@@ -227,10 +227,10 @@ export async function getStatistics(
         countIf(event_type = 'scroll') as scrolls,
         countIf(event_type = 'hover') as hovers,
         uniq(session_id) as unique_sessions,
-        avg(scroll_depth) as avg_scroll_depth,
-        countIf(device_type = 'desktop') as desktop_events,
-        countIf(device_type = 'tablet') as tablet_events,
-        countIf(device_type = 'mobile') as mobile_events
+        avg(scroll_percentage) as avg_scroll_depth,
+        countIf(viewport_width >= 1024) as desktop_events,
+        countIf(viewport_width >= 768 AND viewport_width < 1024) as tablet_events,
+        countIf(viewport_width < 768) as mobile_events
       FROM clickinsight.events
       WHERE site_id = {site_id:String}
     `
@@ -274,6 +274,47 @@ export async function initializeDatabase(): Promise<void> {
     
     // テーブルの作成（存在しない場合）
     // 注意: setup-server.shで既に作成されている場合はスキップされる
+    
+    // usersテーブルの作成（マルチテナント対応）
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.users (
+          id String,
+          email String,
+          password String,
+          name String,
+          plan String DEFAULT 'free',
+          status String DEFAULT 'active',
+          org_id Nullable(String),
+          role String DEFAULT 'user',
+          created_at DateTime,
+          updated_at DateTime
+        ) ENGINE = MergeTree()
+        ORDER BY (id)
+      `,
+    })
+    
+    // sitesテーブルの作成（マルチテナント対応）
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.sites (
+          id String,
+          name String,
+          url String,
+          tracking_id String,
+          status String,
+          user_id Nullable(String),
+          org_id Nullable(String),
+          created_at DateTime,
+          updated_at DateTime,
+          last_activity DateTime,
+          page_views UInt64
+        ) ENGINE = MergeTree()
+        ORDER BY (id)
+      `,
+    })
+    
+    // eventsテーブルの作成（拡張版：収益・広告連携対応）
     await client.exec({
       query: `
         CREATE TABLE IF NOT EXISTS clickinsight.events (
@@ -297,10 +338,112 @@ export async function initializeDatabase(): Promise<void> {
           click_y UInt16,
           scroll_y UInt16,
           scroll_percentage UInt8,
+          event_revenue Decimal(10, 2) DEFAULT 0,
+          utm_source Nullable(String),
+          utm_medium Nullable(String),
+          utm_campaign Nullable(String),
+          utm_term Nullable(String),
+          utm_content Nullable(String),
+          gclid Nullable(String),
+          fbclid Nullable(String),
+          conversion_type Nullable(String),
+          conversion_value Decimal(10, 2) DEFAULT 0,
+          search_query Nullable(String),
+          device_type Nullable(String),
           received_at DateTime DEFAULT now()
         ) ENGINE = MergeTree()
         ORDER BY (site_id, timestamp)
         PARTITION BY toYYYYMM(timestamp)
+      `,
+    })
+    
+    // sessionsテーブルの作成（セッション集約）
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.sessions (
+          session_id String,
+          site_id String,
+          user_id Nullable(String),
+          start_time DateTime,
+          end_time DateTime,
+          duration UInt32,
+          page_views UInt16,
+          events_count UInt32,
+          total_revenue Decimal(10, 2) DEFAULT 0,
+          conversion_type Nullable(String),
+          landing_page String,
+          exit_page String,
+          utm_source Nullable(String),
+          utm_medium Nullable(String),
+          utm_campaign Nullable(String),
+          search_query Nullable(String),
+          device_type Nullable(String),
+          referrer_type Nullable(String)
+        ) ENGINE = MergeTree()
+        ORDER BY (site_id, start_time)
+        PARTITION BY toYYYYMM(start_time)
+      `,
+    })
+    
+    // heatmap_summaryテーブルの作成（集計済みヒートマップキャッシュ）
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.heatmap_summary (
+          site_id String,
+          page_url String,
+          date Date,
+          device_type String,
+          click_data String,
+          scroll_data String,
+          click_count UInt32,
+          scroll_depth_avg Float32,
+          last_updated DateTime DEFAULT now()
+        ) ENGINE = ReplacingMergeTree(last_updated)
+        ORDER BY (site_id, page_url, date, device_type)
+        PARTITION BY toYYYYMM(date)
+      `,
+    })
+    
+    // session_recordingsテーブルの作成（セッション録画データ）
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.session_recordings (
+          id String,
+          site_id String,
+          session_id String,
+          user_id Nullable(String),
+          start_time DateTime,
+          end_time DateTime,
+          duration UInt32,
+          events_count UInt32,
+          recording_data String,
+          metadata String,
+          has_conversion UInt8 DEFAULT 0,
+          conversion_value Decimal(10, 2) DEFAULT 0,
+          created_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree()
+        ORDER BY (site_id, session_id, start_time)
+        PARTITION BY toYYYYMM(start_time)
+      `,
+    })
+    
+    // gsc_dataテーブルの作成（Google Search Consoleデータ）
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.gsc_data (
+          site_id String,
+          date Date,
+          query String,
+          page String,
+          clicks UInt32,
+          impressions UInt32,
+          ctr Float32,
+          position Float32,
+          device String,
+          created_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree()
+        ORDER BY (site_id, date, query, page)
+        PARTITION BY toYYYYMM(date)
       `,
     })
     

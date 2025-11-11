@@ -20,6 +20,8 @@ import {
   Loader2,
   Key
 } from 'lucide-react'
+import Loading from '../../components/ui/loading'
+import ErrorMessage from '../../components/ui/error-message'
 
 interface Site {
   id: string
@@ -145,12 +147,16 @@ export default function SitesPage() {
   }
 
   const generateTrackingScript = (site: Site) => {
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || (typeof window !== 'undefined' ? window.location.origin : '')
     return `<!-- ClickInsight Pro Tracking -->
 <script>
     window.CLICKINSIGHT_SITE_ID = '${site.tracking_id}';
     window.CLICKINSIGHT_DEBUG = false; // 本番環境ではfalse
+    window.CLICKINSIGHT_API_URL = '${appUrl}/api/track';
+    window.CLICKINSIGHT_RECORDING_SAMPLE_RATE = 0.1; // 10%のセッションを録画
 </script>
-<script src="${window.location.origin}/tracking.js" async></script>
+<script src="${appUrl}/tracking.js" async></script>
+<script src="${appUrl}/recording.js" async></script>
 <!-- End ClickInsight Pro -->`
   }
 
@@ -193,11 +199,16 @@ export default function SitesPage() {
 
         {/* Error Message */}
         {error && (
-          <Card className="bg-red-50 border-red-200">
-            <CardContent className="p-4">
-              <p className="text-red-700">{error}</p>
-            </CardContent>
-          </Card>
+          <ErrorMessage
+            title="エラー"
+            message={error}
+            onDismiss={() => setError(null)}
+          />
+        )}
+
+        {/* Loading State */}
+        {loading && (
+          <Loading text="サイトを読み込み中..." />
         )}
 
       {/* サイト追加フォーム */}
@@ -239,8 +250,22 @@ export default function SitesPage() {
       )}
 
       {/* サイト一覧 */}
-      <div className="grid gap-4">
-        {sites.map((site) => (
+      {!loading && (
+        <div className="grid gap-4">
+          {sites.length === 0 ? (
+            <Card>
+              <CardContent className="p-12 text-center">
+                <Globe className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">サイトが登録されていません</h3>
+                <p className="text-gray-600 mb-4">最初のサイトを登録してトラッキングを開始しましょう</p>
+                <Button onClick={() => setShowAddForm(true)}>
+                  <Plus className="w-4 h-4 mr-2" />
+                  サイトを追加
+                </Button>
+              </CardContent>
+            </Card>
+          ) : (
+            sites.map((site) => (
           <Card key={site.id} className="hover:shadow-md transition-shadow">
             <CardContent className="p-6">
               <div className="flex items-center justify-between">
@@ -309,8 +334,10 @@ export default function SitesPage() {
               </div>
             </CardContent>
           </Card>
-        ))}
-      </div>
+            ))
+          )}
+        </div>
+      )}
 
       {/* トラッキングスクリプトモーダル */}
       {showTrackingScript && selectedSite && (

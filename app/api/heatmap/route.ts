@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-// import { getHeatmapData, getHeatmapCache, setHeatmapCache } from '@/lib/clickhouse'
-// import { getHeatmapCache as getRedisCache, setHeatmapCache as setRedisCache } from '@/lib/redis'
+import { getHeatmapData } from '@/lib/clickhouse'
+import { getHeatmapCache, setHeatmapCache } from '@/lib/redis'
 
 export async function GET(request: NextRequest) {
   try {
@@ -18,17 +18,41 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // モックデータを返す（実際の実装ではClickHouseから取得）
-    const heatmapData = [
-      { click_x: 100, click_y: 200, click_count: 15, avg_duration: 120, last_click: new Date().toISOString() },
-      { click_x: 300, click_y: 150, click_count: 8, avg_duration: 95, last_click: new Date().toISOString() },
-      { click_x: 500, click_y: 300, click_count: 12, avg_duration: 110, last_click: new Date().toISOString() }
-    ]
+    // キャッシュキーの生成
+    const cacheKey = `${siteId}:${pageUrl}:${deviceType || 'all'}:${startDate || 'all'}:${endDate || 'all'}`
+    
+    // キャッシュから取得を試みる
+    let cached = false
+    let heatmapData = await getHeatmapCache(siteId, pageUrl, deviceType || undefined)
+    
+    if (!heatmapData) {
+      try {
+        // ClickHouseからデータを取得
+        heatmapData = await getHeatmapData(
+          siteId,
+          pageUrl,
+          deviceType || undefined,
+          startDate || undefined,
+          endDate || undefined
+        )
+        
+        // キャッシュに保存
+        if (heatmapData && heatmapData.length > 0) {
+          await setHeatmapCache(siteId, pageUrl, heatmapData, deviceType || undefined)
+        }
+      } catch (error) {
+        console.error('Error fetching heatmap data from ClickHouse:', error)
+        // エラー時は空配列を返す
+        heatmapData = []
+      }
+    } else {
+      cached = true
+    }
 
     return NextResponse.json({
       success: true,
-      data: heatmapData,
-      cached: false
+      data: heatmapData || [],
+      cached
     })
 
   } catch (error) {
@@ -52,18 +76,29 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // モックデータを返す（実際の実装ではClickHouseから取得）
-    const heatmapData = [
-      { click_x: 100, click_y: 200, click_count: 15, avg_duration: 120, last_click: new Date().toISOString() },
-      { click_x: 300, click_y: 150, click_count: 8, avg_duration: 95, last_click: new Date().toISOString() },
-      { click_x: 500, click_y: 300, click_count: 12, avg_duration: 110, last_click: new Date().toISOString() }
-    ]
+    // ClickHouseからデータを取得
+    let heatmapData: any[] = []
+    try {
+      heatmapData = await getHeatmapData(
+        site_id,
+        page_url,
+        device_type || undefined,
+        start_date || undefined,
+        end_date || undefined
+      )
+    } catch (error) {
+      console.error('Error fetching heatmap data from ClickHouse:', error)
+      // エラー時は空配列を返す
+      heatmapData = []
+    }
 
     // ヒートマップの統計情報を計算
     const stats = {
-      total_clicks: heatmapData.reduce((sum, item) => sum + item.click_count, 0),
+      total_clicks: heatmapData.reduce((sum: number, item: any) => sum + (item.click_count || 0), 0),
       unique_positions: heatmapData.length,
-      avg_duration: heatmapData.reduce((sum, item) => sum + (item.avg_duration || 0), 0) / heatmapData.length,
+      avg_duration: heatmapData.length > 0 
+        ? heatmapData.reduce((sum: number, item: any) => sum + (item.avg_duration || 0), 0) / heatmapData.length 
+        : 0,
       last_click: heatmapData.length > 0 ? heatmapData[0].last_click : null
     }
 

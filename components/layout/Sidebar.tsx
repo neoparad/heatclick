@@ -11,7 +11,8 @@ import {
   Settings, 
   Globe,
   Zap,
-  Activity
+  Activity,
+  Video
 } from 'lucide-react'
 
 const menuItems = [
@@ -20,6 +21,7 @@ const menuItems = [
   { id: 'heatmap', icon: Map, label: 'ヒートマップ', href: '/heatmap' },
   { id: 'sites', icon: Globe, label: 'サイト管理', href: '/sites' },
   { id: 'clicks', icon: MousePointerClick, label: 'クリック分析', href: '/clicks' },
+  { id: 'recordings', icon: Video, label: 'セッション録画', href: '/recordings' },
   { id: 'ai-insights', icon: Brain, label: 'AI分析', href: '/ai-insights' },
   { id: 'reports', icon: FileText, label: 'レポート', href: '/reports' },
   { id: 'settings', icon: Settings, label: '設定', href: '/settings' },

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
 import { publishRealtimeData } from '@/lib/redis'
+import { checkRateLimit } from '@/lib/rate-limit'
+import { anonymizeIp } from '@/lib/privacy'
 
 // メモリ内データストレージ（フォールバック用）
 let trackingData: any[] = []
@@ -23,6 +25,27 @@ export async function OPTIONS(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    // Rate Limiting（IP匿名化）
+    const rawIp = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
+    const clientIp = anonymizeIp(rawIp)
+    const rateLimit = checkRateLimit(`track:${clientIp}`)
+    
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        { error: 'Too many requests. Please try again later.' },
+        { 
+          status: 429,
+          headers: {
+            ...buildCorsHeaders(request),
+            'X-RateLimit-Limit': '100',
+            'X-RateLimit-Remaining': rateLimit.remaining.toString(),
+            'X-RateLimit-Reset': new Date(rateLimit.resetTime).toISOString(),
+            'Retry-After': Math.ceil((rateLimit.resetTime - Date.now()) / 1000).toString(),
+          }
+        }
+      )
+    }
+
     const data = await request.json()
 
     // Support both single event and batch events
@@ -40,7 +63,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Prepare events for ClickHouse
+    // Prepare events for ClickHouse（収益・広告連携対応）
     const clickHouseEvents = events.map(event => ({
       id: event.id || `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       site_id: event.site_id || event.siteId,
@@ -53,15 +76,27 @@ export async function POST(request: NextRequest) {
       user_agent: event.user_agent || event.userAgent || '',
       viewport_width: event.viewport_width || event.viewportWidth || 0,
       viewport_height: event.viewport_height || event.viewportHeight || 0,
-      element_tag_name: event.element?.tagName || event.element_tag || null,
+      element_tag_name: event.element?.tagName || event.element_tag_name || event.element_tag || null,
       element_id: event.element?.id || event.element_id || null,
-      element_class_name: event.element?.className || event.element_class || null,
+      element_class_name: event.element?.className || event.element_class_name || event.element_class || null,
       element_text: event.element?.text || event.element_text || null,
       element_href: event.element?.href || event.element_href || null,
       click_x: event.position?.x || event.click_x || 0,
       click_y: event.position?.y || event.click_y || 0,
       scroll_y: event.scroll_y || 0,
       scroll_percentage: event.scroll_percentage || 0,
+      event_revenue: event.event_revenue || event.revenue || 0,
+      utm_source: event.utm_source || null,
+      utm_medium: event.utm_medium || null,
+      utm_campaign: event.utm_campaign || null,
+      utm_term: event.utm_term || null,
+      utm_content: event.utm_content || null,
+      gclid: event.gclid || null,
+      fbclid: event.fbclid || null,
+      conversion_type: event.conversion_type || null,
+      conversion_value: event.conversion_value || event.conversionValue || 0,
+      search_query: event.search_query || null,
+      device_type: event.device_type || null,
     }))
 
     // Store in ClickHouse (primary storage)

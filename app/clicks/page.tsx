@@ -25,6 +25,7 @@ export default function ClicksPage() {
   const [selectedSite, setSelectedSite] = useState('example.com')
   const [selectedPeriod, setSelectedPeriod] = useState('7days')
   const [selectedPage, setSelectedPage] = useState('all')
+  const [exporting, setExporting] = useState(false)
 
   // サンプルデータ
   const clickData = [
@@ -101,6 +102,50 @@ export default function ClicksPage() {
     return change.startsWith('+') ? 'text-green-600' : 'text-red-600'
   }
 
+  const handleExport = async () => {
+    setExporting(true)
+    try {
+      // CSVデータの準備
+      const csvHeaders = ['要素', 'セレクター', 'クリック数', 'CTR', '変化率', 'ページ', 'デバイス']
+      const csvRows = clickData.map(item => [
+        item.element,
+        item.selector,
+        item.clicks.toString(),
+        `${item.ctr}%`,
+        item.change,
+        item.page,
+        item.device === 'desktop' ? 'デスクトップ' : item.device === 'mobile' ? 'モバイル' : 'タブレット'
+      ])
+
+      // CSV文字列の生成
+      const csvContent = [
+        csvHeaders.join(','),
+        ...csvRows.map(row => row.map(cell => `"${cell}"`).join(','))
+      ].join('\n')
+
+      // BOMを追加してExcelで正しく開けるようにする
+      const BOM = '\uFEFF'
+      const blob = new Blob([BOM + csvContent], { type: 'text/csv;charset=utf-8;' })
+      
+      // ダウンロード
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `clickinsight-clicks-${selectedSite}-${new Date().toISOString().split('T')[0]}.csv`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+
+      alert('エクスポートが完了しました')
+    } catch (error) {
+      console.error('Export error:', error)
+      alert('エクスポートに失敗しました')
+    } finally {
+      setExporting(false)
+    }
+  }
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -114,9 +159,9 @@ export default function ClicksPage() {
               <Filter className="w-4 h-4 mr-2" />
               フィルター
             </Button>
-            <Button>
+            <Button onClick={handleExport} disabled={exporting}>
               <Download className="w-4 h-4 mr-2" />
-              エクスポート
+              {exporting ? 'エクスポート中...' : 'エクスポート'}
             </Button>
           </div>
         </div>

@@ -111,9 +111,50 @@
     },
   };
 
+  // UTMパラメータと広告IDの取得
+  const getUtmParams = () => {
+    const params = new URLSearchParams(window.location.search);
+    return {
+      utm_source: params.get('utm_source') || '',
+      utm_medium: params.get('utm_medium') || '',
+      utm_campaign: params.get('utm_campaign') || '',
+      utm_term: params.get('utm_term') || '',
+      utm_content: params.get('utm_content') || '',
+      gclid: params.get('gclid') || '',
+      fbclid: params.get('fbclid') || '',
+    };
+  };
+
+  // デバイスタイプの判定
+  const getDeviceType = () => {
+    const width = utils.getViewport().width;
+    if (width >= 1024) return 'desktop';
+    if (width >= 768) return 'tablet';
+    return 'mobile';
+  };
+
+  // リファラータイプの判定
+  const getReferrerType = (referrer) => {
+    if (!referrer) return 'direct';
+    try {
+      const url = new URL(referrer);
+      const hostname = url.hostname.toLowerCase();
+      if (hostname.includes('google') || hostname.includes('bing') || hostname.includes('yahoo')) {
+        return 'organic';
+      }
+      if (hostname.includes('facebook') || hostname.includes('instagram') || hostname.includes('twitter')) {
+        return 'social';
+      }
+      return 'referral';
+    } catch {
+      return 'direct';
+    }
+  };
+
   // Event Queue
   const eventQueue = [];
   let batchTimer = null;
+  const utmParams = getUtmParams();
 
   const queueEvent = (event) => {
     eventQueue.push({
@@ -128,6 +169,9 @@
       user_agent: navigator.userAgent,
       viewport_width: utils.getViewport().width,
       viewport_height: utils.getViewport().height,
+      device_type: getDeviceType(),
+      referrer_type: getReferrerType(document.referrer),
+      ...utmParams,
     });
 
     if (config.debug) {
@@ -241,8 +285,26 @@
     },
   };
 
+  // オプトアウトチェック
+  const checkOptOut = () => {
+    return localStorage.getItem('clickinsight_optout') === 'true';
+  };
+
+  // Cookie同意チェック
+  const checkCookieConsent = () => {
+    return localStorage.getItem('clickinsight_cookie_consent') === 'true';
+  };
+
   // Initialize tracking
   const init = () => {
+    // オプトアウトまたはCookie同意がない場合はトラッキングを無効化
+    if (checkOptOut() || !checkCookieConsent()) {
+      if (config.debug) {
+        console.log('ClickInsight Pro: Tracking disabled (opt-out or no consent)');
+      }
+      return;
+    }
+
     if (config.debug) {
       console.log('ClickInsight Pro: Initializing tracking script', {
         siteId: config.siteId,

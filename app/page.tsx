@@ -36,9 +36,22 @@ export default function HomePage() {
               <Link href="#features" className="text-gray-600 hover:text-gray-900">機能</Link>
               <Link href="#pricing" className="text-gray-600 hover:text-gray-900">料金</Link>
               <Link href="#about" className="text-gray-600 hover:text-gray-900">会社概要</Link>
-              <Button variant="outline" size="sm">ログイン</Button>
-              <Button size="sm">無料で始める</Button>
+              <Link href="/auth/login">
+                <Button variant="outline" size="sm">ログイン</Button>
+              </Link>
+              <Link href="/auth/register">
+                <Button size="sm">無料で始める</Button>
+              </Link>
             </nav>
+            {/* モバイルメニュー */}
+            <div className="md:hidden flex items-center gap-2">
+              <Link href="/auth/login">
+                <Button variant="outline" size="sm">ログイン</Button>
+              </Link>
+              <Link href="/auth/register">
+                <Button size="sm">始める</Button>
+              </Link>
+            </div>
           </div>
         </div>
       </header>
@@ -61,13 +74,17 @@ export default function HomePage() {
             AIによる自動診断と改善提案を行う次世代SEO特化型ツール
           </p>
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
-            <Button size="lg" className="text-lg px-8 py-6">
-              無料で始める
-              <ArrowRight className="ml-2 h-5 w-5" />
-            </Button>
-            <Button variant="outline" size="lg" className="text-lg px-8 py-6">
-              デモを見る
-            </Button>
+            <Link href="/auth/register">
+              <Button size="lg" className="text-lg px-8 py-6">
+                無料で始める
+                <ArrowRight className="ml-2 h-5 w-5" />
+              </Button>
+            </Link>
+            <Link href="/dashboard">
+              <Button variant="outline" size="lg" className="text-lg px-8 py-6">
+                デモを見る
+              </Button>
+            </Link>
           </div>
         </div>
       </section>
@@ -174,9 +191,11 @@ export default function HomePage() {
                   <li>• 基本ヒートマップ</li>
                   <li>• 7日間データ保持</li>
                 </ul>
-                <Button className="w-full mt-6" variant="outline">
-                  無料で始める
-                </Button>
+                <Link href="/auth/register" className="block">
+                  <Button className="w-full mt-6" variant="outline">
+                    無料で始める
+                  </Button>
+                </Link>
               </CardContent>
             </Card>
 
@@ -194,9 +213,11 @@ export default function HomePage() {
                   <li>• AI分析（月1回）</li>
                   <li>• GSC連携</li>
                 </ul>
-                <Button className="w-full mt-6">
-                  今すぐ始める
-                </Button>
+                <Link href="/auth/register" className="block">
+                  <Button className="w-full mt-6">
+                    今すぐ始める
+                  </Button>
+                </Link>
               </CardContent>
             </Card>
 
@@ -214,9 +235,11 @@ export default function HomePage() {
                   <li>• A/Bテスト</li>
                   <li>• API提供</li>
                 </ul>
-                <Button className="w-full mt-6" variant="outline">
-                  選択する
-                </Button>
+                <Link href="/auth/register" className="block">
+                  <Button className="w-full mt-6" variant="outline">
+                    選択する
+                  </Button>
+                </Link>
               </CardContent>
             </Card>
 

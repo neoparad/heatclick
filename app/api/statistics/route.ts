@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-// import { getStatistics, getStatisticsCache, setStatisticsCache } from '@/lib/clickhouse'
-// import { getStatisticsCache as getRedisCache, setStatisticsCache as setRedisCache } from '@/lib/redis'
+import { getStatistics } from '@/lib/clickhouse'
+import { getStatisticsCache, setStatisticsCache } from '@/lib/redis'
 
 export async function GET(request: NextRequest) {
   try {
@@ -16,23 +16,46 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // モックデータを返す（実際の実装ではClickHouseから取得）
-    const statistics = {
-      total_events: 12345,
-      clicks: 8900,
-      scrolls: 2100,
-      hovers: 1345,
-      unique_sessions: 8234,
-      avg_scroll_depth: 65.5,
-      desktop_events: 7234,
-      tablet_events: 988,
-      mobile_events: 4123
+    // キャッシュから取得を試みる
+    let cached = false
+    let statistics = await getStatisticsCache(siteId, startDate || undefined, endDate || undefined)
+    
+    if (!statistics) {
+      try {
+        // ClickHouseからデータを取得
+        statistics = await getStatistics(
+          siteId,
+          startDate || undefined,
+          endDate || undefined
+        )
+        
+        // キャッシュに保存
+        if (statistics) {
+          await setStatisticsCache(siteId, statistics, startDate || undefined, endDate || undefined)
+        }
+      } catch (error) {
+        console.error('Error fetching statistics from ClickHouse:', error)
+        // エラー時は空の統計を返す
+        statistics = {
+          total_events: 0,
+          clicks: 0,
+          scrolls: 0,
+          hovers: 0,
+          unique_sessions: 0,
+          avg_scroll_depth: 0,
+          desktop_events: 0,
+          tablet_events: 0,
+          mobile_events: 0
+        }
+      }
+    } else {
+      cached = true
     }
 
     return NextResponse.json({
       success: true,
-      data: statistics,
-      cached: false
+      data: statistics || {},
+      cached
     })
 
   } catch (error) {
