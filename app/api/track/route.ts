@@ -70,7 +70,7 @@ export async function POST(request: NextRequest) {
       session_id: event.session_id || event.sessionId,
       user_id: event.user_id || event.userId || null,
       event_type: event.event_type || event.eventType,
-      timestamp: event.timestamp || new Date().toISOString().replace('T', ' ').substring(0, 19),
+      timestamp: event.timestamp ? new Date(event.timestamp).toISOString().replace('T', ' ').replace('Z', '').substring(0, 19) : new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
       url: event.url || event.page_url || '',
       referrer: event.referrer || null,
       user_agent: event.user_agent || event.userAgent || '',
