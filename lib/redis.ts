@@ -1,17 +1,94 @@
 import Redis from 'ioredis'
 
-// Redisクライアントの設定（モック実装）
-const redis = {
-  get: async (key: string) => null,
-  setex: async (key: string, ttl: number, value: string) => 'OK',
-  del: async (...keys: string[]) => 0,
-  keys: async (pattern: string) => [],
-  publish: async (channel: string, message: string) => 0,
-  subscribe: async (channel: string) => {},
-  duplicate: () => redis,
-  on: (event: string, callback: Function) => {},
-  status: 'ready' as const,
-  info: async (section: string) => '',
+// Redisクライアントの設定
+function getRedisConfig() {
+  if (process.env.REDIS_URL) {
+    // 完全なURL形式の場合
+    return {
+      host: process.env.REDIS_URL,
+    }
+  } else {
+    // 個別の環境変数から構築
+    const host = process.env.REDIS_HOST || 'localhost'
+    const port = parseInt(process.env.REDIS_PORT || '6379')
+    const password = process.env.REDIS_PASSWORD || undefined
+    
+    return {
+      host,
+      port,
+      password,
+      retryStrategy: (times: number) => {
+        const delay = Math.min(times * 50, 2000)
+        return delay
+      },
+      maxRetriesPerRequest: 3,
+    }
+  }
+}
+
+let redis: Redis | null = null
+
+// Redisクライアントの初期化（遅延初期化）
+function getRedisClient(): Redis {
+  if (!redis) {
+    try {
+      const config = getRedisConfig()
+      
+      if ('host' in config && config.host.startsWith('redis://')) {
+        // URL形式の場合
+        redis = new Redis(config.host, {
+          retryStrategy: (times: number) => {
+            const delay = Math.min(times * 50, 2000)
+            return delay
+          },
+          maxRetriesPerRequest: 3,
+        })
+      } else {
+        // 個別設定の場合
+        redis = new Redis(config as any)
+      }
+      
+      redis.on('error', (error) => {
+        console.error('Redis client error:', error)
+      })
+      
+      redis.on('connect', () => {
+        if (process.env.NODE_ENV === 'development') {
+          console.log('Redis client connected')
+        }
+      })
+      
+      if (process.env.NODE_ENV === 'development') {
+        console.log('Redis client initialized:', {
+          host: 'host' in config ? config.host : 'N/A',
+          port: 'port' in config ? config.port : 'N/A',
+        })
+      }
+    } catch (error) {
+      console.error('Failed to initialize Redis client:', error)
+      // エラーが発生してもモック実装にフォールバック
+      return createMockRedis()
+    }
+  }
+  return redis
+}
+
+// モック実装（接続失敗時のフォールバック）
+function createMockRedis(): Redis {
+  const mockRedis = {
+    get: async (key: string) => null,
+    setex: async (key: string, ttl: number, value: string) => 'OK',
+    del: async (...keys: string[]) => 0,
+    keys: async (pattern: string) => [],
+    publish: async (channel: string, message: string) => 0,
+    subscribe: async (channel: string) => {},
+    duplicate: () => mockRedis as any,
+    on: (event: string, callback: Function) => {},
+    status: 'ready' as const,
+    info: async (section: string) => '',
+  } as any
+  
+  return mockRedis as Redis
 }
 
 // キャッシュの設定
@@ -29,8 +106,9 @@ export async function getHeatmapCache(
   deviceType?: string
 ): Promise<any[] | null> {
   try {
+    const client = getRedisClient()
     const key = `heatmap:${siteId}:${pageUrl}${deviceType ? `:${deviceType}` : ''}`
-    const cached = await redis.get(key)
+    const cached = await client.get(key)
     return cached ? JSON.parse(cached) : null
   } catch (error) {
     console.error('Error getting heatmap cache:', error)
@@ -47,7 +125,8 @@ export async function setHeatmapCache(
 ): Promise<void> {
   try {
     const key = `heatmap:${siteId}:${pageUrl}${deviceType ? `:${deviceType}` : ''}`
-    await redis.setex(key, ttl, JSON.stringify(data))
+    const client = getRedisClient()
+    await client.setex(key, ttl, JSON.stringify(data))
   } catch (error) {
     console.error('Error setting heatmap cache:', error)
   }
@@ -61,7 +140,8 @@ export async function getStatisticsCache(
 ): Promise<any | null> {
   try {
     const key = `stats:${siteId}:${startDate || 'all'}:${endDate || 'all'}`
-    const cached = await redis.get(key)
+    const client = getRedisClient()
+    const cached = await client.get(key)
     return cached ? JSON.parse(cached) : null
   } catch (error) {
     console.error('Error getting statistics cache:', error)
@@ -78,7 +158,8 @@ export async function setStatisticsCache(
 ): Promise<void> {
   try {
     const key = `stats:${siteId}:${startDate || 'all'}:${endDate || 'all'}`
-    await redis.setex(key, ttl, JSON.stringify(data))
+    const client = getRedisClient()
+    await client.setex(key, ttl, JSON.stringify(data))
   } catch (error) {
     console.error('Error setting statistics cache:', error)
   }
@@ -88,7 +169,8 @@ export async function setStatisticsCache(
 export async function getSessionCache(sessionId: string): Promise<any | null> {
   try {
     const key = `session:${sessionId}`
-    const cached = await redis.get(key)
+    const client = getRedisClient()
+    const cached = await client.get(key)
     return cached ? JSON.parse(cached) : null
   } catch (error) {
     console.error('Error getting session cache:', error)
@@ -103,7 +185,8 @@ export async function setSessionCache(
 ): Promise<void> {
   try {
     const key = `session:${sessionId}`
-    await redis.setex(key, ttl, JSON.stringify(data))
+    const client = getRedisClient()
+    await client.setex(key, ttl, JSON.stringify(data))
   } catch (error) {
     console.error('Error setting session cache:', error)
   }
@@ -113,7 +196,8 @@ export async function setSessionCache(
 export async function getUserCache(userId: string): Promise<any | null> {
   try {
     const key = `user:${userId}`
-    const cached = await redis.get(key)
+    const client = getRedisClient()
+    const cached = await client.get(key)
     return cached ? JSON.parse(cached) : null
   } catch (error) {
     console.error('Error getting user cache:', error)
@@ -128,7 +212,8 @@ export async function setUserCache(
 ): Promise<void> {
   try {
     const key = `user:${userId}`
-    await redis.setex(key, ttl, JSON.stringify(data))
+    const client = getRedisClient()
+    await client.setex(key, ttl, JSON.stringify(data))
   } catch (error) {
     console.error('Error setting user cache:', error)
   }
@@ -141,7 +226,8 @@ export async function publishRealtimeData(
 ): Promise<void> {
   try {
     const channel = `realtime:${siteId}`
-    await redis.publish(channel, JSON.stringify(data))
+    const client = getRedisClient()
+    await client.publish(channel, JSON.stringify(data))
   } catch (error) {
     console.error('Error publishing realtime data:', error)
   }
@@ -153,7 +239,8 @@ export async function subscribeRealtimeData(
 ): Promise<void> {
   try {
     const channel = `realtime:${siteId}`
-    const subscriber = redis.duplicate()
+    const client = getRedisClient()
+    const subscriber = client.duplicate()
     
     await subscriber.subscribe(channel)
     subscriber.on('message', (channel: string, message: string) => {
@@ -172,9 +259,10 @@ export async function subscribeRealtimeData(
 // キャッシュのクリア
 export async function clearCache(pattern: string): Promise<void> {
   try {
-    const keys = await redis.keys(pattern)
+    const client = getRedisClient()
+    const keys = await client.keys(pattern)
     if (keys.length > 0) {
-      await redis.del(...keys)
+      await client.del(...keys)
     }
   } catch (error) {
     console.error('Error clearing cache:', error)
@@ -184,13 +272,14 @@ export async function clearCache(pattern: string): Promise<void> {
 // キャッシュの統計情報
 export async function getCacheStats(): Promise<any> {
   try {
-    const info = await redis.info('memory')
-    const keyspace = await redis.info('keyspace')
+    const client = getRedisClient()
+    const info = await client.info('memory')
+    const keyspace = await client.info('keyspace')
     
     return {
       memory: info,
       keyspace: keyspace,
-      connected: redis.status === 'ready'
+      connected: client.status === 'ready'
     }
   } catch (error) {
     console.error('Error getting cache stats:', error)
@@ -198,4 +287,5 @@ export async function getCacheStats(): Promise<any> {
   }
 }
 
-export { redis }
+// Export the client getter function
+export { getRedisClient as redis }

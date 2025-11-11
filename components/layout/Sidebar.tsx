@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import { 
   BarChart3, 
   Map, 
@@ -27,16 +27,25 @@ const menuItems = [
 
 export default function Sidebar() {
   const pathname = usePathname()
+  const router = useRouter()
+
+  const handleLogoClick = () => {
+    router.push('/')
+  }
 
   return (
     <div className="w-64 bg-white border-r border-gray-200 flex flex-col hidden lg:flex">
       <div className="p-6 border-b border-gray-200">
-        <div className="flex items-center gap-2">
+        <button
+          onClick={handleLogoClick}
+          className="flex items-center gap-2 hover:opacity-80 transition-opacity cursor-pointer"
+          aria-label="ホームに戻る"
+        >
           <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
             <Zap className="w-5 h-5 text-white" />
           </div>
           <span className="font-bold text-lg">ClickInsight Pro</span>
-        </div>
+        </button>
       </div>
       
       <nav className="flex-1 p-4 space-y-1">

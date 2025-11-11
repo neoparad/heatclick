@@ -28,10 +28,10 @@ export default function HomePage() {
       <header className="border-b bg-white/80 backdrop-blur-sm">
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-2">
+            <Link href="/" className="flex items-center space-x-2 hover:opacity-80 transition-opacity">
               <div className="h-8 w-8 rounded-lg bg-gradient-to-r from-blue-600 to-purple-600"></div>
               <span className="text-xl font-bold text-gray-900">ClickInsight Pro</span>
-            </div>
+            </Link>
             <nav className="hidden md:flex items-center space-x-6">
               <Link href="#features" className="text-gray-600 hover:text-gray-900">機能</Link>
               <Link href="#pricing" className="text-gray-600 hover:text-gray-900">料金</Link>

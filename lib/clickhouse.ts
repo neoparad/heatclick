@@ -1,12 +1,52 @@
 import { ClickHouseClient, createClient } from '@clickhouse/client'
 
 // ClickHouseクライアントの設定
-const clickhouse = createClient({
-  host: process.env.CLICKHOUSE_URL || 'http://localhost:8123',
-  username: process.env.CLICKHOUSE_USERNAME || 'default',
-  password: process.env.CLICKHOUSE_PASSWORD || '',
-  database: process.env.CLICKHOUSE_DATABASE || 'clickinsight',
-})
+// CLICKHOUSE_URLが設定されている場合はそれを使用、そうでなければ個別の環境変数から構築
+function getClickHouseConfig() {
+  if (process.env.CLICKHOUSE_URL) {
+    // 完全なURL形式の場合
+    return {
+      url: process.env.CLICKHOUSE_URL,
+    }
+  } else {
+    // 個別の環境変数から構築
+    const host = process.env.CLICKHOUSE_HOST || 'localhost'
+    const port = process.env.CLICKHOUSE_PORT || '8123'
+    const username = process.env.CLICKHOUSE_USERNAME || 'default'
+    const password = process.env.CLICKHOUSE_PASSWORD || ''
+    const database = process.env.CLICKHOUSE_DATABASE || 'clickinsight'
+    
+    return {
+      host: `http://${host}:${port}`,
+      username,
+      password,
+      database,
+    }
+  }
+}
+
+let clickhouse: ClickHouseClient | null = null
+
+// ClickHouseクライアントの初期化（遅延初期化）
+function getClickHouseClient(): ClickHouseClient {
+  if (!clickhouse) {
+    try {
+      const config = getClickHouseConfig()
+      clickhouse = createClient(config)
+      
+      if (process.env.NODE_ENV === 'development') {
+        console.log('ClickHouse client initialized:', {
+          host: 'url' in config ? config.url : config.host,
+          database: 'database' in config ? config.database : 'N/A',
+        })
+      }
+    } catch (error) {
+      console.error('Failed to initialize ClickHouse client:', error)
+      throw error
+    }
+  }
+  return clickhouse
+}
 
 // イベントデータの型定義
 export interface ClickEvent {
@@ -54,14 +94,18 @@ export interface ClickEvent {
 // イベントデータの挿入
 export async function insertClickEvent(event: ClickEvent): Promise<void> {
   try {
-    await clickhouse.insert({
-      table: 'click_events',
+    const client = getClickHouseClient()
+    await client.insert({
+      table: 'clickinsight.events',
       values: [event],
       format: 'JSONEachRow',
     })
   } catch (error) {
     console.error('Error inserting click event:', error)
-    throw error
+    // 開発環境ではエラーをスロー、本番環境ではログのみ
+    if (process.env.NODE_ENV === 'development') {
+      throw error
+    }
   }
 }
 
@@ -75,7 +119,7 @@ export async function getClickEvents(
   try {
     let query = `
       SELECT *
-      FROM click_events
+      FROM clickinsight.events
       WHERE site_id = {site_id:String}
     `
     
@@ -94,7 +138,8 @@ export async function getClickEvents(
     query += ` ORDER BY created_at DESC LIMIT {limit:UInt32}`
     params.limit = limit
     
-    const result = await clickhouse.query({
+    const client = getClickHouseClient()
+    const result = await client.query({
       query,
       query_params: params,
       format: 'JSONEachRow',
@@ -123,7 +168,7 @@ export async function getHeatmapData(
         count() as click_count,
         avg(duration) as avg_duration,
         max(created_at) as last_click
-      FROM click_events
+      FROM clickinsight.events
       WHERE site_id = {site_id:String}
         AND page_url = {page_url:String}
         AND event_type = 'click'
@@ -154,7 +199,8 @@ export async function getHeatmapData(
       ORDER BY click_count DESC
     `
     
-    const result = await clickhouse.query({
+    const client = getClickHouseClient()
+    const result = await client.query({
       query,
       query_params: params,
       format: 'JSONEachRow',
@@ -185,7 +231,7 @@ export async function getStatistics(
         countIf(device_type = 'desktop') as desktop_events,
         countIf(device_type = 'tablet') as tablet_events,
         countIf(device_type = 'mobile') as mobile_events
-      FROM click_events
+      FROM clickinsight.events
       WHERE site_id = {site_id:String}
     `
     
@@ -201,7 +247,8 @@ export async function getStatistics(
       params.end_date = endDate
     }
     
-    const result = await clickhouse.query({
+    const client = getClickHouseClient()
+    const result = await client.query({
       query,
       query_params: params,
       format: 'JSONEachRow',
@@ -218,13 +265,60 @@ export async function getStatistics(
 // データベースの初期化
 export async function initializeDatabase(): Promise<void> {
   try {
-    // 実際の実装ではClickHouseのテーブルを作成
-    // 現在はモック実装
-    console.log('ClickHouse database initialized successfully (mock)')
+    const client = getClickHouseClient()
+    
+    // データベースの作成（存在しない場合）
+    await client.exec({
+      query: 'CREATE DATABASE IF NOT EXISTS clickinsight',
+    })
+    
+    // テーブルの作成（存在しない場合）
+    // 注意: setup-server.shで既に作成されている場合はスキップされる
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.events (
+          id String,
+          site_id String,
+          session_id String,
+          user_id Nullable(String),
+          event_type String,
+          timestamp DateTime,
+          url String,
+          referrer Nullable(String),
+          user_agent String,
+          viewport_width UInt16,
+          viewport_height UInt16,
+          element_tag_name Nullable(String),
+          element_id Nullable(String),
+          element_class_name Nullable(String),
+          element_text Nullable(String),
+          element_href Nullable(String),
+          click_x UInt16,
+          click_y UInt16,
+          scroll_y UInt16,
+          scroll_percentage UInt8,
+          received_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree()
+        ORDER BY (site_id, timestamp)
+        PARTITION BY toYYYYMM(timestamp)
+      `,
+    })
+    
+    console.log('ClickHouse database initialized successfully')
   } catch (error) {
     console.error('Error initializing database:', error)
-    throw error
+    // 開発環境ではエラーをスロー、本番環境ではログのみ
+    if (process.env.NODE_ENV === 'development') {
+      throw error
+    }
   }
 }
 
-export { clickhouse }
+// Get ClickHouse client instance (for API routes)
+// This is an async wrapper for compatibility with existing code
+export async function getClickHouseClientAsync(): Promise<ClickHouseClient> {
+  return getClickHouseClient()
+}
+
+// Export the synchronous client getter (for internal use)
+export { getClickHouseClient }

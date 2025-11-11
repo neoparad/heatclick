@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClickInsight Pro - テストページ</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        h1 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .subtitle {
+            color: #666;
+            font-size: 1.2em;
+        }
+
+        .content {
+            background: white;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin-bottom: 30px;
+        }
+
+        h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 1.8em;
+        }
+
+        p {
+            margin-bottom: 15px;
+            font-size: 1.1em;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 15px;
+            margin: 30px 0;
+            flex-wrap: wrap;
+        }
+
+        button, a.button {
+            padding: 15px 30px;
+            font-size: 1.1em;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-secondary {
+            background: #48bb78;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #38a169;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(72, 187, 120, 0.3);
+        }
+
+        .btn-danger {
+            background: #f56565;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #e53e3e;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(245, 101, 101, 0.3);
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin: 30px 0;
+        }
+
+        .feature-card {
+            background: #f7fafc;
+            padding: 25px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+
+        .feature-card:hover {
+            transform: translateX(5px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .feature-card h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .tracking-status {
+            background: #667eea;
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 1.2em;
+        }
+
+        .form-section {
+            background: #f7fafc;
+            padding: 30px;
+            border-radius: 8px;
+            margin: 30px 0;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        input, textarea, select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 5px;
+            font-size: 1em;
+            transition: border-color 0.3s ease;
+        }
+
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .link-section {
+            margin: 30px 0;
+        }
+
+        .link-section a {
+            display: inline-block;
+            color: #667eea;
+            text-decoration: none;
+            margin: 10px 15px 10px 0;
+            font-size: 1.1em;
+            transition: all 0.3s ease;
+        }
+
+        .link-section a:hover {
+            color: #5568d3;
+            text-decoration: underline;
+        }
+
+        footer {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="tracking-status">
+            ✅ ClickInsight Pro トラッキング有効 - Site ID: test-site-001
+        </div>
+
+        <header>
+            <h1>ClickInsight Pro</h1>
+            <p class="subtitle">ヒートマップ＆クリック分析ツール - テストページ</p>
+        </header>
+
+        <div class="content">
+            <h2>🎯 トラッキングテスト</h2>
+            <p>このページではClickInsight Proのトラッキング機能をテストできます。以下の要素をクリック、スクロール、操作してトラッキングデータを生成してください。</p>
+
+            <div class="button-group">
+                <button class="btn-primary" onclick="alert('プライマリボタンがクリックされました！')">プライマリボタン</button>
+                <button class="btn-secondary" onclick="alert('セカンダリボタンがクリックされました！')">セカンダリボタン</button>
+                <button class="btn-danger" onclick="alert('デンジャーボタンがクリックされました！')">デンジャーボタン</button>
+                <a href="#features" class="button btn-primary">機能一覧へ</a>
+            </div>
+        </div>
+
+        <div class="content" id="features">
+            <h2>✨ 主要機能</h2>
+            <div class="features">
+                <div class="feature-card" onclick="console.log('クリックヒートマップ')">
+                    <h3>🔥 クリックヒートマップ</h3>
+                    <p>ユーザーがどこをクリックしているかを可視化します。</p>
+                </div>
+                <div class="feature-card" onclick="console.log('スクロールヒートマップ')">
+                    <h3>📊 スクロールヒートマップ</h3>
+                    <p>ページのどこまでスクロールされているかを分析します。</p>
+                </div>
+                <div class="feature-card" onclick="console.log('AI分析')">
+                    <h3>🤖 AI分析</h3>
+                    <p>Claude APIによる自動分析と改善提案を提供します。</p>
+                </div>
+                <div class="feature-card" onclick="console.log('リアルタイム監視')">
+                    <h3>⚡ リアルタイム監視</h3>
+                    <p>リアルタイムでユーザー行動を監視できます。</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="content">
+            <h2>📝 フォームテスト</h2>
+            <div class="form-section">
+                <form onsubmit="event.preventDefault(); alert('フォームが送信されました！');">
+                    <div class="form-group">
+                        <label for="name">お名前</label>
+                        <input type="text" id="name" name="name" placeholder="山田太郎">
+                    </div>
+                    <div class="form-group">
+                        <label for="email">メールアドレス</label>
+                        <input type="email" id="email" name="email" placeholder="example@example.com">
+                    </div>
+                    <div class="form-group">
+                        <label for="plan">プラン選択</label>
+                        <select id="plan" name="plan">
+                            <option value="">選択してください</option>
+                            <option value="free">Free - ¥0/月</option>
+                            <option value="starter">Starter - ¥4,980/月</option>
+                            <option value="professional">Professional - ¥9,800/月</option>
+                            <option value="business">Business - ¥24,800/月</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="message">メッセージ</label>
+                        <textarea id="message" name="message" placeholder="ご質問やご要望をお聞かせください"></textarea>
+                    </div>
+                    <button type="submit" class="btn-primary">送信する</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="content">
+            <h2>🔗 リンクテスト</h2>
+            <div class="link-section">
+                <a href="#top">トップへ戻る</a>
+                <a href="#features">機能一覧</a>
+                <a href="https://example.com" target="_blank">外部リンク</a>
+                <a href="/api/track">APIエンドポイント</a>
+                <a href="mailto:support@example.com">お問い合わせ</a>
+            </div>
+        </div>
+
+        <div class="content">
+            <h2>📊 トラッキングデータ確認</h2>
+            <p>開発者ツールのコンソールを開いて、トラッキングデータの送信状況を確認できます。</p>
+            <div class="button-group">
+                <button class="btn-secondary" onclick="console.log('現在の設定:', window.ClickInsightPro.config)">
+                    設定を表示
+                </button>
+                <button class="btn-secondary" onclick="window.ClickInsightPro.track('custom_event', { test: 'カスタムイベント' })">
+                    カスタムイベント送信
+                </button>
+                <button class="btn-primary" onclick="window.open('/api/track?siteId=test-site-001&limit=10', '_blank')">
+                    収集データを確認
+                </button>
+            </div>
+        </div>
+
+        <footer>
+            <p>&copy; 2024 ClickInsight Pro. All rights reserved.</p>
+            <p style="margin-top: 10px; color: #666;">
+                このページは ClickInsight Pro のトラッキング機能のテストページです。
+            </p>
+        </footer>
+    </div>
+
+    <!-- ClickInsight Pro トラッキングスクリプト -->
+    <script
+        src="/track.js"
+        data-site-id="test-site-001"
+        data-api-url="http://localhost:3000/api/track"
+    ></script>
+</body>
+</html>

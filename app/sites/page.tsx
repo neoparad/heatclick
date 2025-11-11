@@ -1,22 +1,24 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import DashboardLayout from '../../components/layout/DashboardLayout'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card'
 import { Input } from '../../components/ui/input'
 import { Label } from '../../components/ui/label'
 import { Badge } from '../../components/ui/badge'
-import { 
-  Plus, 
-  Globe, 
-  Settings, 
-  Trash2, 
-  Copy, 
+import {
+  Plus,
+  Globe,
+  Settings,
+  Trash2,
+  Copy,
   ExternalLink,
   CheckCircle,
   AlertCircle,
-  Clock
+  Clock,
+  Loader2,
+  Key
 } from 'lucide-react'
 
 interface Site {
@@ -24,72 +26,111 @@ interface Site {
   name: string
   url: string
   status: 'active' | 'inactive' | 'pending'
-  trackingId: string
-  createdAt: string
-  lastActivity: string
-  pageViews: number
+  tracking_id: string
+  created_at: string
+  last_activity: string
+  page_views: number
 }
 
-const mockSites: Site[] = [
-  {
-    id: '1',
-    name: 'メインサイト',
-    url: 'https://example.com',
-    status: 'active',
-    trackingId: 'CIP_1234567890',
-    createdAt: '2024-01-15',
-    lastActivity: '2024-01-20',
-    pageViews: 15420
-  },
-  {
-    id: '2',
-    name: 'ブログ',
-    url: 'https://blog.example.com',
-    status: 'active',
-    trackingId: 'CIP_0987654321',
-    createdAt: '2024-01-10',
-    lastActivity: '2024-01-19',
-    pageViews: 8230
-  },
-  {
-    id: '3',
-    name: 'ランディングページ',
-    url: 'https://lp.example.com',
-    status: 'pending',
-    trackingId: 'CIP_1122334455',
-    createdAt: '2024-01-18',
-    lastActivity: '2024-01-18',
-    pageViews: 0
-  }
-]
-
 export default function SitesPage() {
-  const [sites, setSites] = useState<Site[]>(mockSites)
+  const [sites, setSites] = useState<Site[]>([])
+  const [loading, setLoading] = useState(true)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [showAddForm, setShowAddForm] = useState(false)
   const [newSite, setNewSite] = useState({ name: '', url: '' })
   const [selectedSite, setSelectedSite] = useState<Site | null>(null)
   const [showTrackingScript, setShowTrackingScript] = useState(false)
+  const [copiedTrackingId, setCopiedTrackingId] = useState<string | null>(null)
 
-  const handleAddSite = () => {
-    if (newSite.name && newSite.url) {
-      const site: Site = {
-        id: Date.now().toString(),
-        name: newSite.name,
-        url: newSite.url,
-        status: 'pending',
-        trackingId: `CIP_${Math.random().toString(36).substr(2, 10)}`,
-        createdAt: new Date().toISOString().split('T')[0],
-        lastActivity: new Date().toISOString().split('T')[0],
-        pageViews: 0
+  // Fetch sites from API
+  useEffect(() => {
+    fetchSites()
+  }, [])
+
+  const fetchSites = async () => {
+    try {
+      setLoading(true)
+      setError(null)
+      const response = await fetch('/api/sites')
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch sites')
       }
-      setSites([...sites, site])
-      setNewSite({ name: '', url: '' })
-      setShowAddForm(false)
+
+      const data = await response.json()
+      setSites(data.sites || [])
+    } catch (err) {
+      console.error('Error fetching sites:', err)
+      setError('サイトの読み込みに失敗しました')
+    } finally {
+      setLoading(false)
     }
   }
 
-  const handleDeleteSite = (id: string) => {
-    setSites(sites.filter(site => site.id !== id))
+  const handleAddSite = async () => {
+    if (!newSite.name || !newSite.url) {
+      alert('サイト名とURLを入力してください')
+      return
+    }
+
+    try {
+      setSubmitting(true)
+      setError(null)
+
+      const response = await fetch('/api/sites', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(newSite),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || 'Failed to create site')
+      }
+
+      const data = await response.json()
+
+      // Add new site to the list
+      setSites([data.site, ...sites])
+      setNewSite({ name: '', url: '' })
+      setShowAddForm(false)
+
+      // Show tracking ID modal after successful registration
+      setSelectedSite(data.site)
+      setShowTrackingScript(true)
+    } catch (err: any) {
+      console.error('Error creating site:', err)
+      setError(err.message || 'サイトの作成に失敗しました')
+      alert(err.message || 'サイトの作成に失敗しました')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleDeleteSite = async (id: string) => {
+    if (!confirm('本当にこのサイトを削除しますか？')) {
+      return
+    }
+
+    try {
+      const response = await fetch(`/api/sites/${id}`, {
+        method: 'DELETE',
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to delete site')
+      }
+
+      // Remove site from list
+      setSites(sites.filter(site => site.id !== id))
+      alert('サイトが削除されました')
+    } catch (err) {
+      console.error('Error deleting site:', err)
+      alert('サイトの削除に失敗しました')
+    }
   }
 
   const getStatusBadge = (status: Site['status']) => {
@@ -104,18 +145,12 @@ export default function SitesPage() {
   }
 
   const generateTrackingScript = (site: Site) => {
-    return `<!-- ClickInsight Pro Tracking Script -->
+    return `<!-- ClickInsight Pro Tracking -->
 <script>
-  (function(c,i,p){
-    var s=document.createElement('script');
-    s.type='text/javascript';
-    s.async=true;
-    s.src='http://localhost:3001/track.js';
-    s.setAttribute('data-site-id','${site.trackingId}');
-    var x=document.getElementsByTagName('script')[0];
-    x.parentNode.insertBefore(s,x);
-  })();
+    window.CLICKINSIGHT_SITE_ID = '${site.tracking_id}';
+    window.CLICKINSIGHT_DEBUG = false; // 本番環境ではfalse
 </script>
+<script src="${window.location.origin}/tracking.js" async></script>
 <!-- End ClickInsight Pro -->`
   }
 
@@ -128,22 +163,42 @@ export default function SitesPage() {
     }
   }
 
+  const copyTrackingId = async (trackingId: string) => {
+    try {
+      await navigator.clipboard.writeText(trackingId)
+      setCopiedTrackingId(trackingId)
+      setTimeout(() => setCopiedTrackingId(null), 2000)
+    } catch (err) {
+      console.error('Failed to copy tracking ID: ', err)
+      alert('トラッキングIDのコピーに失敗しました')
+    }
+  }
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">サイト管理</h1>
-          <p className="text-gray-600 mt-2">トラッキング対象サイトの管理と設定</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold">サイト管理</h1>
+            <p className="text-gray-600 mt-2">トラッキング対象サイトの管理と設定</p>
+          </div>
+          <Button
+            onClick={() => setShowAddForm(true)}
+            className="bg-blue-600 hover:bg-blue-700"
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            サイトを追加
+          </Button>
         </div>
-        <Button 
-          onClick={() => setShowAddForm(true)}
-          className="bg-blue-600 hover:bg-blue-700"
-        >
-          <Plus className="w-4 h-4 mr-2" />
-          サイトを追加
-        </Button>
-      </div>
+
+        {/* Error Message */}
+        {error && (
+          <Card className="bg-red-50 border-red-200">
+            <CardContent className="p-4">
+              <p className="text-red-700">{error}</p>
+            </CardContent>
+          </Card>
+        )}
 
       {/* サイト追加フォーム */}
       {showAddForm && (
@@ -198,11 +253,26 @@ export default function SitesPage() {
                     <p className="text-gray-600">{site.url}</p>
                     <div className="flex items-center space-x-4 mt-2">
                       {getStatusBadge(site.status)}
+                      <div className="flex items-center space-x-2">
+                        <Key className="w-3 h-3 text-gray-400" />
+                        <span className="text-sm text-gray-500 font-mono">
+                          トラッキングID: {site.tracking_id}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2"
+                          onClick={() => copyTrackingId(site.tracking_id)}
+                          title="トラッキングIDをコピー"
+                        >
+                          <Copy className={`w-3 h-3 ${copiedTrackingId === site.tracking_id ? 'text-green-600' : ''}`} />
+                        </Button>
+                      </div>
                       <span className="text-sm text-gray-500">
-                        PV: {site.pageViews.toLocaleString()}
+                        PV: {(site.page_views || 0).toLocaleString()}
                       </span>
                       <span className="text-sm text-gray-500">
-                        最終活動: {site.lastActivity}
+                        最終活動: {site.last_activity ? new Date(site.last_activity).toLocaleDateString('ja-JP') : 'なし'}
                       </span>
                     </div>
                   </div>
@@ -216,8 +286,8 @@ export default function SitesPage() {
                       setShowTrackingScript(true)
                     }}
                   >
-                    <Copy className="w-4 h-4 mr-1" />
-                    トラッキングコード
+                    <Key className="w-4 h-4 mr-1" />
+                    トラッキングID
                   </Button>
                   <Button variant="outline" size="sm">
                     <Settings className="w-4 h-4 mr-1" />
@@ -253,10 +323,33 @@ export default function SitesPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="bg-gray-100 p-4 rounded-lg">
-                <pre className="text-sm overflow-x-auto">
-                  <code>{generateTrackingScript(selectedSite)}</code>
-                </pre>
+              {/* トラッキングID表示 */}
+              <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label className="text-sm font-semibold text-blue-900 mb-1 block">トラッキングID</Label>
+                    <p className="text-sm font-mono text-blue-700">{selectedSite.tracking_id}</p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => copyTrackingId(selectedSite.tracking_id)}
+                    className={copiedTrackingId === selectedSite.tracking_id ? 'bg-green-50 border-green-300' : ''}
+                  >
+                    <Copy className={`w-4 h-4 mr-1 ${copiedTrackingId === selectedSite.tracking_id ? 'text-green-600' : ''}`} />
+                    {copiedTrackingId === selectedSite.tracking_id ? 'コピー済み' : 'コピー'}
+                  </Button>
+                </div>
+              </div>
+
+              {/* トラッキングスクリプト */}
+              <div>
+                <Label className="text-sm font-semibold mb-2 block">トラッキングスクリプト</Label>
+                <div className="bg-gray-100 p-4 rounded-lg">
+                  <pre className="text-sm overflow-x-auto">
+                    <code>{generateTrackingScript(selectedSite)}</code>
+                  </pre>
+                </div>
               </div>
               <div className="flex gap-2">
                 <Button
