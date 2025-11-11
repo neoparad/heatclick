@@ -12,6 +12,7 @@
     siteId: window.CLICKINSIGHT_SITE_ID || '',
     apiEndpoint: window.CLICKINSIGHT_API_URL || '/api/recordings',
     debug: window.CLICKINSIGHT_DEBUG || false,
+    requireConsent: window.CLICKINSIGHT_REQUIRE_CONSENT === true, // デフォルト: false（同意不要）
     sampleRate: window.CLICKINSIGHT_RECORDING_SAMPLE_RATE || 1.0, // 100% by default
     maxDuration: 30 * 60 * 1000, // 30 minutes max
   };
@@ -41,9 +42,18 @@
     return localStorage.getItem('clickinsight_cookie_consent') === 'true';
   };
 
-  if (checkOptOut() || !checkCookieConsent()) {
+  // オプトアウトチェック
+  if (checkOptOut()) {
     if (config.debug) {
-      console.log('ClickInsight Pro: Recording disabled (opt-out or no consent)');
+      console.log('ClickInsight Pro: Recording disabled (user opted out)');
+    }
+    return;
+  }
+
+  // Cookie同意が必要な場合のみチェック
+  if (config.requireConsent && !checkCookieConsent()) {
+    if (config.debug) {
+      console.log('ClickInsight Pro: Recording disabled (consent required but not given)');
     }
     return;
   }
@@ -221,6 +231,7 @@
     initRecording();
   }
 })();
+
 
 
 
