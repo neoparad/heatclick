@@ -158,8 +158,8 @@ export async function GET(request: NextRequest) {
       format: 'JSONEachRow',
     })
     
-    const statsData = await statsResult.json()
-    const stats = statsData[0] || {}
+    const statsData = await statsResult.json() as any[]
+    const stats = (statsData && statsData[0]) ? statsData[0] : { total_clicks: 0 }
 
     // 前期間との比較（簡易版）
     let prevStartDate: string | undefined
