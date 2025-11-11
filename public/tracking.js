@@ -12,6 +12,7 @@
     siteId: window.CLICKINSIGHT_SITE_ID || '',
     debug: window.CLICKINSIGHT_DEBUG || false,
     apiEndpoint: window.CLICKINSIGHT_API_URL || '/api/track',
+    requireConsent: window.CLICKINSIGHT_REQUIRE_CONSENT === true, // デフォルト: false（同意不要）
     batchSize: 10,
     batchInterval: 5000, // 5 seconds
     sessionTimeout: 30 * 60 * 1000, // 30 minutes
@@ -297,10 +298,18 @@
 
   // Initialize tracking
   const init = () => {
-    // オプトアウトまたはCookie同意がない場合はトラッキングを無効化
-    if (checkOptOut() || !checkCookieConsent()) {
+    // オプトアウトチェック
+    if (checkOptOut()) {
       if (config.debug) {
-        console.log('ClickInsight Pro: Tracking disabled (opt-out or no consent)');
+        console.log('ClickInsight Pro: Tracking disabled (user opted out)');
+      }
+      return;
+    }
+
+    // Cookie同意が必要な場合のみチェック
+    if (config.requireConsent && !checkCookieConsent()) {
+      if (config.debug) {
+        console.log('ClickInsight Pro: Tracking disabled (consent required but not given)');
       }
       return;
     }

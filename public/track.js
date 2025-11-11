@@ -7,7 +7,8 @@
     siteId: null,
     sessionId: null,
     userId: null,
-    debug: true
+    debug: true,
+    requireConsent: false // デフォルト: false（同意不要）
   };
 
   // セッション管理
@@ -40,6 +41,22 @@
     const script = document.querySelector('script[data-site-id]');
     const attrUrl = script ? script.getAttribute('data-api-url') : null;
     return attrUrl || CONFIG.apiUrl;
+  }
+
+  function getRequireConsent() {
+    const script = document.querySelector('script[data-site-id]');
+    const requireConsent = script ? script.getAttribute('data-require-consent') : null;
+    return requireConsent === 'true';
+  }
+
+  // オプトアウトチェック
+  function checkOptOut() {
+    return localStorage.getItem('clickinsight_optout') === 'true';
+  }
+
+  // Cookie同意チェック
+  function checkCookieConsent() {
+    return localStorage.getItem('clickinsight_cookie_consent') === 'true';
   }
 
   // データ送信
@@ -155,11 +172,28 @@
   function init() {
     CONFIG.siteId = getSiteId();
     CONFIG.apiUrl = getApiUrl();
+    CONFIG.requireConsent = getRequireConsent();
     CONFIG.sessionId = getSessionId();
     CONFIG.userId = getUserId();
 
     if (!CONFIG.siteId) {
       console.error('ClickInsight Pro - Site ID not found. Please check your tracking script.');
+      return;
+    }
+
+    // オプトアウトチェック
+    if (checkOptOut()) {
+      if (CONFIG.debug) {
+        console.log('ClickInsight Pro - Tracking disabled (user opted out)');
+      }
+      return;
+    }
+
+    // Cookie同意が必要な場合のみチェック
+    if (CONFIG.requireConsent && !checkCookieConsent()) {
+      if (CONFIG.debug) {
+        console.log('ClickInsight Pro - Tracking disabled (consent required but not given)');
+      }
       return;
     }
 
