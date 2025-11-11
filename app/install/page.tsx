@@ -34,8 +34,8 @@ export default function InstallPage() {
     }
   }
 
-  const siteId = 'demo-site'
-  const trackingUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://clickinsight.pro'}/tracking.js`
+  const siteId = 'your-site-id'
+  const trackingUrl = 'https://heatclick-ai.vercel.app/tracking.js'
 
   const wordPressCode = `<?php
 // ClickInsight Pro WordPress Plugin
@@ -51,16 +51,18 @@ function clickinsight_pro_tracking() {
 
 add_action('wp_head', 'clickinsight_pro_tracking');`
 
+  const simpleTrackingCode = `<!-- ClickInsight Pro Tracking -->
+<script>
+    window.CLICKINSIGHT_SITE_ID = '${siteId}';
+    window.CLICKINSIGHT_DEBUG = false; // 本番環境ではfalse
+</script>
+<script src="${trackingUrl}" async></script>`
+
   const htmlCode = `<!DOCTYPE html>
 <html>
 <head>
     <title>Your Website</title>
-    <!-- ClickInsight Pro Tracking -->
-    <script>
-        window.CLICKINSIGHT_SITE_ID = '${siteId}';
-        window.CLICKINSIGHT_DEBUG = false;
-    </script>
-    <script src="${trackingUrl}" async></script>
+    ${simpleTrackingCode}
 </head>
 <body>
     <!-- Your website content -->
@@ -197,19 +199,79 @@ export default function App({ Component, pageProps }) {
               <CardHeader>
                 <CardTitle className="flex items-center space-x-2">
                   <Code className="h-5 w-5" />
-                  <span>HTML インストール</span>
+                  <span>HTML インストール（推奨）</span>
                 </CardTitle>
                 <CardDescription>
-                  静的HTMLサイトにClickInsight Proをインストール
+                  静的HTML・WordPress・任意のWebサイトに対応
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <div className="space-y-4">
-                  <div className="p-4 bg-blue-50 rounded-lg">
-                    <h3 className="font-medium text-blue-900 mb-2">HTMLに直接追加</h3>
-                    <p className="text-sm text-blue-700 mb-3">
-                      各ページの&lt;head&gt;セクションに以下のコードを追加してください。
+                <div className="space-y-6">
+                  {/* ステップ1 */}
+                  <div className="p-4 bg-blue-50 rounded-lg border-l-4 border-blue-600">
+                    <h3 className="font-bold text-blue-900 mb-3 flex items-center">
+                      <span className="flex items-center justify-center w-6 h-6 bg-blue-600 text-white rounded-full text-sm mr-2">1</span>
+                      以下のコードをコピー
+                    </h3>
+                    <div className="relative">
+                      <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm">
+                        <code>{simpleTrackingCode}</code>
+                      </pre>
+                      <Button
+                        size="sm"
+                        className="absolute top-2 right-2"
+                        onClick={() => handleCopy(simpleTrackingCode, 'simple-tracking')}
+                      >
+                        {copied === 'simple-tracking' ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* ステップ2 */}
+                  <div className="p-4 bg-green-50 rounded-lg border-l-4 border-green-600">
+                    <h3 className="font-bold text-green-900 mb-3 flex items-center">
+                      <span className="flex items-center justify-center w-6 h-6 bg-green-600 text-white rounded-full text-sm mr-2">2</span>
+                      HTMLの &lt;head&gt; セクションに貼り付け
+                    </h3>
+                    <p className="text-sm text-green-800 mb-3">
+                      あなたのWebサイトの各ページの <code className="bg-green-200 px-2 py-1 rounded">&lt;head&gt;</code> タグ内に貼り付けてください。
                     </p>
+                    <div className="bg-white p-3 rounded border border-green-300">
+                      <p className="text-xs text-gray-600 mb-2">📍 貼り付け位置の例：</p>
+                      <pre className="text-xs text-gray-700">
+{`<head>
+    <title>Your Website</title>
+    <meta charset="UTF-8">
+
+    ← ここに貼り付け
+
+</head>`}
+                      </pre>
+                    </div>
+                  </div>
+
+                  {/* ステップ3 */}
+                  <div className="p-4 bg-yellow-50 rounded-lg border-l-4 border-yellow-600">
+                    <h3 className="font-bold text-yellow-900 mb-3 flex items-center">
+                      <span className="flex items-center justify-center w-6 h-6 bg-yellow-600 text-white rounded-full text-sm mr-2">3</span>
+                      サイトIDを変更
+                    </h3>
+                    <p className="text-sm text-yellow-800 mb-2">
+                      <code className="bg-yellow-200 px-2 py-1 rounded font-mono">'your-site-id'</code> の部分を、あなたのサイトを識別できる名前に変更してください。
+                    </p>
+                    <div className="bg-white p-3 rounded border border-yellow-300">
+                      <p className="text-xs text-gray-600 mb-2">💡 例：</p>
+                      <ul className="text-sm text-gray-700 space-y-1">
+                        <li>• <code className="bg-gray-100 px-2 py-1 rounded">'my-blog'</code></li>
+                        <li>• <code className="bg-gray-100 px-2 py-1 rounded">'company-website'</code></li>
+                        <li>• <code className="bg-gray-100 px-2 py-1 rounded">'ec-site-001'</code></li>
+                      </ul>
+                    </div>
+                  </div>
+
+                  {/* 完全なHTMLの例 */}
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <h3 className="font-medium text-gray-900 mb-2">📝 完全なHTMLの例</h3>
                     <div className="relative">
                       <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm">
                         <code>{htmlCode}</code>
