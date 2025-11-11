@@ -202,7 +202,7 @@ export default function RealtimePage() {
                 <Activity className="w-12 h-12 text-gray-400 mx-auto mb-4" />
                 <p className="text-gray-500">イベントデータがありません</p>
                 <p className="text-sm text-gray-400 mt-2">
-                  トラッキングスクリプトが設置されたサイトでアクティビティを確認してください
+                  サイトでアクティビティが発生すると、ここに表示されます
                 </p>
               </div>
             ) : (
@@ -244,41 +244,6 @@ export default function RealtimePage() {
           </CardContent>
         </Card>
 
-        {/* トラッキングスクリプト情報 */}
-        <Card>
-          <CardHeader>
-            <CardTitle>トラッキングスクリプト</CardTitle>
-            <CardDescription>サイトに設置するスクリプト</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="bg-gray-100 p-4 rounded-lg">
-              <pre className="text-sm overflow-x-auto">
-                <code>{`<!-- ClickInsight Pro Tracking Script -->
-<script>
-  (function(c,i,p){
-    var s=document.createElement('script');
-    s.type='text/javascript';
-    s.async=true;
-    s.src='http://localhost:3001/track.js';
-    s.setAttribute('data-site-id','YOUR_SITE_ID');
-    var x=document.getElementsByTagName('script')[0];
-    x.parentNode.insertBefore(s,x);
-  })();
-</script>
-<!-- End ClickInsight Pro -->`}</code>
-              </pre>
-            </div>
-            <div className="mt-4 p-4 bg-blue-50 rounded-lg">
-              <h4 className="font-semibold text-blue-800 mb-2">設置方法</h4>
-              <ol className="text-sm text-blue-700 space-y-1 list-decimal list-inside">
-                <li>上記のスクリプトをコピー</li>
-                <li>YOUR_SITE_IDを実際のサイトIDに置き換え</li>
-                <li>サイトの&lt;head&gt;タグ内に貼り付け</li>
-                <li>サイトにアクセスしてデータを確認</li>
-              </ol>
-            </div>
-          </CardContent>
-        </Card>
       </div>
     </DashboardLayout>
   )

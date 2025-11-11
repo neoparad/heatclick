@@ -23,9 +23,15 @@ export async function GET(request: NextRequest) {
     
     // キャッシュから取得を試みる
     let cached = false
-    let heatmapData = await getHeatmapCache(siteId, pageUrl, deviceType || undefined)
-    
-    if (!heatmapData) {
+    let heatmapData: any[] = []
+
+    try {
+      heatmapData = await getHeatmapCache(siteId, pageUrl, deviceType || undefined) || []
+    } catch (error) {
+      console.error('Redis cache error:', error)
+    }
+
+    if (!heatmapData || heatmapData.length === 0) {
       try {
         // ClickHouseからデータを取得
         heatmapData = await getHeatmapData(
@@ -35,14 +41,19 @@ export async function GET(request: NextRequest) {
           startDate || undefined,
           endDate || undefined
         )
-        
+
         // キャッシュに保存
         if (heatmapData && heatmapData.length > 0) {
-          await setHeatmapCache(siteId, pageUrl, heatmapData, deviceType || undefined)
+          try {
+            await setHeatmapCache(siteId, pageUrl, heatmapData, deviceType || undefined)
+          } catch (cacheError) {
+            console.error('Failed to cache heatmap data:', cacheError)
+          }
         }
       } catch (error) {
         console.error('Error fetching heatmap data from ClickHouse:', error)
-        // エラー時は空配列を返す
+        // データベース接続エラー時はモックデータを返す（開発用）
+        console.log('Returning empty data due to database error')
         heatmapData = []
       }
     } else {

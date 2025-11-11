@@ -18,8 +18,14 @@ export async function GET(request: NextRequest) {
 
     // キャッシュから取得を試みる
     let cached = false
-    let statistics = await getStatisticsCache(siteId, startDate || undefined, endDate || undefined)
-    
+    let statistics: any = null
+
+    try {
+      statistics = await getStatisticsCache(siteId, startDate || undefined, endDate || undefined)
+    } catch (cacheError) {
+      console.error('Redis cache error:', cacheError)
+    }
+
     if (!statistics) {
       try {
         // ClickHouseからデータを取得
@@ -31,7 +37,11 @@ export async function GET(request: NextRequest) {
         
         // キャッシュに保存
         if (statistics) {
-          await setStatisticsCache(siteId, statistics, startDate || undefined, endDate || undefined)
+          try {
+            await setStatisticsCache(siteId, statistics, startDate || undefined, endDate || undefined)
+          } catch (cacheError) {
+            console.error('Failed to cache statistics:', cacheError)
+          }
         }
       } catch (error) {
         console.error('Error fetching statistics from ClickHouse:', error)

@@ -2,7 +2,6 @@
 
 import Sidebar from './Sidebar'
 import Header from './Header'
-import Footer from './Footer'
 import AuthGuard from './AuthGuard'
 
 interface DashboardLayoutProps {
@@ -20,9 +19,6 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
           <main className="flex-1 overflow-y-auto p-4 lg:p-8 min-h-0">
             {children}
           </main>
-          <div className="mt-auto">
-            <Footer />
-          </div>
         </div>
       </div>
     </AuthGuard>
