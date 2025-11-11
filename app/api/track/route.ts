@@ -64,10 +64,11 @@ export async function POST(request: NextRequest) {
 
     // Debug log
     if (process.env.NODE_ENV === 'development') {
+      const uniqueEventTypes = Array.from(new Set(events.map(e => e.event_type)))
       console.log('ClickInsight Pro - Received batch:', {
         count: events.length,
         siteId: events[0]?.site_id,
-        eventTypes: [...new Set(events.map(e => e.event_type))],
+        eventTypes: uniqueEventTypes,
       })
     }
 
