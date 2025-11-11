@@ -22,28 +22,59 @@ export async function OPTIONS(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const data = await request.json()
-    
-    // データの検証
-    if (!data.siteId || !data.eventType) {
+
+    // Support both single event and batch events
+    const events = data.events || [data]
+
+    // Validate events
+    if (!Array.isArray(events) || events.length === 0) {
       return NextResponse.json({ error: 'Invalid data' }, { status: 400, headers: buildCorsHeaders(request) })
     }
 
-    // データを保存
-    trackingData.push({
-      ...data,
-      id: Date.now() + '_' + Math.random().toString(36).substr(2, 9),
-      receivedAt: new Date().toISOString()
+    // Validate each event
+    for (const event of events) {
+      if (!event.site_id || !event.event_type) {
+        return NextResponse.json({ error: 'Invalid event data' }, { status: 400, headers: buildCorsHeaders(request) })
+      }
+    }
+
+    // Store in memory (fallback)
+    events.forEach(event => {
+      trackingData.push({
+        ...event,
+        received_at: new Date().toISOString()
+      })
     })
 
-    // デバッグ用ログ
-    console.log('ClickInsight Pro - Received tracking data:', {
-      siteId: data.siteId,
-      eventType: data.eventType,
-      timestamp: data.timestamp,
-      url: data.url
-    })
+    // TODO: Store in ClickHouse
+    // Uncomment when ClickHouse client is set up
+    /*
+    try {
+      const clickhouse = await getClickHouseClient()
+      await clickhouse.insert({
+        table: 'clickinsight.events',
+        values: events,
+        format: 'JSONEachRow',
+      })
+    } catch (error) {
+      console.error('ClickHouse insert error:', error)
+      // Continue even if ClickHouse fails (data is in memory)
+    }
+    */
 
-    return NextResponse.json({ success: true }, { headers: buildCorsHeaders(request) })
+    // Debug log
+    if (process.env.NODE_ENV === 'development') {
+      console.log('ClickInsight Pro - Received batch:', {
+        count: events.length,
+        siteId: events[0]?.site_id,
+        eventTypes: [...new Set(events.map(e => e.event_type))],
+      })
+    }
+
+    return NextResponse.json({
+      success: true,
+      received: events.length
+    }, { headers: buildCorsHeaders(request) })
   } catch (error) {
     console.error('ClickInsight Pro - API Error:', error)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500, headers: buildCorsHeaders(request) })
