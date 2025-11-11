@@ -98,12 +98,12 @@ export default function DashboardPage() {
 
   // KPIデータを計算
   const kpiData = statistics ? {
-    totalClicks: statistics.clicks,
+    totalClicks: statistics.clicks || 0,
     clickRate: statistics.unique_sessions > 0 ? ((statistics.clicks / statistics.unique_sessions) * 100).toFixed(1) : '0',
     avgTimeOnPage: 0, // TODO: 実装が必要
     bounceRate: 0, // TODO: 実装が必要
-    uniqueSessions: statistics.unique_sessions,
-    avgScrollDepth: statistics.avg_scroll_depth.toFixed(1),
+    uniqueSessions: statistics.unique_sessions || 0,
+    avgScrollDepth: (statistics.avg_scroll_depth || 0).toFixed(1),
   } : {
     totalClicks: 0,
     clickRate: '0',
@@ -209,7 +209,7 @@ export default function DashboardPage() {
               <span className="text-sm font-medium text-gray-600">総イベント数</span>
               <BarChart3 className="w-5 h-5 text-purple-600" />
             </div>
-            <div className="text-3xl font-bold mb-2">{statistics?.total_events.toLocaleString() || 0}</div>
+            <div className="text-3xl font-bold mb-2">{(statistics?.total_events || 0).toLocaleString()}</div>
             <div className="flex items-center gap-1 text-sm">
               <span className="text-gray-500">クリック・スクロール・ホバー</span>
             </div>
