@@ -33,13 +33,13 @@ function getClickHouseClient(): ClickHouseClient {
     try {
       const config = getClickHouseConfig()
       clickhouse = createClient(config)
-      
-      if (process.env.NODE_ENV === 'development') {
-        console.log('ClickHouse client initialized:', {
-          host: 'url' in config ? config.url : config.host,
-          database: 'database' in config ? config.database : 'N/A',
-        })
-      }
+
+      console.log('ClickHouse client initialized:', {
+        host: 'url' in config ? config.url : config.host,
+        database: 'database' in config ? config.database : 'N/A',
+        hasUrl: !!process.env.CLICKHOUSE_URL,
+        hasHost: !!process.env.CLICKHOUSE_HOST,
+      })
     } catch (error) {
       console.error('Failed to initialize ClickHouse client:', error)
       throw error

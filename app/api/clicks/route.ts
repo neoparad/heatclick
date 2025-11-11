@@ -8,7 +8,7 @@ export async function GET(request: NextRequest) {
     const startDate = searchParams.get('start_date')
     const endDate = searchParams.get('end_date')
     const pageUrl = searchParams.get('page_url')
-    
+
     if (!siteId) {
       return NextResponse.json(
         { error: 'Missing required parameter: site_id' },
@@ -16,7 +16,28 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    const client = getClickHouseClient()
+    let client
+    try {
+      client = getClickHouseClient()
+    } catch (error) {
+      console.error('ClickHouse connection error:', error)
+      // データベース接続エラー時は空データを返す
+      return NextResponse.json({
+        success: true,
+        data: {
+          elements: [],
+          pages: [],
+          devices: [],
+          timeline: [],
+          stats: {
+            totalClicks: 0,
+            uniqueSessions: 0,
+            avgClicksPerSession: 0,
+            clickChange: '+0%'
+          }
+        }
+      })
+    }
 
     // 要素別クリックデータの取得
     let elementQuery = `

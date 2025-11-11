@@ -1,11 +1,12 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import DashboardLayout from '../../components/layout/DashboardLayout'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card'
 import { Button } from '../../components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select'
 import { Badge } from '../../components/ui/badge'
+import Loading from '../../components/ui/loading'
 import { 
   MousePointer, 
   TrendingUp, 
@@ -21,78 +22,134 @@ import {
   Globe
 } from 'lucide-react'
 
+interface Site {
+  id: string
+  name: string
+  url: string
+  tracking_id: string
+}
+
+interface ClickElement {
+  element: string
+  selector: string
+  clicks: number
+  ctr: number
+  change: string
+  page: string
+  device: string
+  position: { x: number; y: number }
+}
+
+interface PageStat {
+  page: string
+  clicks: number
+  ctr: number
+  visitors: number
+}
+
+interface DeviceStat {
+  device: string
+  clicks: number
+  percentage: number
+  ctr: number
+}
+
 export default function ClicksPage() {
-  const [selectedSite, setSelectedSite] = useState('example.com')
+  const [sites, setSites] = useState<Site[]>([])
+  const [selectedSite, setSelectedSite] = useState<string>('')
   const [selectedPeriod, setSelectedPeriod] = useState('7days')
   const [selectedPage, setSelectedPage] = useState('all')
   const [exporting, setExporting] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [clickData, setClickData] = useState<ClickElement[]>([])
+  const [pageStats, setPageStats] = useState<PageStat[]>([])
+  const [deviceStats, setDeviceStats] = useState<DeviceStat[]>([])
+  const [stats, setStats] = useState({
+    totalClicks: 0,
+    uniqueElements: 0,
+    uniquePages: 0,
+    uniqueSessions: 0,
+    clickChange: '0'
+  })
 
-  // サンプルデータ
-  const clickData = [
-    {
-      element: '「資料請求」ボタン',
-      selector: '.cta-button',
-      clicks: 8542,
-      ctr: 18.9,
-      change: '+15%',
-      page: '/contact',
-      device: 'desktop',
-      position: { x: 120, y: 450 }
-    },
-    {
-      element: '「料金プラン」リンク',
-      selector: 'a[href="/pricing"]',
-      clicks: 6234,
-      ctr: 13.8,
-      change: '+8%',
-      page: '/',
-      device: 'desktop',
-      position: { x: 200, y: 120 }
-    },
-    {
-      element: 'メニュー「導入事例」',
-      selector: '.nav-item[href="/cases"]',
-      clicks: 4521,
-      ctr: 10.0,
-      change: '-2%',
-      page: '/',
-      device: 'mobile',
-      position: { x: 50, y: 60 }
-    },
-    {
-      element: 'フッター「お問い合わせ」',
-      selector: '.footer-contact',
-      clicks: 3102,
-      ctr: 6.9,
-      change: '+22%',
-      page: '/',
-      device: 'desktop',
-      position: { x: 300, y: 800 }
-    },
-    {
-      element: '「無料トライアル」ボタン',
-      selector: '.trial-button',
-      clicks: 2845,
-      ctr: 6.3,
-      change: '+5%',
-      page: '/pricing',
-      device: 'desktop',
-      position: { x: 150, y: 300 }
+  // サイト一覧の取得
+  useEffect(() => {
+    const fetchSites = async () => {
+      try {
+        const response = await fetch('/api/sites')
+        if (response.ok) {
+          const data = await response.json()
+          const sitesList = data.sites || []
+          setSites(sitesList)
+          if (sitesList.length > 0 && !selectedSite) {
+            setSelectedSite(sitesList[0].tracking_id)
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching sites:', error)
+      }
     }
-  ]
+    fetchSites()
+  }, [])
 
-  const pageStats = [
-    { page: '/', clicks: 15420, ctr: 12.4, visitors: 124200 },
-    { page: '/pricing', clicks: 8920, ctr: 15.8, visitors: 56400 },
-    { page: '/contact', clicks: 6540, ctr: 18.2, visitors: 35900 },
-    { page: '/about', clicks: 3200, ctr: 8.9, visitors: 35900 }
-  ]
+  // クリックデータの取得
+  useEffect(() => {
+    if (!selectedSite) return
 
-  const deviceStats = [
-    { device: 'デスクトップ', clicks: 28420, percentage: 68.5, ctr: 14.2 },
-    { device: 'モバイル', clicks: 10200, percentage: 24.6, ctr: 9.8 },
-    { device: 'タブレット', clicks: 2840, percentage: 6.9, ctr: 11.5 }
-  ]
+    const fetchClickData = async () => {
+      setLoading(true)
+      try {
+        // 期間の計算
+        const endDate = new Date().toISOString().split('T')[0]
+        let startDate = new Date()
+        switch (selectedPeriod) {
+          case '1day':
+            startDate.setDate(startDate.getDate() - 1)
+            break
+          case '7days':
+            startDate.setDate(startDate.getDate() - 7)
+            break
+          case '30days':
+            startDate.setDate(startDate.getDate() - 30)
+            break
+          case '90days':
+            startDate.setDate(startDate.getDate() - 90)
+            break
+        }
+        const startDateStr = startDate.toISOString().split('T')[0]
+
+        const params = new URLSearchParams({
+          site_id: selectedSite,
+          start_date: startDateStr,
+          end_date: endDate,
+          ...(selectedPage !== 'all' && { page_url: selectedPage })
+        })
+
+        const response = await fetch(`/api/clicks?${params}`)
+        if (response.ok) {
+          const result = await response.json()
+          if (result.success && result.data) {
+            setClickData(result.data.elements || [])
+            setPageStats(result.data.pages || [])
+            setDeviceStats(result.data.devices || [])
+            setStats(result.data.stats || {
+              totalClicks: 0,
+              uniqueElements: 0,
+              uniquePages: 0,
+              uniqueSessions: 0,
+              clickChange: '0'
+            })
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching click data:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchClickData()
+  }, [selectedSite, selectedPeriod, selectedPage])
 
   const getChangeIcon = (change: string) => {
     return change.startsWith('+') ? TrendingUp : TrendingDown
@@ -130,8 +187,9 @@ export default function ClicksPage() {
       // ダウンロード
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
+      const siteName = sites.find(s => s.tracking_id === selectedSite)?.name || selectedSite
       link.href = url
-      link.download = `clickinsight-clicks-${selectedSite}-${new Date().toISOString().split('T')[0]}.csv`
+      link.download = `clickinsight-clicks-${siteName}-${new Date().toISOString().split('T')[0]}.csv`
       document.body.appendChild(link)
       link.click()
       document.body.removeChild(link)
@@ -145,6 +203,8 @@ export default function ClicksPage() {
       setExporting(false)
     }
   }
+
+  const selectedSiteName = sites.find(s => s.tracking_id === selectedSite)?.name || selectedSite
 
   return (
     <DashboardLayout>
@@ -174,12 +234,14 @@ export default function ClicksPage() {
                 <label className="text-sm font-medium text-gray-700 mb-2 block">サイト</label>
                 <Select value={selectedSite} onValueChange={setSelectedSite}>
                   <SelectTrigger>
-                    <SelectValue />
+                    <SelectValue placeholder="サイトを選択" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="example.com">example.com</SelectItem>
-                    <SelectItem value="blog.example.com">blog.example.com</SelectItem>
-                    <SelectItem value="lp.example.com">lp.example.com</SelectItem>
+                    {sites.map((site) => (
+                      <SelectItem key={site.id} value={site.tracking_id}>
+                        {site.name} ({site.url})
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -216,83 +278,85 @@ export default function ClicksPage() {
         </Card>
 
         {/* サマリー統計 */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <Card>
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-gray-600">総クリック数</p>
-                  <p className="text-2xl font-bold">41,460</p>
+        {loading ? (
+          <Loading />
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <Card>
+              <CardContent className="p-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">総クリック数</p>
+                    <p className="text-2xl font-bold">{stats.totalClicks.toLocaleString()}</p>
+                  </div>
+                  <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
+                    <MousePointer className="w-4 h-4 text-blue-600" />
+                  </div>
                 </div>
-                <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
-                  <MousePointer className="w-4 h-4 text-blue-600" />
-                </div>
-              </div>
-              <div className="flex items-center gap-1 text-sm mt-2">
-                <TrendingUp className="w-4 h-4 text-green-600" />
-                <span className="text-green-600 font-medium">+12.5%</span>
-                <span className="text-gray-500">vs 前期間</span>
-              </div>
-            </CardContent>
-          </Card>
+                {stats.clickChange !== '0' && (
+                  <div className="flex items-center gap-1 text-sm mt-2">
+                    {parseFloat(stats.clickChange) >= 0 ? (
+                      <TrendingUp className="w-4 h-4 text-green-600" />
+                    ) : (
+                      <TrendingDown className="w-4 h-4 text-red-600" />
+                    )}
+                    <span className={parseFloat(stats.clickChange) >= 0 ? 'text-green-600' : 'text-red-600'}>
+                      {parseFloat(stats.clickChange) >= 0 ? '+' : ''}{stats.clickChange}%
+                    </span>
+                    <span className="text-gray-500">vs 前期間</span>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
 
-          <Card>
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-gray-600">平均CTR</p>
-                  <p className="text-2xl font-bold">13.2%</p>
+            <Card>
+              <CardContent className="p-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">平均CTR</p>
+                    <p className="text-2xl font-bold">
+                      {pageStats.length > 0 
+                        ? (pageStats.reduce((sum, p) => sum + p.ctr, 0) / pageStats.length).toFixed(1)
+                        : '0'
+                      }%
+                    </p>
+                  </div>
+                  <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center">
+                    <Target className="w-4 h-4 text-green-600" />
+                  </div>
                 </div>
-                <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center">
-                  <Target className="w-4 h-4 text-green-600" />
-                </div>
-              </div>
-              <div className="flex items-center gap-1 text-sm mt-2">
-                <TrendingUp className="w-4 h-4 text-green-600" />
-                <span className="text-green-600 font-medium">+2.1%</span>
-                <span className="text-gray-500">vs 前期間</span>
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
 
-          <Card>
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-gray-600">ユニーク要素</p>
-                  <p className="text-2xl font-bold">1,247</p>
+            <Card>
+              <CardContent className="p-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">ユニーク要素</p>
+                    <p className="text-2xl font-bold">{stats.uniqueElements.toLocaleString()}</p>
+                  </div>
+                  <div className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center">
+                    <Activity className="w-4 h-4 text-purple-600" />
+                  </div>
                 </div>
-                <div className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center">
-                  <Activity className="w-4 h-4 text-purple-600" />
-                </div>
-              </div>
-              <div className="flex items-center gap-1 text-sm mt-2">
-                <TrendingUp className="w-4 h-4 text-green-600" />
-                <span className="text-green-600 font-medium">+8.3%</span>
-                <span className="text-gray-500">vs 前期間</span>
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
 
-          <Card>
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-gray-600">アクティブページ</p>
-                  <p className="text-2xl font-bold">12</p>
+            <Card>
+              <CardContent className="p-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">アクティブページ</p>
+                    <p className="text-2xl font-bold">{stats.uniquePages.toLocaleString()}</p>
+                  </div>
+                  <div className="w-8 h-8 bg-orange-100 rounded-lg flex items-center justify-center">
+                    <Globe className="w-4 h-4 text-orange-600" />
+                  </div>
                 </div>
-                <div className="w-8 h-8 bg-orange-100 rounded-lg flex items-center justify-center">
-                  <Globe className="w-4 h-4 text-orange-600" />
-                </div>
-              </div>
-              <div className="flex items-center gap-1 text-sm mt-2">
-                <TrendingUp className="w-4 h-4 text-green-600" />
-                <span className="text-green-600 font-medium">+2</span>
-                <span className="text-gray-500">vs 前期間</span>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
 
         {/* トップクリック要素 */}
         <Card>
@@ -301,42 +365,52 @@ export default function ClicksPage() {
             <CardDescription>最もクリックされた要素の詳細分析</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4">
-              {clickData.map((item, idx) => {
-                const ChangeIcon = getChangeIcon(item.change)
-                return (
-                  <div key={idx} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
-                    <div className="flex items-center gap-4 flex-1">
-                      <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
-                        <span className="font-bold text-blue-600 text-sm">{idx + 1}</span>
+            {loading ? (
+              <Loading />
+            ) : clickData.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">
+                クリックデータがありません
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {clickData.map((item, idx) => {
+                  const ChangeIcon = getChangeIcon(item.change)
+                  return (
+                    <div key={idx} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+                      <div className="flex items-center gap-4 flex-1">
+                        <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
+                          <span className="font-bold text-blue-600 text-sm">{idx + 1}</span>
+                        </div>
+                        <div className="flex-1">
+                          <div className="font-medium mb-1">{item.element}</div>
+                          <div className="text-sm text-gray-500 mb-1">
+                            {item.selector} • {item.page}
+                          </div>
+                          <div className="flex items-center gap-4 text-sm text-gray-500">
+                            <span>{item.clicks.toLocaleString()} クリック</span>
+                            {item.ctr > 0 && <span>CTR {item.ctr.toFixed(1)}%</span>}
+                            <Badge variant="outline" className="text-xs">
+                              {item.device === 'desktop' ? 'デスクトップ' : item.device === 'mobile' ? 'モバイル' : 'タブレット'}
+                            </Badge>
+                          </div>
+                        </div>
                       </div>
-                      <div className="flex-1">
-                        <div className="font-medium mb-1">{item.element}</div>
-                        <div className="text-sm text-gray-500 mb-1">
-                          {item.selector} • {item.page}
-                        </div>
-                        <div className="flex items-center gap-4 text-sm text-gray-500">
-                          <span>{item.clicks.toLocaleString()} クリック</span>
-                          <span>CTR {item.ctr}%</span>
-                          <Badge variant="outline" className="text-xs">
-                            {item.device === 'desktop' ? 'デスクトップ' : 'モバイル'}
-                          </Badge>
-                        </div>
+                      <div className="flex items-center gap-2">
+                        {item.change !== '+0%' && (
+                          <div className={`flex items-center gap-1 text-sm font-medium ${getChangeColor(item.change)}`}>
+                            <ChangeIcon className="w-4 h-4" />
+                            {item.change}
+                          </div>
+                        )}
+                        <Button variant="outline" size="sm">
+                          <Eye className="w-4 h-4" />
+                        </Button>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <div className={`flex items-center gap-1 text-sm font-medium ${getChangeColor(item.change)}`}>
-                        <ChangeIcon className="w-4 h-4" />
-                        {item.change}
-                      </div>
-                      <Button variant="outline" size="sm">
-                        <Eye className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
+                  )
+                })}
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -348,22 +422,30 @@ export default function ClicksPage() {
               <CardDescription>各ページのクリックパフォーマンス</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="space-y-3">
-                {pageStats.map((page, idx) => (
-                  <div key={idx} className="flex items-center justify-between p-3 border border-gray-200 rounded-lg">
-                    <div>
-                      <div className="font-medium">{page.page}</div>
-                      <div className="text-sm text-gray-500">
-                        {page.visitors.toLocaleString()} 訪問者
+              {loading ? (
+                <Loading />
+              ) : pageStats.length === 0 ? (
+                <div className="text-center py-8 text-gray-500">
+                  ページ別データがありません
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {pageStats.map((page, idx) => (
+                    <div key={idx} className="flex items-center justify-between p-3 border border-gray-200 rounded-lg">
+                      <div>
+                        <div className="font-medium">{page.page}</div>
+                        <div className="text-sm text-gray-500">
+                          {page.visitors.toLocaleString()} 訪問者
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="font-bold">{page.clicks.toLocaleString()}</div>
+                        <div className="text-sm text-gray-500">CTR {page.ctr.toFixed(1)}%</div>
                       </div>
                     </div>
-                    <div className="text-right">
-                      <div className="font-bold">{page.clicks.toLocaleString()}</div>
-                      <div className="text-sm text-gray-500">CTR {page.ctr}%</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -373,27 +455,35 @@ export default function ClicksPage() {
               <CardDescription>デバイスごとのクリック分布</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="space-y-4">
-                {deviceStats.map((device, idx) => (
-                  <div key={idx}>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="font-medium">{device.device}</span>
-                      <span className="text-sm text-gray-500">
-                        {device.clicks.toLocaleString()} ({device.percentage}%)
-                      </span>
+              {loading ? (
+                <Loading />
+              ) : deviceStats.length === 0 ? (
+                <div className="text-center py-8 text-gray-500">
+                  デバイス別データがありません
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {deviceStats.map((device, idx) => (
+                    <div key={idx}>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-medium">{device.device}</span>
+                        <span className="text-sm text-gray-500">
+                          {device.clicks.toLocaleString()} ({device.percentage.toFixed(1)}%)
+                        </span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-2">
+                        <div 
+                          className="bg-blue-600 h-2 rounded-full" 
+                          style={{ width: `${device.percentage}%` }}
+                        />
+                      </div>
+                      <div className="text-sm text-gray-500 mt-1">
+                        CTR: {device.ctr.toFixed(1)}%
+                      </div>
                     </div>
-                    <div className="w-full bg-gray-200 rounded-full h-2">
-                      <div 
-                        className="bg-blue-600 h-2 rounded-full" 
-                        style={{ width: `${device.percentage}%` }}
-                      />
-                    </div>
-                    <div className="text-sm text-gray-500 mt-1">
-                      CTR: {device.ctr}%
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>
