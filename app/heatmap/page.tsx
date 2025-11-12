@@ -111,21 +111,26 @@ export default function HeatmapPage() {
 
   // ヒートマップデータを取得
   useEffect(() => {
-    if (!selectedSite || !selectedPageUrl) return
+    if (!selectedSite || !selectedPageUrl) {
+      setHeatmapData([])
+      return
+    }
 
     const fetchHeatmap = async () => {
       try {
-        const response = await fetch(
-          `/api/heatmap?site_id=${selectedSite.tracking_id}&page_url=${encodeURIComponent(selectedPageUrl)}`
-        )
+        const url = `/api/heatmap?site_id=${selectedSite.tracking_id}&page_url=${encodeURIComponent(selectedPageUrl)}`
+        console.log('Fetching heatmap data from:', url)
+        const response = await fetch(url)
         if (!response.ok) {
-          throw new Error('Failed to fetch heatmap data')
+          throw new Error(`Failed to fetch heatmap data: ${response.status} ${response.statusText}`)
         }
         const data = await response.json()
+        console.log('Heatmap data received:', data.data?.length || 0, 'points')
         setHeatmapData(data.data || [])
       } catch (err) {
         console.error('Error fetching heatmap:', err)
         setHeatmapData([])
+        setError('ヒートマップデータの取得に失敗しました')
       }
     }
 
@@ -134,7 +139,16 @@ export default function HeatmapPage() {
 
   // ヒートマップを描画
   useEffect(() => {
-    if (!h337 || !heatmapContainerRef.current || heatmapData.length === 0) return
+    if (!h337 || !heatmapContainerRef.current || heatmapData.length === 0) {
+      // データがない場合は既存のキャンバスをクリーンアップ
+      if (heatmapContainerRef.current) {
+        const canvas = heatmapContainerRef.current.querySelector('canvas')
+        if (canvas) {
+          canvas.remove()
+        }
+      }
+      return
+    }
 
     // 既存のヒートマップインスタンスをクリーンアップ
     if (heatmapInstanceRef.current) {
@@ -142,47 +156,68 @@ export default function HeatmapPage() {
       if (canvas) {
         canvas.remove()
       }
+      heatmapInstanceRef.current = null
     }
 
-    // ヒートマップインスタンスを作成
-    const heatmapInstance = h337.create({
-      container: heatmapContainerRef.current,
-      radius: 40,
-      maxOpacity: 0.6,
-      minOpacity: 0,
-      blur: 0.75,
-    })
+    // 少し遅延させてコンテナのサイズが確定してから描画
+    const timer = setTimeout(() => {
+      if (!heatmapContainerRef.current) return
 
-    // データポイントを変換
-    const points = heatmapData.map(point => ({
-      x: point.click_x,
-      y: point.click_y,
-      value: point.count || point.click_count || 1,
-    }))
+      try {
+        // ヒートマップインスタンスを作成
+        const heatmapInstance = h337.create({
+          container: heatmapContainerRef.current,
+          radius: 40,
+          maxOpacity: 0.6,
+          minOpacity: 0,
+          blur: 0.75,
+        })
 
-    // 最大値を計算（空配列の場合は1を設定）
-    const maxValue = points.length > 0 
-      ? Math.max(...points.map(p => p.value), 1)
-      : 1
+        // データポイントを変換（有効な座標のみ）
+        const points = heatmapData
+          .filter(point => 
+            typeof point.click_x === 'number' && 
+            typeof point.click_y === 'number' &&
+            !isNaN(point.click_x) && 
+            !isNaN(point.click_y) &&
+            point.click_x >= 0 && 
+            point.click_y >= 0
+          )
+          .map(point => ({
+            x: Math.round(point.click_x),
+            y: Math.round(point.click_y),
+            value: point.count || point.click_count || 1,
+          }))
 
-    // データを設定
-    try {
-      heatmapInstance.setData({
-        max: maxValue,
-        data: points,
-      })
-    } catch (error) {
-      console.error('Error setting heatmap data:', error)
-    }
+        if (points.length === 0) {
+          console.warn('No valid heatmap points to display')
+          return
+        }
 
-    heatmapInstanceRef.current = heatmapInstance
+        // 最大値を計算
+        const maxValue = Math.max(...points.map(p => p.value), 1)
+
+        // データを設定
+        heatmapInstance.setData({
+          max: maxValue,
+          data: points,
+        })
+
+        heatmapInstanceRef.current = heatmapInstance
+        console.log('Heatmap rendered with', points.length, 'points')
+      } catch (error) {
+        console.error('Error setting heatmap data:', error)
+      }
+    }, 100)
 
     return () => {
+      clearTimeout(timer)
       if (heatmapInstanceRef.current) {
         const canvas = heatmapContainerRef.current?.querySelector('canvas')
         if (canvas) {
           canvas.remove()
         }
+        heatmapInstanceRef.current = null
       }
     }
   }, [heatmapData])

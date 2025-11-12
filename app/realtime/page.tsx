@@ -76,6 +76,8 @@ export default function RealtimePage() {
           if (sitesList.length > 0 && !selectedSite) {
             setSelectedSite(sitesList[0].tracking_id)
           }
+        } else {
+          console.error('Failed to fetch sites:', response.status, response.statusText)
         }
       } catch (error) {
         console.error('Error fetching sites:', error)
@@ -85,13 +87,28 @@ export default function RealtimePage() {
   }, [])
 
   const fetchData = async () => {
-    if (!selectedSite) return
+    if (!selectedSite) {
+      setEvents([])
+      setStats({
+        totalEvents: 0,
+        uniqueUsers: 0,
+        uniqueSessions: 0,
+        clicks: 0,
+        scrolls: 0,
+        pageViews: 0
+      })
+      return
+    }
     
     setIsLoading(true)
     try {
       const response = await fetch(`/api/track?siteId=${selectedSite}&limit=50`)
+      if (!response.ok) {
+        throw new Error(`Failed to fetch events: ${response.status} ${response.statusText}`)
+      }
       const result = await response.json()
       const eventData = result.data || []
+      console.log('Fetched events:', eventData.length, 'events')
       setEvents(eventData)
       
       // 統計計算
@@ -120,6 +137,15 @@ export default function RealtimePage() {
       })
     } catch (error) {
       console.error('Failed to fetch data:', error)
+      setEvents([])
+      setStats({
+        totalEvents: 0,
+        uniqueUsers: 0,
+        uniqueSessions: 0,
+        clicks: 0,
+        scrolls: 0,
+        pageViews: 0
+      })
     } finally {
       setIsLoading(false)
     }
@@ -131,6 +157,7 @@ export default function RealtimePage() {
     fetchData()
     const interval = setInterval(fetchData, 5000) // 5秒ごとに更新
     return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSite])
 
   const getEventIcon = (eventType: string) => {
