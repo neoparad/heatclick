@@ -1,27 +1,19 @@
 import { ClickHouseClient, createClient } from '@clickhouse/client'
 
 // ClickHouseクライアントの設定
-// CLICKHOUSE_URLが設定されている場合はそれを使用、そうでなければ個別の環境変数から構築
+// 個別の環境変数から構築（より柔軟で確実）
 function getClickHouseConfig() {
-  if (process.env.CLICKHOUSE_URL) {
-    // 完全なURL形式の場合
-    return {
-      url: process.env.CLICKHOUSE_URL,
-    }
-  } else {
-    // 個別の環境変数から構築
-    const host = process.env.CLICKHOUSE_HOST || 'localhost'
-    const port = process.env.CLICKHOUSE_PORT || '8123'
-    const username = process.env.CLICKHOUSE_USER || 'default'
-    const password = process.env.CLICKHOUSE_PASSWORD || ''
-    const database = process.env.CLICKHOUSE_DATABASE || 'clickinsight'
-    
-    return {
-      host: `http://${host}:${port}`,
-      username,
-      password,
-      database,
-    }
+  const host = process.env.CLICKHOUSE_HOST || 'localhost'
+  const port = process.env.CLICKHOUSE_PORT || '8123'
+  const username = process.env.CLICKHOUSE_USER || 'default'
+  const password = process.env.CLICKHOUSE_PASSWORD || ''
+  const database = process.env.CLICKHOUSE_DATABASE || 'clickinsight'
+
+  return {
+    url: `http://${host}:${port}`,
+    username,
+    password,
+    database,
   }
 }
 
@@ -35,10 +27,9 @@ function getClickHouseClient(): ClickHouseClient {
       clickhouse = createClient(config)
 
       console.log('ClickHouse client initialized:', {
-        host: 'url' in config ? config.url : config.host,
-        database: 'database' in config ? config.database : 'N/A',
-        hasUrl: !!process.env.CLICKHOUSE_URL,
-        hasHost: !!process.env.CLICKHOUSE_HOST,
+        url: config.url,
+        database: config.database,
+        username: config.username,
       })
     } catch (error) {
       console.error('Failed to initialize ClickHouse client:', error)
