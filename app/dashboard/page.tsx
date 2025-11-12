@@ -58,7 +58,7 @@ export default function DashboardPage() {
   const [statistics, setStatistics] = useState<Statistics | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [dateRange, setDateRange] = useState<'all' | '7days' | '30days' | '90days'>('30days')
+  const [dateRange, setDateRange] = useState<'all' | '7days' | '30days' | '90days'>('all')
 
   // サイトリストを取得
   useEffect(() => {
@@ -86,10 +86,14 @@ export default function DashboardPage() {
 
   // 選択されたサイトの統計を取得
   useEffect(() => {
-    if (!selectedSite) return
+    if (!selectedSite) {
+      setStatistics(null)
+      return
+    }
 
     const fetchStatistics = async () => {
       try {
+        setError(null)
         // 期間の計算
         let startDate: string | undefined = undefined
         let endDate: string | undefined = undefined
@@ -130,6 +134,7 @@ export default function DashboardPage() {
       } catch (err) {
         console.error('Error fetching statistics:', err)
         setError('統計情報の取得に失敗しました')
+        setStatistics(null)
       }
     }
 
