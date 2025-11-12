@@ -42,8 +42,9 @@ export async function POST(request: NextRequest) {
         if (usersFromDb.length > 0) {
           user = usersFromDb[0]
         }
-      } catch (error) {
-        console.log('ClickHouse not connected, checking memory storage only')
+      } catch (error: any) {
+        console.warn('ClickHouse not connected, checking memory storage only:', error?.message || error)
+        // メモリ内ストレージのみで検索を続行
       }
     }
 
@@ -78,6 +79,7 @@ export async function POST(request: NextRequest) {
     )
   }
 }
+
 
 
 

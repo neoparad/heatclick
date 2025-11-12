@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getClickHouseClient } from '@/lib/clickhouse'
+import { getClickHouseClientAsync } from '@/lib/clickhouse'
 
 // プラン情報の定義
 const PLAN_LIMITS: Record<string, { name: string; pvLimit: number }> = {
@@ -33,7 +33,7 @@ export async function GET(request: NextRequest) {
 
     let usage = 0
     try {
-      const client = getClickHouseClient()
+      const client = await getClickHouseClientAsync()
       
       // ユーザーが所有するサイトのIDを取得
       const sitesResult = await client.query({
@@ -72,8 +72,12 @@ export async function GET(request: NextRequest) {
         const usageData = await usageResult.json() as any[]
         usage = (usageData && usageData[0]) ? (usageData[0].pv_count || 0) : 0
       }
-    } catch (error) {
-      console.error('Error fetching usage:', error)
+    } catch (error: any) {
+      console.error('Error fetching usage:', {
+        error: error?.message || String(error),
+        code: error?.code,
+        userId,
+      })
       // エラー時は0を返す
       usage = 0
     }

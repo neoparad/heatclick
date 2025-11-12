@@ -19,7 +19,7 @@ export default function Footer() {
           <div className="col-span-1 md:col-span-2">
             <div className="flex items-center gap-2 mb-4">
               <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
-                <span className="text-white font-bold text-sm">CI</span>
+                <span className="text-white font-bold text-sm">UG</span>
               </div>
               <span className="font-bold text-lg">UGOKI MAP</span>
             </div>
