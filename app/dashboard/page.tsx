@@ -42,6 +42,10 @@ interface Statistics {
   desktop_events: number
   tablet_events: number
   mobile_events: number
+  avg_time_on_page?: number
+  bounce_rate?: number
+  total_sessions?: number
+  bounce_sessions?: number
 }
 
 export default function DashboardPage() {
