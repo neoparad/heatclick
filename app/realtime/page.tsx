@@ -37,6 +37,10 @@ interface TrackingEvent {
   event_type?: string
   scroll_percentage?: number
   time_on_page?: number
+  page_url?: string
+  elementTag?: string
+  elementId?: string
+  elementClass?: string
 }
 
 interface Site {
@@ -91,11 +95,20 @@ export default function RealtimePage() {
       setEvents(eventData)
       
       // 統計計算
-      const uniqueUsers = new Set(eventData.map((e: TrackingEvent) => e.userId || e.user_id)).size
-      const uniqueSessions = new Set(eventData.map((e: TrackingEvent) => e.sessionId || e.session_id)).size
-      const clicks = eventData.filter((e: TrackingEvent) => (e.eventType || e.event_type) === 'click').length
-      const scrolls = eventData.filter((e: TrackingEvent) => (e.eventType || e.event_type) === 'scroll').length
-      const pageViews = eventData.filter((e: TrackingEvent) => (e.eventType || e.event_type) === 'page_view').length
+      const uniqueUsers = new Set(eventData.map((e: TrackingEvent) => e.userId || e.user_id || 'anonymous').filter((id: string) => id)).size
+      const uniqueSessions = new Set(eventData.map((e: TrackingEvent) => e.sessionId || e.session_id || '').filter((id: string) => id)).size
+      const clicks = eventData.filter((e: TrackingEvent) => {
+        const type = e.eventType || e.event_type || ''
+        return type === 'click' || type === 'Click'
+      }).length
+      const scrolls = eventData.filter((e: TrackingEvent) => {
+        const type = e.eventType || e.event_type || ''
+        return type === 'scroll' || type === 'Scroll'
+      }).length
+      const pageViews = eventData.filter((e: TrackingEvent) => {
+        const type = e.eventType || e.event_type || ''
+        return type === 'page_view' || type === 'pageview' || type === 'PageView'
+      }).length
 
       setStats({
         totalEvents: eventData.length,
@@ -121,22 +134,28 @@ export default function RealtimePage() {
   }, [selectedSite])
 
   const getEventIcon = (eventType: string) => {
-    switch (eventType) {
+    if (!eventType) return Activity
+    const type = eventType.toLowerCase()
+    switch (type) {
       case 'click': return MousePointer
       case 'scroll': return ScrollText
       case 'mouse_move': return Map
-      case 'page_view': return Eye
+      case 'page_view':
+      case 'pageview': return Eye
       case 'page_leave': return Clock
       default: return Activity
     }
   }
 
   const getEventColor = (eventType: string) => {
-    switch (eventType) {
+    if (!eventType) return 'bg-gray-100 text-gray-700'
+    const type = eventType.toLowerCase()
+    switch (type) {
       case 'click': return 'bg-blue-100 text-blue-700'
       case 'scroll': return 'bg-green-100 text-green-700'
       case 'mouse_move': return 'bg-purple-100 text-purple-700'
-      case 'page_view': return 'bg-orange-100 text-orange-700'
+      case 'page_view':
+      case 'pageview': return 'bg-orange-100 text-orange-700'
       case 'page_leave': return 'bg-red-100 text-red-700'
       default: return 'bg-gray-100 text-gray-700'
     }
@@ -274,34 +293,42 @@ export default function RealtimePage() {
             ) : (
               <div className="space-y-3">
                 {events.map((event) => {
-                  const EventIcon = getEventIcon(event.eventType)
+                  const eventType = event.eventType || event.event_type || 'unknown'
+                  const EventIcon = getEventIcon(eventType)
+                  const sessionId = event.sessionId || event.session_id || ''
+                  const url = event.url || event.page_url || ''
+                  const timestamp = event.timestamp || ''
+                  
                   return (
-                    <div key={event.id} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+                    <div key={event.id || `${eventType}-${timestamp}`} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
                       <div className="flex items-center gap-4 flex-1">
                         <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center">
                           <EventIcon className="w-4 h-4 text-gray-600" />
                         </div>
                         <div className="flex-1">
                           <div className="flex items-center gap-2 mb-1">
-                            <span className="font-medium">{event.eventType}</span>
-                            <Badge className={getEventColor(event.eventType)}>
-                              {event.eventType}
+                            <span className="font-medium">{eventType}</span>
+                            <Badge className={getEventColor(eventType)}>
+                              {eventType}
                             </Badge>
                           </div>
                           <div className="text-sm text-gray-500">
-                            {formatUrl(event.url)} • {formatTime(event.timestamp)}
+                            {url ? formatUrl(url) : 'N/A'} • {timestamp ? formatTime(timestamp) : 'N/A'}
                           </div>
-                          {event.element && (
+                          {(event.element || event.elementTag) && (
                             <div className="text-xs text-gray-400 mt-1">
-                              {event.element.tagName} {event.element.id && `#${event.element.id}`}
-                              {event.element.className && `.${event.element.className.split(' ')[0]}`}
+                              {event.element?.tagName || event.elementTag || 'N/A'} 
+                              {(event.element?.id || event.elementId) && ` #${event.element?.id || event.elementId}`}
+                              {(event.element?.className || event.elementClass) && `.${(event.element?.className || event.elementClass).split(' ')[0]}`}
                             </div>
                           )}
                         </div>
                       </div>
-                      <div className="text-xs text-gray-400">
-                        {event.sessionId.substring(0, 8)}...
-                      </div>
+                      {sessionId && (
+                        <div className="text-xs text-gray-400">
+                          {sessionId.substring(0, 8)}...
+                        </div>
+                      )}
                     </div>
                   )
                 })}

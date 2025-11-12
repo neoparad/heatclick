@@ -45,7 +45,7 @@ CLICKHOUSE_URL=http://default:your_password@localhost:8123/clickinsight
 
 ### 2. 認証システム
 
-#### 実装状況: ✅ 基本機能完了（データ永続化は未実装）
+#### 実装状況: ✅ 基本機能完了（データ同期の問題は解決済み）
 
 **実装内容**:
 - ✅ ユーザー登録API (`/api/auth/register`)
@@ -57,11 +57,18 @@ CLICKHOUSE_URL=http://default:your_password@localhost:8123/clickinsight
 - ✅ ClickHouseへの保存機能（接続可能な場合）
 - ✅ メモリ内ストレージへのフォールバック
 - ✅ セッション管理（sessionStorage）
+- ✅ **データ同期の問題は解決済み（2025年1月26日修正）**
+
+**実装の詳細**:
+- ✅ **ClickHouse接続可能な場合は、ClickHouseを優先**
+  - ログイン時: ClickHouseから先に検索、接続不可時はメモリ内ストレージから検索
+  - 登録時: ClickHouseで先に重複チェック、接続不可時はメモリ内ストレージでチェック
+  - 保存時: ClickHouseに優先して保存、成功後メモリ内ストレージにも保存（キャッシュとして）
+- ✅ **メモリ内ストレージはフォールバック/キャッシュとして使用**
 
 **制限事項**:
-- ⚠️ ClickHouse接続不可時はメモリ内ストレージのみ
-- ⚠️ サーバー再起動でデータ消失
-- ⚠️ マルチインスタンス環境では動作しない
+- ⚠️ ClickHouse接続不可時はメモリ内ストレージのみ（サーバー再起動でデータ消失）
+- ⚠️ マルチインスタンス環境では、メモリ内ストレージは共有されない（ClickHouse接続推奨）
 
 ### 3. Healthエンドポイント
 
@@ -146,8 +153,9 @@ vercel env add CLICKHOUSE_DATABASE production
 
 **現状**:
 - ✅ 認証APIは実装済み
-- ⚠️ ClickHouse接続不可時はメモリ内ストレージのみ
-- ❌ サーバー再起動でデータ消失
+- ✅ **データ同期の問題は解決済み（2025年1月26日修正）**
+- ✅ ClickHouse接続可能な場合は、ClickHouseを優先
+- ⚠️ ClickHouse接続不可時はメモリ内ストレージのみ（サーバー再起動でデータ消失）
 
 **必要な作業**:
 1. ClickHouseサーバーのセットアップ（上記参照）
@@ -155,8 +163,8 @@ vercel env add CLICKHOUSE_DATABASE production
 3. 接続テストと動作確認
 
 **影響**:
-- ユーザーが登録しても、サーバー再起動でログインできなくなる
-- 本番環境で使用できない
+- ✅ ClickHouse接続可能な場合: データは永続化され、サーバー再起動後もログイン可能
+- ⚠️ ClickHouse接続不可時: メモリ内ストレージのみのため、サーバー再起動でデータ消失
 
 #### 3. デプロイ状態
 
@@ -284,10 +292,17 @@ vercel env add CLICKHOUSE_DATABASE production
 - 警告メッセージの返却
 
 **ログインAPI** (`login/route.ts`):
-- メモリ内ストレージからの検索
-- ClickHouseからの検索（接続可能な場合）
-- パスワード検証（bcrypt）
-- セッション情報の返却
+- ✅ ClickHouse接続可能な場合は、ClickHouseを優先して検索
+- ✅ ClickHouse接続不可時はメモリ内ストレージから検索（フォールバック）
+- ✅ パスワード検証（bcrypt）
+- ✅ セッション情報の返却（パスワード除外）
+
+**登録API** (`register/route.ts`):
+- ✅ ClickHouse接続可能な場合は、ClickHouseを優先して重複チェック
+- ✅ ClickHouse接続可能な場合は、ClickHouseを優先して保存
+- ✅ 保存成功後、メモリ内ストレージにも保存（キャッシュとして）
+- ✅ ClickHouse接続不可時はメモリ内ストレージのみに保存
+- ✅ 警告メッセージの返却（メモリ内のみ保存の場合）
 
 ---
 

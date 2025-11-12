@@ -16,8 +16,15 @@ import {
 } from 'lucide-react'
 import dynamic from 'next/dynamic'
 
-// Dynamically import h337 to avoid SSR issues
-const h337 = typeof window !== 'undefined' ? require('heatmap.js') : null
+// Dynamically import heatmap.js to avoid SSR issues
+let h337: any = null
+if (typeof window !== 'undefined') {
+  try {
+    h337 = require('heatmap.js')
+  } catch (error) {
+    console.error('Failed to load heatmap.js:', error)
+  }
+}
 
 interface Site {
   id: string
@@ -35,10 +42,11 @@ interface PageData {
 interface HeatmapPoint {
   click_x: number
   click_y: number
-  element_tag_name: string
-  element_id: string
-  element_class_name: string
-  count: number
+  element_tag_name?: string
+  element_id?: string
+  element_class_name?: string
+  count?: number
+  click_count?: number
 }
 
 export default function HeatmapPage() {
@@ -149,17 +157,23 @@ export default function HeatmapPage() {
     const points = heatmapData.map(point => ({
       x: point.click_x,
       y: point.click_y,
-      value: point.count,
+      value: point.count || point.click_count || 1,
     }))
 
-    // 最大値を計算
-    const maxValue = Math.max(...points.map(p => p.value))
+    // 最大値を計算（空配列の場合は1を設定）
+    const maxValue = points.length > 0 
+      ? Math.max(...points.map(p => p.value), 1)
+      : 1
 
     // データを設定
-    heatmapInstance.setData({
-      max: maxValue,
-      data: points,
-    })
+    try {
+      heatmapInstance.setData({
+        max: maxValue,
+        data: points,
+      })
+    } catch (error) {
+      console.error('Error setting heatmap data:', error)
+    }
 
     heatmapInstanceRef.current = heatmapInstance
 
@@ -314,7 +328,7 @@ export default function HeatmapPage() {
                   <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
                     <h4 className="font-semibold mb-2">クリックポイント統計</h4>
                     <div className="text-sm text-gray-600">
-                      総クリック数: {heatmapData.reduce((sum, point) => sum + point.count, 0).toLocaleString()}
+                      総クリック数: {heatmapData.reduce((sum, point) => sum + (point.count || point.click_count || 0), 0).toLocaleString()}
                     </div>
                     <div className="text-sm text-gray-600">
                       クリックポイント数: {heatmapData.length.toLocaleString()}
@@ -343,29 +357,32 @@ export default function HeatmapPage() {
                     <h4 className="font-semibold">トップクリック要素</h4>
                     <div className="space-y-2">
                       {heatmapData
-                        .sort((a, b) => b.count - a.count)
+                        .sort((a, b) => (b.count || b.click_count || 0) - (a.count || a.click_count || 0))
                         .slice(0, 10)
-                        .map((point, index) => (
-                          <div
-                            key={index}
-                            className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
-                          >
-                            <div className="flex-1">
-                              <div className="font-medium">
-                                {point.element_tag_name || 'unknown'}
-                                {point.element_id && ` #${point.element_id}`}
-                                {point.element_class_name && ` .${point.element_class_name}`}
+                        .map((point, index) => {
+                          const clickCount = point.count || point.click_count || 0
+                          return (
+                            <div
+                              key={index}
+                              className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
+                            >
+                              <div className="flex-1">
+                                <div className="font-medium">
+                                  {point.element_tag_name || 'unknown'}
+                                  {point.element_id && ` #${point.element_id}`}
+                                  {point.element_class_name && ` .${point.element_class_name}`}
+                                </div>
+                                <div className="text-sm text-gray-600">
+                                  位置: ({point.click_x}, {point.click_y})
+                                </div>
                               </div>
-                              <div className="text-sm text-gray-600">
-                                位置: ({point.click_x}, {point.click_y})
+                              <div className="text-right">
+                                <div className="font-bold text-blue-600">{clickCount.toLocaleString()}</div>
+                                <div className="text-sm text-gray-500">クリック</div>
                               </div>
                             </div>
-                            <div className="text-right">
-                              <div className="font-bold text-blue-600">{point.count.toLocaleString()}</div>
-                              <div className="text-sm text-gray-500">クリック</div>
-                            </div>
-                          </div>
-                        ))}
+                          )
+                        })}
                     </div>
                   </div>
                 </div>

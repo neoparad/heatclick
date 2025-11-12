@@ -42,16 +42,9 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // 既存ユーザーのチェック（メモリ内）
-    const existingUser = users.find(u => u.email === email)
-    if (existingUser) {
-      return NextResponse.json(
-        { error: 'User with this email already exists' },
-        { status: 409 }
-      )
-    }
-
-    // ClickHouseからもチェック（接続されている場合）
+    // 既存ユーザーのチェック
+    // ClickHouse接続可能な場合は、ClickHouseを優先してチェック
+    // メモリ内ストレージはフォールバックとして使用
     try {
       const clickhouse = await getClickHouseClientAsync()
       const result = await clickhouse.query({
@@ -67,9 +60,15 @@ export async function POST(request: NextRequest) {
         )
       }
     } catch (error: any) {
-      // ClickHouseが接続されていない場合はメモリ内のみでチェック
-      console.warn('ClickHouse not connected, using memory storage only:', error?.message || error)
-      // 警告: メモリ内ストレージはサーバー再起動でデータが失われます
+      // ClickHouse接続不可時はメモリ内ストレージをチェック
+      console.warn('ClickHouse not connected, checking memory storage only:', error?.message || error)
+      const existingUser = users.find(u => u.email === email)
+      if (existingUser) {
+        return NextResponse.json(
+          { error: 'User with this email already exists' },
+          { status: 409 }
+        )
+      }
     }
 
     // パスワードのハッシュ化
@@ -87,10 +86,9 @@ export async function POST(request: NextRequest) {
       created_at: createdAt,
     }
 
-    // メモリ内に保存
-    users.push(newUser)
-
     // ClickHouseに保存（接続されている場合）
+    // ClickHouse接続可能な場合は、ClickHouseを優先して保存
+    // メモリ内ストレージはフォールバックとして使用
     let savedToClickHouse = false
     try {
       const clickhouse = await getClickHouseClientAsync()
@@ -110,9 +108,13 @@ export async function POST(request: NextRequest) {
       })
       savedToClickHouse = true
       console.log('User saved to ClickHouse successfully')
+      // ClickHouseに保存成功した場合、メモリ内ストレージにも保存（キャッシュとして）
+      users.push(newUser)
     } catch (error: any) {
+      // ClickHouse接続不可時はメモリ内ストレージのみに保存
       console.warn('ClickHouse not connected, user saved in memory only:', error?.message || error)
       console.warn('WARNING: Data will be lost on server restart. Please configure ClickHouse connection.')
+      users.push(newUser)
     }
 
     return NextResponse.json({

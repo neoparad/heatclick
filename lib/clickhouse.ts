@@ -303,7 +303,10 @@ export async function getHeatmapData(
         click_x,
         click_y,
         count() as click_count,
-        max(timestamp) as last_click
+        max(timestamp) as last_click,
+        argMax(element_tag_name, timestamp) as element_tag_name,
+        argMax(element_id, timestamp) as element_id,
+        argMax(element_class_name, timestamp) as element_class_name
       FROM clickinsight.events
       WHERE site_id = {site_id:String}
         AND url = {page_url:String}
@@ -371,11 +374,14 @@ export async function getStatistics(
         countIf(event_type = 'click') as clicks,
         countIf(event_type = 'scroll') as scrolls,
         countIf(event_type = 'hover') as hovers,
+        countIf(event_type = 'page_view' OR event_type = 'pageview') as page_views,
         uniq(session_id) as unique_sessions,
         avg(scroll_percentage) as avg_scroll_depth,
         countIf(viewport_width >= 1024) as desktop_events,
         countIf(viewport_width >= 768 AND viewport_width < 1024) as tablet_events,
-        countIf(viewport_width < 768) as mobile_events
+        countIf(viewport_width < 768) as mobile_events,
+        min(timestamp) as first_event_time,
+        max(timestamp) as last_event_time
       FROM clickinsight.events
       WHERE site_id = {site_id:String}
     `

@@ -37,6 +37,7 @@ interface Statistics {
   clicks: number
   scrolls: number
   hovers: number
+  page_views?: number
   unique_sessions: number
   avg_scroll_depth: number
   desktop_events: number
@@ -46,6 +47,8 @@ interface Statistics {
   bounce_rate?: number
   total_sessions?: number
   bounce_sessions?: number
+  first_event_time?: string
+  last_event_time?: string
 }
 
 export default function DashboardPage() {
@@ -55,6 +58,7 @@ export default function DashboardPage() {
   const [statistics, setStatistics] = useState<Statistics | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [dateRange, setDateRange] = useState<'all' | '7days' | '30days' | '90days'>('30days')
 
   // サイトリストを取得
   useEffect(() => {
@@ -86,7 +90,38 @@ export default function DashboardPage() {
 
     const fetchStatistics = async () => {
       try {
-        const response = await fetch(`/api/statistics?site_id=${selectedSite.tracking_id}`)
+        // 期間の計算
+        let startDate: string | undefined = undefined
+        let endDate: string | undefined = undefined
+        
+        if (dateRange !== 'all') {
+          const end = new Date()
+          const start = new Date()
+          
+          switch (dateRange) {
+            case '7days':
+              start.setDate(start.getDate() - 7)
+              break
+            case '30days':
+              start.setDate(start.getDate() - 30)
+              break
+            case '90days':
+              start.setDate(start.getDate() - 90)
+              break
+          }
+          
+          startDate = start.toISOString().split('T')[0]
+          endDate = end.toISOString().split('T')[0]
+        }
+        
+        const params = new URLSearchParams({
+          site_id: selectedSite.tracking_id,
+        })
+        
+        if (startDate) params.append('start_date', startDate)
+        if (endDate) params.append('end_date', endDate)
+        
+        const response = await fetch(`/api/statistics?${params.toString()}`)
         if (!response.ok) {
           throw new Error('Failed to fetch statistics')
         }
@@ -99,18 +134,60 @@ export default function DashboardPage() {
     }
 
     fetchStatistics()
-  }, [selectedSite])
+  }, [selectedSite, dateRange])
+
+  // 期間表示の文字列を生成
+  const getDateRangeText = () => {
+    switch (dateRange) {
+      case 'all':
+        return '全期間'
+      case '7days':
+        return '過去7日間'
+      case '30days':
+        return '過去30日間'
+      case '90days':
+        return '過去90日間'
+      default:
+        return '過去30日間'
+    }
+  }
+
+  // データ期間の表示
+  const getDataPeriodText = () => {
+    if (!statistics || !statistics.first_event_time || !statistics.last_event_time) {
+      return null
+    }
+    
+    const firstDate = new Date(statistics.first_event_time)
+    const lastDate = new Date(statistics.last_event_time)
+    
+    const formatDate = (date: Date) => {
+      return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`
+    }
+    
+    if (firstDate.getTime() === lastDate.getTime()) {
+      return formatDate(firstDate)
+    }
+    
+    return `${formatDate(firstDate)} ～ ${formatDate(lastDate)}`
+  }
 
   // KPIデータを計算
   const kpiData = statistics ? {
-    totalClicks: statistics.clicks || 0,
-    clickRate: statistics.unique_sessions > 0 ? ((statistics.clicks / statistics.unique_sessions) * 100).toFixed(1) : '0',
-    avgTimeOnPage: statistics.avg_time_on_page || 0,
-    bounceRate: statistics.bounce_rate || 0,
-    uniqueSessions: statistics.unique_sessions || 0,
-    avgScrollDepth: (statistics.avg_scroll_depth || 0).toFixed(1),
+    totalClicks: Number(statistics.clicks) || 0,
+    pageViews: Number(statistics.page_views) || 0,
+    // クリック率: 総クリック数 / ユニークセッション数 * 100（セッションあたりの平均クリック数）
+    clickRate: statistics.unique_sessions > 0 
+      ? ((Number(statistics.clicks) / Number(statistics.unique_sessions)) * 100).toFixed(1) 
+      : '0',
+    avgTimeOnPage: Number(statistics.avg_time_on_page) || 0,
+    bounceRate: Number(statistics.bounce_rate) || 0,
+    uniqueSessions: Number(statistics.unique_sessions) || 0,
+    // 平均スクロール深度: 0-100%の範囲で表示
+    avgScrollDepth: Math.min(100, Math.max(0, Number(statistics.avg_scroll_depth) || 0)).toFixed(1),
   } : {
     totalClicks: 0,
+    pageViews: 0,
     clickRate: '0',
     avgTimeOnPage: 0,
     bounceRate: 0,
@@ -147,25 +224,50 @@ export default function DashboardPage() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        {/* サイト選択 */}
+        {/* サイト選択と期間選択 */}
         <div className="bg-white rounded-lg border border-gray-200 p-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            サイトを選択
-          </label>
-          <select
-            value={selectedSite?.id || ''}
-            onChange={(e) => {
-              const site = sites.find(s => s.id === e.target.value)
-              if (site) setSelectedSite(site)
-            }}
-            className="w-full md:w-auto px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-          >
-            {sites.map((site) => (
-              <option key={site.id} value={site.id}>
-                {site.name} ({site.domain})
-              </option>
-            ))}
-          </select>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                サイトを選択
+              </label>
+              <select
+                value={selectedSite?.id || ''}
+                onChange={(e) => {
+                  const site = sites.find(s => s.id === e.target.value)
+                  if (site) setSelectedSite(site)
+                }}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              >
+                {sites.map((site) => (
+                  <option key={site.id} value={site.id}>
+                    {site.name} ({site.domain})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                期間を選択
+              </label>
+              <select
+                value={dateRange}
+                onChange={(e) => setDateRange(e.target.value as 'all' | '7days' | '30days' | '90days')}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="7days">過去7日間</option>
+                <option value="30days">過去30日間</option>
+                <option value="90days">過去90日間</option>
+                <option value="all">全期間</option>
+              </select>
+            </div>
+          </div>
+          {getDataPeriodText() && (
+            <div className="mt-3 text-sm text-gray-600">
+              <Calendar className="w-4 h-4 inline mr-1" />
+              データ期間: {getDataPeriodText()} ({getDateRangeText()})
+            </div>
+          )}
         </div>
 
         {error && (
@@ -175,15 +277,37 @@ export default function DashboardPage() {
         )}
 
         {/* KPIカード */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 lg:gap-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 lg:gap-6">
+          <div className="bg-white rounded-lg border border-gray-200 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-medium text-gray-600">ページビュー数</span>
+              <Eye className="w-5 h-5 text-blue-600" />
+            </div>
+            <div className="text-3xl font-bold mb-2">{kpiData.pageViews.toLocaleString()}</div>
+            <div className="flex items-center gap-1 text-sm">
+              <span className="text-gray-500">アクセス数（ページビュー）</span>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-lg border border-gray-200 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-medium text-gray-600">セッション数</span>
+              <Users className="w-5 h-5 text-green-600" />
+            </div>
+            <div className="text-3xl font-bold mb-2">{kpiData.uniqueSessions.toLocaleString()}</div>
+            <div className="flex items-center gap-1 text-sm">
+              <span className="text-gray-500">ユニークセッション数</span>
+            </div>
+          </div>
+
           <div className="bg-white rounded-lg border border-gray-200 p-6">
             <div className="flex items-center justify-between mb-4">
               <span className="text-sm font-medium text-gray-600">総クリック数</span>
-              <MousePointerClick className="w-5 h-5 text-blue-600" />
+              <MousePointerClick className="w-5 h-5 text-purple-600" />
             </div>
             <div className="text-3xl font-bold mb-2">{kpiData.totalClicks.toLocaleString()}</div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">ユニークセッション: {kpiData.uniqueSessions}</span>
+              <span className="text-gray-500">全クリックイベントの合計</span>
             </div>
           </div>
 
@@ -194,7 +318,7 @@ export default function DashboardPage() {
             </div>
             <div className="text-3xl font-bold mb-2">{kpiData.clickRate}%</div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">セッションあたり</span>
+              <span className="text-gray-500">セッションあたりの平均クリック数</span>
             </div>
           </div>
 
@@ -203,9 +327,15 @@ export default function DashboardPage() {
               <span className="text-sm font-medium text-gray-600">平均滞在時間</span>
               <Clock className="w-5 h-5 text-green-600" />
             </div>
-            <div className="text-3xl font-bold mb-2">{kpiData.avgTimeOnPage}分</div>
+            <div className="text-3xl font-bold mb-2">
+              {kpiData.avgTimeOnPage > 0 ? `${kpiData.avgTimeOnPage}分` : 'データなし'}
+            </div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">セッションあたり</span>
+              <span className="text-gray-500">
+                {kpiData.avgTimeOnPage > 0 
+                  ? 'セッションあたりの平均滞在時間' 
+                  : 'セッションデータがありません'}
+              </span>
             </div>
           </div>
 
@@ -214,9 +344,15 @@ export default function DashboardPage() {
               <span className="text-sm font-medium text-gray-600">直帰率</span>
               <TrendingDown className="w-5 h-5 text-red-600" />
             </div>
-            <div className="text-3xl font-bold mb-2">{kpiData.bounceRate}%</div>
+            <div className="text-3xl font-bold mb-2">
+              {kpiData.bounceRate > 0 ? `${kpiData.bounceRate}%` : 'データなし'}
+            </div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">1ページビューのセッション</span>
+              <span className="text-gray-500">
+                {kpiData.bounceRate > 0 
+                  ? '1ページビューのセッション割合' 
+                  : 'セッションデータがありません'}
+              </span>
             </div>
           </div>
 
@@ -227,7 +363,7 @@ export default function DashboardPage() {
             </div>
             <div className="text-3xl font-bold mb-2">{kpiData.avgScrollDepth}%</div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">ページビューあたり</span>
+              <span className="text-gray-500">ページビューあたりの平均スクロール位置（0-100%）</span>
             </div>
           </div>
 
