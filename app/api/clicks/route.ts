@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getClickHouseClient } from '@/lib/clickhouse'
+import { getClickHouseClientAsync } from '@/lib/clickhouse'
 
 export async function GET(request: NextRequest) {
   try {
@@ -18,9 +18,12 @@ export async function GET(request: NextRequest) {
 
     let client
     try {
-      client = getClickHouseClient()
-    } catch (error) {
-      console.error('ClickHouse connection error:', error)
+      client = await getClickHouseClientAsync()
+    } catch (error: any) {
+      console.error('ClickHouse connection error:', {
+        error: error?.message || String(error),
+        code: error?.code,
+      })
       // データベース接続エラー時は空データを返す
       return NextResponse.json({
         success: true,
@@ -35,7 +38,8 @@ export async function GET(request: NextRequest) {
             avgClicksPerSession: 0,
             clickChange: '+0%'
           }
-        }
+        },
+        warning: 'ClickHouse connection failed. Returning empty data.',
       })
     }
 

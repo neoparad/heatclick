@@ -66,9 +66,10 @@ export async function POST(request: NextRequest) {
           { status: 409 }
         )
       }
-    } catch (error) {
+    } catch (error: any) {
       // ClickHouseが接続されていない場合はメモリ内のみでチェック
-      console.log('ClickHouse not connected, using memory storage')
+      console.warn('ClickHouse not connected, using memory storage only:', error?.message || error)
+      // 警告: メモリ内ストレージはサーバー再起動でデータが失われます
     }
 
     // パスワードのハッシュ化
@@ -90,6 +91,7 @@ export async function POST(request: NextRequest) {
     users.push(newUser)
 
     // ClickHouseに保存（接続されている場合）
+    let savedToClickHouse = false
     try {
       const clickhouse = await getClickHouseClientAsync()
       await clickhouse.insert({
@@ -106,8 +108,11 @@ export async function POST(request: NextRequest) {
         }],
         format: 'JSONEachRow',
       })
-    } catch (error) {
-      console.log('ClickHouse not connected, user saved in memory only')
+      savedToClickHouse = true
+      console.log('User saved to ClickHouse successfully')
+    } catch (error: any) {
+      console.warn('ClickHouse not connected, user saved in memory only:', error?.message || error)
+      console.warn('WARNING: Data will be lost on server restart. Please configure ClickHouse connection.')
     }
 
     return NextResponse.json({
@@ -118,6 +123,7 @@ export async function POST(request: NextRequest) {
         name,
         created_at: createdAt,
       },
+      warning: savedToClickHouse ? undefined : 'User saved in memory only. Data will be lost on server restart. Please configure ClickHouse connection.',
     }, { status: 201 })
   } catch (error) {
     console.error('Error registering user:', error)
@@ -127,6 +133,7 @@ export async function POST(request: NextRequest) {
     )
   }
 }
+
 
 
 

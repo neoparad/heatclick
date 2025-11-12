@@ -5,38 +5,168 @@ import { ClickHouseClient, createClient } from '@clickhouse/client'
 function getClickHouseConfig() {
   const host = process.env.CLICKHOUSE_HOST || 'localhost'
   const port = process.env.CLICKHOUSE_PORT || '8123'
-  const username = process.env.CLICKHOUSE_USER || 'default'
+  // CLICKHOUSE_USER と CLICKHOUSE_USERNAME の両方をサポート
+  const username = process.env.CLICKHOUSE_USER || process.env.CLICKHOUSE_USERNAME || 'default'
   const password = process.env.CLICKHOUSE_PASSWORD || ''
   const database = process.env.CLICKHOUSE_DATABASE || 'clickinsight'
+  
+  // CLICKHOUSE_URLが設定されている場合は優先
+  const url = process.env.CLICKHOUSE_URL || `http://${host}:${port}`
 
   return {
-    url: `http://${host}:${port}`,
+    url,
     username,
     password,
     database,
+    // 追加の設定オプション
+    request_timeout: 30000,
+    max_open_connections: 10,
   }
 }
 
 let clickhouse: ClickHouseClient | null = null
+let connectionError: Error | null = null
+let lastConnectionTest: Date | null = null
+const CONNECTION_TEST_INTERVAL = 60000 // 1分ごとに接続テスト
 
 // ClickHouseクライアントの初期化（遅延初期化）
 function getClickHouseClient(): ClickHouseClient {
   if (!clickhouse) {
     try {
       const config = getClickHouseConfig()
-      clickhouse = createClient(config)
+      
+      // URL形式から設定を構築
+      let clientConfig: any = {
+        url: config.url,
+        username: config.username,
+        password: config.password,
+        database: config.database,
+        request_timeout: config.request_timeout,
+        max_open_connections: config.max_open_connections,
+      }
+      
+      clickhouse = createClient(clientConfig)
+      connectionError = null
 
       console.log('ClickHouse client initialized:', {
         url: config.url,
         database: config.database,
         username: config.username,
+        passwordSet: !!config.password,
       })
     } catch (error) {
+      connectionError = error as Error
       console.error('Failed to initialize ClickHouse client:', error)
       throw error
     }
   }
   return clickhouse
+}
+
+// 接続をリセット（再接続用）
+export function resetClickHouseConnection(): void {
+  if (clickhouse) {
+    try {
+      clickhouse.close()
+    } catch (error) {
+      console.error('Error closing ClickHouse connection:', error)
+    }
+  }
+  clickhouse = null
+  connectionError = null
+  lastConnectionTest = null
+}
+
+// ClickHouse接続のテスト
+export async function testClickHouseConnection(): Promise<{
+  connected: boolean
+  error?: string
+  errorDetails?: any
+  config?: {
+    url: string
+    database: string
+    username: string
+    host?: string
+    port?: string
+  }
+}> {
+  try {
+    const config = getClickHouseConfig()
+    
+    // 新しいクライアントインスタンスを作成してテスト
+    const testClient = createClient({
+      url: config.url,
+      username: config.username,
+      password: config.password,
+      database: config.database,
+      request_timeout: 10000, // 10秒のタイムアウト
+    })
+    
+    // 簡単なクエリで接続をテスト
+    const result = await testClient.query({
+      query: 'SELECT 1 as test',
+      format: 'JSONEachRow',
+    })
+    
+    const data = await result.json()
+    await testClient.close()
+    
+    // 接続成功時は既存のクライアントもリセットして再接続
+    if (clickhouse) {
+      resetClickHouseConnection()
+    }
+    
+    lastConnectionTest = new Date()
+    connectionError = null
+    
+    return {
+      connected: true,
+      config: {
+        url: config.url,
+        database: config.database,
+        username: config.username,
+        host: process.env.CLICKHOUSE_HOST || 'localhost',
+        port: process.env.CLICKHOUSE_PORT || '8123',
+      },
+    }
+  } catch (error: any) {
+    const config = getClickHouseConfig()
+    const errorMessage = error?.message || String(error)
+    const errorCode = error?.code || error?.errno || 'UNKNOWN'
+    const errorStack = error?.stack
+    
+    console.error('ClickHouse connection test failed:', {
+      message: errorMessage,
+      code: errorCode,
+      url: config.url,
+      username: config.username,
+    })
+    
+    connectionError = error as Error
+    lastConnectionTest = new Date()
+    
+    return {
+      connected: false,
+      error: errorMessage,
+      errorDetails: {
+        code: errorCode,
+        message: errorMessage,
+        stack: errorStack,
+      },
+      config: {
+        url: config.url,
+        database: config.database,
+        username: config.username,
+        host: process.env.CLICKHOUSE_HOST || 'localhost',
+        port: process.env.CLICKHOUSE_PORT || '8123',
+      },
+    }
+  }
+}
+
+// 接続エラー情報を取得
+export function getConnectionError(): Error | null {
+  return connectionError
 }
 
 // イベントデータの型定義
@@ -85,14 +215,22 @@ export interface ClickEvent {
 // イベントデータの挿入
 export async function insertClickEvent(event: ClickEvent): Promise<void> {
   try {
-    const client = getClickHouseClient()
+    const client = await getClickHouseClientAsync()
     await client.insert({
       table: 'clickinsight.events',
       values: [event],
       format: 'JSONEachRow',
     })
-  } catch (error) {
-    console.error('Error inserting click event:', error)
+  } catch (error: any) {
+    console.error('Error inserting click event:', {
+      error: error?.message || String(error),
+      code: error?.code,
+      eventId: event.id,
+    })
+    // 接続エラーの場合は接続をリセット
+    if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT' || error?.message?.includes('connection')) {
+      resetClickHouseConnection()
+    }
     // 開発環境ではエラーをスロー、本番環境ではログのみ
     if (process.env.NODE_ENV === 'development') {
       throw error
@@ -129,7 +267,7 @@ export async function getClickEvents(
     query += ` ORDER BY timestamp DESC LIMIT {limit:UInt32}`
     params.limit = limit
     
-    const client = getClickHouseClient()
+    const client = await getClickHouseClientAsync()
     const result = await client.query({
       query,
       query_params: params,
@@ -137,8 +275,16 @@ export async function getClickEvents(
     })
     
     return await result.json()
-  } catch (error) {
-    console.error('Error fetching click events:', error)
+  } catch (error: any) {
+    console.error('Error fetching click events:', {
+      error: error?.message || String(error),
+      code: error?.code,
+      siteId,
+    })
+    // 接続エラーの場合は接続をリセット
+    if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT' || error?.message?.includes('connection')) {
+      resetClickHouseConnection()
+    }
     throw error
   }
 }
@@ -189,7 +335,7 @@ export async function getHeatmapData(
       ORDER BY click_count DESC
     `
     
-    const client = getClickHouseClient()
+    const client = await getClickHouseClientAsync()
     const result = await client.query({
       query,
       query_params: params,
@@ -197,8 +343,17 @@ export async function getHeatmapData(
     })
     
     return await result.json()
-  } catch (error) {
-    console.error('Error fetching heatmap data:', error)
+  } catch (error: any) {
+    console.error('Error fetching heatmap data:', {
+      error: error?.message || String(error),
+      code: error?.code,
+      siteId,
+      pageUrl,
+    })
+    // 接続エラーの場合は接続をリセット
+    if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT' || error?.message?.includes('connection')) {
+      resetClickHouseConnection()
+    }
     throw error
   }
 }
@@ -237,7 +392,7 @@ export async function getStatistics(
       params.end_date = endDate
     }
 
-    const client = getClickHouseClient()
+    const client = await getClickHouseClientAsync()
     const result = await client.query({
       query,
       query_params: params,
@@ -279,8 +434,12 @@ export async function getStatistics(
       
       const sessionData = await sessionResult.json()
       sessionStats = sessionData[0] || {}
-    } catch (error) {
-      console.error('Error fetching session statistics:', error)
+    } catch (error: any) {
+      console.error('Error fetching session statistics:', {
+        error: error?.message || String(error),
+        code: error?.code,
+        siteId,
+      })
       // エラー時はデフォルト値を設定
       sessionStats = {
         avg_time_on_page: 0,
@@ -314,7 +473,7 @@ export async function getStatistics(
 // データベースの初期化
 export async function initializeDatabase(): Promise<void> {
   try {
-    const client = getClickHouseClient()
+    const client = await getClickHouseClientAsync()
     
     // データベースの作成（存在しない場合）
     await client.exec({
@@ -509,7 +668,48 @@ export async function initializeDatabase(): Promise<void> {
 // Get ClickHouse client instance (for API routes)
 // This is an async wrapper for compatibility with existing code
 export async function getClickHouseClientAsync(): Promise<ClickHouseClient> {
-  return getClickHouseClient()
+  try {
+    const client = getClickHouseClient()
+    
+    // 定期的に接続をテスト（最後のテストから1分以上経過している場合）
+    const now = new Date()
+    if (!lastConnectionTest || (now.getTime() - lastConnectionTest.getTime()) > CONNECTION_TEST_INTERVAL) {
+      try {
+        await client.query({
+          query: 'SELECT 1',
+          format: 'JSONEachRow',
+        })
+        lastConnectionTest = now
+        connectionError = null
+      } catch (testError: any) {
+        console.warn('ClickHouse connection test failed, resetting client:', testError?.message)
+        resetClickHouseConnection()
+        // 再接続を試みる
+        return getClickHouseClient()
+      }
+    }
+    
+    return client
+  } catch (error) {
+    console.error('ClickHouse client not available:', error)
+    connectionError = error as Error
+    throw error
+  }
+}
+
+// ClickHouse接続状態を確認（エラーをスローせずに）
+export async function isClickHouseConnected(): Promise<boolean> {
+  try {
+    const client = await getClickHouseClientAsync()
+    await client.query({
+      query: 'SELECT 1',
+      format: 'JSONEachRow',
+    })
+    return true
+  } catch (error: any) {
+    console.warn('ClickHouse connection check failed:', error?.message)
+    return false
+  }
 }
 
 // Export the synchronous client getter (for internal use)
