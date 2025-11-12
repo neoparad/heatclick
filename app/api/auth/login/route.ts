@@ -26,26 +26,23 @@ export async function POST(request: NextRequest) {
 
     let user: any = null
 
-    // メモリ内から検索
-    user = users.find(u => u.email === email)
-
-    // ClickHouseから検索（接続されている場合）
-    if (!user) {
-      try {
-        const clickhouse = await getClickHouseClientAsync()
-        const result = await clickhouse.query({
-          query: `SELECT id, email, password, name, created_at, plan, status FROM clickinsight.users WHERE email = {email:String}`,
-          query_params: { email },
-          format: 'JSONEachRow',
-        })
-        const usersFromDb = await result.json()
-        if (usersFromDb.length > 0) {
-          user = usersFromDb[0]
-        }
-      } catch (error: any) {
-        console.warn('ClickHouse not connected, checking memory storage only:', error?.message || error)
-        // メモリ内ストレージのみで検索を続行
+    // ClickHouse接続可能な場合は、ClickHouseを優先して検索
+    // メモリ内ストレージはフォールバックとして使用
+    try {
+      const clickhouse = await getClickHouseClientAsync()
+      const result = await clickhouse.query({
+        query: `SELECT id, email, password, name, created_at, plan, status FROM clickinsight.users WHERE email = {email:String}`,
+        query_params: { email },
+        format: 'JSONEachRow',
+      })
+      const usersFromDb = await result.json()
+      if (usersFromDb.length > 0) {
+        user = usersFromDb[0]
       }
+    } catch (error: any) {
+      // ClickHouse接続不可時はメモリ内ストレージから検索
+      console.warn('ClickHouse not connected, checking memory storage only:', error?.message || error)
+      user = users.find(u => u.email === email)
     }
 
     if (!user) {
