@@ -38,8 +38,8 @@ export async function POST(request: NextRequest) {
         format: 'JSONEachRow',
       })
       
-      const siteData = await siteResult.json()
-      if (siteData && siteData.length > 0 && siteData[0].gsc_client_email) {
+      const siteData = await siteResult.json() as any[]
+      if (siteData && siteData.length > 0 && siteData[0]?.gsc_client_email) {
         // サイトごとの設定が存在する場合はそれを使用
         gscConfig = {
           clientEmail: siteData[0].gsc_client_email || gscConfig.clientEmail,
