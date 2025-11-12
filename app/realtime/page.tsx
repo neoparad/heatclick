@@ -30,6 +30,13 @@ interface TrackingEvent {
   position?: any
   scrollPercentage?: number
   timeOnPage?: number
+  // Snake case versions (from API)
+  site_id?: string
+  session_id?: string
+  user_id?: string
+  event_type?: string
+  scroll_percentage?: number
+  time_on_page?: number
 }
 
 interface Site {
