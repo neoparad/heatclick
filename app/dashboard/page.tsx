@@ -7,6 +7,7 @@ import {
   MousePointerClick,
   Zap,
   TrendingUp,
+  TrendingDown,
   Clock,
   Users,
   Activity,
@@ -100,8 +101,8 @@ export default function DashboardPage() {
   const kpiData = statistics ? {
     totalClicks: statistics.clicks || 0,
     clickRate: statistics.unique_sessions > 0 ? ((statistics.clicks / statistics.unique_sessions) * 100).toFixed(1) : '0',
-    avgTimeOnPage: 0, // TODO: 実装が必要
-    bounceRate: 0, // TODO: 実装が必要
+    avgTimeOnPage: statistics.avg_time_on_page || 0,
+    bounceRate: statistics.bounce_rate || 0,
     uniqueSessions: statistics.unique_sessions || 0,
     avgScrollDepth: (statistics.avg_scroll_depth || 0).toFixed(1),
   } : {
@@ -170,7 +171,7 @@ export default function DashboardPage() {
         )}
 
         {/* KPIカード */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 lg:gap-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 lg:gap-6">
           <div className="bg-white rounded-lg border border-gray-200 p-6">
             <div className="flex items-center justify-between mb-4">
               <span className="text-sm font-medium text-gray-600">総クリック数</span>
@@ -190,6 +191,28 @@ export default function DashboardPage() {
             <div className="text-3xl font-bold mb-2">{kpiData.clickRate}%</div>
             <div className="flex items-center gap-1 text-sm">
               <span className="text-gray-500">セッションあたり</span>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-lg border border-gray-200 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-medium text-gray-600">平均滞在時間</span>
+              <Clock className="w-5 h-5 text-green-600" />
+            </div>
+            <div className="text-3xl font-bold mb-2">{kpiData.avgTimeOnPage}分</div>
+            <div className="flex items-center gap-1 text-sm">
+              <span className="text-gray-500">セッションあたり</span>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-lg border border-gray-200 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-medium text-gray-600">直帰率</span>
+              <TrendingDown className="w-5 h-5 text-red-600" />
+            </div>
+            <div className="text-3xl font-bold mb-2">{kpiData.bounceRate}%</div>
+            <div className="flex items-center gap-1 text-sm">
+              <span className="text-gray-500">1ページビューのセッション</span>
             </div>
           </div>
 

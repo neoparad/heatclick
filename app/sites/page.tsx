@@ -148,7 +148,7 @@ export default function SitesPage() {
 
   const generateTrackingScript = (site: Site) => {
     const appUrl = typeof window !== 'undefined' ? window.location.origin : 'https://heatclick-ai.vercel.app'
-    return `<!-- ClickInsight Pro Tracking -->
+    return `<!-- UGOKI MAP Tracking -->
 <script>
     window.CLICKINSIGHT_SITE_ID = '${site.tracking_id}';
     window.CLICKINSIGHT_DEBUG = false; // 本番環境ではfalse
@@ -157,7 +157,7 @@ export default function SitesPage() {
 </script>
 <script src="${appUrl}/tracking.js" async></script>
 <script src="${appUrl}/recording.js" async></script>
-<!-- End ClickInsight Pro -->`
+<!-- End UGOKI MAP -->`
   }
 
   const copyToClipboard = async (text: string) => {

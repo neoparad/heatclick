@@ -254,7 +254,66 @@ export async function getStatistics(
     })
     
     const data = await result.json()
-    return data[0] || {}
+    const eventStats = data[0] || {}
+
+    // セッション統計を取得（平均滞在時間と直帰率）
+    let sessionQuery = `
+      SELECT 
+        avg(duration) as avg_time_on_page,
+        countIf(page_views = 1) as bounce_sessions,
+        count() as total_sessions
+      FROM clickinsight.sessions
+      WHERE site_id = {site_id:String}
+    `
+    
+    const sessionParams: Record<string, any> = { site_id: siteId }
+
+    if (startDate) {
+      sessionQuery += ` AND start_time >= {start_date:String}`
+      sessionParams.start_date = startDate
+    }
+
+    if (endDate) {
+      sessionQuery += ` AND start_time <= {end_date:String}`
+      sessionParams.end_date = endDate
+    }
+
+    let sessionStats: any = {}
+    try {
+      const sessionResult = await client.query({
+        query: sessionQuery,
+        query_params: sessionParams,
+        format: 'JSONEachRow',
+      })
+      
+      const sessionData = await sessionResult.json()
+      sessionStats = sessionData[0] || {}
+    } catch (error) {
+      console.error('Error fetching session statistics:', error)
+      // エラー時はデフォルト値を設定
+      sessionStats = {
+        avg_time_on_page: 0,
+        bounce_sessions: 0,
+        total_sessions: 0
+      }
+    }
+
+    // 平均滞在時間（秒）を分に変換
+    const avgTimeOnPageSeconds = Number(sessionStats.avg_time_on_page) || 0
+    const avgTimeOnPageMinutes = avgTimeOnPageSeconds > 0 ? (avgTimeOnPageSeconds / 60).toFixed(1) : '0'
+
+    // 直帰率の計算（1ページビューのセッション数 / 全セッション数 * 100）
+    const totalSessions = Number(sessionStats.total_sessions) || 0
+    const bounceSessions = Number(sessionStats.bounce_sessions) || 0
+    const bounceRate = totalSessions > 0 ? ((bounceSessions / totalSessions) * 100).toFixed(1) : '0'
+
+    return {
+      ...eventStats,
+      avg_time_on_page: parseFloat(avgTimeOnPageMinutes),
+      bounce_rate: parseFloat(bounceRate),
+      total_sessions: totalSessions,
+      bounce_sessions: bounceSessions
+    }
   } catch (error) {
     console.error('Error fetching statistics:', error)
     throw error

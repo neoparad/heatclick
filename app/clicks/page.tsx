@@ -189,7 +189,7 @@ export default function ClicksPage() {
       const link = document.createElement('a')
       const siteName = sites.find(s => s.tracking_id === selectedSite)?.name || selectedSite
       link.href = url
-      link.download = `clickinsight-clicks-${siteName}-${new Date().toISOString().split('T')[0]}.csv`
+      link.download = `ugokimap-clicks-${siteName}-${new Date().toISOString().split('T')[0]}.csv`
       document.body.appendChild(link)
       link.click()
       document.body.removeChild(link)

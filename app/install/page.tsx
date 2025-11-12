@@ -38,7 +38,7 @@ export default function InstallPage() {
   const trackingUrl = 'https://heatclick-ai.vercel.app/tracking.js'
 
   const wordPressCode = `<?php
-// ClickInsight Pro WordPress Plugin
+// UGOKI MAP WordPress Plugin
 function clickinsight_pro_tracking() {
     ?>
     <script>
@@ -51,7 +51,7 @@ function clickinsight_pro_tracking() {
 
 add_action('wp_head', 'clickinsight_pro_tracking');`
 
-  const simpleTrackingCode = `<!-- ClickInsight Pro Tracking -->
+  const simpleTrackingCode = `<!-- UGOKI MAP Tracking -->
 <script>
     window.CLICKINSIGHT_SITE_ID = '${siteId}';
     window.CLICKINSIGHT_DEBUG = false; // 本番環境ではfalse
@@ -69,7 +69,7 @@ add_action('wp_head', 'clickinsight_pro_tracking');`
 </body>
 </html>`
 
-  const reactCode = `// ClickInsight Pro React Integration
+  const reactCode = `// UGOKI MAP React Integration
 import { ClickInsightProvider } from '@clickinsight/tracking';
 
 function App() {
@@ -80,7 +80,7 @@ function App() {
   );
 }`
 
-  const nextjsCode = `// ClickInsight Pro Next.js Integration
+  const nextjsCode = `// UGOKI MAP Next.js Integration
 import { ClickInsightProvider } from '@clickinsight/tracking';
 
 export default function App({ Component, pageProps }) {
@@ -99,7 +99,7 @@ export default function App({ Component, pageProps }) {
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
               <div className="h-8 w-8 rounded-lg bg-gradient-to-r from-blue-600 to-purple-600"></div>
-              <span className="text-xl font-bold text-gray-900">ClickInsight Pro</span>
+              <span className="text-xl font-bold text-gray-900">UGOKI MAP</span>
             </div>
             <div className="flex items-center space-x-4">
               <Badge variant="secondary">Free Plan</Badge>
@@ -113,7 +113,7 @@ export default function App({ Component, pageProps }) {
         {/* ページタイトル */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gray-900 mb-2">インストール</h1>
-          <p className="text-gray-600">ClickInsight Proのトラッキングスクリプトをインストール</p>
+          <p className="text-gray-600">UGOKI MAPのトラッキングスクリプトをインストール</p>
         </div>
 
         {/* サイト情報 */}
@@ -154,7 +154,7 @@ export default function App({ Component, pageProps }) {
                   <span>WordPress インストール</span>
                 </CardTitle>
                 <CardDescription>
-                  WordPressサイトにClickInsight Proをインストール
+                  WordPressサイトにUGOKI MAPをインストール
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -299,7 +299,7 @@ export default function App({ Component, pageProps }) {
                   <span>React インストール</span>
                 </CardTitle>
                 <CardDescription>
-                  ReactアプリケーションにClickInsight Proをインストール
+                  ReactアプリケーションにUGOKI MAPをインストール
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -349,7 +349,7 @@ export default function App({ Component, pageProps }) {
                   <span>Next.js インストール</span>
                 </CardTitle>
                 <CardDescription>
-                  Next.jsアプリケーションにClickInsight Proをインストール
+                  Next.jsアプリケーションにUGOKI MAPをインストール
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -405,7 +405,7 @@ export default function App({ Component, pageProps }) {
                   ブラウザの開発者ツール（F12）を開き、Consoleタブで以下のメッセージが表示されることを確認してください。
                 </p>
                 <pre className="bg-gray-900 text-gray-100 p-3 rounded text-sm">
-                  <code>ClickInsight Pro: Initializing tracking script</code>
+                  <code>UGOKI MAP: Initializing tracking script</code>
                 </pre>
               </div>
 

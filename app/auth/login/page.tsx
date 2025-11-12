@@ -69,7 +69,7 @@ export default function LoginPage() {
             </div>
             <CardTitle className="text-2xl">ログイン</CardTitle>
             <CardDescription>
-              ClickInsight Proアカウントにログイン
+              UGOKI MAPアカウントにログイン
             </CardDescription>
           </CardHeader>
           <CardContent>

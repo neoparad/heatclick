@@ -147,31 +147,101 @@ export async function POST(request: NextRequest) {
 }
 
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url)
-  const siteId = searchParams.get('siteId')
-  const eventType = searchParams.get('eventType')
-  const limit = parseInt(searchParams.get('limit') || '100')
+  try {
+    const { searchParams } = new URL(request.url)
+    const siteId = searchParams.get('siteId')
+    const eventType = searchParams.get('eventType')
+    const limit = parseInt(searchParams.get('limit') || '100')
 
-  let filteredData = trackingData
+    // ClickHouseからデータを取得を試みる
+    let events: any[] = []
+    
+    try {
+      const clickhouse = await getClickHouseClientAsync()
+      
+      let query = `
+        SELECT 
+          id,
+          site_id as siteId,
+          session_id as sessionId,
+          user_id as userId,
+          event_type as eventType,
+          timestamp,
+          url as page_url,
+          referrer,
+          user_agent as userAgent,
+          viewport_width as viewportWidth,
+          viewport_height as viewportHeight,
+          element_tag_name as elementTag,
+          element_id as elementId,
+          element_class_name as elementClass,
+          element_text as elementText,
+          click_x as clickX,
+          click_y as clickY,
+          scroll_y as scrollY,
+          scroll_percentage as scrollPercentage,
+          device_type as deviceType
+        FROM clickinsight.events
+        WHERE 1=1
+      `
+      
+      const params: Record<string, any> = {}
+      
+      if (siteId) {
+        query += ` AND site_id = {site_id:String}`
+        params.site_id = siteId
+      }
+      
+      if (eventType) {
+        query += ` AND event_type = {event_type:String}`
+        params.event_type = eventType
+      }
+      
+      query += ` ORDER BY timestamp DESC LIMIT {limit:UInt32}`
+      params.limit = limit
+      
+      const result = await clickhouse.query({
+        query,
+        query_params: params,
+        format: 'JSONEachRow',
+      })
+      
+      events = await result.json()
+    } catch (error) {
+      console.error('Error fetching events from ClickHouse:', error)
+      // フォールバック: メモリ内データを使用
+      events = trackingData
+      
+      if (siteId) {
+        events = events.filter(item => item.siteId === siteId || item.site_id === siteId)
+      }
+      
+      if (eventType) {
+        events = events.filter(item => item.eventType === eventType || item.event_type === eventType)
+      }
+      
+      events = events
+        .sort((a, b) => {
+          const timeA = new Date(a.timestamp || a.received_at || 0).getTime()
+          const timeB = new Date(b.timestamp || b.received_at || 0).getTime()
+          return timeB - timeA
+        })
+        .slice(0, limit)
+    }
 
-  if (siteId) {
-    filteredData = filteredData.filter(item => item.siteId === siteId)
+    return NextResponse.json({
+      data: events,
+      total: events.length,
+      filtered: events.length,
+      source: events.length > 0 && events[0].id ? 'clickhouse' : 'memory'
+    }, { headers: buildCorsHeaders(request) })
+  } catch (error) {
+    console.error('Error in GET /api/track:', error)
+    return NextResponse.json(
+      { error: 'Internal server error', data: [] },
+      { status: 500, headers: buildCorsHeaders(request) }
+    )
   }
-
-  if (eventType) {
-    filteredData = filteredData.filter(item => item.eventType === eventType)
-  }
-
-  // 最新のデータを返す
-  filteredData = filteredData
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    .slice(0, limit)
-
-  return NextResponse.json({
-    data: filteredData,
-    total: trackingData.length,
-    filtered: filteredData.length
-  }, { headers: buildCorsHeaders(request) })
 }
 
 

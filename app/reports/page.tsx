@@ -1,11 +1,13 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import DashboardLayout from '../../components/layout/DashboardLayout'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card'
 import { Button } from '../../components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select'
 import { Badge } from '../../components/ui/badge'
+import Loading from '../../components/ui/loading'
+import { getCurrentUser } from '@/lib/auth'
 import { 
   FileText, 
   Download, 
@@ -24,10 +26,51 @@ import {
   Filter
 } from 'lucide-react'
 
+interface Site {
+  id: string
+  name: string
+  url: string
+  tracking_id: string
+}
+
 export default function ReportsPage() {
-  const [selectedSite, setSelectedSite] = useState('example.com')
+  const [sites, setSites] = useState<Site[]>([])
+  const [selectedSite, setSelectedSite] = useState<string>('')
   const [selectedPeriod, setSelectedPeriod] = useState('7days')
   const [selectedReport, setSelectedReport] = useState('comprehensive')
+  const [loading, setLoading] = useState(true)
+  const [user, setUser] = useState<any>(null)
+  const [generatedReports, setGeneratedReports] = useState<any[]>([])
+
+  // サイト一覧の取得
+  useEffect(() => {
+    const fetchSites = async () => {
+      try {
+        const response = await fetch('/api/sites')
+        if (response.ok) {
+          const data = await response.json()
+          const sitesList = data.sites || []
+          setSites(sitesList)
+          if (sitesList.length > 0 && !selectedSite) {
+            setSelectedSite(sitesList[0].tracking_id)
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching sites:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchSites()
+  }, [])
+
+  // ユーザー情報の取得
+  useEffect(() => {
+    const currentUser = getCurrentUser()
+    if (currentUser) {
+      setUser(currentUser)
+    }
+  }, [])
 
   // レポートテンプレート
   const reportTemplates = [
@@ -65,46 +108,20 @@ export default function ReportsPage() {
     }
   ]
 
-  // 生成済みレポート
-  const generatedReports = [
-    {
-      id: 'report_001',
-      name: '総合分析レポート - 2025年1月',
-      site: 'example.com',
-      generatedAt: '2025-01-25 10:30',
-      status: 'completed',
-      size: '2.3MB',
-      pages: 24,
-      insights: 12,
-      downloadCount: 3
-    },
-    {
-      id: 'report_002',
-      name: 'クリック分析レポート - 2025年1月',
-      site: 'example.com',
-      generatedAt: '2025-01-24 15:45',
-      status: 'completed',
-      size: '1.8MB',
-      pages: 18,
-      insights: 8,
-      downloadCount: 1
-    },
-    {
-      id: 'report_003',
-      name: 'AI分析レポート - 2025年1月',
-      site: 'example.com',
-      generatedAt: '2025-01-23 09:15',
-      status: 'completed',
-      size: '3.1MB',
-      pages: 32,
-      insights: 15,
-      downloadCount: 5
-    }
-  ]
-
   const handleGenerateReport = async () => {
-    // レポート生成のシミュレーション
-    console.log('Generating report...')
+    if (!selectedSite) {
+      alert('サイトを選択してください')
+      return
+    }
+
+    try {
+      // TODO: 実際のレポート生成APIを実装
+      alert('レポート生成機能は現在開発中です')
+      console.log('Generating report for site:', selectedSite, 'period:', selectedPeriod, 'type:', selectedReport)
+    } catch (error) {
+      console.error('Error generating report:', error)
+      alert('レポートの生成に失敗しました')
+    }
   }
 
   const getStatusBadge = (status: string) => {
@@ -152,12 +169,14 @@ export default function ReportsPage() {
                 <label className="text-sm font-medium text-gray-700 mb-2 block">サイト</label>
                 <Select value={selectedSite} onValueChange={setSelectedSite}>
                   <SelectTrigger>
-                    <SelectValue />
+                    <SelectValue placeholder="サイトを選択" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="example.com">example.com</SelectItem>
-                    <SelectItem value="blog.example.com">blog.example.com</SelectItem>
-                    <SelectItem value="lp.example.com">lp.example.com</SelectItem>
+                    {sites.map((site) => (
+                      <SelectItem key={site.id} value={site.tracking_id}>
+                        {site.name} ({site.url})
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -244,8 +263,16 @@ export default function ReportsPage() {
             <CardDescription>過去に生成されたレポートの一覧</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4">
-              {generatedReports.map((report) => (
+            {loading ? (
+              <Loading />
+            ) : generatedReports.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">
+                生成済みのレポートがありません
+                <p className="text-sm mt-2">レポートを生成すると、ここに表示されます</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {generatedReports.map((report) => (
                 <div key={report.id} className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 transition-colors">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-4 flex-1">
@@ -269,15 +296,60 @@ export default function ReportsPage() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <Button variant="outline" size="sm">
+                      <Button 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => {
+                          // TODO: レポートプレビュー機能の実装
+                          alert('レポートプレビュー機能は現在開発中です')
+                        }}
+                      >
                         <Eye className="w-4 h-4 mr-1" />
                         プレビュー
                       </Button>
-                      <Button variant="outline" size="sm">
+                      <Button 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => {
+                          // レポートをダウンロード
+                          const reportContent = `レポート: ${report.name}\nサイト: ${report.site}\n生成日時: ${report.generatedAt}\n\nこのレポートは現在開発中です。`
+                          const blob = new Blob([reportContent], { type: 'text/plain' })
+                          const url = URL.createObjectURL(blob)
+                          const a = document.createElement('a')
+                          a.href = url
+                          a.download = `${report.name.replace(/\s+/g, '_')}.txt`
+                          document.body.appendChild(a)
+                          a.click()
+                          document.body.removeChild(a)
+                          URL.revokeObjectURL(url)
+                        }}
+                      >
                         <Download className="w-4 h-4 mr-1" />
                         ダウンロード
                       </Button>
-                      <Button variant="outline" size="sm">
+                      <Button 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => {
+                          // レポートを共有
+                          if (navigator.share) {
+                            navigator.share({
+                              title: report.name,
+                              text: `${report.name} - ${report.site}`,
+                              url: window.location.href
+                            }).catch(err => console.error('Error sharing:', err))
+                          } else {
+                            // フォールバック: クリップボードにコピー
+                            const shareUrl = `${window.location.origin}/reports?report=${report.id}`
+                            navigator.clipboard.writeText(shareUrl).then(() => {
+                              alert('レポートのリンクをクリップボードにコピーしました')
+                            }).catch(err => {
+                              console.error('Error copying to clipboard:', err)
+                              alert('共有機能を使用できません')
+                            })
+                          }
+                        }}
+                      >
                         <Share2 className="w-4 h-4 mr-1" />
                         共有
                       </Button>
@@ -285,7 +357,8 @@ export default function ReportsPage() {
                   </div>
                 </div>
               ))}
-            </div>
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -323,7 +396,7 @@ export default function ReportsPage() {
                   <div className="flex items-center justify-between p-3 border border-gray-200 rounded-lg">
                     <div className="flex items-center gap-2">
                       <Mail className="w-4 h-4 text-gray-500" />
-                      <span>admin@example.com</span>
+                      <span>{user?.email || 'メールアドレス未設定'}</span>
                     </div>
                     <Button variant="outline" size="sm">編集</Button>
                   </div>

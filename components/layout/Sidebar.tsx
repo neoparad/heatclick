@@ -1,5 +1,6 @@
 'use client'
 
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { 
@@ -14,6 +15,7 @@ import {
   Activity,
   Video
 } from 'lucide-react'
+import { getCurrentUser } from '@/lib/auth'
 
 const menuItems = [
   { id: 'dashboard', icon: BarChart3, label: 'ダッシュボード', href: '/dashboard' },
@@ -30,9 +32,53 @@ const menuItems = [
 export default function Sidebar() {
   const pathname = usePathname()
   const router = useRouter()
+  const [usage, setUsage] = useState({
+    plan: 'Free',
+    usage: 0,
+    limit: 5000,
+    percentage: 0,
+  })
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const fetchUsage = async () => {
+      try {
+        const user = getCurrentUser()
+        if (!user || !user.id) {
+          setLoading(false)
+          return
+        }
+
+        const plan = user.plan || 'free'
+        const response = await fetch(`/api/usage?user_id=${user.id}&plan=${plan}`)
+        if (response.ok) {
+          const result = await response.json()
+          if (result.success && result.data) {
+            setUsage(result.data)
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching usage:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchUsage()
+  }, [])
 
   const handleLogoClick = () => {
     router.push('/')
+  }
+
+  const getPlanDisplayName = (plan: string) => {
+    const planMap: Record<string, string> = {
+      free: 'Free',
+      starter: 'Starter',
+      professional: 'Professional',
+      business: 'Business',
+    }
+    return planMap[plan.toLowerCase()] || plan
   }
 
   return (
@@ -46,7 +92,7 @@ export default function Sidebar() {
           <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
             <Zap className="w-5 h-5 text-white" />
           </div>
-          <span className="font-bold text-lg">ClickInsight Pro</span>
+          <span className="font-bold text-lg">UGOKI MAP</span>
         </button>
       </div>
       
@@ -71,13 +117,34 @@ export default function Sidebar() {
         <div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg p-4">
           <div className="flex items-center gap-2 mb-2">
             <Brain className="w-5 h-5 text-blue-600" />
-            <span className="font-semibold text-sm">Starter プラン</span>
+            <span className="font-semibold text-sm">
+              {loading ? '読み込み中...' : `${usage.plan} プラン`}
+            </span>
           </div>
           <p className="text-xs text-gray-600 mb-2">今月の使用量</p>
-          <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
-            <div className="bg-blue-600 h-2 rounded-full" style={{ width: '65%' }} />
-          </div>
-          <p className="text-xs text-gray-500">32,500 / 50,000 PV</p>
+          {loading ? (
+            <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
+              <div className="bg-gray-300 h-2 rounded-full" style={{ width: '0%' }} />
+            </div>
+          ) : (
+            <>
+              <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
+                <div 
+                  className={`h-2 rounded-full ${
+                    usage.percentage >= 90 
+                      ? 'bg-red-600' 
+                      : usage.percentage >= 70 
+                      ? 'bg-yellow-600' 
+                      : 'bg-blue-600'
+                  }`}
+                  style={{ width: `${Math.min(100, usage.percentage)}%` }} 
+                />
+              </div>
+              <p className="text-xs text-gray-500">
+                {usage.usage.toLocaleString()} / {usage.limit.toLocaleString()} PV
+              </p>
+            </>
+          )}
         </div>
       </div>
     </div>

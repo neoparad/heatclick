@@ -5,31 +5,31 @@ import './globals.css'
 const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
-  title: 'ClickInsight Pro - ヒートマップ＆クリック分析ツール',
+  title: 'UGOKI MAP - ヒートマップ＆クリック分析ツール',
   description: 'WordPressサイトを中心としたWebサイトのクリック行動とヒートマップを可視化・分析し、AIによる自動診断と改善提案を行う次世代SEO特化型ヒートマップツール',
   keywords: ['ヒートマップ', 'クリック分析', 'SEO', 'UX分析', 'AI分析'],
-  authors: [{ name: 'ClickInsight Pro Team' }],
-  creator: 'ClickInsight Pro',
-  publisher: 'ClickInsight Pro',
+  authors: [{ name: 'UGOKI MAP Team' }],
+  creator: 'UGOKI MAP',
+  publisher: 'UGOKI MAP',
   formatDetection: {
     email: false,
     address: false,
     telephone: false,
   },
-  metadataBase: new URL('https://clickinsight.pro'),
+  metadataBase: new URL('https://ugokimap.com'),
   openGraph: {
-    title: 'ClickInsight Pro - ヒートマップ＆クリック分析ツール',
+    title: 'UGOKI MAP - ヒートマップ＆クリック分析ツール',
     description: 'AIによる自動診断と改善提案を行う次世代SEO特化型ヒートマップツール',
-    url: 'https://clickinsight.pro',
-    siteName: 'ClickInsight Pro',
+    url: 'https://ugokimap.com',
+    siteName: 'UGOKI MAP',
     locale: 'ja_JP',
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'ClickInsight Pro - ヒートマップ＆クリック分析ツール',
+    title: 'UGOKI MAP - ヒートマップ＆クリック分析ツール',
     description: 'AIによる自動診断と改善提案を行う次世代SEO特化型ヒートマップツール',
-    creator: '@clickinsight_pro',
+    creator: '@ugokimap',
   },
   robots: {
     index: true,

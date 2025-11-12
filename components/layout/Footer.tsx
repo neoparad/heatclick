@@ -21,7 +21,7 @@ export default function Footer() {
               <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
                 <span className="text-white font-bold text-sm">CI</span>
               </div>
-              <span className="font-bold text-lg">ClickInsight Pro</span>
+              <span className="font-bold text-lg">UGOKI MAP</span>
             </div>
             <p className="text-gray-600 text-sm mb-4">
               AIによる自動診断と改善提案を行う次世代SEO特化型ヒートマップツール
@@ -122,7 +122,7 @@ export default function Footer() {
         <div className="border-t border-gray-200 mt-8 pt-6">
           <div className="flex flex-col md:flex-row items-center justify-between gap-4">
             <p className="text-gray-500 text-sm">
-              © {currentYear} ClickInsight Pro. All rights reserved.
+              © {currentYear} UGOKI MAP. All rights reserved.
             </p>
             <div className="flex items-center gap-6 text-sm text-gray-500">
               <Link href="/terms" className="hover:text-gray-900 transition-colors">
