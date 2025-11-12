@@ -275,3 +275,61 @@ curl "http://localhost:3000/api/track?siteId=YOUR_SITE_ID&limit=10"
 **修正者**: AI Assistant  
 **ステータス**: ✅ 修正完了
 
+---
+
+## 🔴 追加の問題: https://bihadashop.jp でのトラッキングデータが表示されない
+
+**報告日**: 2025年1月25日  
+**サイト**: https://bihadashop.jp  
+**サイトID**: `CIP_EcwUTHEZdIOAUqum`
+
+### 問題の症状
+
+トラッキングタグを設置しているが、管理画面で数字が表示されない。
+
+### 考えられる原因
+
+1. **サイトIDがデータベースに存在しない**
+   - サイトID `CIP_EcwUTHEZdIOAUqum` が `clickinsight.sites` テーブルに登録されていない可能性
+
+2. **トラッキングスクリプトが正しく動作していない**
+   - ブラウザのコンソールにエラーが表示されている可能性
+   - ネットワークタブで `/api/track` へのリクエストが送信されていない可能性
+
+3. **データが保存されていない**
+   - APIエンドポイントがエラーを返している可能性
+   - ClickHouseへの接続に問題がある可能性
+
+4. **サイトIDの不一致**
+   - トラッキングスクリプトのサイトIDとデータベースのサイトIDが一致していない可能性
+
+### 確認手順
+
+詳細なデバッグ手順は `docs/tracking-debug-guide.md` を参照してください。
+
+### 即座に確認すべきポイント
+
+1. **ブラウザのコンソールで確認**:
+   ```javascript
+   console.log(window.CLICKINSIGHT_SITE_ID)
+   // 期待値: "CIP_EcwUTHEZdIOAUqum"
+   ```
+
+2. **ネットワークタブで確認**:
+   - `/api/track` へのリクエストが送信されているか
+   - ステータスコードが200か
+   - リクエストボディに `site_id: "CIP_EcwUTHEZdIOAUqum"` が含まれているか
+
+3. **データベースで確認**:
+   ```sql
+   SELECT * FROM clickinsight.sites 
+   WHERE tracking_id = 'CIP_EcwUTHEZdIOAUqum';
+   
+   SELECT count() FROM clickinsight.events
+   WHERE site_id = 'CIP_EcwUTHEZdIOAUqum';
+   ```
+
+4. **管理画面で確認**:
+   - サイト選択ドロップダウンに `CIP_EcwUTHEZdIOAUqum` が表示されているか
+   - 正しいサイトが選択されているか
+
