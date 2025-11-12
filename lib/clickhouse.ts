@@ -126,16 +126,16 @@ export async function getClickEvents(
     const params: Record<string, any> = { site_id: siteId }
     
     if (startDate) {
-      query += ` AND created_at >= {start_date:String}`
+      query += ` AND timestamp >= {start_date:String}`
       params.start_date = startDate
     }
-    
+
     if (endDate) {
-      query += ` AND created_at <= {end_date:String}`
+      query += ` AND timestamp <= {end_date:String}`
       params.end_date = endDate
     }
-    
-    query += ` ORDER BY created_at DESC LIMIT {limit:UInt32}`
+
+    query += ` ORDER BY timestamp DESC LIMIT {limit:UInt32}`
     params.limit = limit
     
     const client = getClickHouseClient()
@@ -162,15 +162,14 @@ export async function getHeatmapData(
 ): Promise<any[]> {
   try {
     let query = `
-      SELECT 
+      SELECT
         click_x,
         click_y,
         count() as click_count,
-        avg(duration) as avg_duration,
-        max(created_at) as last_click
+        max(timestamp) as last_click
       FROM clickinsight.events
       WHERE site_id = {site_id:String}
-        AND page_url = {page_url:String}
+        AND url = {page_url:String}
         AND event_type = 'click'
     `
     
@@ -183,17 +182,17 @@ export async function getHeatmapData(
       query += ` AND device_type = {device_type:String}`
       params.device_type = deviceType
     }
-    
+
     if (startDate) {
-      query += ` AND created_at >= {start_date:String}`
+      query += ` AND timestamp >= {start_date:String}`
       params.start_date = startDate
     }
-    
+
     if (endDate) {
-      query += ` AND created_at <= {end_date:String}`
+      query += ` AND timestamp <= {end_date:String}`
       params.end_date = endDate
     }
-    
+
     query += `
       GROUP BY click_x, click_y
       ORDER BY click_count DESC
@@ -236,17 +235,17 @@ export async function getStatistics(
     `
     
     const params: Record<string, any> = { site_id: siteId }
-    
+
     if (startDate) {
-      query += ` AND created_at >= {start_date:String}`
+      query += ` AND timestamp >= {start_date:String}`
       params.start_date = startDate
     }
-    
+
     if (endDate) {
-      query += ` AND created_at <= {end_date:String}`
+      query += ` AND timestamp <= {end_date:String}`
       params.end_date = endDate
     }
-    
+
     const client = getClickHouseClient()
     const result = await client.query({
       query,
