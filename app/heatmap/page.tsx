@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import DashboardLayout from '../../components/layout/DashboardLayout'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card'
@@ -14,6 +14,10 @@ import {
   Globe,
   BarChart3
 } from 'lucide-react'
+import dynamic from 'next/dynamic'
+
+// Dynamically import h337 to avoid SSR issues
+const h337 = typeof window !== 'undefined' ? require('heatmap.js') : null
 
 interface Site {
   id: string
@@ -45,6 +49,8 @@ export default function HeatmapPage() {
   const [heatmapData, setHeatmapData] = useState<HeatmapPoint[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const heatmapContainerRef = useRef<HTMLDivElement>(null)
+  const heatmapInstanceRef = useRef<any>(null)
 
   // サイトリストを取得
   useEffect(() => {
@@ -117,6 +123,55 @@ export default function HeatmapPage() {
 
     fetchHeatmap()
   }, [selectedSite, selectedPageUrl])
+
+  // ヒートマップを描画
+  useEffect(() => {
+    if (!h337 || !heatmapContainerRef.current || heatmapData.length === 0) return
+
+    // 既存のヒートマップインスタンスをクリーンアップ
+    if (heatmapInstanceRef.current) {
+      const canvas = heatmapContainerRef.current.querySelector('canvas')
+      if (canvas) {
+        canvas.remove()
+      }
+    }
+
+    // ヒートマップインスタンスを作成
+    const heatmapInstance = h337.create({
+      container: heatmapContainerRef.current,
+      radius: 40,
+      maxOpacity: 0.6,
+      minOpacity: 0,
+      blur: 0.75,
+    })
+
+    // データポイントを変換
+    const points = heatmapData.map(point => ({
+      x: point.click_x,
+      y: point.click_y,
+      value: point.count,
+    }))
+
+    // 最大値を計算
+    const maxValue = Math.max(...points.map(p => p.value))
+
+    // データを設定
+    heatmapInstance.setData({
+      max: maxValue,
+      data: points,
+    })
+
+    heatmapInstanceRef.current = heatmapInstance
+
+    return () => {
+      if (heatmapInstanceRef.current) {
+        const canvas = heatmapContainerRef.current?.querySelector('canvas')
+        if (canvas) {
+          canvas.remove()
+        }
+      }
+    }
+  }, [heatmapData])
 
   if (loading) {
     return (
@@ -261,6 +316,27 @@ export default function HeatmapPage() {
                     <div className="text-sm text-gray-600">
                       総クリック数: {heatmapData.reduce((sum, point) => sum + point.count, 0).toLocaleString()}
                     </div>
+                    <div className="text-sm text-gray-600">
+                      クリックポイント数: {heatmapData.length.toLocaleString()}
+                    </div>
+                  </div>
+
+                  {/* ヒートマップビジュアライゼーション */}
+                  <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="p-4 border-b border-gray-200">
+                      <h4 className="font-semibold flex items-center">
+                        <Eye className="w-4 h-4 mr-2" />
+                        クリックヒートマップ
+                      </h4>
+                      <p className="text-sm text-gray-600 mt-1">
+                        赤い領域ほどクリックが集中しています
+                      </p>
+                    </div>
+                    <div
+                      ref={heatmapContainerRef}
+                      className="relative bg-gray-50"
+                      style={{ width: '100%', height: '600px' }}
+                    />
                   </div>
 
                   <div className="space-y-2">
@@ -291,17 +367,6 @@ export default function HeatmapPage() {
                           </div>
                         ))}
                     </div>
-                  </div>
-
-                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                    <h4 className="font-semibold text-yellow-900 mb-2">
-                      <Eye className="w-4 h-4 inline mr-2" />
-                      ヒートマップビジュアライゼーション
-                    </h4>
-                    <p className="text-yellow-700 text-sm">
-                      現在、クリックデータは収集されています。
-                      ビジュアルヒートマップ表示機能は今後のアップデートで実装予定です。
-                    </p>
                   </div>
                 </div>
               )}
