@@ -13,15 +13,49 @@ export async function POST(request: NextRequest) {
     }
 
     // GSC設定を取得（環境変数またはDBから）
-    // TODO: サイトごとのGSC設定をDBから取得
-    const gscConfig: GSCConfig = {
+    let gscConfig: GSCConfig = {
       clientEmail: process.env.GSC_CLIENT_EMAIL || '',
       privateKey: process.env.GSC_PRIVATE_KEY || '',
       siteUrl: process.env.GSC_SITE_URL || '',
     }
 
+    // サイトごとのGSC設定をDBから取得
+    try {
+      const clickhouse = await getClickHouseClientAsync()
+      const siteQuery = `
+        SELECT 
+          gsc_client_email,
+          gsc_private_key,
+          gsc_site_url
+        FROM clickinsight.sites
+        WHERE tracking_id = {site_id:String}
+        LIMIT 1
+      `
+      
+      const siteResult = await clickhouse.query({
+        query: siteQuery,
+        query_params: { site_id: siteId },
+        format: 'JSONEachRow',
+      })
+      
+      const siteData = await siteResult.json()
+      if (siteData && siteData.length > 0 && siteData[0].gsc_client_email) {
+        // サイトごとの設定が存在する場合はそれを使用
+        gscConfig = {
+          clientEmail: siteData[0].gsc_client_email || gscConfig.clientEmail,
+          privateKey: siteData[0].gsc_private_key || gscConfig.privateKey,
+          siteUrl: siteData[0].gsc_site_url || gscConfig.siteUrl,
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching site GSC config:', error)
+      // エラー時は環境変数の設定をそのまま使用
+    }
+
     if (!gscConfig.clientEmail || !gscConfig.privateKey || !gscConfig.siteUrl) {
-      return NextResponse.json({ error: 'GSC configuration is missing' }, { status: 400 })
+      return NextResponse.json({ 
+        error: 'GSC configuration is missing. Please configure GSC settings in environment variables or site settings.' 
+      }, { status: 400 })
     }
 
     // GSCデータを取得

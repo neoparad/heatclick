@@ -89,58 +89,100 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // モックデータを返す（実際の実装ではClickHouseから取得）
-    const basicStats = {
-      total_events: 12345,
-      clicks: 8900,
-      scrolls: 2100,
-      hovers: 1345,
-      unique_sessions: 8234,
-      avg_scroll_depth: 65.5,
-      desktop_events: 7234,
-      tablet_events: 988,
-      mobile_events: 4123
+    // ClickHouseから実際のデータを取得
+    let basicStats: any = {}
+    try {
+      basicStats = await getStatistics(
+        site_id,
+        start_date || undefined,
+        end_date || undefined
+      )
+    } catch (error) {
+      console.error('Error fetching statistics from ClickHouse:', error)
+      // エラー時は空の統計を返す
+      basicStats = {
+        total_events: 0,
+        clicks: 0,
+        scrolls: 0,
+        hovers: 0,
+        unique_sessions: 0,
+        avg_scroll_depth: 0,
+        desktop_events: 0,
+        tablet_events: 0,
+        mobile_events: 0
+      }
     }
 
     // 追加メトリクスの計算
+    const totalEvents = Number(basicStats.total_events) || 0
+    const clicks = Number(basicStats.clicks) || 0
+    const scrolls = Number(basicStats.scrolls) || 0
+    const hovers = Number(basicStats.hovers) || 0
+    const desktopEvents = Number(basicStats.desktop_events) || 0
+    const tabletEvents = Number(basicStats.tablet_events) || 0
+    const mobileEvents = Number(basicStats.mobile_events) || 0
+
     const additionalMetrics = {
-      click_rate: basicStats.clicks / basicStats.total_events * 100,
-      scroll_rate: basicStats.scrolls / basicStats.total_events * 100,
-      hover_rate: basicStats.hovers / basicStats.total_events * 100,
-      desktop_ratio: basicStats.desktop_events / basicStats.total_events * 100,
-      tablet_ratio: basicStats.tablet_events / basicStats.total_events * 100,
-      mobile_ratio: basicStats.mobile_events / basicStats.total_events * 100
+      click_rate: totalEvents > 0 ? (clicks / totalEvents * 100) : 0,
+      scroll_rate: totalEvents > 0 ? (scrolls / totalEvents * 100) : 0,
+      hover_rate: totalEvents > 0 ? (hovers / totalEvents * 100) : 0,
+      desktop_ratio: totalEvents > 0 ? (desktopEvents / totalEvents * 100) : 0,
+      tablet_ratio: totalEvents > 0 ? (tabletEvents / totalEvents * 100) : 0,
+      mobile_ratio: totalEvents > 0 ? (mobileEvents / totalEvents * 100) : 0
     }
 
     // 期間比較データ（前週・前月）
-    const now = new Date()
-    const lastWeek = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-    const lastMonth = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    let lastWeekStats: any = { total_events: 0, clicks: 0, unique_sessions: 0 }
+    let lastMonthStats: any = { total_events: 0, clicks: 0, unique_sessions: 0 }
 
-    // モックデータを返す（実際の実装ではClickHouseから取得）
-    const lastWeekStats = {
-      total_events: 11000,
-      clicks: 8000,
-      unique_sessions: 7500
-    }
+    if (start_date && end_date) {
+      const start = new Date(start_date)
+      const end = new Date(end_date)
+      const diff = end.getTime() - start.getTime()
+      
+      // 前週の期間を計算
+      const lastWeekEnd = new Date(start.getTime() - 1)
+      const lastWeekStart = new Date(start.getTime() - diff - 1)
+      
+      // 前月の期間を計算
+      const lastMonthEnd = new Date(start.getTime() - 1)
+      const lastMonthStart = new Date(start.getTime() - diff * 4 - 1)
 
-    const lastMonthStats = {
-      total_events: 10000,
-      clicks: 7000,
-      unique_sessions: 6500
+      try {
+        lastWeekStats = await getStatistics(
+          site_id,
+          lastWeekStart.toISOString().split('T')[0],
+          lastWeekEnd.toISOString().split('T')[0]
+        ) || { total_events: 0, clicks: 0, unique_sessions: 0 }
+
+        lastMonthStats = await getStatistics(
+          site_id,
+          lastMonthStart.toISOString().split('T')[0],
+          lastMonthEnd.toISOString().split('T')[0]
+        ) || { total_events: 0, clicks: 0, unique_sessions: 0 }
+      } catch (error) {
+        console.error('Error fetching comparison statistics:', error)
+      }
     }
 
     // 比較データ
+    const lastWeekTotalEvents = Number(lastWeekStats.total_events) || 0
+    const lastWeekClicks = Number(lastWeekStats.clicks) || 0
+    const lastWeekSessions = Number(lastWeekStats.unique_sessions) || 0
+    const lastMonthTotalEvents = Number(lastMonthStats.total_events) || 0
+    const lastMonthClicks = Number(lastMonthStats.clicks) || 0
+    const lastMonthSessions = Number(lastMonthStats.unique_sessions) || 0
+
     const comparison = {
       week_over_week: {
-        total_events: ((basicStats.total_events - lastWeekStats.total_events) / lastWeekStats.total_events * 100) || 0,
-        clicks: ((basicStats.clicks - lastWeekStats.clicks) / lastWeekStats.clicks * 100) || 0,
-        unique_sessions: ((basicStats.unique_sessions - lastWeekStats.unique_sessions) / lastWeekStats.unique_sessions * 100) || 0
+        total_events: lastWeekTotalEvents > 0 ? ((totalEvents - lastWeekTotalEvents) / lastWeekTotalEvents * 100) : 0,
+        clicks: lastWeekClicks > 0 ? ((clicks - lastWeekClicks) / lastWeekClicks * 100) : 0,
+        unique_sessions: lastWeekSessions > 0 ? ((Number(basicStats.unique_sessions) || 0 - lastWeekSessions) / lastWeekSessions * 100) : 0
       },
       month_over_month: {
-        total_events: ((basicStats.total_events - lastMonthStats.total_events) / lastMonthStats.total_events * 100) || 0,
-        clicks: ((basicStats.clicks - lastMonthStats.clicks) / lastMonthStats.clicks * 100) || 0,
-        unique_sessions: ((basicStats.unique_sessions - lastMonthStats.unique_sessions) / lastMonthStats.unique_sessions * 100) || 0
+        total_events: lastMonthTotalEvents > 0 ? ((totalEvents - lastMonthTotalEvents) / lastMonthTotalEvents * 100) : 0,
+        clicks: lastMonthClicks > 0 ? ((clicks - lastMonthClicks) / lastMonthClicks * 100) : 0,
+        unique_sessions: lastMonthSessions > 0 ? ((Number(basicStats.unique_sessions) || 0 - lastMonthSessions) / lastMonthSessions * 100) : 0
       }
     }
 

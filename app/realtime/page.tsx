@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import DashboardLayout from '../../components/layout/DashboardLayout'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card'
 import { Badge } from '../../components/ui/badge'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select'
 import { 
   MousePointer, 
   Eye, 
@@ -31,7 +32,16 @@ interface TrackingEvent {
   timeOnPage?: number
 }
 
+interface Site {
+  id: string
+  name: string
+  url: string
+  tracking_id: string
+}
+
 export default function RealtimePage() {
+  const [sites, setSites] = useState<Site[]>([])
+  const [selectedSite, setSelectedSite] = useState<string>('')
   const [events, setEvents] = useState<TrackingEvent[]>([])
   const [stats, setStats] = useState({
     totalEvents: 0,
@@ -43,22 +53,45 @@ export default function RealtimePage() {
   })
   const [isLoading, setIsLoading] = useState(false)
 
+  // サイト一覧の取得
+  useEffect(() => {
+    const fetchSites = async () => {
+      try {
+        const response = await fetch('/api/sites')
+        if (response.ok) {
+          const data = await response.json()
+          const sitesList = data.sites || []
+          setSites(sitesList)
+          if (sitesList.length > 0 && !selectedSite) {
+            setSelectedSite(sitesList[0].tracking_id)
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching sites:', error)
+      }
+    }
+    fetchSites()
+  }, [])
+
   const fetchData = async () => {
+    if (!selectedSite) return
+    
     setIsLoading(true)
     try {
-      const response = await fetch('/api/track?limit=50')
+      const response = await fetch(`/api/track?siteId=${selectedSite}&limit=50`)
       const result = await response.json()
-      setEvents(result.data)
+      const eventData = result.data || []
+      setEvents(eventData)
       
       // 統計計算
-      const uniqueUsers = new Set(result.data.map((e: TrackingEvent) => e.userId)).size
-      const uniqueSessions = new Set(result.data.map((e: TrackingEvent) => e.sessionId)).size
-      const clicks = result.data.filter((e: TrackingEvent) => e.eventType === 'click').length
-      const scrolls = result.data.filter((e: TrackingEvent) => e.eventType === 'scroll').length
-      const pageViews = result.data.filter((e: TrackingEvent) => e.eventType === 'page_view').length
+      const uniqueUsers = new Set(eventData.map((e: TrackingEvent) => e.userId || e.user_id)).size
+      const uniqueSessions = new Set(eventData.map((e: TrackingEvent) => e.sessionId || e.session_id)).size
+      const clicks = eventData.filter((e: TrackingEvent) => (e.eventType || e.event_type) === 'click').length
+      const scrolls = eventData.filter((e: TrackingEvent) => (e.eventType || e.event_type) === 'scroll').length
+      const pageViews = eventData.filter((e: TrackingEvent) => (e.eventType || e.event_type) === 'page_view').length
 
       setStats({
-        totalEvents: result.data.length,
+        totalEvents: eventData.length,
         uniqueUsers,
         uniqueSessions,
         clicks,
@@ -73,10 +106,12 @@ export default function RealtimePage() {
   }
 
   useEffect(() => {
+    if (!selectedSite) return
+    
     fetchData()
     const interval = setInterval(fetchData, 5000) // 5秒ごとに更新
     return () => clearInterval(interval)
-  }, [])
+  }, [selectedSite])
 
   const getEventIcon = (eventType: string) => {
     switch (eventType) {
@@ -121,14 +156,30 @@ export default function RealtimePage() {
             <h1 className="text-3xl font-bold">リアルタイム分析</h1>
             <p className="text-gray-600 mt-2">ライブデータの監視と分析</p>
           </div>
-          <button 
-            onClick={fetchData}
-            disabled={isLoading}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-          >
-            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-            更新
-          </button>
+          <div className="flex items-center gap-4">
+            {sites.length > 0 && (
+              <Select value={selectedSite} onValueChange={setSelectedSite}>
+                <SelectTrigger className="w-64">
+                  <SelectValue placeholder="サイトを選択" />
+                </SelectTrigger>
+                <SelectContent>
+                  {sites.map((site) => (
+                    <SelectItem key={site.id} value={site.tracking_id}>
+                      {site.name} ({site.url})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            <button 
+              onClick={fetchData}
+              disabled={isLoading || !selectedSite}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+              更新
+            </button>
+          </div>
         </div>
 
         {/* 統計カード */}
@@ -197,12 +248,20 @@ export default function RealtimePage() {
             <CardDescription>最新のユーザー行動データ</CardDescription>
           </CardHeader>
           <CardContent>
-            {events.length === 0 ? (
+            {!selectedSite ? (
+              <div className="text-center py-8">
+                <Globe className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                <p className="text-gray-500">サイトを選択してください</p>
+              </div>
+            ) : events.length === 0 ? (
               <div className="text-center py-8">
                 <Activity className="w-12 h-12 text-gray-400 mx-auto mb-4" />
                 <p className="text-gray-500">イベントデータがありません</p>
                 <p className="text-sm text-gray-400 mt-2">
                   サイトでアクティビティが発生すると、ここに表示されます
+                </p>
+                <p className="text-xs text-gray-400 mt-1">
+                  トラッキングスクリプトが正しく設置されているか確認してください
                 </p>
               </div>
             ) : (

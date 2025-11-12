@@ -1,7 +1,7 @@
 {
   "name": "clickinsight-pro",
   "version": "1.0.0",
-  "description": "ClickInsight Pro - ヒートマップ＆クリック分析ツール",
+  "description": "UGOKI MAP - ヒートマップ＆クリック分析ツール",
   "private": true,
   "scripts": {
     "dev": "next dev",

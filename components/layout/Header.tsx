@@ -3,8 +3,6 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { 
-  ChevronDown, 
-  Calendar, 
   Search, 
   Filter, 
   Download,
@@ -17,8 +15,6 @@ import { Button } from '../ui/button'
 
 export default function Header() {
   const router = useRouter()
-  const [selectedSite, setSelectedSite] = useState('example.com')
-  const [selectedPeriod, setSelectedPeriod] = useState('過去7日間')
   const [user, setUser] = useState<any>(null)
 
   useEffect(() => {
@@ -38,22 +34,6 @@ export default function Header() {
           <button className="lg:hidden p-2 hover:bg-gray-100 rounded-lg">
             <Menu className="w-5 h-5 text-gray-600" />
           </button>
-          
-          <div className="relative">
-            <button className="flex items-center gap-2 px-2 lg:px-4 py-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">
-              <span className="font-medium text-sm lg:text-base">{selectedSite}</span>
-              <ChevronDown className="w-4 h-4" />
-            </button>
-          </div>
-          
-          <div className="relative hidden sm:block">
-            <button className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">
-              <Calendar className="w-4 h-4" />
-              <span className="hidden lg:inline">{selectedPeriod}</span>
-              <span className="lg:hidden">7日</span>
-              <ChevronDown className="w-4 h-4" />
-            </button>
-          </div>
         </div>
 
         <div className="flex items-center gap-2 lg:gap-3">

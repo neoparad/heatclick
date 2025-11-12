@@ -17,7 +17,7 @@ import {
 } from 'lucide-react'
 
 export const metadata: Metadata = {
-  title: 'ClickInsight Pro - ヒートマップ＆クリック分析ツール',
+  title: 'UGOKI MAP - ヒートマップ＆クリック分析ツール',
   description: 'AIによる自動診断と改善提案を行う次世代SEO特化型ヒートマップツール',
 }
 
@@ -30,7 +30,7 @@ export default function HomePage() {
           <div className="flex items-center justify-between">
             <Link href="/" className="flex items-center space-x-2 hover:opacity-80 transition-opacity">
               <div className="h-8 w-8 rounded-lg bg-gradient-to-r from-blue-600 to-purple-600"></div>
-              <span className="text-xl font-bold text-gray-900">ClickInsight Pro</span>
+              <span className="text-xl font-bold text-gray-900">UGOKI MAP</span>
             </Link>
             <nav className="hidden md:flex items-center space-x-6">
               <Link href="#features" className="text-gray-600 hover:text-gray-900">機能</Link>
@@ -94,7 +94,7 @@ export default function HomePage() {
         <div className="container mx-auto px-4">
           <div className="text-center mb-16">
             <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
-              なぜClickInsight Proなのか？
+              なぜUGOKI MAPなのか？
             </h2>
             <p className="text-xl text-gray-600 max-w-2xl mx-auto">
               競合を圧倒する3つの差別化ポイント
@@ -273,7 +273,7 @@ export default function HomePage() {
             <div>
               <div className="flex items-center space-x-2 mb-4">
                 <div className="h-8 w-8 rounded-lg bg-gradient-to-r from-blue-600 to-purple-600"></div>
-                <span className="text-xl font-bold">ClickInsight Pro</span>
+                <span className="text-xl font-bold">UGOKI MAP</span>
               </div>
               <p className="text-gray-400">
                 次世代SEO特化型ヒートマップツール
@@ -305,7 +305,7 @@ export default function HomePage() {
             </div>
           </div>
           <div className="border-t border-gray-800 mt-8 pt-8 text-center text-gray-400">
-            <p>&copy; 2025 ClickInsight Pro. All rights reserved.</p>
+            <p>&copy; 2025 UGOKI MAP. All rights reserved.</p>
           </div>
         </div>
       </footer>

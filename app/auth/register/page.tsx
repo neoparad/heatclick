@@ -99,7 +99,7 @@ export default function RegisterPage() {
             </div>
             <CardTitle className="text-2xl">新規登録</CardTitle>
             <CardDescription>
-              ClickInsight Proを無料で始める
+              UGOKI MAPを無料で始める
             </CardDescription>
           </CardHeader>
           <CardContent>

@@ -53,7 +53,7 @@ export async function GET(request: NextRequest) {
 
 function generateWordPressCode(siteId: string): string {
   return `<?php
-// ClickInsight Pro WordPress Plugin
+// UGOKI MAP WordPress Plugin
 // テーマのfunctions.phpに追加するか、プラグインとして作成
 
 function clickinsight_pro_tracking() {
@@ -72,8 +72,8 @@ add_action('wp_head', 'clickinsight_pro_tracking');
 // 管理画面での設定
 function clickinsight_pro_admin_menu() {
     add_options_page(
-        'ClickInsight Pro',
-        'ClickInsight Pro',
+        'UGOKI MAP',
+        'UGOKI MAP',
         'manage_options',
         'clickinsight-pro',
         'clickinsight_pro_admin_page'
@@ -84,7 +84,7 @@ add_action('admin_menu', 'clickinsight_pro_admin_menu');
 function clickinsight_pro_admin_page() {
     ?>
     <div class="wrap">
-        <h1>ClickInsight Pro 設定</h1>
+        <h1>UGOKI MAP 設定</h1>
         <p>サイトID: <strong>${siteId}</strong></p>
         <p>トラッキングスクリプトが正常に読み込まれています。</p>
         <p><a href="${process.env.NEXT_PUBLIC_APP_URL}/dashboard" target="_blank">ダッシュボードを開く</a></p>
@@ -98,7 +98,7 @@ function generateHTMLCode(siteId: string): string {
 <html>
 <head>
     <title>Your Website</title>
-    <!-- ClickInsight Pro Tracking -->
+    <!-- UGOKI MAP Tracking -->
     <script>
         window.CLICKINSIGHT_SITE_ID = '${siteId}';
         window.CLICKINSIGHT_DEBUG = false;
@@ -112,7 +112,7 @@ function generateHTMLCode(siteId: string): string {
 }
 
 function generateReactCode(siteId: string): string {
-  return `// ClickInsight Pro React Integration
+  return `// UGOKI MAP React Integration
 // 1. package.jsonに依存関係を追加
 // npm install @clickinsight/tracking
 
@@ -142,7 +142,7 @@ function MyComponent() {
 }
 
 function generateNextJSCode(siteId: string): string {
-  return `// ClickInsight Pro Next.js Integration
+  return `// UGOKI MAP Next.js Integration
 // 1. package.jsonに依存関係を追加
 // npm install @clickinsight/tracking
 
