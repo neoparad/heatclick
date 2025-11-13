@@ -362,5 +362,105 @@ GET /api/traffic-sources?site_id=xxx&start_date=xxx&end_date=xxx
 
 ---
 
+---
+
+## ✅ 追加の修正（2025年1月26日 後半）
+
+### 1. ロゴ表示の修正
+
+#### 問題点
+- サイドバーの左上にロゴ画像とテキスト「UGOKI MAP」が混在して表示されていた
+- ロゴ画像だけで十分なのに、テキストが重複していた
+
+#### 実装内容
+- `components/layout/Sidebar.tsx`: ロゴ表示からテキスト「UGOKI MAP」を削除
+- ロゴ画像のみを表示するように変更
+
+**変更前**:
+```tsx
+<img src="/ugokimap.png" alt="UGOKI MAP" className="h-8 w-auto" />
+<span className="font-bold text-lg">UGOKI MAP</span>
+```
+
+**変更後**:
+```tsx
+<img src="/ugokimap.png" alt="UGOKI MAP" className="h-8 w-auto" />
+```
+
+---
+
+### 2. 流入元情報の計測・集計状況の確認
+
+#### 確認結果
+
+**✅ 計測・集計は実装済み**
+
+1. **トラッキングスクリプト** (`public/tracking.js`)
+   - ✅ `document.referrer`を取得して送信
+   - ✅ UTMパラメータ（`utm_source`, `utm_medium`, `utm_campaign`など）を取得して送信
+   - ✅ `getUtmParams()`関数でURLパラメータからUTM情報を抽出
+
+2. **APIエンドポイント** (`app/api/track/route.ts`)
+   - ✅ `referrer`フィールドをClickHouseに保存
+   - ✅ `utm_source`, `utm_medium`, `utm_campaign`などをClickHouseに保存
+
+3. **データ取得関数** (`lib/clickhouse.ts`)
+   - ✅ `getTrafficSources()`関数が実装済み
+   - ✅ リファラー別の統計を取得（セッション数、ページビュー数）
+   - ✅ UTMソース別の統計を取得（セッション数、ページビュー数）
+
+4. **APIエンドポイント** (`app/api/traffic-sources/route.ts`)
+   - ✅ 流入元情報を取得するAPIが実装済み
+
+5. **フロントエンドUI** (`app/dashboard/page.tsx`)
+   - ✅ 流入元（リファラー）の表示UIが実装済み
+   - ✅ 流入チャネル（UTMソース）の表示UIが実装済み
+   - ✅ セッション数、ページビュー数、割合を表示
+
+#### データフロー
+
+```
+ユーザーアクセス
+  ↓
+トラッキングスクリプト (tracking.js)
+  - document.referrer を取得
+  - URLパラメータからUTM情報を取得
+  ↓
+/api/track エンドポイント
+  - referrer, utm_source, utm_medium などを保存
+  ↓
+ClickHouse (eventsテーブル)
+  - referrer, utm_source, utm_medium などのフィールドに保存
+  ↓
+/api/traffic-sources エンドポイント
+  - getTrafficSources() 関数で集計
+  ↓
+ダッシュボードUI
+  - リファラー別統計を表示
+  - UTMソース別統計を表示
+```
+
+#### 注意事項
+
+- **データが表示されない場合の原因**:
+  1. トラッキングタグが正しく設置されていない
+  2. まだデータが蓄積されていない（新規サイトの場合）
+  3. すべてのアクセスが直接アクセス（referrerがない）の場合
+
+- **UTMパラメータの取得**:
+  - URLに`?utm_source=xxx&utm_medium=xxx`などのパラメータが含まれている場合のみ取得されます
+  - 例: `https://example.com/page?utm_source=google&utm_medium=cpc`
+
+---
+
+## 📚 関連ドキュメント
+
+- [パフォーマンス改善の実装](./performance-optimization-implementation.md) - パフォーマンス改善の詳細
+- [パフォーマンス改善提案](./performance-optimization-proposal.md) - パフォーマンス改善の提案と実装状況
+- [ヒートマップタイプの実装状況](./heatmap-types-status.md) - ヒートマップタイプの実装状況
+- [UI改善内容](./ui-improvements-2025-01-26.md) - ロゴ表示の改善と流入元情報の実装状況確認
+
+---
+
 **最終更新**: 2025年1月26日
 

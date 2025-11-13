@@ -86,25 +86,12 @@ export default function Sidebar() {
       <div className="p-6 border-b border-gray-200">
         <button
           onClick={handleLogoClick}
-          className="flex items-center gap-2 hover:opacity-80 transition-opacity cursor-pointer"
+          className="flex items-center hover:opacity-80 transition-opacity cursor-pointer"
           aria-label="ホームに戻る"
         >
-          <img 
-            src="/ugokimap.png" 
-            alt="UGOKI MAP" 
-            className="h-8 w-auto"
-            onError={(e) => {
-              // ロゴ画像が読み込めない場合のフォールバック
-              const target = e.target as HTMLImageElement
-              target.style.display = 'none'
-              const fallback = target.nextElementSibling as HTMLElement
-              if (fallback) fallback.style.display = 'flex'
-            }}
-          />
-          <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center" style={{ display: 'none' }}>
-            <Zap className="w-5 h-5 text-white" />
+          <div className="w-10 h-10 bg-gradient-to-br from-pink-500 via-blue-500 to-blue-600 rounded-lg flex items-center justify-center shadow-md">
+            <span className="text-white font-bold text-xl">U</span>
           </div>
-          <span className="font-bold text-lg">UGOKI MAP</span>
         </button>
       </div>
       

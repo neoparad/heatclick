@@ -63,7 +63,19 @@ export default function LoginPage() {
         <Card>
           <CardHeader className="text-center">
             <div className="flex items-center justify-center mb-4">
-              <div className="h-12 w-12 rounded-lg bg-gradient-to-r from-blue-600 to-purple-600 flex items-center justify-center">
+              <img 
+                src="/ugokimap.png" 
+                alt="UGOKI MAP" 
+                className="h-12 w-auto"
+                onError={(e) => {
+                  // ロゴ画像が読み込めない場合のフォールバック
+                  const target = e.target as HTMLImageElement
+                  target.style.display = 'none'
+                  const fallback = target.nextElementSibling as HTMLElement
+                  if (fallback) fallback.style.display = 'flex'
+                }}
+              />
+              <div className="h-12 w-12 rounded-lg bg-gradient-to-r from-blue-600 to-purple-600 flex items-center justify-center" style={{ display: 'none' }}>
                 <span className="text-white font-bold text-xl">CI</span>
               </div>
             </div>
