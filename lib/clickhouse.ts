@@ -295,63 +295,215 @@ export async function getHeatmapData(
   pageUrl: string,
   deviceType?: string,
   startDate?: string,
-  endDate?: string
+  endDate?: string,
+  heatmapType: 'click' | 'scroll' | 'read' = 'click'
 ): Promise<any[]> {
   try {
-    let query = `
-      SELECT
-        click_x,
-        click_y,
-        count() as click_count,
-        max(timestamp) as last_click,
-        argMax(element_tag_name, timestamp) as element_tag_name,
-        argMax(element_id, timestamp) as element_id,
-        argMax(element_class_name, timestamp) as element_class_name
-      FROM clickinsight.events
-      WHERE site_id = {site_id:String}
-        AND url = {page_url:String}
-        AND event_type = 'click'
-    `
-    
-    const params: Record<string, any> = {
-      site_id: siteId,
-      page_url: pageUrl,
-    }
-    
-    if (deviceType) {
-      query += ` AND device_type = {device_type:String}`
-      params.device_type = deviceType
-    }
-
-    if (startDate) {
-      query += ` AND timestamp >= {start_date:String}`
-      params.start_date = startDate
-    }
-
-    if (endDate) {
-      query += ` AND timestamp <= {end_date:String}`
-      params.end_date = endDate
-    }
-
-    query += `
-      GROUP BY click_x, click_y
-      ORDER BY click_count DESC
-    `
-    
     const client = await getClickHouseClientAsync()
-    const result = await client.query({
-      query,
-      query_params: params,
-      format: 'JSONEachRow',
-    })
     
-    return await result.json()
+    // クリックヒートマップの場合（既存のロジック）
+    if (heatmapType === 'click') {
+      let query = `
+        SELECT
+          click_x,
+          click_y,
+          count() as click_count,
+          max(timestamp) as last_click,
+          argMax(element_tag_name, timestamp) as element_tag_name,
+          argMax(element_id, timestamp) as element_id,
+          argMax(element_class_name, timestamp) as element_class_name
+        FROM clickinsight.events
+        WHERE site_id = {site_id:String}
+          AND url = {page_url:String}
+          AND event_type = 'click'
+      `
+      
+      const params: Record<string, any> = {
+        site_id: siteId,
+        page_url: pageUrl,
+      }
+      
+      if (deviceType) {
+        query += ` AND device_type = {device_type:String}`
+        params.device_type = deviceType
+      }
+
+      if (startDate) {
+        query += ` AND timestamp >= {start_date:String}`
+        params.start_date = startDate
+      }
+
+      if (endDate) {
+        query += ` AND timestamp <= {end_date:String}`
+        params.end_date = endDate
+      }
+
+      query += `
+        GROUP BY click_x, click_y
+        ORDER BY click_count DESC
+      `
+      
+      const result = await client.query({
+        query,
+        query_params: params,
+        format: 'JSONEachRow',
+      })
+      
+      return await result.json()
+    }
+    
+    // スクロール深度ヒートマップの場合
+    if (heatmapType === 'scroll') {
+      // heatmap_eventsテーブルからスクロール深度データを取得
+      // 各Y座標ごとの到達率を計算（到達したセッション数 / 全セッション数）
+      let query = `
+        SELECT 
+          y as scroll_y,
+          count() as session_count,
+          uniq(session_id) as unique_sessions,
+          avg(value) as avg_scroll_percentage,
+          max(value) as max_scroll_percentage
+        FROM clickinsight.heatmap_events
+        WHERE page_url = {page_url:String}
+          AND event_type = 'scroll'
+      `
+      
+      const params: Record<string, any> = {
+        page_url: pageUrl,
+      }
+
+      if (startDate) {
+        query += ` AND created_at >= {start_date:String}`
+        params.start_date = startDate
+      }
+
+      if (endDate) {
+        query += ` AND created_at <= {end_date:String}`
+        params.end_date = endDate
+      }
+
+      query += `
+        GROUP BY y
+        ORDER BY scroll_y ASC
+      `
+      
+      const result = await client.query({
+        query,
+        query_params: params,
+        format: 'JSONEachRow',
+      })
+      
+      const scrollData = await result.json() as any[]
+      
+      // 全セッション数を取得
+      let totalSessionsQuery = `
+        SELECT uniq(session_id) as total_sessions
+        FROM clickinsight.heatmap_events
+        WHERE page_url = {page_url:String}
+          AND event_type = 'scroll'
+      `
+      
+      const totalSessionsParams: Record<string, any> = {
+        page_url: pageUrl,
+      }
+      
+      if (startDate) {
+        totalSessionsQuery += ` AND created_at >= {start_date:String}`
+        totalSessionsParams.start_date = startDate
+      }
+
+      if (endDate) {
+        totalSessionsQuery += ` AND created_at <= {end_date:String}`
+        totalSessionsParams.end_date = endDate
+      }
+      
+      const totalSessionsResult = await client.query({
+        query: totalSessionsQuery,
+        query_params: totalSessionsParams,
+        format: 'JSONEachRow',
+      })
+      
+      const totalSessionsData = await totalSessionsResult.json() as any[]
+      const totalSessions = Number(totalSessionsData[0]?.total_sessions) || 1
+      
+      // 到達率を計算して返す
+      return scrollData.map(item => ({
+        scroll_y: Number(item.scroll_y) || 0,
+        session_count: Number(item.session_count) || 0,
+        unique_sessions: Number(item.unique_sessions) || 0,
+        reach_rate: totalSessions > 0 ? ((Number(item.unique_sessions) / totalSessions) * 100) : 0,
+        avg_scroll_percentage: Number(item.avg_scroll_percentage) || 0,
+        max_scroll_percentage: Number(item.max_scroll_percentage) || 0,
+      }))
+    }
+    
+    // 熟読エリアヒートマップの場合
+    if (heatmapType === 'read') {
+      // heatmap_eventsテーブルから熟読エリアデータを取得
+      // 各Y座標ごとの総滞在時間を合計
+      let query = `
+        SELECT 
+          y as read_y,
+          sum(value) as total_duration,
+          avg(value) as avg_duration,
+          max(value) as max_duration,
+          count() as read_count,
+          uniq(session_id) as unique_sessions
+        FROM clickinsight.heatmap_events
+        WHERE page_url = {page_url:String}
+          AND event_type = 'read'
+      `
+      
+      const params: Record<string, any> = {
+        page_url: pageUrl,
+      }
+
+      if (startDate) {
+        query += ` AND created_at >= {start_date:String}`
+        params.start_date = startDate
+      }
+
+      if (endDate) {
+        query += ` AND created_at <= {end_date:String}`
+        params.end_date = endDate
+      }
+
+      query += `
+        GROUP BY y
+        ORDER BY total_duration DESC
+      `
+      
+      const result = await client.query({
+        query,
+        query_params: params,
+        format: 'JSONEachRow',
+      })
+      
+      const readData = await result.json() as any[]
+      
+      // 最大値を取得して正規化（0-1の範囲）
+      const maxDuration = Math.max(...readData.map(item => Number(item.total_duration) || 0), 1)
+      
+      // 正規化済みのintensityを計算
+      return readData.map(item => ({
+        read_y: Number(item.read_y) || 0,
+        total_duration: Number(item.total_duration) || 0,
+        avg_duration: Number(item.avg_duration) || 0,
+        max_duration: Number(item.max_duration) || 0,
+        read_count: Number(item.read_count) || 0,
+        unique_sessions: Number(item.unique_sessions) || 0,
+        intensity: maxDuration > 0 ? (Number(item.total_duration) / maxDuration) : 0,
+      }))
+    }
+    
+    return []
   } catch (error: any) {
     console.error('Error fetching heatmap data:', {
       error: error?.message || String(error),
       code: error?.code,
       siteId,
       pageUrl,
+      heatmapType,
     })
     // 接続エラーの場合は接続をリセット
     if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT' || error?.message?.includes('connection')) {
@@ -409,28 +561,47 @@ export async function getStatistics(
     const eventStats = data[0] || {}
 
     // セッション統計を取得（平均滞在時間と直帰率）
+    // イベントデータから直接計算（sessionsテーブルに依存しない）
+    // 集約関数を使用してループ処理を削減（パフォーマンス改善）
     let sessionQuery = `
       SELECT 
-        avg(duration) as avg_time_on_page,
-        countIf(page_views = 1) as bounce_sessions,
-        count() as total_sessions
-      FROM clickinsight.sessions
-      WHERE site_id = {site_id:String}
+        count() as total_sessions,
+        avg(dateDiff('second', session_start, session_end)) as avg_duration_seconds,
+        countIf(page_views <= 1) as bounce_sessions
+      FROM (
+        SELECT 
+          session_id,
+          min(timestamp) as session_start,
+          max(timestamp) as session_end,
+          countIf(event_type = 'page_view' OR event_type = 'pageview') as page_views
+        FROM clickinsight.events
+        WHERE site_id = {site_id:String}
     `
     
     const sessionParams: Record<string, any> = { site_id: siteId }
 
     if (startDate) {
-      sessionQuery += ` AND start_time >= {start_date:String}`
+      sessionQuery += ` AND timestamp >= {start_date:String}`
       sessionParams.start_date = startDate
     }
 
     if (endDate) {
-      sessionQuery += ` AND start_time <= {end_date:String}`
+      sessionQuery += ` AND timestamp <= {end_date:String}`
       sessionParams.end_date = endDate
     }
 
-    let sessionStats: any = {}
+    sessionQuery += `
+        GROUP BY session_id
+      )
+    `
+
+    let sessionStats: any = {
+      avg_time_on_page: 0,
+      bounce_sessions: 0,
+      total_sessions: 0,
+      bounce_rate: 0
+    }
+    
     try {
       const sessionResult = await client.query({
         query: sessionQuery,
@@ -438,41 +609,180 @@ export async function getStatistics(
         format: 'JSONEachRow',
       })
       
-      const sessionData = await sessionResult.json()
-      sessionStats = sessionData[0] || {}
+      const sessionData = await sessionResult.json() as any[]
+      
+      if (sessionData && sessionData.length > 0) {
+        const stats = sessionData[0]
+        const totalSessions = Number(stats.total_sessions) || 0
+        const avgDurationSeconds = Number(stats.avg_duration_seconds) || 0
+        const bounceSessions = Number(stats.bounce_sessions) || 0
+        
+        // 秒から分に変換
+        const avgTimeOnPageMinutes = totalSessions > 0 && avgDurationSeconds > 0 
+          ? (avgDurationSeconds / 60).toFixed(1) 
+          : '0'
+        
+        // 直帰率を計算
+        const bounceRate = totalSessions > 0 
+          ? ((bounceSessions / totalSessions) * 100).toFixed(1) 
+          : '0'
+        
+        sessionStats = {
+          avg_time_on_page: Number(avgTimeOnPageMinutes),
+          bounce_sessions: bounceSessions,
+          total_sessions: totalSessions,
+          bounce_rate: Number(bounceRate)
+        }
+      }
     } catch (error: any) {
       console.error('Error fetching session statistics:', {
         error: error?.message || String(error),
         code: error?.code,
         siteId,
       })
-      // エラー時はデフォルト値を設定
-      sessionStats = {
-        avg_time_on_page: 0,
-        bounce_sessions: 0,
-        total_sessions: 0
-      }
     }
 
-    // 平均滞在時間（秒）を分に変換
-    const avgTimeOnPageSeconds = Number(sessionStats.avg_time_on_page) || 0
-    const avgTimeOnPageMinutes = avgTimeOnPageSeconds > 0 ? (avgTimeOnPageSeconds / 60).toFixed(1) : '0'
+    // 平均滞在時間（分）
+    const avgTimeOnPageMinutes = sessionStats.avg_time_on_page || 0
 
-    // 直帰率の計算（1ページビューのセッション数 / 全セッション数 * 100）
-    const totalSessions = Number(sessionStats.total_sessions) || 0
-    const bounceSessions = Number(sessionStats.bounce_sessions) || 0
-    const bounceRate = totalSessions > 0 ? ((bounceSessions / totalSessions) * 100).toFixed(1) : '0'
+    // 直帰率
+    const totalSessions = sessionStats.total_sessions || 0
+    const bounceSessions = sessionStats.bounce_sessions || 0
+    const bounceRate = sessionStats.bounce_rate || 0
 
     return {
       ...eventStats,
-      avg_time_on_page: parseFloat(avgTimeOnPageMinutes),
-      bounce_rate: parseFloat(bounceRate),
+      avg_time_on_page: Number(avgTimeOnPageMinutes),
+      bounce_rate: Number(bounceRate),
       total_sessions: totalSessions,
       bounce_sessions: bounceSessions
     }
   } catch (error) {
     console.error('Error fetching statistics:', error)
     throw error
+  }
+}
+
+// 流入元情報の取得
+export async function getTrafficSources(
+  siteId: string,
+  startDate?: string,
+  endDate?: string
+): Promise<any> {
+  try {
+    const client = await getClickHouseClientAsync()
+    
+    // リファラー別の統計
+    let referrerQuery = `
+      SELECT 
+        CASE 
+          WHEN referrer = '' OR referrer IS NULL THEN 'direct'
+          ELSE referrer
+        END as referrer,
+        count() as sessions,
+        uniq(session_id) as unique_sessions,
+        countIf(event_type = 'page_view' OR event_type = 'pageview') as page_views
+      FROM clickinsight.events
+      WHERE site_id = {site_id:String}
+        AND (event_type = 'page_view' OR event_type = 'pageview')
+    `
+    
+    const referrerParams: Record<string, any> = { site_id: siteId }
+    
+    if (startDate) {
+      referrerQuery += ` AND timestamp >= {start_date:String}`
+      referrerParams.start_date = startDate
+    }
+    
+    if (endDate) {
+      referrerQuery += ` AND timestamp <= {end_date:String}`
+      referrerParams.end_date = endDate
+    }
+    
+    referrerQuery += `
+      GROUP BY referrer
+      ORDER BY sessions DESC
+      LIMIT 20
+    `
+    
+    const referrerResult = await client.query({
+      query: referrerQuery,
+      query_params: referrerParams,
+      format: 'JSONEachRow',
+    })
+    
+    const referrerData = await referrerResult.json() as any[]
+    
+    // UTM source別の統計
+    let utmQuery = `
+      SELECT 
+        CASE 
+          WHEN utm_source = '' OR utm_source IS NULL THEN 'direct'
+          ELSE utm_source
+        END as utm_source,
+        CASE 
+          WHEN utm_medium = '' OR utm_medium IS NULL THEN 'none'
+          ELSE utm_medium
+        END as utm_medium,
+        count() as sessions,
+        uniq(session_id) as unique_sessions,
+        countIf(event_type = 'page_view' OR event_type = 'pageview') as page_views
+      FROM clickinsight.events
+      WHERE site_id = {site_id:String}
+        AND (event_type = 'page_view' OR event_type = 'pageview')
+    `
+    
+    const utmParams: Record<string, any> = { site_id: siteId }
+    
+    if (startDate) {
+      utmQuery += ` AND timestamp >= {start_date:String}`
+      utmParams.start_date = startDate
+    }
+    
+    if (endDate) {
+      utmQuery += ` AND timestamp <= {end_date:String}`
+      utmParams.end_date = endDate
+    }
+    
+    utmQuery += `
+      GROUP BY utm_source, utm_medium
+      ORDER BY sessions DESC
+      LIMIT 20
+    `
+    
+    const utmResult = await client.query({
+      query: utmQuery,
+      query_params: utmParams,
+      format: 'JSONEachRow',
+    })
+    
+    const utmData = await utmResult.json() as any[]
+    
+    return {
+      referrers: referrerData.map(item => ({
+        referrer: item.referrer || 'direct',
+        sessions: Number(item.sessions) || 0,
+        unique_sessions: Number(item.unique_sessions) || 0,
+        page_views: Number(item.page_views) || 0,
+      })),
+      utm_sources: utmData.map(item => ({
+        utm_source: item.utm_source || 'direct',
+        utm_medium: item.utm_medium || 'none',
+        sessions: Number(item.sessions) || 0,
+        unique_sessions: Number(item.unique_sessions) || 0,
+        page_views: Number(item.page_views) || 0,
+      })),
+    }
+  } catch (error: any) {
+    console.error('Error fetching traffic sources:', {
+      error: error?.message || String(error),
+      code: error?.code,
+      siteId,
+    })
+    return {
+      referrers: [],
+      utm_sources: [],
+    }
   }
 }
 
@@ -568,6 +878,24 @@ export async function initializeDatabase(): Promise<void> {
         ) ENGINE = MergeTree()
         ORDER BY (site_id, timestamp)
         PARTITION BY toYYYYMM(timestamp)
+      `,
+    })
+    
+    // heatmap_eventsテーブルの作成（ヒートマップ専用データ）
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.heatmap_events (
+          id String,
+          session_id String,
+          page_url String,
+          event_type String, -- 'scroll', 'read', 'click'
+          x UInt16, -- クリック or 読了領域のX座標
+          y UInt16, -- スクロール深度・熟読領域のY座標
+          value Float32, -- 深度% or 滞在時間(ms)
+          created_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree()
+        ORDER BY (page_url, event_type, y)
+        PARTITION BY toYYYYMM(created_at)
       `,
     })
     

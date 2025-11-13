@@ -50,8 +50,7 @@ export async function GET(request: NextRequest) {
         element_id,
         element_class_name as element_class,
         element_text,
-        element_path as selector,
-        page_url as page,
+        url as page,
         device_type as device,
         avg(click_x) as avg_x,
         avg(click_y) as avg_y,
@@ -65,22 +64,22 @@ export async function GET(request: NextRequest) {
     const params: Record<string, any> = { site_id: siteId }
     
     if (startDate) {
-      elementQuery += ` AND created_at >= {start_date:String}`
+      elementQuery += ` AND timestamp >= {start_date:String}`
       params.start_date = startDate
     }
     
     if (endDate) {
-      elementQuery += ` AND created_at <= {end_date:String}`
+      elementQuery += ` AND timestamp <= {end_date:String}`
       params.end_date = endDate
     }
 
     if (pageUrl && pageUrl !== 'all') {
-      elementQuery += ` AND page_url = {page_url:String}`
+      elementQuery += ` AND url = {page_url:String}`
       params.page_url = pageUrl
     }
     
     elementQuery += `
-      GROUP BY element_tag, element_id, element_class, element_text, selector, page, device
+      GROUP BY element_tag, element_id, element_class, element_text, page, device
       ORDER BY clicks DESC
       LIMIT 100
     `
@@ -96,7 +95,7 @@ export async function GET(request: NextRequest) {
     // ページ別統計の取得
     let pageQuery = `
       SELECT 
-        page_url as page,
+        url as page,
         count() as clicks,
         uniq(session_id) as visitors
       FROM clickinsight.events
@@ -105,11 +104,11 @@ export async function GET(request: NextRequest) {
     `
     
     if (startDate) {
-      pageQuery += ` AND created_at >= {start_date:String}`
+      pageQuery += ` AND timestamp >= {start_date:String}`
     }
     
     if (endDate) {
-      pageQuery += ` AND created_at <= {end_date:String}`
+      pageQuery += ` AND timestamp <= {end_date:String}`
     }
     
     pageQuery += `
@@ -137,11 +136,11 @@ export async function GET(request: NextRequest) {
     `
     
     if (startDate) {
-      deviceQuery += ` AND created_at >= {start_date:String}`
+      deviceQuery += ` AND timestamp >= {start_date:String}`
     }
     
     if (endDate) {
-      deviceQuery += ` AND created_at <= {end_date:String}`
+      deviceQuery += ` AND timestamp <= {end_date:String}`
     }
     
     deviceQuery += `
@@ -162,19 +161,19 @@ export async function GET(request: NextRequest) {
       SELECT 
         count() as total_clicks,
         uniq(session_id) as unique_sessions,
-        uniq(page_url) as unique_pages,
-        count(DISTINCT element_path) as unique_elements
+        uniq(url) as unique_pages,
+        uniq(concat(element_tag_name, '|', coalesce(element_id, ''), '|', coalesce(element_class_name, ''))) as unique_elements
       FROM clickinsight.events
       WHERE site_id = {site_id:String}
         AND event_type = 'click'
     `
     
     if (startDate) {
-      statsQuery += ` AND created_at >= {start_date:String}`
+      statsQuery += ` AND timestamp >= {start_date:String}`
     }
     
     if (endDate) {
-      statsQuery += ` AND created_at <= {end_date:String}`
+      statsQuery += ` AND timestamp <= {end_date:String}`
     }
     
     const statsResult = await client.query({
@@ -208,8 +207,8 @@ export async function GET(request: NextRequest) {
         FROM clickinsight.events
         WHERE site_id = {site_id:String}
           AND event_type = 'click'
-          AND created_at >= {prev_start_date:String}
-          AND created_at <= {prev_end_date:String}
+          AND timestamp >= {prev_start_date:String}
+          AND timestamp <= {prev_end_date:String}
       `
       
       const prevResult = await client.query({
@@ -238,16 +237,20 @@ export async function GET(request: NextRequest) {
         ? `「${item.element_text.substring(0, 30)}${item.element_text.length > 30 ? '...' : ''}」`
         : item.element_tag || '要素'
       
-      const selector = item.selector || 
+      const selector = 
         (item.element_id ? `#${item.element_id}` : '') ||
         (item.element_class ? `.${item.element_class.split(' ')[0]}` : '') ||
         item.element_tag || ''
       
+      const sessions = Number(item.unique_sessions) || 0
+      const clicks = Number(item.clicks) || 0
+      const ctr = sessions > 0 ? ((clicks / sessions) * 100).toFixed(1) : '0'
+      
       return {
         element: elementName,
         selector: selector,
-        clicks: Number(item.clicks) || 0,
-        ctr: 0, // CTRは別途計算が必要
+        clicks: clicks,
+        ctr: parseFloat(ctr),
         change: '+0%', // 前期間比較は別途実装
         page: item.page || '/',
         device: item.device || 'desktop',
