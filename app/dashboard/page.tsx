@@ -58,6 +58,7 @@ export default function DashboardPage() {
   const [selectedSite, setSelectedSite] = useState<Site | null>(null)
   const [statistics, setStatistics] = useState<Statistics | null>(null)
   const [previousStatistics, setPreviousStatistics] = useState<Statistics | null>(null)
+  const [trafficSources, setTrafficSources] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [dateRange, setDateRange] = useState<'all' | '7days' | '30days' | '90days'>('all')
@@ -85,6 +86,61 @@ export default function DashboardPage() {
 
     fetchSites()
   }, [])
+
+  // 流入元情報を取得
+  useEffect(() => {
+    if (!selectedSite) {
+      setTrafficSources(null)
+      return
+    }
+
+    const fetchTrafficSources = async () => {
+      try {
+        // 期間の計算
+        let startDate: string | undefined = undefined
+        let endDate: string | undefined = undefined
+        
+        if (dateRange !== 'all') {
+          const end = new Date()
+          const start = new Date()
+          
+          switch (dateRange) {
+            case '7days':
+              start.setDate(start.getDate() - 7)
+              break
+            case '30days':
+              start.setDate(start.getDate() - 30)
+              break
+            case '90days':
+              start.setDate(start.getDate() - 90)
+              break
+          }
+          
+          startDate = start.toISOString().split('T')[0]
+          endDate = end.toISOString().split('T')[0]
+        }
+
+        const params = new URLSearchParams({
+          site_id: selectedSite.tracking_id,
+        })
+        
+        if (startDate) params.append('start_date', startDate)
+        if (endDate) params.append('end_date', endDate)
+
+        const response = await fetch(`/api/traffic-sources?${params.toString()}`)
+        if (!response.ok) {
+          throw new Error('Failed to fetch traffic sources')
+        }
+        const data = await response.json()
+        setTrafficSources(data.data || { referrers: [], utm_sources: [] })
+      } catch (err) {
+        console.error('Error fetching traffic sources:', err)
+        setTrafficSources({ referrers: [], utm_sources: [] })
+      }
+    }
+
+    fetchTrafficSources()
+  }, [selectedSite, dateRange])
 
   // 選択されたサイトの統計を取得
   useEffect(() => {
