@@ -1,25 +1,21 @@
-import { Metadata } from 'next'
+'use client'
+
 import Link from 'next/link'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Badge } from '../components/ui/badge'
-import { 
-  BarChart3, 
-  Brain, 
-  Zap, 
-  Shield, 
-  Globe, 
+import {
+  BarChart3,
+  Brain,
+  Zap,
+  Shield,
+  Globe,
   TrendingUp,
   Users,
   Target,
   Lightbulb,
   ArrowRight
 } from 'lucide-react'
-
-export const metadata: Metadata = {
-  title: 'UGOKI MAP - ヒートマップ＆クリック分析ツール',
-  description: 'AIによる自動診断と改善提案を行う次世代SEO特化型ヒートマップツール',
-}
 
 export default function HomePage() {
   return (
