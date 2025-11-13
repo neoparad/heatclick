@@ -341,6 +341,7 @@ export async function getHeatmapData(
       query += `
         GROUP BY click_x, click_y
         ORDER BY click_count DESC
+        LIMIT 10000
       `
       
       const result = await client.query({

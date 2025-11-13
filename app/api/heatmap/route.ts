@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getHeatmapData } from '@/lib/clickhouse'
 import { getHeatmapCache, setHeatmapCache } from '@/lib/redis'
 
+// Vercelのタイムアウトを60秒に設定（Pro/Enterpriseプランで有効）
+export const maxDuration = 60
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)

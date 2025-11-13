@@ -46,13 +46,19 @@ interface PageData {
 }
 
 interface HeatmapPoint {
-  click_x: number
-  click_y: number
+  click_x?: number
+  click_y?: number
+  scroll_y?: number
+  read_y?: number
   element_tag_name?: string
   element_id?: string
   element_class_name?: string
   count?: number
   click_count?: number
+  reach_rate?: number
+  intensity?: number
+  total_duration?: number
+  avg_duration?: number
 }
 
 export default function HeatmapPage() {
@@ -65,8 +71,13 @@ export default function HeatmapPage() {
   const [error, setError] = useState<string | null>(null)
   const [containerHeight, setContainerHeight] = useState(3000)
   const [dateRange, setDateRange] = useState<'all' | '7days' | '30days' | '90days'>('all')
+  const [heatmapType, setHeatmapType] = useState<'click' | 'scroll' | 'read'>('click')
+  const [displayMode, setDisplayMode] = useState<'iframe' | 'image'>('iframe')
+  const [iframeLoaded, setIframeLoaded] = useState(false)
+  const [imageError, setImageError] = useState(false)
   const heatmapContainerRef = useRef<HTMLDivElement>(null)
   const heatmapInstanceRef = useRef<any>(null)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
 
   // サイトリストを取得
   useEffect(() => {
@@ -169,6 +180,7 @@ export default function HeatmapPage() {
         const params = new URLSearchParams({
           site_id: selectedSite.tracking_id,
           page_url: selectedPageUrl,
+          heatmap_type: heatmapType,
         })
         
         if (startDate) params.append('start_date', startDate)
@@ -181,13 +193,20 @@ export default function HeatmapPage() {
           throw new Error(`Failed to fetch heatmap data: ${response.status} ${response.statusText}`)
         }
         const data = await response.json()
-        console.log('Heatmap data received:', data.data?.length || 0, 'points')
+        console.log('Heatmap data received:', data.data?.length || 0, 'points', 'type:', heatmapType)
         const heatmapPoints = data.data || []
         setHeatmapData(heatmapPoints)
 
         // ヒートマップデータから最大のY座標を取得して高さを設定
         if (heatmapPoints.length > 0) {
-          const maxY = Math.max(...heatmapPoints.map((p: HeatmapPoint) => p.click_y || 0))
+          let maxY = 0
+          if (heatmapType === 'click') {
+            maxY = Math.max(...heatmapPoints.map((p: HeatmapPoint) => p.click_y || 0))
+          } else if (heatmapType === 'scroll') {
+            maxY = Math.max(...heatmapPoints.map((p: HeatmapPoint) => p.scroll_y || 0))
+          } else if (heatmapType === 'read') {
+            maxY = Math.max(...heatmapPoints.map((p: HeatmapPoint) => p.read_y || 0))
+          }
           // 余裕を持って+500px、最低3000px
           const calculatedHeight = Math.max(maxY + 500, 3000)
           setContainerHeight(calculatedHeight)
@@ -203,7 +222,7 @@ export default function HeatmapPage() {
     }
 
     fetchHeatmap()
-  }, [selectedSite, selectedPageUrl, dateRange])
+  }, [selectedSite, selectedPageUrl, dateRange, heatmapType])
 
   // ヒートマップを描画
   useEffect(() => {
@@ -247,21 +266,54 @@ export default function HeatmapPage() {
           blur: 0.75,
         })
 
-        // データポイントを変換（有効な座標のみ）
-        const points = heatmapData
-          .filter(point => 
-            typeof point.click_x === 'number' && 
-            typeof point.click_y === 'number' &&
-            !isNaN(point.click_x) && 
-            !isNaN(point.click_y) &&
-            point.click_x >= 0 && 
-            point.click_y >= 0
-          )
-          .map(point => ({
-            x: Math.round(point.click_x),
-            y: Math.round(point.click_y),
-            value: point.count || point.click_count || 1,
-          }))
+        // データポイントを変換（ヒートマップタイプに応じて）
+        let points: Array<{ x: number; y: number; value: number }> = []
+        
+        if (heatmapType === 'click') {
+          // クリックヒートマップ
+          points = heatmapData
+            .filter(point => 
+              typeof point.click_x === 'number' && 
+              typeof point.click_y === 'number' &&
+              !isNaN(point.click_x) && 
+              !isNaN(point.click_y) &&
+              point.click_x >= 0 && 
+              point.click_y >= 0
+            )
+            .map(point => ({
+              x: Math.round(point.click_x || 0),
+              y: Math.round(point.click_y || 0),
+              value: point.count || point.click_count || 1,
+            }))
+        } else if (heatmapType === 'scroll') {
+          // スクロール深度ヒートマップ（Y座標ごとの到達率）
+          points = heatmapData
+            .filter(point => 
+              typeof point.scroll_y === 'number' &&
+              !isNaN(point.scroll_y) &&
+              point.scroll_y >= 0 &&
+              typeof point.reach_rate === 'number'
+            )
+            .map(point => ({
+              x: Math.round(window.innerWidth / 2), // 中央に配置
+              y: Math.round(point.scroll_y || 0),
+              value: point.reach_rate || 0, // 到達率を値として使用
+            }))
+        } else if (heatmapType === 'read') {
+          // 熟読エリアヒートマップ（Y座標ごとの滞在時間）
+          points = heatmapData
+            .filter(point => 
+              typeof point.read_y === 'number' &&
+              !isNaN(point.read_y) &&
+              point.read_y >= 0 &&
+              typeof point.intensity === 'number'
+            )
+            .map(point => ({
+              x: Math.round(window.innerWidth / 2), // 中央に配置
+              y: Math.round(point.read_y || 0),
+              value: (point.intensity || 0) * 100, // intensityを0-100の範囲に変換
+            }))
+        }
 
         if (points.length === 0) {
           console.warn('No valid heatmap points to display')
@@ -294,7 +346,72 @@ export default function HeatmapPage() {
         heatmapInstanceRef.current = null
       }
     }
-  }, [heatmapData])
+  }, [heatmapData, heatmapType])
+
+  // iframeのスクロール位置を監視してヒートマップの位置を同期（iframeモードのみ）
+  useEffect(() => {
+    if (displayMode !== 'iframe' || !iframeRef.current || !heatmapContainerRef.current) return
+
+    const iframe = iframeRef.current
+    const heatmapContainer = heatmapContainerRef.current
+
+    const handleScroll = () => {
+      try {
+        // iframe内のスクロール位置を取得
+        const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document
+        if (!iframeDoc) return
+
+        const scrollY = iframeDoc.documentElement.scrollTop || iframeDoc.body.scrollTop || 0
+        const scrollX = iframeDoc.documentElement.scrollLeft || iframeDoc.body.scrollLeft || 0
+
+        // ヒートマップのキャンバスをスクロール位置に合わせて移動
+        const canvas = heatmapContainer.querySelector('canvas')
+        if (canvas) {
+          canvas.style.transform = `translate(${-scrollX}px, ${-scrollY}px)`
+        }
+      } catch (error) {
+        // CORSエラーの場合は無視（異なるオリジンのiframeの場合）
+        console.warn('Cannot access iframe content due to CORS:', error)
+      }
+    }
+
+    // iframeの読み込み完了を待つ
+    const handleIframeLoad = () => {
+      try {
+        const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document
+        if (!iframeDoc) return
+
+        // iframe内のスクロールイベントを監視
+        iframeDoc.addEventListener('scroll', handleScroll, { passive: true })
+        iframe.contentWindow?.addEventListener('scroll', handleScroll, { passive: true })
+        
+        // 初期位置を設定
+        handleScroll()
+      } catch (error) {
+        console.warn('Cannot access iframe content due to CORS:', error)
+      }
+    }
+
+    iframe.addEventListener('load', handleIframeLoad)
+    
+    // 既に読み込み済みの場合
+    if (iframe.contentDocument?.readyState === 'complete') {
+      handleIframeLoad()
+    }
+
+    return () => {
+      iframe.removeEventListener('load', handleIframeLoad)
+      try {
+        const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document
+        if (iframeDoc) {
+          iframeDoc.removeEventListener('scroll', handleScroll)
+          iframe.contentWindow?.removeEventListener('scroll', handleScroll)
+        }
+      } catch (error) {
+        // CORSエラーは無視
+      }
+    }
+  }, [selectedPageUrl, heatmapData, displayMode])
 
   if (loading) {
     return (
@@ -465,13 +582,48 @@ export default function HeatmapPage() {
         {sites.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>
-              <MousePointer className="w-5 h-5 inline mr-2" />
-              クリックヒートマップ
-            </CardTitle>
-            <CardDescription>
-              {selectedPageUrl || 'ページを選択してください'}
-            </CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>
+                  {heatmapType === 'click' && <MousePointer className="w-5 h-5 inline mr-2" />}
+                  {heatmapType === 'scroll' && <ScrollText className="w-5 h-5 inline mr-2" />}
+                  {heatmapType === 'read' && <Eye className="w-5 h-5 inline mr-2" />}
+                  {heatmapType === 'click' && 'クリックヒートマップ'}
+                  {heatmapType === 'scroll' && 'スクロール深度ヒートマップ'}
+                  {heatmapType === 'read' && '熟読エリアヒートマップ'}
+                </CardTitle>
+                <CardDescription>
+                  {selectedPageUrl || 'ページを選択してください'}
+                </CardDescription>
+              </div>
+              {/* ヒートマップタイプの切り替え */}
+              <div className="flex gap-2">
+                <Button
+                  variant={heatmapType === 'click' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setHeatmapType('click')}
+                >
+                  <MousePointer className="w-4 h-4 mr-2" />
+                  クリック
+                </Button>
+                <Button
+                  variant={heatmapType === 'scroll' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setHeatmapType('scroll')}
+                >
+                  <ScrollText className="w-4 h-4 mr-2" />
+                  スクロール
+                </Button>
+                <Button
+                  variant={heatmapType === 'read' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setHeatmapType('read')}
+                >
+                  <Eye className="w-4 h-4 mr-2" />
+                  熟読
+                </Button>
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
             {!selectedPageUrl ? (
@@ -518,76 +670,198 @@ export default function HeatmapPage() {
               </div>
             ) : (
               <div className="space-y-4">
+                {/* 統計情報 */}
                 <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                  <h4 className="font-semibold mb-2">クリックポイント統計</h4>
-                  <div className="text-sm text-gray-600">
-                    総クリック数: {heatmapData.reduce((sum, point) => sum + (point.count || point.click_count || 0), 0).toLocaleString()}
-                  </div>
-                  <div className="text-sm text-gray-600">
-                    クリックポイント数: {heatmapData.length.toLocaleString()}
-                  </div>
+                  <h4 className="font-semibold mb-2">
+                    {heatmapType === 'click' && 'クリックポイント統計'}
+                    {heatmapType === 'scroll' && 'スクロール深度統計'}
+                    {heatmapType === 'read' && '熟読エリア統計'}
+                  </h4>
+                  {heatmapType === 'click' && (
+                    <>
+                      <div className="text-sm text-gray-600">
+                        総クリック数: {heatmapData.reduce((sum, point) => sum + (point.count || point.click_count || 0), 0).toLocaleString()}
+                      </div>
+                      <div className="text-sm text-gray-600">
+                        クリックポイント数: {heatmapData.length.toLocaleString()}
+                      </div>
+                    </>
+                  )}
+                  {heatmapType === 'scroll' && (
+                    <>
+                      <div className="text-sm text-gray-600">
+                        データポイント数: {heatmapData.length.toLocaleString()}
+                      </div>
+                      <div className="text-sm text-gray-600">
+                        平均到達率: {heatmapData.length > 0 
+                          ? (heatmapData.reduce((sum, point) => sum + (point.reach_rate || 0), 0) / heatmapData.length).toFixed(1)
+                          : '0'}%
+                      </div>
+                    </>
+                  )}
+                  {heatmapType === 'read' && (
+                    <>
+                      <div className="text-sm text-gray-600">
+                        熟読エリア数: {heatmapData.length.toLocaleString()}
+                      </div>
+                      <div className="text-sm text-gray-600">
+                        総滞在時間: {heatmapData.reduce((sum, point) => sum + (point.total_duration || 0), 0).toLocaleString()}ms
+                      </div>
+                      <div className="text-sm text-gray-600">
+                        平均滞在時間: {heatmapData.length > 0 
+                          ? (heatmapData.reduce((sum, point) => sum + (point.avg_duration || 0), 0) / heatmapData.length).toFixed(0)
+                          : '0'}ms
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 {/* ヒートマップビジュアライゼーション */}
                 <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
                   <div className="p-4 border-b border-gray-200">
                     <h4 className="font-semibold flex items-center">
-                      <Eye className="w-4 h-4 mr-2" />
-                      クリックヒートマップ
+                      {heatmapType === 'click' && <MousePointer className="w-4 h-4 mr-2" />}
+                      {heatmapType === 'scroll' && <ScrollText className="w-4 h-4 mr-2" />}
+                      {heatmapType === 'read' && <Eye className="w-4 h-4 mr-2" />}
+                      {heatmapType === 'click' && 'クリックヒートマップ'}
+                      {heatmapType === 'scroll' && 'スクロール深度ヒートマップ'}
+                      {heatmapType === 'read' && '熟読エリアヒートマップ'}
                     </h4>
                     <p className="text-sm text-gray-600 mt-1">
-                      赤い領域ほどクリックが集中しています
+                      {heatmapType === 'click' && '赤い領域ほどクリックが集中しています'}
+                      {heatmapType === 'scroll' && '赤い領域ほど多くのユーザーが到達しています（ページ上部=赤、下部=青）'}
+                      {heatmapType === 'read' && '赤い領域ほど長時間滞在されています'}
                     </p>
                   </div>
-                  <div className="relative bg-white" style={{ width: '100%', height: `${containerHeight}px` }}>
-                    {/* 実際のページをiframeで表示 */}
-                    <iframe
-                      src={selectedPageUrl}
-                      className="absolute inset-0 w-full h-full border-0"
-                      title="Page Preview"
-                      sandbox="allow-same-origin allow-scripts"
-                    />
+                  <div className="relative bg-white" style={{ width: '100%', height: `${containerHeight}px`, overflow: 'hidden' }}>
+                    {/* 表示モードの切り替えボタン */}
+                    <div className="absolute top-2 right-2 z-10 flex gap-2">
+                      <Button
+                        variant={displayMode === 'iframe' ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => {
+                          setDisplayMode('iframe')
+                          setImageError(false)
+                        }}
+                        className="bg-white/90 backdrop-blur-sm"
+                      >
+                        <Eye className="w-4 h-4 mr-1" />
+                        iframe
+                      </Button>
+                      <Button
+                        variant={displayMode === 'image' ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => {
+                          setDisplayMode('image')
+                          setIframeLoaded(false)
+                        }}
+                        className="bg-white/90 backdrop-blur-sm"
+                      >
+                        <Map className="w-4 h-4 mr-1" />
+                        画像
+                      </Button>
+                    </div>
+
+                    {/* iframe表示モード */}
+                    {displayMode === 'iframe' && (
+                      <>
+                        {!iframeLoaded && (
+                          <div className="absolute inset-0 bg-gray-100 flex items-center justify-center z-0">
+                            <div className="text-center text-gray-500">
+                              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-2"></div>
+                              <p className="text-sm">ページを読み込み中...</p>
+                            </div>
+                          </div>
+                        )}
+                        <iframe
+                          ref={iframeRef}
+                          src={selectedPageUrl}
+                          className="absolute inset-0 w-full h-full border-0"
+                          title="Page Preview"
+                          sandbox="allow-same-origin allow-scripts"
+                          style={{ overflow: 'auto' }}
+                          loading="lazy"
+                          onLoad={() => setIframeLoaded(true)}
+                        />
+                      </>
+                    )}
+
+                    {/* 画像表示モード（スクリーンショットAPIを使用） */}
+                    {displayMode === 'image' && (
+                      <>
+                        {imageError ? (
+                          <div className="absolute inset-0 bg-gray-100 flex items-center justify-center z-0">
+                            <div className="text-center text-gray-500">
+                              <Map className="h-12 w-12 mx-auto mb-2 text-gray-400" />
+                              <p className="text-sm">画像の読み込みに失敗しました</p>
+                              <p className="text-xs mt-1">iframe表示に切り替えてください</p>
+                            </div>
+                          </div>
+                        ) : (
+                          <img
+                            src={`/api/screenshot?url=${encodeURIComponent(selectedPageUrl)}`}
+                            alt="Page Preview"
+                            className="absolute inset-0 w-full h-full object-contain"
+                            style={{ objectPosition: 'top' }}
+                            onError={() => {
+                              setImageError(true)
+                              console.warn('Screenshot API failed, falling back to iframe')
+                            }}
+                            loading="lazy"
+                          />
+                        )}
+                      </>
+                    )}
+
                     {/* ヒートマップをオーバーレイ */}
                     <div
                       ref={heatmapContainerRef}
                       className="absolute inset-0 pointer-events-none"
-                      style={{ width: '100%', height: '100%' }}
+                      style={{ 
+                        width: '100%', 
+                        height: '100%',
+                        overflow: 'hidden',
+                        zIndex: 1
+                      }}
                     />
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <h4 className="font-semibold">トップクリック要素</h4>
+                {/* トップ要素リスト（クリックヒートマップのみ） */}
+                {heatmapType === 'click' && (
                   <div className="space-y-2">
-                    {heatmapData
-                      .sort((a, b) => (b.count || b.click_count || 0) - (a.count || a.click_count || 0))
-                      .slice(0, 10)
-                      .map((point, index) => {
-                        const clickCount = point.count || point.click_count || 0
-                        return (
-                          <div
-                            key={index}
-                            className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
-                          >
-                            <div className="flex-1">
-                              <div className="font-medium">
-                                {point.element_tag_name || 'unknown'}
-                                {point.element_id && ` #${point.element_id}`}
-                                {point.element_class_name && ` .${point.element_class_name}`}
+                    <h4 className="font-semibold">トップクリック要素</h4>
+                    <div className="space-y-2">
+                      {heatmapData
+                        .sort((a, b) => (b.count || b.click_count || 0) - (a.count || a.click_count || 0))
+                        .slice(0, 10)
+                        .map((point, index) => {
+                          const clickCount = point.count || point.click_count || 0
+                          return (
+                            <div
+                              key={index}
+                              className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
+                            >
+                              <div className="flex-1">
+                                <div className="font-medium">
+                                  {point.element_tag_name || 'unknown'}
+                                  {point.element_id && ` #${point.element_id}`}
+                                  {point.element_class_name && ` .${point.element_class_name}`}
+                                </div>
+                                <div className="text-sm text-gray-600">
+                                  位置: ({point.click_x}, {point.click_y})
+                                </div>
                               </div>
-                              <div className="text-sm text-gray-600">
-                                位置: ({point.click_x}, {point.click_y})
+                              <div className="text-right">
+                                <div className="font-bold text-blue-600">{clickCount.toLocaleString()}</div>
+                                <div className="text-sm text-gray-500">クリック</div>
                               </div>
                             </div>
-                            <div className="text-right">
-                              <div className="font-bold text-blue-600">{clickCount.toLocaleString()}</div>
-                              <div className="text-sm text-gray-500">クリック</div>
-                            </div>
-                          </div>
-                        )
-                      })}
+                          )
+                        })}
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             )}
           </CardContent>
