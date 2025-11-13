@@ -720,6 +720,84 @@ export default function DashboardPage() {
             </div>
           </div>
         )}
+
+        {/* 流入元情報 */}
+        {trafficSources && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* リファラー別統計 */}
+            <div className="bg-white rounded-lg border border-gray-200 p-6">
+              <h3 className="text-lg font-semibold mb-4 flex items-center">
+                <Globe className="w-5 h-5 mr-2" />
+                流入元（リファラー）
+              </h3>
+              {trafficSources.referrers && trafficSources.referrers.length > 0 ? (
+                <div className="space-y-3">
+                  {trafficSources.referrers.slice(0, 10).map((ref: any, index: number) => (
+                    <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-sm text-gray-900 truncate">
+                          {ref.referrer === 'direct' || ref.referrer === '(direct)' ? '直接アクセス' : ref.referrer}
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          {Number(ref.sessions || 0).toLocaleString()} セッション · {Number(ref.page_views || 0).toLocaleString()} PV
+                        </div>
+                      </div>
+                      <div className="ml-4 flex-shrink-0">
+                        <div className="text-right">
+                          <div className="text-sm font-bold text-blue-600">
+                            {((Number(ref.sessions || 0) / trafficSources.referrers.reduce((sum: number, r: any) => sum + Number(r.sessions || 0), 0)) * 100).toFixed(1)}%
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8 text-gray-500">
+                  リファラーデータがありません
+                </div>
+              )}
+            </div>
+
+            {/* UTMソース別統計 */}
+            <div className="bg-white rounded-lg border border-gray-200 p-6">
+              <h3 className="text-lg font-semibold mb-4 flex items-center">
+                <BarChart3 className="w-5 h-5 mr-2" />
+                流入チャネル（UTMソース）
+              </h3>
+              {trafficSources.utm_sources && trafficSources.utm_sources.length > 0 ? (
+                <div className="space-y-3">
+                  {trafficSources.utm_sources.slice(0, 10).map((utm: any, index: number) => (
+                    <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-sm text-gray-900 truncate">
+                          {utm.utm_source === 'direct' || utm.utm_source === '(not set)' ? '直接アクセス' : utm.utm_source}
+                          {utm.utm_medium && utm.utm_medium !== '(not set)' && (
+                            <span className="text-xs text-gray-500 ml-2">/ {utm.utm_medium}</span>
+                          )}
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          {Number(utm.sessions || 0).toLocaleString()} セッション · {Number(utm.page_views || 0).toLocaleString()} PV
+                        </div>
+                      </div>
+                      <div className="ml-4 flex-shrink-0">
+                        <div className="text-right">
+                          <div className="text-sm font-bold text-green-600">
+                            {((Number(utm.sessions || 0) / trafficSources.utm_sources.reduce((sum: number, u: any) => sum + Number(u.sessions || 0), 0)) * 100).toFixed(1)}%
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8 text-gray-500">
+                  UTMソースデータがありません
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </DashboardLayout>
   )

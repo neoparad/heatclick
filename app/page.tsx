@@ -29,7 +29,19 @@ export default function HomePage() {
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
             <Link href="/" className="flex items-center space-x-2 hover:opacity-80 transition-opacity">
-              <div className="h-8 w-8 rounded-lg bg-gradient-to-r from-blue-600 to-purple-600"></div>
+              <img 
+                src="/ugokimap.png" 
+                alt="UGOKI MAP" 
+                className="h-8 w-auto"
+                onError={(e) => {
+                  // ロゴ画像が読み込めない場合のフォールバック
+                  const target = e.target as HTMLImageElement
+                  target.style.display = 'none'
+                  const fallback = target.nextElementSibling as HTMLElement
+                  if (fallback) fallback.style.display = 'block'
+                }}
+              />
+              <div className="h-8 w-8 rounded-lg bg-gradient-to-r from-blue-600 to-purple-600" style={{ display: 'none' }}></div>
               <span className="text-xl font-bold text-gray-900">UGOKI MAP</span>
             </Link>
             <nav className="hidden md:flex items-center space-x-6">
