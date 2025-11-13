@@ -240,11 +240,22 @@
     });
   };
 
+  // スクロール深度トラッキング用の変数
+  let lastScrollDepth = 0;
+  let maxScrollDepth = 0;
+
+  // 熟読エリアトラッキング用の変数
+  let scrollStopTimer = null;
+  let readingStartTime = null;
+  let readingY = null;
+  let isPageVisible = true;
+
   // Event Trackers
   const trackers = {
     click: (e) => {
       const element = e.target;
       const rect = element.getBoundingClientRect();
+      const scrollY = window.scrollY || window.pageYOffset;
 
       queueEvent({
         event_type: 'click',
@@ -255,23 +266,62 @@
         element_href: element.href || element.closest('a')?.href || '',
         element_path: utils.getElementPath(element),
         click_x: Math.round(e.clientX),
-        click_y: Math.round(e.clientY + window.scrollY),
+        click_y: Math.round(e.clientY + scrollY), // ページ全体に対する絶対位置
         element_x: Math.round(rect.left),
-        element_y: Math.round(rect.top + window.scrollY),
+        element_y: Math.round(rect.top + scrollY),
       });
     },
 
     scroll: utils.throttle(() => {
       const scrollY = window.scrollY || window.pageYOffset;
-      const documentHeight = document.documentElement.scrollHeight - window.innerHeight;
-      const scrollPercentage = Math.round((scrollY / documentHeight) * 100);
+      const documentHeight = document.documentElement.scrollHeight;
+      const maxScroll = documentHeight - window.innerHeight;
+      const scrollPercentage = maxScroll > 0 ? Math.round((scrollY / maxScroll) * 100) : 0;
+
+      // 最深到達地点を更新
+      if (scrollPercentage > maxScrollDepth) {
+        maxScrollDepth = scrollPercentage;
+      }
+      lastScrollDepth = scrollPercentage;
 
       queueEvent({
         event_type: 'scroll',
         scroll_y: Math.round(scrollY),
         scroll_percentage: Math.min(100, Math.max(0, scrollPercentage)),
       });
-    }, 1000),
+
+      // 熟読エリアのトラッキング: スクロール停止を検出
+      if (scrollStopTimer) {
+        clearTimeout(scrollStopTimer);
+      }
+
+      // 既存の熟読セッションを終了
+      if (readingStartTime && readingY !== null) {
+        const readingDuration = Date.now() - readingStartTime;
+        if (readingDuration >= 500) {
+          // 500ms以上滞在していた場合のみ送信
+          const viewportCenter = scrollY + (window.innerHeight / 2);
+          const readingAreaY = Math.round(viewportCenter);
+
+          queueEvent({
+            event_type: 'read_area',
+            read_y: readingAreaY,
+            read_duration: readingDuration,
+          });
+        }
+        readingStartTime = null;
+        readingY = null;
+      }
+
+      // 新しいスクロール停止タイマーを設定
+      scrollStopTimer = setTimeout(() => {
+        if (isPageVisible) {
+          const viewportCenter = scrollY + (window.innerHeight / 2);
+          readingY = Math.round(viewportCenter);
+          readingStartTime = Date.now();
+        }
+      }, 500); // 500ms停止で熟読判定
+    }, 200), // 200ms間隔でスクロール深度を取得
 
     pageview: () => {
       queueEvent({
@@ -281,6 +331,27 @@
     },
 
     pageleave: () => {
+      // ページ離脱時に最終深度を送信
+      if (maxScrollDepth > 0) {
+        queueEvent({
+          event_type: 'scroll_depth',
+          scroll_percentage: maxScrollDepth,
+          is_final: true,
+        });
+      }
+
+      // 熟読エリアの最終送信
+      if (readingStartTime && readingY !== null) {
+        const readingDuration = Date.now() - readingStartTime;
+        if (readingDuration >= 500) {
+          queueEvent({
+            event_type: 'read_area',
+            read_y: readingY,
+            read_duration: readingDuration,
+          });
+        }
+      }
+
       // Send remaining events before page unload
       sendBatch();
     },
@@ -332,7 +403,26 @@
 
     // Send batch on visibility change (tab switch)
     document.addEventListener('visibilitychange', () => {
+      isPageVisible = !document.hidden;
+      
       if (document.hidden) {
+        // タブが非アクティブになった場合、熟読計測を停止
+        if (readingStartTime && readingY !== null) {
+          const readingDuration = Date.now() - readingStartTime;
+          if (readingDuration >= 500) {
+            queueEvent({
+              event_type: 'read_area',
+              read_y: readingY,
+              read_duration: readingDuration,
+            });
+          }
+          readingStartTime = null;
+          readingY = null;
+        }
+        if (scrollStopTimer) {
+          clearTimeout(scrollStopTimer);
+          scrollStopTimer = null;
+        }
         sendBatch();
       }
     });

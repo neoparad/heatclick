@@ -103,11 +103,14 @@ const CACHE_TTL = {
 export async function getHeatmapCache(
   siteId: string,
   pageUrl: string,
-  deviceType?: string
+  deviceType?: string,
+  startDate?: string,
+  endDate?: string
 ): Promise<any[] | null> {
   try {
     const client = getRedisClient()
-    const key = `heatmap:${siteId}:${pageUrl}${deviceType ? `:${deviceType}` : ''}`
+    // 期間を含めたキャッシュキーに変更
+    const key = `heatmap:${siteId}:${pageUrl}:${deviceType || 'all'}:${startDate || 'all'}:${endDate || 'all'}`
     const cached = await client.get(key)
     return cached ? JSON.parse(cached) : null
   } catch (error) {
@@ -121,10 +124,13 @@ export async function setHeatmapCache(
   pageUrl: string,
   data: any[],
   deviceType?: string,
+  startDate?: string,
+  endDate?: string,
   ttl: number = CACHE_TTL.HEATMAP
 ): Promise<void> {
   try {
-    const key = `heatmap:${siteId}:${pageUrl}${deviceType ? `:${deviceType}` : ''}`
+    // 期間を含めたキャッシュキーに変更
+    const key = `heatmap:${siteId}:${pageUrl}:${deviceType || 'all'}:${startDate || 'all'}:${endDate || 'all'}`
     const client = getRedisClient()
     await client.setex(key, ttl, JSON.stringify(data))
   } catch (error) {

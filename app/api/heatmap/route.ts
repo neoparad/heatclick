@@ -10,6 +10,7 @@ export async function GET(request: NextRequest) {
     const deviceType = searchParams.get('device_type')
     const startDate = searchParams.get('start_date')
     const endDate = searchParams.get('end_date')
+    const heatmapType = (searchParams.get('heatmap_type') || 'click') as 'click' | 'scroll' | 'read'
     
     if (!siteId || !pageUrl) {
       return NextResponse.json(
@@ -18,34 +19,45 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // キャッシュキーの生成
-    const cacheKey = `${siteId}:${pageUrl}:${deviceType || 'all'}:${startDate || 'all'}:${endDate || 'all'}`
-    
-    // キャッシュから取得を試みる
+    // キャッシュから取得を試みる（期間を含めたキャッシュキーを使用）
     let cached = false
     let heatmapData: any[] = []
 
     try {
-      heatmapData = await getHeatmapCache(siteId, pageUrl, deviceType || undefined) || []
+      heatmapData = await getHeatmapCache(
+        siteId, 
+        pageUrl, 
+        deviceType || undefined,
+        startDate || undefined,
+        endDate || undefined
+      ) || []
     } catch (error) {
       console.error('Redis cache error:', error)
     }
 
     if (!heatmapData || heatmapData.length === 0) {
       try {
-        // ClickHouseからデータを取得
+        // ClickHouseからデータを取得（ヒートマップタイプを指定）
         heatmapData = await getHeatmapData(
           siteId,
           pageUrl,
           deviceType || undefined,
           startDate || undefined,
-          endDate || undefined
+          endDate || undefined,
+          heatmapType
         )
 
-        // キャッシュに保存
+        // キャッシュに保存（期間を含めたキャッシュキーを使用）
         if (heatmapData && heatmapData.length > 0) {
           try {
-            await setHeatmapCache(siteId, pageUrl, heatmapData, deviceType || undefined)
+            await setHeatmapCache(
+              siteId, 
+              pageUrl, 
+              heatmapData, 
+              deviceType || undefined,
+              startDate || undefined,
+              endDate || undefined
+            )
           } catch (cacheError) {
             console.error('Failed to cache heatmap data:', cacheError)
           }
@@ -63,7 +75,8 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       success: true,
       data: heatmapData || [],
-      cached
+      cached,
+      heatmap_type: heatmapType
     })
 
   } catch (error) {

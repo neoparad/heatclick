@@ -27,7 +27,8 @@ import {
 interface Site {
   id: string
   name: string
-  domain: string
+  url: string  // APIはurlを返す
+  domain?: string  // 後方互換性のため残す
   tracking_id: string
   created_at: string
 }
@@ -56,6 +57,7 @@ export default function DashboardPage() {
   const [sites, setSites] = useState<Site[]>([])
   const [selectedSite, setSelectedSite] = useState<Site | null>(null)
   const [statistics, setStatistics] = useState<Statistics | null>(null)
+  const [previousStatistics, setPreviousStatistics] = useState<Statistics | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [dateRange, setDateRange] = useState<'all' | '7days' | '30days' | '90days'>('all')
@@ -97,27 +99,43 @@ export default function DashboardPage() {
         // 期間の計算
         let startDate: string | undefined = undefined
         let endDate: string | undefined = undefined
+        let prevStartDate: string | undefined = undefined
+        let prevEndDate: string | undefined = undefined
         
         if (dateRange !== 'all') {
           const end = new Date()
           const start = new Date()
+          let days = 0
           
           switch (dateRange) {
             case '7days':
+              days = 7
               start.setDate(start.getDate() - 7)
               break
             case '30days':
+              days = 30
               start.setDate(start.getDate() - 30)
               break
             case '90days':
+              days = 90
               start.setDate(start.getDate() - 90)
               break
           }
           
           startDate = start.toISOString().split('T')[0]
           endDate = end.toISOString().split('T')[0]
+          
+          // 前期間の計算（同じ日数分、前の期間）
+          const prevEnd = new Date(start)
+          prevEnd.setDate(prevEnd.getDate() - 1) // 現在期間の1日前まで
+          const prevStart = new Date(prevEnd)
+          prevStart.setDate(prevStart.getDate() - days + 1) // 同じ日数分前
+          
+          prevStartDate = prevStart.toISOString().split('T')[0]
+          prevEndDate = prevEnd.toISOString().split('T')[0]
         }
         
+        // 現在期間の統計を取得
         const params = new URLSearchParams({
           site_id: selectedSite.tracking_id,
         })
@@ -131,10 +149,30 @@ export default function DashboardPage() {
         }
         const data = await response.json()
         setStatistics(data.data || null)
+        
+        // 前期間の統計を取得（期間選択時のみ）
+        if (dateRange !== 'all' && prevStartDate && prevEndDate) {
+          const prevParams = new URLSearchParams({
+            site_id: selectedSite.tracking_id,
+            start_date: prevStartDate,
+            end_date: prevEndDate,
+          })
+          
+          const prevResponse = await fetch(`/api/statistics?${prevParams.toString()}`)
+          if (prevResponse.ok) {
+            const prevData = await prevResponse.json()
+            setPreviousStatistics(prevData.data || null)
+          } else {
+            setPreviousStatistics(null)
+          }
+        } else {
+          setPreviousStatistics(null)
+        }
       } catch (err) {
         console.error('Error fetching statistics:', err)
         setError('統計情報の取得に失敗しました')
         setStatistics(null)
+        setPreviousStatistics(null)
       }
     }
 
@@ -177,19 +215,64 @@ export default function DashboardPage() {
     return `${formatDate(firstDate)} ～ ${formatDate(lastDate)}`
   }
 
-  // KPIデータを計算
+  // 増減率を計算する関数
+  const calculateChange = (current: number, previous: number): { value: string; isPositive: boolean } => {
+    if (!previous || previous === 0) {
+      return { value: 'N/A', isPositive: false }
+    }
+    const change = ((current - previous) / previous) * 100
+    const isPositive = change >= 0
+    return {
+      value: `${isPositive ? '+' : ''}${change.toFixed(1)}%`,
+      isPositive
+    }
+  }
+
+  // KPIデータを計算（前期間との比較を含む）
   const kpiData = statistics ? {
     totalClicks: Number(statistics.clicks) || 0,
     pageViews: Number(statistics.page_views) || 0,
-    // クリック率: 総クリック数 / ユニークセッション数 * 100（セッションあたりの平均クリック数）
     clickRate: statistics.unique_sessions > 0 
       ? ((Number(statistics.clicks) / Number(statistics.unique_sessions)) * 100).toFixed(1) 
       : '0',
     avgTimeOnPage: Number(statistics.avg_time_on_page) || 0,
     bounceRate: Number(statistics.bounce_rate) || 0,
     uniqueSessions: Number(statistics.unique_sessions) || 0,
-    // 平均スクロール深度: 0-100%の範囲で表示
     avgScrollDepth: Math.min(100, Math.max(0, Number(statistics.avg_scroll_depth) || 0)).toFixed(1),
+    totalEvents: Number(statistics.total_events) || 0,
+    // 前期間との比較
+    clicksChange: previousStatistics 
+      ? calculateChange(Number(statistics.clicks) || 0, Number(previousStatistics.clicks) || 0)
+      : null,
+    pageViewsChange: previousStatistics 
+      ? calculateChange(Number(statistics.page_views) || 0, Number(previousStatistics.page_views) || 0)
+      : null,
+    sessionsChange: previousStatistics 
+      ? calculateChange(Number(statistics.unique_sessions) || 0, Number(previousStatistics.unique_sessions) || 0)
+      : null,
+    clickRateChange: previousStatistics && previousStatistics.unique_sessions > 0
+      ? calculateChange(
+          parseFloat(statistics.unique_sessions > 0 
+            ? ((Number(statistics.clicks) / Number(statistics.unique_sessions)) * 100).toFixed(1) 
+            : '0'),
+          parseFloat(((Number(previousStatistics.clicks) / Number(previousStatistics.unique_sessions)) * 100).toFixed(1))
+        )
+      : null,
+    avgTimeOnPageChange: previousStatistics 
+      ? calculateChange(Number(statistics.avg_time_on_page) || 0, Number(previousStatistics.avg_time_on_page) || 0)
+      : null,
+    bounceRateChange: previousStatistics 
+      ? calculateChange(Number(statistics.bounce_rate) || 0, Number(previousStatistics.bounce_rate) || 0)
+      : null,
+    avgScrollDepthChange: previousStatistics 
+      ? calculateChange(
+          parseFloat(Math.min(100, Math.max(0, Number(statistics.avg_scroll_depth) || 0)).toFixed(1)),
+          parseFloat(Math.min(100, Math.max(0, Number(previousStatistics.avg_scroll_depth) || 0)).toFixed(1))
+        )
+      : null,
+    totalEventsChange: previousStatistics 
+      ? calculateChange(Number(statistics.total_events) || 0, Number(previousStatistics.total_events) || 0)
+      : null,
   } : {
     totalClicks: 0,
     pageViews: 0,
@@ -198,6 +281,15 @@ export default function DashboardPage() {
     bounceRate: 0,
     uniqueSessions: 0,
     avgScrollDepth: '0',
+    totalEvents: 0,
+    clicksChange: null,
+    pageViewsChange: null,
+    sessionsChange: null,
+    clickRateChange: null,
+    avgTimeOnPageChange: null,
+    bounceRateChange: null,
+    avgScrollDepthChange: null,
+    totalEventsChange: null,
   }
 
   if (loading) {
@@ -246,7 +338,7 @@ export default function DashboardPage() {
               >
                 {sites.map((site) => (
                   <option key={site.id} value={site.id}>
-                    {site.name} ({site.domain})
+                    {site.name} ({site.url || site.domain || 'N/A'})
                   </option>
                 ))}
               </select>
@@ -290,7 +382,20 @@ export default function DashboardPage() {
             </div>
             <div className="text-3xl font-bold mb-2">{kpiData.pageViews.toLocaleString()}</div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">アクセス数（ページビュー）</span>
+              {kpiData.pageViewsChange && (
+                <div className={`flex items-center gap-1 ${kpiData.pageViewsChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                  {kpiData.pageViewsChange.isPositive ? (
+                    <TrendingUp className="w-4 h-4" />
+                  ) : (
+                    <TrendingDown className="w-4 h-4" />
+                  )}
+                  <span className="font-medium">{kpiData.pageViewsChange.value}</span>
+                  <span className="text-gray-500">vs 前期間</span>
+                </div>
+              )}
+              {!kpiData.pageViewsChange && (
+                <span className="text-gray-500">アクセス数（ページビュー）</span>
+              )}
             </div>
           </div>
 
@@ -301,7 +406,20 @@ export default function DashboardPage() {
             </div>
             <div className="text-3xl font-bold mb-2">{kpiData.uniqueSessions.toLocaleString()}</div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">ユニークセッション数</span>
+              {kpiData.sessionsChange && (
+                <div className={`flex items-center gap-1 ${kpiData.sessionsChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                  {kpiData.sessionsChange.isPositive ? (
+                    <TrendingUp className="w-4 h-4" />
+                  ) : (
+                    <TrendingDown className="w-4 h-4" />
+                  )}
+                  <span className="font-medium">{kpiData.sessionsChange.value}</span>
+                  <span className="text-gray-500">vs 前期間</span>
+                </div>
+              )}
+              {!kpiData.sessionsChange && (
+                <span className="text-gray-500">ユニークセッション数</span>
+              )}
             </div>
           </div>
 
@@ -312,7 +430,20 @@ export default function DashboardPage() {
             </div>
             <div className="text-3xl font-bold mb-2">{kpiData.totalClicks.toLocaleString()}</div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">全クリックイベントの合計</span>
+              {kpiData.clicksChange && (
+                <div className={`flex items-center gap-1 ${kpiData.clicksChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                  {kpiData.clicksChange.isPositive ? (
+                    <TrendingUp className="w-4 h-4" />
+                  ) : (
+                    <TrendingDown className="w-4 h-4" />
+                  )}
+                  <span className="font-medium">{kpiData.clicksChange.value}</span>
+                  <span className="text-gray-500">vs 前期間</span>
+                </div>
+              )}
+              {!kpiData.clicksChange && (
+                <span className="text-gray-500">全クリックイベントの合計</span>
+              )}
             </div>
           </div>
 
@@ -323,7 +454,20 @@ export default function DashboardPage() {
             </div>
             <div className="text-3xl font-bold mb-2">{kpiData.clickRate}%</div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">セッションあたりの平均クリック数</span>
+              {kpiData.clickRateChange && (
+                <div className={`flex items-center gap-1 ${kpiData.clickRateChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                  {kpiData.clickRateChange.isPositive ? (
+                    <TrendingUp className="w-4 h-4" />
+                  ) : (
+                    <TrendingDown className="w-4 h-4" />
+                  )}
+                  <span className="font-medium">{kpiData.clickRateChange.value}</span>
+                  <span className="text-gray-500">vs 前期間</span>
+                </div>
+              )}
+              {!kpiData.clickRateChange && (
+                <span className="text-gray-500">セッションあたりの平均クリック数</span>
+              )}
             </div>
           </div>
 
@@ -336,11 +480,24 @@ export default function DashboardPage() {
               {kpiData.avgTimeOnPage > 0 ? `${kpiData.avgTimeOnPage}分` : 'データなし'}
             </div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">
-                {kpiData.avgTimeOnPage > 0 
-                  ? 'セッションあたりの平均滞在時間' 
-                  : 'セッションデータがありません'}
-              </span>
+              {kpiData.avgTimeOnPageChange && kpiData.avgTimeOnPage > 0 && (
+                <div className={`flex items-center gap-1 ${kpiData.avgTimeOnPageChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                  {kpiData.avgTimeOnPageChange.isPositive ? (
+                    <TrendingUp className="w-4 h-4" />
+                  ) : (
+                    <TrendingDown className="w-4 h-4" />
+                  )}
+                  <span className="font-medium">{kpiData.avgTimeOnPageChange.value}</span>
+                  <span className="text-gray-500">vs 前期間</span>
+                </div>
+              )}
+              {!kpiData.avgTimeOnPageChange && (
+                <span className="text-gray-500">
+                  {kpiData.avgTimeOnPage > 0 
+                    ? 'セッションあたりの平均滞在時間' 
+                    : 'セッションデータがありません'}
+                </span>
+              )}
             </div>
           </div>
 
@@ -353,11 +510,25 @@ export default function DashboardPage() {
               {kpiData.bounceRate > 0 ? `${kpiData.bounceRate}%` : 'データなし'}
             </div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">
-                {kpiData.bounceRate > 0 
-                  ? '1ページビューのセッション割合' 
-                  : 'セッションデータがありません'}
-              </span>
+              {kpiData.bounceRateChange && kpiData.bounceRate > 0 && (
+                <div className={`flex items-center gap-1 ${kpiData.bounceRateChange.isPositive ? 'text-red-600' : 'text-green-600'}`}>
+                  {/* 直帰率は低い方が良いので、増加は赤、減少は緑 */}
+                  {kpiData.bounceRateChange.isPositive ? (
+                    <TrendingUp className="w-4 h-4" />
+                  ) : (
+                    <TrendingDown className="w-4 h-4" />
+                  )}
+                  <span className="font-medium">{kpiData.bounceRateChange.value}</span>
+                  <span className="text-gray-500">vs 前期間</span>
+                </div>
+              )}
+              {!kpiData.bounceRateChange && (
+                <span className="text-gray-500">
+                  {kpiData.bounceRate > 0 
+                    ? '1ページビューのセッション割合' 
+                    : 'セッションデータがありません'}
+                </span>
+              )}
             </div>
           </div>
 
@@ -368,7 +539,20 @@ export default function DashboardPage() {
             </div>
             <div className="text-3xl font-bold mb-2">{kpiData.avgScrollDepth}%</div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">ページビューあたりの平均スクロール位置（0-100%）</span>
+              {kpiData.avgScrollDepthChange && (
+                <div className={`flex items-center gap-1 ${kpiData.avgScrollDepthChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                  {kpiData.avgScrollDepthChange.isPositive ? (
+                    <TrendingUp className="w-4 h-4" />
+                  ) : (
+                    <TrendingDown className="w-4 h-4" />
+                  )}
+                  <span className="font-medium">{kpiData.avgScrollDepthChange.value}</span>
+                  <span className="text-gray-500">vs 前期間</span>
+                </div>
+              )}
+              {!kpiData.avgScrollDepthChange && (
+                <span className="text-gray-500">ページビューあたりの平均スクロール位置（0-100%）</span>
+              )}
             </div>
           </div>
 
@@ -377,9 +561,22 @@ export default function DashboardPage() {
               <span className="text-sm font-medium text-gray-600">総イベント数</span>
               <BarChart3 className="w-5 h-5 text-purple-600" />
             </div>
-            <div className="text-3xl font-bold mb-2">{(statistics?.total_events || 0).toLocaleString()}</div>
+            <div className="text-3xl font-bold mb-2">{kpiData.totalEvents.toLocaleString()}</div>
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-gray-500">クリック・スクロール・ホバー</span>
+              {kpiData.totalEventsChange && (
+                <div className={`flex items-center gap-1 ${kpiData.totalEventsChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                  {kpiData.totalEventsChange.isPositive ? (
+                    <TrendingUp className="w-4 h-4" />
+                  ) : (
+                    <TrendingDown className="w-4 h-4" />
+                  )}
+                  <span className="font-medium">{kpiData.totalEventsChange.value}</span>
+                  <span className="text-gray-500">vs 前期間</span>
+                </div>
+              )}
+              {!kpiData.totalEventsChange && (
+                <span className="text-gray-500">クリック・スクロール・ホバー</span>
+              )}
             </div>
           </div>
         </div>

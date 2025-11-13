@@ -85,6 +85,8 @@ export async function POST(request: NextRequest) {
       click_y: event.position?.y || event.click_y || 0,
       scroll_y: event.scroll_y || 0,
       scroll_percentage: event.scroll_percentage || 0,
+      read_y: event.read_y || null,
+      read_duration: event.read_duration || 0,
       event_revenue: event.event_revenue || event.revenue || 0,
       utm_source: event.utm_source || null,
       utm_medium: event.utm_medium || null,
@@ -99,6 +101,53 @@ export async function POST(request: NextRequest) {
       device_type: event.device_type || null,
     }))
 
+    // Prepare heatmap_events for ClickHouse
+    const heatmapEvents: any[] = []
+    for (const event of events) {
+      const eventType = event.event_type || event.eventType
+      const pageUrl = event.url || event.page_url || ''
+      const sessionId = event.session_id || event.sessionId
+
+      if (eventType === 'click' && event.click_x !== undefined && event.click_y !== undefined) {
+        heatmapEvents.push({
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          session_id: sessionId,
+          page_url: pageUrl,
+          event_type: 'click',
+          x: event.click_x || 0,
+          y: event.click_y || 0,
+          value: 1, // クリックは1として記録
+          created_at: event.timestamp ? new Date(event.timestamp).toISOString().replace('T', ' ').replace('Z', '').substring(0, 19) : new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
+        })
+      } else if (eventType === 'scroll' || eventType === 'scroll_depth') {
+        const scrollY = event.scroll_y || 0
+        const scrollPercentage = event.scroll_percentage || 0
+        if (scrollY > 0 || scrollPercentage > 0) {
+          heatmapEvents.push({
+            id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            session_id: sessionId,
+            page_url: pageUrl,
+            event_type: 'scroll',
+            x: 0,
+            y: scrollY,
+            value: scrollPercentage,
+            created_at: event.timestamp ? new Date(event.timestamp).toISOString().replace('T', ' ').replace('Z', '').substring(0, 19) : new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
+          })
+        }
+      } else if (eventType === 'read_area' && event.read_y !== undefined && event.read_duration !== undefined) {
+        heatmapEvents.push({
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          session_id: sessionId,
+          page_url: pageUrl,
+          event_type: 'read',
+          x: 0,
+          y: event.read_y || 0,
+          value: event.read_duration || 0,
+          created_at: event.timestamp ? new Date(event.timestamp).toISOString().replace('T', ' ').replace('Z', '').substring(0, 19) : new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
+        })
+      }
+    }
+
     // Store in ClickHouse (primary storage)
     try {
       const clickhouse = await getClickHouseClientAsync()
@@ -107,6 +156,15 @@ export async function POST(request: NextRequest) {
         values: clickHouseEvents,
         format: 'JSONEachRow',
       })
+
+      // Store heatmap_events if any
+      if (heatmapEvents.length > 0) {
+        await clickhouse.insert({
+          table: 'clickinsight.heatmap_events',
+          values: heatmapEvents,
+          format: 'JSONEachRow',
+        })
+      }
       
       // Publish realtime data via Redis
       for (const event of events) {
