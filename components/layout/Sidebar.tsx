@@ -89,7 +89,19 @@ export default function Sidebar() {
           className="flex items-center gap-2 hover:opacity-80 transition-opacity cursor-pointer"
           aria-label="ホームに戻る"
         >
-          <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
+          <img 
+            src="/ugokimap.png" 
+            alt="UGOKI MAP" 
+            className="h-8 w-auto"
+            onError={(e) => {
+              // ロゴ画像が読み込めない場合のフォールバック
+              const target = e.target as HTMLImageElement
+              target.style.display = 'none'
+              const fallback = target.nextElementSibling as HTMLElement
+              if (fallback) fallback.style.display = 'flex'
+            }}
+          />
+          <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center" style={{ display: 'none' }}>
             <Zap className="w-5 h-5 text-white" />
           </div>
           <span className="font-bold text-lg">UGOKI MAP</span>
