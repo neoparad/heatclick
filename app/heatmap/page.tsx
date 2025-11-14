@@ -178,7 +178,7 @@ export default function HeatmapPage() {
         }
 
         const params = new URLSearchParams({
-          site_id: selectedSite.tracking_id,
+          site_id: selectedSite.id,
           page_url: selectedPageUrl,
           heatmap_type: heatmapType,
         })
