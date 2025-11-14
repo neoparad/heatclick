@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getHeatmapData } from '@/lib/clickhouse'
+import { getHeatmapData as getHeatmapDataFromQuery } from '@/inngest/lib/heatmapQuery'
+import { getHeatmapData as getHeatmapDataLegacy } from '@/lib/clickhouse'
 import { getHeatmapCache, setHeatmapCache } from '@/lib/redis'
 
-// Vercelのタイムアウトを60秒に設定（Pro/Enterpriseプランで有効）
-export const maxDuration = 60
+// 集約テーブル使用で10秒で十分
+export const maxDuration = 10
 
 export async function GET(request: NextRequest) {
   try {
@@ -22,7 +23,7 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // キャッシュから取得を試みる（期間を含めたキャッシュキーを使用）
+    // キャッシュから取得を試みる（heatmap_typeを含めたキャッシュキーを使用）
     let cached = false
     let heatmapData: any[] = []
 
@@ -32,7 +33,8 @@ export async function GET(request: NextRequest) {
         pageUrl, 
         deviceType || undefined,
         startDate || undefined,
-        endDate || undefined
+        endDate || undefined,
+        heatmapType
       ) || []
     } catch (error) {
       console.error('Redis cache error:', error)
@@ -40,17 +42,29 @@ export async function GET(request: NextRequest) {
 
     if (!heatmapData || heatmapData.length === 0) {
       try {
-        // ClickHouseからデータを取得（ヒートマップタイプを指定）
-        heatmapData = await getHeatmapData(
-          siteId,
-          pageUrl,
-          deviceType || undefined,
-          startDate || undefined,
-          endDate || undefined,
-          heatmapType
-        )
+        // クリックヒートマップの場合は集約テーブルから取得
+        if (heatmapType === 'click') {
+          heatmapData = await getHeatmapDataFromQuery({
+            siteId,
+            pageUrl,
+            deviceType: deviceType || undefined,
+            heatmapType: 'click',
+            startDate: startDate || undefined,
+            endDate: endDate || undefined,
+          })
+        } else {
+          // スクロール・熟読ヒートマップは既存ロジックを使用
+          heatmapData = await getHeatmapDataLegacy(
+            siteId,
+            pageUrl,
+            deviceType || undefined,
+            startDate || undefined,
+            endDate || undefined,
+            heatmapType
+          )
+        }
 
-        // キャッシュに保存（期間を含めたキャッシュキーを使用）
+        // キャッシュに保存（heatmap_typeを含めたキャッシュキーを使用）
         if (heatmapData && heatmapData.length > 0) {
           try {
             await setHeatmapCache(
@@ -59,16 +73,17 @@ export async function GET(request: NextRequest) {
               heatmapData, 
               deviceType || undefined,
               startDate || undefined,
-              endDate || undefined
+              endDate || undefined,
+              3600 * 2, // 2時間
+              heatmapType
             )
           } catch (cacheError) {
             console.error('Failed to cache heatmap data:', cacheError)
           }
         }
       } catch (error) {
-        console.error('Error fetching heatmap data from ClickHouse:', error)
-        // データベース接続エラー時はモックデータを返す（開発用）
-        console.log('Returning empty data due to database error')
+        console.error('Error fetching heatmap data:', error)
+        // データベース接続エラー時は空配列を返す
         heatmapData = []
       }
     } else {
@@ -103,18 +118,19 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // ClickHouseからデータを取得
+    // ClickHouseからデータを取得（集約テーブルから）
     let heatmapData: any[] = []
     try {
-      heatmapData = await getHeatmapData(
-        site_id,
-        page_url,
-        device_type || undefined,
-        start_date || undefined,
-        end_date || undefined
-      )
+      heatmapData = await getHeatmapDataFromQuery({
+        siteId: site_id,
+        pageUrl: page_url,
+        deviceType: device_type || undefined,
+        heatmapType: 'click',
+        startDate: start_date || undefined,
+        endDate: end_date || undefined,
+      })
     } catch (error) {
-      console.error('Error fetching heatmap data from ClickHouse:', error)
+      console.error('Error fetching heatmap data:', error)
       // エラー時は空配列を返す
       heatmapData = []
     }
