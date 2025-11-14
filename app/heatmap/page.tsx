@@ -270,7 +270,7 @@ export default function HeatmapPage() {
         let points: Array<{ x: number; y: number; value: number }> = []
         
         if (heatmapType === 'click') {
-          // クリックヒートマップ
+          // クリックヒートマップ - クリック数でソートし、上位500件に制限
           points = heatmapData
             .filter(point => 
               typeof point.click_x === 'number' && 
@@ -280,6 +280,8 @@ export default function HeatmapPage() {
               point.click_x >= 0 && 
               point.click_y >= 0
             )
+            .sort((a, b) => (b.count || b.click_count || 0) - (a.count || a.click_count || 0))
+            .slice(0, 500)
             .map(point => ({
               x: Math.round(point.click_x || 0),
               y: Math.round(point.click_y || 0),
@@ -323,14 +325,39 @@ export default function HeatmapPage() {
         // 最大値を計算
         const maxValue = Math.max(...points.map(p => p.value), 1)
 
-        // データを設定
-        heatmapInstance.setData({
-          max: maxValue,
-          data: points,
-        })
+        // 段階的に描画（50件ずつ）
+        const renderBatch = async (pointsToRender: typeof points) => {
+          const batchSize = 50;
+          let accumulatedData: Array<{ x: number; y: number; value: number }> = [];
+
+          for (let i = 0; i < pointsToRender.length; i += batchSize) {
+            const batch = pointsToRender.slice(i, i + batchSize);
+            accumulatedData = [...accumulatedData, ...batch];
+
+            // 既存データに追加
+            heatmapInstance.setData({
+              max: maxValue,
+              data: accumulatedData,
+            });
+
+            // 次のバッチまで少し待機（メインスレッドをブロックしない）
+            await new Promise(resolve => setTimeout(resolve, 0));
+          }
+
+          console.log('Heatmap rendered with', pointsToRender.length, 'points (batched)');
+        };
+
+        // 段階的描画を開始
+        renderBatch(points).catch(error => {
+          console.error('Error in batch rendering:', error);
+          // エラー時は一度に描画
+          heatmapInstance.setData({
+            max: maxValue,
+            data: points,
+          });
+        });
 
         heatmapInstanceRef.current = heatmapInstance
-        console.log('Heatmap rendered with', points.length, 'points')
       } catch (error) {
         console.error('Error setting heatmap data:', error)
       }

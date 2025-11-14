@@ -38,6 +38,7 @@
     "date-fns": "^2.30.0",
     "googleapis": "^165.0.0",
     "heatmap.js": "^2.0.5",
+    "inngest": "^3.45.1",
     "ioredis": "^5.3.0",
     "lucide-react": "^0.292.0",
     "next": "^14.0.0",
