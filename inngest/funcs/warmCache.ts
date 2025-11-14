@@ -1,6 +1,6 @@
 import { inngest } from "../client";
 import { getHeatmapData, getPopularPages } from "../lib/heatmapQuery";
-import { getRedisClient } from "@/lib/redis";
+import { redis as getRedisClient } from "@/lib/redis";
 
 export const warmCache = inngest.createFunction(
   { 
