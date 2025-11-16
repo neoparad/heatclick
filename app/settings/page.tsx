@@ -98,7 +98,7 @@ export default function SettingsPage() {
     window.CLICKINSIGHT_API_URL = '${appUrl}/api/track';
     window.CLICKINSIGHT_RECORDING_SAMPLE_RATE = 0.1; // 10%のセッションを録画
 </script>
-<script src="${appUrl}/tracking.js" async></script>
+<script src="${appUrl}/tracking.js" data-site-id="${site.tracking_id}" async></script>
 <script src="${appUrl}/recording.js" async></script>
 <!-- End UGOKI MAP -->`
   }

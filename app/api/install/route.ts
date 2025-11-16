@@ -62,7 +62,7 @@ function clickinsight_pro_tracking() {
         window.CLICKINSIGHT_SITE_ID = '${siteId}';
         window.CLICKINSIGHT_DEBUG = false;
     </script>
-    <script src="${process.env.NEXT_PUBLIC_APP_URL}/tracking.js" async></script>
+    <script src="${process.env.NEXT_PUBLIC_APP_URL}/tracking.js" data-site-id="${siteId}" async></script>
     <?php
 }
 
@@ -103,7 +103,7 @@ function generateHTMLCode(siteId: string): string {
         window.CLICKINSIGHT_SITE_ID = '${siteId}';
         window.CLICKINSIGHT_DEBUG = false;
     </script>
-    <script src="${process.env.NEXT_PUBLIC_APP_URL}/tracking.js" async></script>
+    <script src="${process.env.NEXT_PUBLIC_APP_URL}/tracking.js" data-site-id="${siteId}" async></script>
 </head>
 <body>
     <!-- Your website content -->

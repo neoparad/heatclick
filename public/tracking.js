@@ -1,15 +1,79 @@
 /**
  * ClickInsight Pro - Tracking Script
- * Version: 1.0.0
+ * Version: 1.1.0
  * Lightweight performance-optimized tracking script (< 5KB)
+ * Supports multiple sites tracking
  */
 
 (function() {
   'use strict';
 
+  // Get site ID from multiple sources (priority order)
+  // CRITICAL: For async scripts, document.currentScript is null
+  // We need a reliable way to identify which script tag is executing
+  const getSiteId = () => {
+    // Method 1: Try document.currentScript first (works for non-async/defer scripts)
+    // This is the most reliable method when available
+    const currentScript = document.currentScript;
+    if (currentScript) {
+      const siteId = currentScript.getAttribute('data-site-id');
+      if (siteId) {
+        return siteId;
+      }
+    }
+    
+    // Method 2: Find script tag with data-site-id attribute (MOST RELIABLE for async)
+    // This works even when async scripts are used
+    // We check all tracking.js scripts and find the one that hasn't been processed yet
+    const allTrackingScripts = Array.from(document.querySelectorAll('script[src*="tracking.js"]'));
+    
+    // Check scripts in reverse order (most recently added first)
+    // This helps when multiple scripts are on the same page
+    for (let i = allTrackingScripts.length - 1; i >= 0; i--) {
+      const script = allTrackingScripts[i];
+      const siteId = script.getAttribute('data-site-id');
+      
+      if (siteId) {
+        // Mark this script as processed to avoid conflicts
+        // Use a timestamp-based check to handle async script execution
+        if (!script.dataset.ciProcessed) {
+          script.dataset.ciProcessed = Date.now().toString();
+          if (window.CLICKINSIGHT_DEBUG) {
+            console.log('ClickInsight Pro: Found site ID from data-site-id attribute:', siteId);
+          }
+          return siteId;
+        }
+      }
+    }
+    
+    // Method 3: Use window global variable (set in inline script before this)
+    // This is the fallback method - works when inline script sets it before async script loads
+    // IMPORTANT: This works because inline scripts execute synchronously before async scripts
+    if (window.CLICKINSIGHT_SITE_ID) {
+      const siteId = window.CLICKINSIGHT_SITE_ID;
+      if (window.CLICKINSIGHT_DEBUG) {
+        console.log('ClickInsight Pro: Found site ID from window.CLICKINSIGHT_SITE_ID:', siteId);
+      }
+      return siteId;
+    }
+    
+    // Method 4: Last resort - find any script with data-site-id
+    // This is less reliable but better than nothing
+    const anyScript = document.querySelector('script[data-site-id]');
+    if (anyScript) {
+      const siteId = anyScript.getAttribute('data-site-id');
+      if (window.CLICKINSIGHT_DEBUG) {
+        console.log('ClickInsight Pro: Found site ID from fallback query:', siteId);
+      }
+      return siteId;
+    }
+    
+    return '';
+  };
+
   // Configuration
   const config = {
-    siteId: window.CLICKINSIGHT_SITE_ID || '',
+    siteId: getSiteId(),
     debug: window.CLICKINSIGHT_DEBUG || false,
     apiEndpoint: window.CLICKINSIGHT_API_URL || '/api/track',
     requireConsent: window.CLICKINSIGHT_REQUIRE_CONSENT === true, // デフォルト: false（同意不要）
@@ -20,8 +84,14 @@
 
   // Validate configuration
   if (!config.siteId) {
-    console.error('ClickInsight Pro: CLICKINSIGHT_SITE_ID is required');
+    console.error('ClickInsight Pro: Site ID is required. Please set CLICKINSIGHT_SITE_ID or add data-site-id attribute to the script tag.');
+    console.error('ClickInsight Pro: Available scripts:', document.querySelectorAll('script[src*="tracking.js"]').length);
     return;
+  }
+
+  // Debug log for multiple sites
+  if (config.debug) {
+    console.log('ClickInsight Pro: Initializing for site:', config.siteId);
   }
 
   // Utilities
@@ -158,7 +228,7 @@
   const utmParams = getUtmParams();
 
   const queueEvent = (event) => {
-    eventQueue.push({
+    const eventData = {
       ...event,
       id: utils.generateId(),
       site_id: config.siteId,
@@ -173,10 +243,25 @@
       device_type: getDeviceType(),
       referrer_type: getReferrerType(document.referrer),
       ...utmParams,
-    });
+    };
+
+    // Validate site_id before queuing
+    if (!eventData.site_id || eventData.site_id.trim() === '') {
+      console.error('ClickInsight Pro: Cannot queue event - site_id is missing or empty', {
+        event_type: event.event_type,
+        config_siteId: config.siteId
+      });
+      return;
+    }
+
+    eventQueue.push(eventData);
 
     if (config.debug) {
-      console.log('ClickInsight Pro: Event queued', event);
+      console.log('ClickInsight Pro: Event queued', {
+        event_type: event.event_type,
+        site_id: eventData.site_id,
+        session_id: eventData.session_id
+      });
     }
 
     // Send batch if queue is full
@@ -198,6 +283,17 @@
       batchTimer = null;
     }
 
+    // Validate all events have site_id before sending
+    const invalidEvents = events.filter(e => !e.site_id || e.site_id.trim() === '');
+    if (invalidEvents.length > 0) {
+      console.error('ClickInsight Pro: Some events are missing site_id, skipping batch', {
+        invalidCount: invalidEvents.length,
+        totalCount: events.length,
+        siteId: config.siteId
+      });
+      return;
+    }
+
     // Use sendBeacon for better performance and reliability
     const data = JSON.stringify({ events });
 
@@ -206,7 +302,12 @@
       const sent = navigator.sendBeacon(config.apiEndpoint, blob);
 
       if (config.debug) {
-        console.log('ClickInsight Pro: Batch sent via sendBeacon', { count: events.length, success: sent });
+        console.log('ClickInsight Pro: Batch sent via sendBeacon', { 
+          count: events.length, 
+          success: sent,
+          site_id: events[0]?.site_id,
+          event_types: [...new Set(events.map(e => e.event_type))]
+        });
       }
 
       if (!sent) {
