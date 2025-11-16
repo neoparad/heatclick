@@ -59,7 +59,28 @@ export async function POST(request: NextRequest) {
     // Validate each event
     for (const event of events) {
       if (!event.site_id || !event.event_type) {
-        return NextResponse.json({ error: 'Invalid event data' }, { status: 400, headers: buildCorsHeaders(request) })
+        console.error('ClickInsight Pro - Invalid event data:', {
+          site_id: event.site_id,
+          event_type: event.event_type,
+          hasSiteId: !!event.site_id,
+          hasEventType: !!event.event_type
+        })
+        return NextResponse.json({ 
+          error: 'Invalid event data: site_id and event_type are required',
+          details: {
+            site_id: event.site_id || 'missing',
+            event_type: event.event_type || 'missing'
+          }
+        }, { status: 400, headers: buildCorsHeaders(request) })
+      }
+      
+      // Validate site_id format (should be a non-empty string)
+      if (typeof event.site_id !== 'string' || event.site_id.trim() === '') {
+        console.error('ClickInsight Pro - Invalid site_id format:', event.site_id)
+        return NextResponse.json({ 
+          error: 'Invalid site_id format: must be a non-empty string',
+          site_id: event.site_id
+        }, { status: 400, headers: buildCorsHeaders(request) })
       }
     }
 
