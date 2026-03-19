@@ -9,7 +9,6 @@ import {
   Brain,
   Settings,
   Globe,
-  Video,
   Zap,
   ClipboardList,
 } from 'lucide-react'
@@ -21,7 +20,6 @@ const menuItems = [
   { id: 'performance', icon: Zap, label: 'パフォーマンス', href: '/performance' },
   { id: 'tests', icon: ClipboardList, label: 'テスト', href: '/tests' },
   { id: 'sites', icon: Globe, label: 'サイト管理', href: '/sites' },
-  { id: 'recordings', icon: Video, label: 'セッション録画', href: '/recordings' },
   { id: 'settings', icon: Settings, label: '設定', href: '/settings' },
 ]
 

@@ -120,7 +120,6 @@ export const config = {
     '/heatmap/:path*',
     '/sites/:path*',
     '/settings/:path*',
-    '/recordings/:path*',
     '/tests/:path*',
     '/performance/:path*',
     '/image-visibility/:path*',
