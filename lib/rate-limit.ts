@@ -1,73 +1,78 @@
-// 簡易的なAPI Rate Limiting実装
+// Redis-backed Rate Limiting
+// メモリフォールバック付き
 
-interface RateLimitStore {
-  [key: string]: {
-    count: number
-    resetTime: number
-  }
-}
+import { redis as getRedisClient } from './redis'
 
-// メモリ内ストレージ（本番環境ではRedisを使用推奨）
-const rateLimitStore: RateLimitStore = {}
-
-// レート制限の設定
 const RATE_LIMIT_CONFIG = {
   windowMs: 15 * 60 * 1000, // 15分
-  maxRequests: 100, // 最大100リクエスト
+  maxRequests: 100,
 }
 
-export function checkRateLimit(identifier: string): { allowed: boolean; remaining: number; resetTime: number } {
-  const now = Date.now()
-  const key = identifier
+// メモリフォールバック（Redis接続失敗時）
+const memoryStore: Record<string, { count: number; resetTime: number }> = {}
 
-  // 既存のレコードを取得
-  let record = rateLimitStore[key]
+export async function checkRateLimitAsync(identifier: string): Promise<{ allowed: boolean; remaining: number; resetTime: number }> {
+  try {
+    const client = getRedisClient()
+    const key = `ratelimit:${identifier}`
+    const now = Date.now()
+    const windowEnd = now + RATE_LIMIT_CONFIG.windowMs
 
-  // レコードが存在しない、またはリセット時間が過ぎている場合
-  if (!record || now > record.resetTime) {
-    record = {
-      count: 0,
-      resetTime: now + RATE_LIMIT_CONFIG.windowMs,
+    // Redisのインクリメント + TTL設定
+    const count = await client.incr(key)
+
+    if (count === 1) {
+      // 新しいキー → TTLを設定
+      await client.pexpire(key, RATE_LIMIT_CONFIG.windowMs)
     }
-    rateLimitStore[key] = record
+
+    const ttl = await client.pttl(key)
+    const resetTime = now + Math.max(ttl, 0)
+    const remaining = Math.max(0, RATE_LIMIT_CONFIG.maxRequests - count)
+
+    return {
+      allowed: count <= RATE_LIMIT_CONFIG.maxRequests,
+      remaining,
+      resetTime,
+    }
+  } catch {
+    // Redis接続失敗 → メモリフォールバック
+    return checkRateLimitSync(identifier)
+  }
+}
+
+// 同期版（メモリ内、後方互換性のため残す）
+export function checkRateLimit(identifier: string): { allowed: boolean; remaining: number; resetTime: number } {
+  return checkRateLimitSync(identifier)
+}
+
+function checkRateLimitSync(identifier: string): { allowed: boolean; remaining: number; resetTime: number } {
+  const now = Date.now()
+  let record = memoryStore[identifier]
+
+  if (!record || now > record.resetTime) {
+    record = { count: 0, resetTime: now + RATE_LIMIT_CONFIG.windowMs }
+    memoryStore[identifier] = record
   }
 
-  // リクエスト数を増やす
   record.count++
-
   const remaining = Math.max(0, RATE_LIMIT_CONFIG.maxRequests - record.count)
-  const allowed = record.count <= RATE_LIMIT_CONFIG.maxRequests
 
   return {
-    allowed,
+    allowed: record.count <= RATE_LIMIT_CONFIG.maxRequests,
     remaining,
     resetTime: record.resetTime,
   }
 }
 
-// 古いレコードのクリーンアップ（定期的に実行）
+// メモリストアのクリーンアップ
 export function cleanupRateLimitStore() {
   const now = Date.now()
-  Object.keys(rateLimitStore).forEach(key => {
-    if (now > rateLimitStore[key].resetTime) {
-      delete rateLimitStore[key]
-    }
-  })
+  for (const key of Object.keys(memoryStore)) {
+    if (now > memoryStore[key].resetTime) delete memoryStore[key]
+  }
 }
 
-// 5分ごとにクリーンアップを実行
 if (typeof setInterval !== 'undefined') {
   setInterval(cleanupRateLimitStore, 5 * 60 * 1000)
 }
-
-
-
-
-
-
-
-
-
-
-
-

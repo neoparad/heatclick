@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
 import { publishRealtimeData, pushEventBuffer } from '@/lib/redis'
-import { checkRateLimit } from '@/lib/rate-limit'
+import { checkRateLimitAsync } from '@/lib/rate-limit'
 import { anonymizeIp } from '@/lib/privacy'
 
 // Vercel Serverless タイムアウト設定（秒）
@@ -31,7 +31,7 @@ export async function POST(request: NextRequest) {
     // Rate Limiting（IP匿名化）
     const rawIp = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
     const clientIp = anonymizeIp(rawIp)
-    const rateLimit = checkRateLimit(`track:${clientIp}`)
+    const rateLimit = await checkRateLimitAsync(`track:${clientIp}`)
     
     if (!rateLimit.allowed) {
       return NextResponse.json(
