@@ -130,27 +130,27 @@
 
 即座に修正すべき問題。放置するとセキュリティリスクまたはデータ不整合。
 
-| # | 修正内容 | 対象ファイル | 影響 |
-|---|---|---|---|
-| 1-1 | `read_y || null` → `read_y || 0` に修正（UInt16にnull不可） | `app/api/track/route.ts` L112 | データ +1 |
-| 1-2 | `verifySiteAccess()` catch節を `authorized: false` に修正 | `lib/api-utils.ts` L84 | API +2 |
-| 1-3 | JWT secretのハードコードフォールバック削除。未設定時はthrow | `lib/jwt.ts` L3-4, `middleware.ts` L4-6 | API +1 |
-| 1-4 | `Object.freeze(window.ClickInsight)` でグローバルAPI保護 | `public/tracking.js` 最終行付近 | トラッキング +1 |
-| 1-5 | `popEventBuffer`をLRANGE+LTRIMの2コマンドに変更 | `lib/redis.ts` popEventBuffer関数 | インフラ +3 |
-| 1-6 | IDをcrypto.randomUUID()に変更（衝突回避） | `app/api/track/route.ts` L92等 | データ +1 |
+| # | 修正内容 | 対象ファイル | 影響 | 状態 |
+|---|---|---|---|---|
+| 1-1 | `read_y \|\| null` → `read_y \|\| 0` に修正（UInt16にnull不可） | `app/api/track/route.ts` | データ +1 | **完了** |
+| 1-2 | `verifySiteAccess()` catch節を `authorized: false` に修正 | `lib/api-utils.ts` | API +2 | **完了** |
+| 1-3 | JWT secretのハードコードフォールバック削除。未設定時はthrow | `lib/jwt.ts`, `middleware.ts` | API +1 | **完了** |
+| 1-4 | `Object.freeze(window.ClickInsight)` でグローバルAPI保護 | `public/tracking.js` | トラッキング +1 | **完了** |
+| 1-5 | `popEventBuffer`をLRANGE+LTRIMの2コマンドに変更 | `lib/redis.ts` | インフラ +3 | **完了** |
+| 1-6 | IDをcrypto.randomUUID()に変更（衝突回避） | `app/api/track/route.ts` | データ +1 | **完了** |
 
 ### Phase 2: 統合・接続（87→92点、2-3日）
 
 作ったが繋いでいない仕組みを、実際のAPIルートに統合する。
 
-| # | 修正内容 | 対象ファイル | 影響 |
-|---|---|---|---|
-| 2-1 | 全APIルート（sites, heatmap, statistics, clicks等）に `getAuthContext()` + `verifySiteAccess()` を統合 | 20+のAPIルート | API +5 |
-| 2-2 | 全APIルートのエラーレスポンスを `apiError()`, `badRequest()` 等に統一 | 20+のAPIルート | API +3 |
-| 2-3 | middleware.tsのページルートチェックを簡素化（matcherに委譲） | `middleware.ts` L94 | API +1 |
-| 2-4 | CORS設定を `/api/track`=全オリジン許可、その他=管理画面ドメイン限定 に分離 | 各APIルート | API +2 |
-| 2-5 | リトライバッファの頻度制御（5分に1回） | `inngest/funcs/flushEventBuffer.ts` | インフラ +1 |
-| 2-6 | tracking.jsコアからutils分離で5KB目標達成 | `public/tracking.js`, 新: `tracking-ext-utils.js` | トラッキング +2 |
+| # | 修正内容 | 対象ファイル | 影響 | 状態 |
+|---|---|---|---|---|
+| 2-1 | 全APIルート（sites, heatmap, statistics, clicks等 16ルート）に `getAuthContext()` を統合。sitesはuser_idフィルタ付き | 16のAPIルート | API +5 | **完了** |
+| 2-2 | 全APIルートのエラーレスポンスを `badRequest()` 等に統一 | 16のAPIルート | API +3 | **完了** |
+| 2-3 | middleware.tsのページルートチェックを簡素化（matcherに委譲） | `middleware.ts` | API +1 | **完了** |
+| 2-4 | CORS設定を `/api/track`=全オリジン許可、その他=管理画面ドメイン限定 に分離 | `lib/api-utils.ts`, `app/api/track/route.ts` | API +2 | **完了** |
+| 2-5 | リトライバッファの頻度制御（5分に1回） | `inngest/funcs/flushEventBuffer.ts` | インフラ +1 | **完了** |
+| 2-6 | tracking.jsコアからutils分離で5KB目標達成 | `public/tracking.js`, 新: `tracking-ext-utils.js` | トラッキング +2 | 未着手 |
 
 ### Phase 3: 品質仕上げ（92→97点、1-2週間）
 

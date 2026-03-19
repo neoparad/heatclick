@@ -316,16 +316,15 @@ export async function pushEventBuffer(
 export async function popEventBuffer(batchSize: number = 500): Promise<Array<{ table: string; values: any[]; timestamp: number }>> {
   try {
     const client = getRedisClient()
-    const items: Array<{ table: string; values: any[]; timestamp: number }> = []
 
-    // LPOPで最大batchSize件取得
-    for (let i = 0; i < batchSize; i++) {
-      const item = await client.lpop(EVENT_BUFFER_KEY)
-      if (!item) break
-      items.push(JSON.parse(item))
-    }
+    // LRANGE + LTRIM の2コマンドでバッチ取得（N+1問題を回避）
+    const rawItems = await client.lrange(EVENT_BUFFER_KEY, 0, batchSize - 1)
+    if (rawItems.length === 0) return []
 
-    return items
+    // 取得した分を削除
+    await client.ltrim(EVENT_BUFFER_KEY, rawItems.length, -1)
+
+    return rawItems.map(item => JSON.parse(item))
   } catch (error) {
     console.error('Error popping from event buffer:', error)
     return []
@@ -348,15 +347,13 @@ export async function pushRetryBuffer(
 export async function popRetryBuffer(batchSize: number = 100): Promise<Array<{ table: string; values: any[]; timestamp: number }>> {
   try {
     const client = getRedisClient()
-    const items: Array<{ table: string; values: any[]; timestamp: number }> = []
 
-    for (let i = 0; i < batchSize; i++) {
-      const item = await client.lpop(EVENT_BUFFER_RETRY_KEY)
-      if (!item) break
-      items.push(JSON.parse(item))
-    }
+    const rawItems = await client.lrange(EVENT_BUFFER_RETRY_KEY, 0, batchSize - 1)
+    if (rawItems.length === 0) return []
 
-    return items
+    await client.ltrim(EVENT_BUFFER_RETRY_KEY, rawItems.length, -1)
+
+    return rawItems.map(item => JSON.parse(item))
   } catch (error) {
     console.error('Error popping from retry buffer:', error)
     return []

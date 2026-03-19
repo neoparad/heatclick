@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
+import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
 
 // プラン情報の定義
 const PLAN_LIMITS: Record<string, { name: string; pvLimit: number }> = {
@@ -10,16 +11,16 @@ const PLAN_LIMITS: Record<string, { name: string; pvLimit: number }> = {
 }
 
 export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const { searchParams } = new URL(request.url)
     const userId = searchParams.get('user_id')
     const plan = searchParams.get('plan') || 'free'
     
     if (!userId) {
-      return NextResponse.json(
-        { error: 'Missing required parameter: user_id' },
-        { status: 400 }
-      )
+      return badRequest('Missing required parameter: user_id')
     }
 
     // プラン情報の取得

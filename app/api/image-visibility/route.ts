@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
+import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
 
 export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const { searchParams } = new URL(request.url)
     const siteId = searchParams.get('site_id')
@@ -11,7 +15,7 @@ export async function GET(request: NextRequest) {
     const deviceType = searchParams.get('device_type')
 
     if (!siteId) {
-      return NextResponse.json({ error: 'site_id is required' }, { status: 400 })
+      return badRequest('site_id is required')
     }
 
     const clickhouse = await getClickHouseClientAsync()

@@ -1,8 +1,10 @@
 import { SignJWT, jwtVerify } from 'jose'
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET || 'ugokimap-default-secret-change-in-production'
-)
+const secret = process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET
+if (!secret) {
+  throw new Error('JWT_SECRET or NEXTAUTH_SECRET environment variable is required')
+}
+const JWT_SECRET = new TextEncoder().encode(secret)
 
 const JWT_EXPIRY = '24h'
 

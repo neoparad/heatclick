@@ -1,15 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
 
 export async function POST(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const body = await request.json()
     
     // バリデーション
     if (!body.site_id || !body.session_id || !body.page_url) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      )
+      return badRequest('Missing required fields')
     }
 
     // イベントデータの構造化
@@ -76,7 +77,10 @@ export async function POST(request: NextRequest) {
   }
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   return NextResponse.json({
     message: 'ClickInsight Pro Events API',
     version: '1.0.0',

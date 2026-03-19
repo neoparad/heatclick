@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { anonymizeIp } from '@/lib/privacy'
+import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
 
 function buildCorsHeaders(request: NextRequest): HeadersInit {
   const origin = request.headers.get('origin') || '*'
@@ -20,6 +21,9 @@ export async function OPTIONS(request: NextRequest) {
 
 // セッション録画データの保存
 export async function POST(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const rawIp = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
     const clientIp = anonymizeIp(rawIp)
@@ -32,7 +36,7 @@ export async function POST(request: NextRequest) {
     const data = await request.json()
 
     if (!data.site_id || !data.session_id || !data.events || !Array.isArray(data.events)) {
-      return NextResponse.json({ error: 'Invalid data' }, { status: 400, headers: buildCorsHeaders(request) })
+      return badRequest('Invalid data')
     }
 
     // 録画データサイズ制限（5MB）
@@ -76,6 +80,9 @@ export async function POST(request: NextRequest) {
 
 // セッション録画データの取得
 export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const { searchParams } = new URL(request.url)
     const siteId = searchParams.get('site_id')
@@ -83,7 +90,7 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get('limit') || '20')
 
     if (!siteId) {
-      return NextResponse.json({ error: 'site_id is required' }, { status: 400, headers: buildCorsHeaders(request) })
+      return badRequest('site_id is required')
     }
 
     const clickhouse = await getClickHouseClientAsync()

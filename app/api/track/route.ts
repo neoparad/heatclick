@@ -3,23 +3,13 @@ import { getClickHouseClientAsync } from '@/lib/clickhouse'
 import { publishRealtimeData, pushEventBuffer } from '@/lib/redis'
 import { checkRateLimitAsync } from '@/lib/rate-limit'
 import { anonymizeIp } from '@/lib/privacy'
+import { buildTrackingCorsHeaders as buildCorsHeaders } from '@/lib/api-utils'
 
 // Vercel Serverless タイムアウト設定（秒）
 export const maxDuration = 60
 
 // メモリ内データストレージ（フォールバック用）
 let trackingData: any[] = []
-
-function buildCorsHeaders(request: NextRequest): HeadersInit {
-  const origin = request.headers.get('origin') || '*'
-  return {
-    'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
-    'Access-Control-Allow-Credentials': 'true',
-    'Vary': 'Origin',
-  }
-}
 
 export async function OPTIONS(request: NextRequest) {
   const headers = buildCorsHeaders(request)
@@ -89,7 +79,7 @@ export async function POST(request: NextRequest) {
 
     // Prepare events for ClickHouse（収益・広告連携対応）
     const clickHouseEvents = events.map(event => ({
-      id: event.id || `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      id: event.id || crypto.randomUUID(),
       site_id: event.site_id || event.siteId,
       session_id: event.session_id || event.sessionId,
       user_id: event.user_id || event.userId || null,
@@ -109,7 +99,7 @@ export async function POST(request: NextRequest) {
       click_y: event.position?.y || event.click_y || 0,
       scroll_y: event.scroll_y || 0,
       scroll_percentage: event.scroll_percentage || 0,
-      read_y: event.read_y || null,
+      read_y: event.read_y || 0,
       read_duration: event.read_duration || 0,
       event_revenue: event.event_revenue || event.revenue || 0,
       utm_source: event.utm_source || null,
@@ -131,7 +121,7 @@ export async function POST(request: NextRequest) {
       const eventType = event.event_type || event.eventType
       if (eventType === 'image_visibility' && event.image_src) {
         imageVisibilityEvents.push({
-          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          id: crypto.randomUUID(),
           site_id: event.site_id || event.siteId,
           session_id: event.session_id || event.sessionId,
           page_url: event.url || event.page_url || '',
@@ -156,7 +146,7 @@ export async function POST(request: NextRequest) {
       const eventType = event.event_type || event.eventType
       if (formEventTypes.includes(eventType)) {
         formEvents.push({
-          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          id: crypto.randomUUID(),
           site_id: event.site_id || event.siteId || '',
           session_id: event.session_id || event.sessionId || '',
           page_url: event.url || event.page_url || '',
@@ -184,7 +174,7 @@ export async function POST(request: NextRequest) {
       const eventType = event.event_type || event.eventType
       if (videoEventTypes.includes(eventType)) {
         videoEvents.push({
-          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          id: crypto.randomUUID(),
           site_id: event.site_id || event.siteId || '',
           session_id: event.session_id || event.sessionId || '',
           page_url: event.url || event.page_url || '',
@@ -210,7 +200,7 @@ export async function POST(request: NextRequest) {
       const eventType = event.event_type || event.eventType
       if (eventType === 'element_visibility' && event.element_selector) {
         elementVisibilityEvents.push({
-          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          id: crypto.randomUUID(),
           site_id: event.site_id || event.siteId || '',
           session_id: event.session_id || event.sessionId || '',
           page_url: event.url || event.page_url || '',

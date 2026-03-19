@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getHeatmapData as getHeatmapDataFromQuery } from '@/inngest/lib/heatmapQuery'
 import { getHeatmapData as getHeatmapDataLegacy } from '@/lib/clickhouse'
 import { getHeatmapCache, setHeatmapCache } from '@/lib/redis'
+import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
 
 // 集約テーブル使用で10秒で十分
 export const maxDuration = 10
 
 export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const { searchParams } = new URL(request.url)
     const siteId = searchParams.get('site_id')

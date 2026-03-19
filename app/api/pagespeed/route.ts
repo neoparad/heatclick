@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { redis as getRedisClient } from '@/lib/redis'
+import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
 
 const PAGESPEED_API_URL = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed'
 const CACHE_TTL = 86400 // 24時間
@@ -69,16 +70,16 @@ const AUDIT_TITLES_JA: Record<string, string> = {
 }
 
 export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const { searchParams } = new URL(request.url)
     const url = searchParams.get('url')
     const device = searchParams.get('device') || 'mobile'
 
     if (!url) {
-      return NextResponse.json(
-        { error: 'Missing required parameter: url' },
-        { status: 400 }
-      )
+      return badRequest('Missing required parameter: url')
     }
 
     const cacheKey = `pagespeed:${url}:${device}`

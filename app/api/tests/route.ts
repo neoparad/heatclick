@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
+import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
 
 // CORS headers
 function buildCorsHeaders(request: NextRequest): HeadersInit {
@@ -28,6 +29,9 @@ function generateId(): string {
 
 // GET - List all tests
 export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const { searchParams } = new URL(request.url)
     const siteId = searchParams.get('site_id')
@@ -120,14 +124,14 @@ export async function GET(request: NextRequest) {
 
 // POST - Create a new test
 export async function POST(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const data = await request.json()
 
     if (!data.name || !data.site_id || !data.page_url_a) {
-      return NextResponse.json(
-        { error: 'name, site_id, and page_url_a are required' },
-        { status: 400, headers: buildCorsHeaders(request) }
-      )
+      return badRequest('name, site_id, and page_url_a are required')
     }
 
     const now = new Date().toISOString().replace('T', ' ').split('.')[0]

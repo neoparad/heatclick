@@ -46,8 +46,12 @@ export const flushEventBuffer = inngest.createFunction(
       return { flushed, failed };
     });
 
-    // Step 2: リトライバッファの処理（5分に1回程度）
+    // Step 2: リトライバッファの処理（5分に1回のみ実行）
     const retryResult = await step.run("flush-retry-buffer", async () => {
+      // 5分に1回だけリトライを実行（毎分のcronだが、分の下1桁が0か5の時のみ）
+      const currentMinute = new Date().getMinutes();
+      if (currentMinute % 5 !== 0) return { retried: 0, failed: 0, skipped: true };
+
       const items = await popRetryBuffer(100);
       if (items.length === 0) return { retried: 0, failed: 0 };
 

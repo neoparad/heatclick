@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { jwtVerify } from 'jose'
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET || 'ugokimap-default-secret-change-in-production'
-)
+const secret = process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET
+if (!secret) {
+  throw new Error('JWT_SECRET or NEXTAUTH_SECRET environment variable is required')
+}
+const JWT_SECRET = new TextEncoder().encode(secret)
 
 // 認証不要なパス（公開API）
 const PUBLIC_API_PATHS = [
@@ -90,26 +92,23 @@ export async function middleware(request: NextRequest) {
     }
   }
 
-  // ページルートの認証チェック（ダッシュボード等）
-  if (pathname.startsWith('/dashboard') || pathname.startsWith('/heatmap') || pathname.startsWith('/sites') || pathname.startsWith('/settings') || pathname.startsWith('/recordings') || pathname.startsWith('/tests') || pathname.startsWith('/performance') || pathname.startsWith('/image-visibility') || pathname.startsWith('/ai-insights') || pathname.startsWith('/reports') || pathname.startsWith('/realtime')) {
-    const token = extractToken(request)
-    if (!token) {
-      const loginUrl = new URL('/auth/login', request.url)
-      loginUrl.searchParams.set('redirect', pathname)
-      return NextResponse.redirect(loginUrl)
-    }
-
-    try {
-      await jwtVerify(token, JWT_SECRET)
-      return NextResponse.next()
-    } catch {
-      const loginUrl = new URL('/auth/login', request.url)
-      loginUrl.searchParams.set('redirect', pathname)
-      return NextResponse.redirect(loginUrl)
-    }
+  // ページルートの認証チェック（matcherで既にフィルタされているので、
+  // ここに到達した非APIルートは全て認証が必要）
+  const token = extractToken(request)
+  if (!token) {
+    const loginUrl = new URL('/auth/login', request.url)
+    loginUrl.searchParams.set('redirect', pathname)
+    return NextResponse.redirect(loginUrl)
   }
 
-  return NextResponse.next()
+  try {
+    await jwtVerify(token, JWT_SECRET)
+    return NextResponse.next()
+  } catch {
+    const loginUrl = new URL('/auth/login', request.url)
+    loginUrl.searchParams.set('redirect', pathname)
+    return NextResponse.redirect(loginUrl)
+  }
 }
 
 export const config = {

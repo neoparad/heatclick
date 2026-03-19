@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
+import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
 
 // クエリごとのヒートマップデータ取得
 export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const { searchParams } = new URL(request.url)
     const siteId = searchParams.get('siteId')
@@ -12,7 +16,7 @@ export async function GET(request: NextRequest) {
     const endDate = searchParams.get('endDate')
 
     if (!siteId) {
-      return NextResponse.json({ error: 'siteId is required' }, { status: 400 })
+      return badRequest('siteId is required')
     }
 
     const clickhouse = await getClickHouseClientAsync()

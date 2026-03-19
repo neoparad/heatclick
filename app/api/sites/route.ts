@@ -7,18 +7,7 @@ import {
   formatDateTime,
   SiteData,
 } from '@/lib/sites-store'
-
-// CORS headers
-function buildCorsHeaders(request: NextRequest): HeadersInit {
-  const origin = request.headers.get('origin') || '*'
-  return {
-    'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
-    'Access-Control-Allow-Credentials': 'true',
-    'Vary': 'Origin',
-  }
-}
+import { buildCorsHeaders, getAuthContext, badRequest, unauthorized, apiError } from '@/lib/api-utils'
 
 export async function OPTIONS(request: NextRequest) {
   return new NextResponse(null, { headers: buildCorsHeaders(request) })
@@ -43,8 +32,11 @@ function generateId(): string {
   })
 }
 
-// GET - List all sites
+// GET - List sites for authenticated user
 export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const clickhouse = await getClickHouseClientAsync()
     const result = await clickhouse.query({
@@ -52,15 +44,16 @@ export async function GET(request: NextRequest) {
         SELECT id, name, url, tracking_id, status,
                created_at, updated_at, last_activity, page_views
         FROM clickinsight.sites
+        WHERE user_id = {user_id:String}
         ORDER BY created_at DESC
       `,
+      query_params: { user_id: auth.userId },
       format: 'JSONEachRow',
     })
     const sites = await result.json()
     return NextResponse.json({ sites, total: sites.length }, { headers: buildCorsHeaders(request) })
   } catch (error) {
     console.warn('ClickHouse unavailable, using memory store:', (error as Error).message)
-    // メモリフォールバック
     const sites = getMemorySites()
     return NextResponse.json(
       { sites, total: sites.length, source: 'memory' },
@@ -71,14 +64,14 @@ export async function GET(request: NextRequest) {
 
 // POST - Create new site
 export async function POST(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const data = await request.json()
 
     if (!data.name || !data.url) {
-      return NextResponse.json(
-        { error: 'Name and URL are required' },
-        { status: 400, headers: buildCorsHeaders(request) }
-      )
+      return badRequest('Name and URL are required')
     }
 
     // Validate URL

@@ -1,5 +1,40 @@
 import { NextRequest, NextResponse } from 'next/server'
 
+// --- CORS ---
+
+// 管理画面API用（自サイトのみ許可）
+export function buildCorsHeaders(request: NextRequest): HeadersInit {
+  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || []
+  const origin = request.headers.get('origin') || ''
+
+  // 開発環境またはallowedOriginsに含まれる場合のみ許可
+  const isAllowed = !origin
+    || origin.includes('localhost')
+    || origin.includes('127.0.0.1')
+    || allowedOrigins.some(o => origin === o.trim())
+    || (process.env.VERCEL_URL && origin.includes(process.env.VERCEL_URL))
+
+  return {
+    'Access-Control-Allow-Origin': isAllowed ? origin || '*' : '',
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+    'Access-Control-Allow-Credentials': 'true',
+    'Vary': 'Origin',
+  }
+}
+
+// トラッキングAPI用（全オリジン許可 — 外部サイトから呼ばれるため）
+export function buildTrackingCorsHeaders(request: NextRequest): HeadersInit {
+  const origin = request.headers.get('origin') || '*'
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+    'Access-Control-Allow-Credentials': 'true',
+    'Vary': 'Origin',
+  }
+}
+
 // --- 共通エラーレスポンス ---
 
 export function apiError(message: string, status: number = 500, code?: string): NextResponse {
@@ -79,8 +114,7 @@ export async function verifySiteAccess(
 
     return { authorized: count > 0, auth }
   } catch {
-    // DB接続エラー時は認可を通す（開発時の利便性のため）
-    // 本番ではfalseを返すべき
-    return { authorized: true, auth }
+    // DB接続エラー時はアクセス拒否（安全側に倒す）
+    return { authorized: false, auth }
   }
 }

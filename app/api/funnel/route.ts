@@ -1,15 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionFunnel, getSessions } from '@/lib/session-aggregator'
+import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
 
 // セッションごとのファネル分析
 export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const { searchParams } = new URL(request.url)
     const siteId = searchParams.get('siteId')
     const sessionId = searchParams.get('sessionId')
     
     if (!siteId) {
-      return NextResponse.json({ error: 'siteId is required' }, { status: 400 })
+      return badRequest('siteId is required')
     }
     
     // 特定のセッションのファネルを取得

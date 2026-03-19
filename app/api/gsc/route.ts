@@ -1,15 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
 import { fetchGSCDailyData, fetchGSCQueryPageData, fetchGSCDataByQuery, fetchGSCDataByPage, GSCConfig } from '@/lib/integrations/gsc'
+import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
 
 // GSCデータの取得と保存
 export async function POST(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const body = await request.json()
     const { siteId, startDate, endDate, action = 'fetch' } = body
 
     if (!siteId || !startDate || !endDate) {
-      return NextResponse.json({ error: 'siteId, startDate, endDate are required' }, { status: 400 })
+      return badRequest('siteId, startDate, endDate are required')
     }
 
     // GSC設定を取得（環境変数またはDBから）
@@ -53,9 +57,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!gscConfig.clientEmail || !gscConfig.privateKey || !gscConfig.siteUrl) {
-      return NextResponse.json({ 
-        error: 'GSC configuration is missing. Please configure GSC settings in environment variables or site settings.' 
-      }, { status: 400 })
+      return badRequest('GSC configuration is missing. Please configure GSC settings in environment variables or site settings.')
     }
 
     // GSCデータを取得
@@ -106,6 +108,9 @@ export async function POST(request: NextRequest) {
 
 // GSCデータの取得（保存済みデータから）
 export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const { searchParams } = new URL(request.url)
     const siteId = searchParams.get('siteId')
@@ -115,7 +120,7 @@ export async function GET(request: NextRequest) {
     const page = searchParams.get('page')
 
     if (!siteId) {
-      return NextResponse.json({ error: 'siteId is required' }, { status: 400 })
+      return badRequest('siteId is required')
     }
 
     const clickhouse = await getClickHouseClientAsync()

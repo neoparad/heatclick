@@ -443,16 +443,16 @@
     loadExtensions();
   };
 
-  // Public API (shared with extensions)
-  window.ClickInsight = {
+  // Public API (shared with extensions, frozen to prevent tampering)
+  window.ClickInsight = Object.freeze({
     track: queueEvent,
     flush: sendBatch,
     getSessionId: utils.getSessionId,
     getUserId: utils.getUserId,
     registerExtension: registerExtension,
-    utils: utils,
-    config: config,
-  };
+    utils: Object.freeze(utils),
+    config: Object.freeze({ ...config }),
+  });
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);

@@ -6,6 +6,7 @@ import {
   deleteMemorySite,
   formatDateTime,
 } from '@/lib/sites-store'
+import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
 
 // CORS headers
 function buildCorsHeaders(request: NextRequest): HeadersInit {
@@ -28,6 +29,9 @@ export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const clickhouse = await getClickHouseClientAsync()
     const result = await clickhouse.query({
@@ -66,6 +70,9 @@ export async function PUT(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const data = await request.json()
 
@@ -74,10 +81,7 @@ export async function PUT(
       try {
         new URL(data.url)
       } catch {
-        return NextResponse.json(
-          { error: 'Invalid URL format' },
-          { status: 400, headers: buildCorsHeaders(request) }
-        )
+        return badRequest('Invalid URL format')
       }
     }
 
@@ -156,6 +160,9 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     // ClickHouseから削除
     let chError: string | null = null

@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
+import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
 
 /**
  * ページ単位の統計API
  * PV、滞在時間、離脱率、スクロール深度、画像可視率を返す
  */
 export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const { searchParams } = new URL(request.url)
     const siteId = searchParams.get('site_id')
@@ -14,10 +18,7 @@ export async function GET(request: NextRequest) {
     const endDate = searchParams.get('end_date')
 
     if (!siteId || !pageUrl) {
-      return NextResponse.json(
-        { error: 'site_id and page_url are required' },
-        { status: 400 }
-      )
+      return badRequest('site_id and page_url are required')
     }
 
     const client = await getClickHouseClientAsync()
