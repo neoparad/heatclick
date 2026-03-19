@@ -902,6 +902,7 @@ export async function initializeDatabase(): Promise<void> {
           conversion_value Decimal(10, 2) DEFAULT 0,
           search_query Nullable(String),
           device_type Nullable(String),
+          ga_client_id Nullable(String),
           received_at DateTime DEFAULT now()
         ) ENGINE = MergeTree()
         ORDER BY (site_id, timestamp)
@@ -916,6 +917,9 @@ export async function initializeDatabase(): Promise<void> {
       })
       await client.exec({
         query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS read_duration Float32 DEFAULT 0`,
+      })
+      await client.exec({
+        query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS ga_client_id Nullable(String)`,
       })
     } catch (e) {
       // カラムが既に存在する場合は無視

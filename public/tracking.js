@@ -88,6 +88,9 @@
   // Extensible utils — extensions can add sanitizePII, sanitizeUrl, getCookie, setCookie
   const _utils = { getElementPath: _elPath, throttle: _throttle };
 
+  // GA4 client_id (for BigQuery demographic join)
+  const _gaClientId = (document.cookie.match(/_ga=GA\d+\.\d+\.(\d+\.\d+)/)||[])[1] || '';
+
   // UTM & Device
   const _p = new URLSearchParams(window.location.search);
   const _utm = { utm_source:_p.get('utm_source')||'', utm_medium:_p.get('utm_medium')||'', utm_campaign:_p.get('utm_campaign')||'', utm_term:_p.get('utm_term')||'', utm_content:_p.get('utm_content')||'', gclid:_p.get('gclid')||'', fbclid:_p.get('fbclid')||'' };
@@ -98,7 +101,7 @@
   const _q = []; let _bt = null;
 
   const queueEvent = (ev) => {
-    const d = { ...ev, id: _genId(), site_id: config.siteId, session_id: _getSession(), user_id: _getUserId(), timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, device_type: _devType(), referrer_type: _refType(document.referrer), ..._utm };
+    const d = { ...ev, id: _genId(), site_id: config.siteId, session_id: _getSession(), user_id: _getUserId(), ga_client_id: _gaClientId, timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, device_type: _devType(), referrer_type: _refType(document.referrer), ..._utm };
     if (!d.site_id || d.site_id.trim() === '') return;
     _q.push(d);
     if (_q.length >= config.batchSize) sendBatch(); else if (!_bt) _bt = setTimeout(sendBatch, config.batchInterval);

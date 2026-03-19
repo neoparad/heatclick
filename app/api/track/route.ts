@@ -113,6 +113,7 @@ export async function POST(request: NextRequest) {
       conversion_value: event.conversion_value || event.conversionValue || 0,
       search_query: event.search_query || null,
       device_type: event.device_type || null,
+      ga_client_id: event.ga_client_id || null,
     }))
 
     // Prepare image_visibility events
