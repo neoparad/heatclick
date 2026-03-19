@@ -313,17 +313,20 @@ export async function pushEventBuffer(
   }
 }
 
+// Lua: LRANGE + LTRIM を原子的に実行（2重処理防止）
+const POP_BUFFER_LUA = `
+  local items = redis.call('LRANGE', KEYS[1], 0, ARGV[1] - 1)
+  if #items > 0 then
+    redis.call('LTRIM', KEYS[1], #items, -1)
+  end
+  return items
+`
+
 export async function popEventBuffer(batchSize: number = 500): Promise<Array<{ table: string; values: any[]; timestamp: number }>> {
   try {
     const client = getRedisClient()
-
-    // LRANGE + LTRIM の2コマンドでバッチ取得（N+1問題を回避）
-    const rawItems = await client.lrange(EVENT_BUFFER_KEY, 0, batchSize - 1)
-    if (rawItems.length === 0) return []
-
-    // 取得した分を削除
-    await client.ltrim(EVENT_BUFFER_KEY, rawItems.length, -1)
-
+    const rawItems = await client.eval(POP_BUFFER_LUA, 1, EVENT_BUFFER_KEY, batchSize) as string[]
+    if (!rawItems || rawItems.length === 0) return []
     return rawItems.map(item => JSON.parse(item))
   } catch (error) {
     console.error('Error popping from event buffer:', error)
@@ -347,12 +350,8 @@ export async function pushRetryBuffer(
 export async function popRetryBuffer(batchSize: number = 100): Promise<Array<{ table: string; values: any[]; timestamp: number }>> {
   try {
     const client = getRedisClient()
-
-    const rawItems = await client.lrange(EVENT_BUFFER_RETRY_KEY, 0, batchSize - 1)
-    if (rawItems.length === 0) return []
-
-    await client.ltrim(EVENT_BUFFER_RETRY_KEY, rawItems.length, -1)
-
+    const rawItems = await client.eval(POP_BUFFER_LUA, 1, EVENT_BUFFER_RETRY_KEY, batchSize) as string[]
+    if (!rawItems || rawItems.length === 0) return []
     return rawItems.map(item => JSON.parse(item))
   } catch (error) {
     console.error('Error popping from retry buffer:', error)

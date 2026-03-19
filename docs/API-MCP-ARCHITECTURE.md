@@ -494,10 +494,13 @@ GROUP BY age_bracket, gender, country, region, ga.device.category
 | コンポーネント | 状態 |
 |---|---|
 | データパイプライン（tracking→Redis→ClickHouse） | **実装済み** |
-| 20軸分析エンジン（lib/analysis-axes.ts） | **実装済み** |
+| 20軸分析エンジン（lib/analysis-axes.ts） | **実装済み**（コスト制御付き） |
 | GA4 client_id取得（tracking.js） | **実装済み** |
-| REST API Layer 1（サマリー） | 未実装 |
-| REST API Layer 2（軸別分析） | 未実装（analysis-axes.tsの呼び出しを繋ぐだけ） |
+| Redisバッファ原子性（Luaスクリプト） | **実装済み** |
+| APIキー別Rate Limiting | **実装済み** |
+| REST API Layer 1（サマリー） | **実装済み** `/api/v1/insights/{site_id}` |
+| REST API Layer 2（軸別分析） | **実装済み** `/api/v1/insights/{site_id}/axis/{axis_id}` |
+| REST API Layer 2（複数軸一括） | **実装済み** `/api/v1/insights/{site_id}/multi` |
 | REST API Layer 3（AI診断） | 未実装 |
-| MCP Server | 未実装 |
+| MCP Server（7ツール） | **実装済み** `mcp-server.ts` |
 | BigQuery連携（GA4デモグラフィック） | 未実装（ga_client_idは取得済み） |

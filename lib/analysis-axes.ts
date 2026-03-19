@@ -15,10 +15,10 @@ export interface AnalysisAxis {
   description: string
   category: 'conversion' | 'engagement' | 'friction' | 'persona' | 'content' | 'traffic' | 'demographic'
   query: string
-  // 必須パラメータ
   requiredParams: string[]
-  // AI向けのプロンプトヒント（結果をどう解釈すべきか）
   aiPromptHint: string
+  // クエリコスト: light(<1s), medium(1-5s), heavy(5s+, ウィンドウ関数/CROSS JOIN含む)
+  cost: 'light' | 'medium' | 'heavy'
 }
 
 export const analysisAxes = new Map<string, AnalysisAxis>()
@@ -32,6 +32,7 @@ analysisAxes.set('cv_behavior_diff', {
   category: 'conversion',
   requiredParams: ['site_id'],
   aiPromptHint: 'event_sequenceからCVに至る典型パターンを抽出し、3-5個のペルソナに分類してください。各ペルソナの特徴と推奨施策を出力してください。',
+  cost: 'heavy',
   query: `
     SELECT session_id,
       max(conversion_type IS NOT NULL) as converted,
@@ -57,6 +58,7 @@ analysisAxes.set('element_cv_contribution', {
   category: 'conversion',
   requiredParams: ['site_id'],
   aiPromptHint: 'CVに寄与している要素と、寄与していない要素を比較し、CTAの改善提案を出してください。',
+  cost: 'medium',
   query: `
     SELECT element_text, element_href, element_tag_name,
       count() as click_count, uniq(session_id) as unique_sessions
@@ -78,6 +80,7 @@ analysisAxes.set('multi_session_cv', {
   category: 'conversion',
   requiredParams: ['site_id'],
   aiPromptHint: 'CVまでの訪問回数の分布から、リマーケティング戦略と初回/再訪のLP切り替え提案を出してください。',
+  cost: 'medium',
   query: `
     SELECT session_rank, count() as cv_count,
       count() / sum(count()) OVER () * 100 as pct
@@ -102,6 +105,7 @@ analysisAxes.set('lp_source_cv', {
   category: 'conversion',
   requiredParams: ['site_id'],
   aiPromptHint: 'CVRが高い/低いLP×流入元の組み合わせを特定し、広告費の再配分と各LPの改善提案を出してください。',
+  cost: 'medium',
   query: `
     SELECT landing_page, utm_source, utm_medium,
       count() as sessions,
@@ -131,6 +135,7 @@ analysisAxes.set('image_cv_correlation', {
   category: 'engagement',
   requiredParams: ['site_id'],
   aiPromptHint: 'CVとの相関が強い画像を特定し、配置変更・差し替え・強調の具体的提案を出してください。',
+  cost: 'medium',
   query: `
     SELECT iv.image_src, iv.image_alt,
       avgIf(iv.visible_duration_ms, e.converted = 1) as cv_avg_ms,
@@ -157,6 +162,7 @@ analysisAxes.set('video_cv_correlation', {
   category: 'engagement',
   requiredParams: ['site_id'],
   aiPromptHint: '動画のどの地点まで見るとCVRが跳ね上がるかを特定し、動画の長さ・CTAオーバーレイ位置の提案を出してください。',
+  cost: 'medium',
   query: `
     SELECT ve.video_src, ve.video_milestone,
       countIf(e.converted = 1) as cv_count,
@@ -181,6 +187,7 @@ analysisAxes.set('reading_area_cv', {
   category: 'engagement',
   requiredParams: ['site_id'],
   aiPromptHint: 'CVした人が熟読したセクションを特定し、そのコンテンツの強化・位置変更の提案を出してください。',
+  cost: 'medium',
   query: `
     SELECT url,
       intDiv(read_y, 200) * 200 as y_zone,
@@ -207,6 +214,7 @@ analysisAxes.set('content_type_effectiveness', {
   category: 'engagement',
   requiredParams: ['site_id'],
   aiPromptHint: 'テキスト/画像/動画のどのコンテンツタイプがCVに最も寄与しているかを判定し、コンテンツ制作リソースの配分提案を出してください。',
+  cost: 'heavy',
   query: `
     SELECT 'text' as content_type,
       avgIf(total_ms, converted=1) as cv_engagement_ms,
@@ -249,6 +257,7 @@ analysisAxes.set('cta_visibility_clickrate', {
   category: 'engagement',
   requiredParams: ['site_id'],
   aiPromptHint: '可視時間が長いのにクリック率が低い要素を特定し、コピー・デザイン・配置の改善提案を出してください。',
+  cost: 'light',
   query: `
     SELECT element_selector, element_text,
       avg(visible_duration_ms) as avg_visible_ms,
@@ -271,6 +280,7 @@ analysisAxes.set('atf_vs_btf', {
   category: 'engagement',
   requiredParams: ['site_id'],
   aiPromptHint: 'ATF滞在率が高すぎるページは重要コンテンツが埋もれている。低すぎるページはファーストビューが弱い。改善提案を出してください。',
+  cost: 'medium',
   query: `
     SELECT url,
       sumIf(read_duration, read_y <= viewport_height) as atf_ms,
@@ -293,6 +303,7 @@ analysisAxes.set('form_friction', {
   category: 'friction',
   requiredParams: ['site_id'],
   aiPromptHint: '離脱率が高いフィールドを特定し、削除・任意化・自動入力の提案を出してください。',
+  cost: 'light',
   query: `
     SELECT form_id, field_name, field_type,
       avg(field_duration_ms) as avg_duration_ms,
@@ -314,6 +325,7 @@ analysisAxes.set('rage_dead_clicks', {
   category: 'friction',
   requiredParams: ['site_id'],
   aiPromptHint: 'rage clickはUI不満の指標、dead clickはクリッカブルに見える非インタラクティブ要素の指標。具体的なUI修正提案を出してください。',
+  cost: 'light',
   query: `
     SELECT url, element_text, element_tag_name,
       intDiv(click_y, 100) * 100 as y_zone,
@@ -334,6 +346,7 @@ analysisAxes.set('confusion_scrolling', {
   category: 'friction',
   requiredParams: ['site_id'],
   aiPromptHint: '上下往復が多い箇所は情報の配置順序やナビゲーションに問題がある。具体的なレイアウト改善提案を出してください。',
+  cost: 'heavy',
   query: `
     SELECT url, count() as sessions_with_confusion,
       avg(confusion_rate) as avg_confusion_rate
@@ -364,6 +377,7 @@ analysisAxes.set('cta_hesitation', {
   category: 'friction',
   requiredParams: ['site_id'],
   aiPromptHint: '迷い時間が長いCTAは、直前のコンテンツが不安を解消できていない。CTA直前に安心材料（保証・実績・FAQ）を配置する提案を出してください。',
+  cost: 'heavy',
   query: `
     SELECT url, element_text,
       avg(time_to_click) as avg_hesitation_sec,
@@ -396,6 +410,7 @@ analysisAxes.set('new_vs_returning', {
   category: 'persona',
   requiredParams: ['site_id'],
   aiPromptHint: '新規とリピーターの行動差から、それぞれに最適化されたLPやコンテンツの提案を出してください。',
+  cost: 'medium',
   query: `
     SELECT
       CASE WHEN visit_count = 1 THEN 'new' ELSE 'returning' END as user_type,
@@ -425,6 +440,7 @@ analysisAxes.set('scroll_speed_persona', {
   category: 'persona',
   requiredParams: ['site_id'],
   aiPromptHint: 'skimmerはビジュアル重視のLP、careful_readerはテキスト詳細型のLPが適している。各群のCVRから最適なコンテンツ戦略を提案してください。',
+  cost: 'heavy',
   query: `
     SELECT reader_type, count() as sessions,
       countIf(converted = 1) / greatest(count(), 1) * 100 as cvr,
@@ -461,6 +477,7 @@ analysisAxes.set('source_behavior_cv', {
   category: 'traffic',
   requiredParams: ['site_id'],
   aiPromptHint: '流入元ごとの行動差から、各チャネルに最適化されたLPバリアントの提案を出してください。',
+  cost: 'light',
   query: `
     SELECT utm_source, utm_medium,
       count() as sessions,
@@ -489,6 +506,7 @@ analysisAxes.set('hourly_pattern', {
   category: 'traffic',
   requiredParams: ['site_id'],
   aiPromptHint: '時間帯別CVRから最適な広告配信時間、コンテンツ更新タイミングの提案を出してください。',
+  cost: 'light',
   query: `
     SELECT toHour(min_ts) as hour_of_day,
       count() as sessions,
@@ -514,6 +532,7 @@ analysisAxes.set('weekday_device_cv', {
   category: 'traffic',
   requiredParams: ['site_id'],
   aiPromptHint: 'CVRが高い/低い曜日×デバイスの組み合わせから、デバイス別LP最適化と広告配信スケジュールの提案を出してください。',
+  cost: 'light',
   query: `
     SELECT toDayOfWeek(min_ts) as day_of_week, device_type,
       count() as sessions,
@@ -538,6 +557,7 @@ analysisAxes.set('page_journey', {
   category: 'persona',
   requiredParams: ['site_id'],
   aiPromptHint: 'CVした人の遷移パターンから典型的なカスタマージャーニーを3-5パターン抽出し、各ジャーニーの特徴と離脱ポイント、改善提案を出してください。',
+  cost: 'heavy',
   query: `
     SELECT page_sequence, count() as session_count, avg(session_sec) as avg_duration_sec
     FROM (
@@ -586,21 +606,40 @@ export async function executeAxis(
   return { axis, data: data as any[] }
 }
 
-// 全軸を一括実行
+// 全軸を一括実行（コスト制御付き: heavyは直列、light/mediumは並列）
 export async function executeAllAxes(
   clickhouse: any,
   params: Record<string, string>
 ): Promise<Map<string, { axis: AnalysisAxis; data: any[] }>> {
   const results = new Map()
+  const entries = Array.from(analysisAxes.entries())
 
-  for (const [id, axis] of Array.from(analysisAxes.entries())) {
+  // light/medium を並列実行
+  const lightMedium = entries.filter(([_, a]) => a.cost !== 'heavy')
+  const heavy = entries.filter(([_, a]) => a.cost === 'heavy')
+
+  // light/medium: 最大5並列
+  for (let i = 0; i < lightMedium.length; i += 5) {
+    const batch = lightMedium.slice(i, i + 5)
+    const batchResults = await Promise.allSettled(
+      batch.map(([id]) => executeAxis(clickhouse, id, params))
+    )
+    batchResults.forEach((r, idx) => {
+      if (r.status === 'fulfilled' && r.value && r.value.data.length > 0) {
+        results.set(batch[idx][0], r.value)
+      }
+    })
+  }
+
+  // heavy: 1つずつ直列実行（メモリ圧迫を防ぐ）
+  for (const [id] of heavy) {
     try {
       const result = await executeAxis(clickhouse, id, params)
       if (result && result.data.length > 0) {
         results.set(id, result)
       }
     } catch (e) {
-      console.error(`Axis ${id} failed:`, e)
+      console.error(`Heavy axis ${id} failed:`, e)
     }
   }
 
@@ -613,8 +652,8 @@ export function getAxesByCategory(category: string): AnalysisAxis[] {
 }
 
 // 軸の一覧（API/MCP用）
-export function listAxes(): Array<{ id: string; name: string; description: string; category: string }> {
+export function listAxes(): Array<{ id: string; name: string; description: string; category: string; cost: string }> {
   return Array.from(analysisAxes.values()).map(a => ({
-    id: a.id, name: a.name, description: a.description, category: a.category,
+    id: a.id, name: a.name, description: a.description, category: a.category, cost: a.cost,
   }))
 }
