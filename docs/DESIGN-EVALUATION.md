@@ -150,7 +150,7 @@
 | 2-3 | middleware.tsのページルートチェックを簡素化（matcherに委譲） | `middleware.ts` | API +1 | **完了** |
 | 2-4 | CORS設定を `/api/track`=全オリジン許可、その他=管理画面ドメイン限定 に分離 | `lib/api-utils.ts`, `app/api/track/route.ts` | API +2 | **完了** |
 | 2-5 | リトライバッファの頻度制御（5分に1回） | `inngest/funcs/flushEventBuffer.ts` | インフラ +1 | **完了** |
-| 2-6 | tracking.jsコアからutils分離で5KB目標達成 | `public/tracking.js`, 新: `tracking-ext-utils.js` | トラッキング +2 | 未着手 |
+| 2-6 | tracking.jsコアからutils分離。minified 6.88KB / gzip 2.93KB | `public/tracking.js`, 新: `tracking-ext-utils.js` | トラッキング +2 | **完了** |
 
 ### Phase 3: 品質仕上げ（92→97点、1-2週間）
 
