@@ -1,23 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import bcrypt from 'bcryptjs'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
-
-// 簡易的なメモリ内ユーザーストレージ（テスト用、後でClickHouseに移行）
-// 注意: サーバー再起動でデータは消失します
-let users: Array<{
-  id: string
-  email: string
-  password: string
-  name: string
-  created_at: string
-}> = []
+import { signToken } from '@/lib/jwt'
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { email, password, name } = body
 
-    // バリデーション
     if (!email || !password || !name) {
       return NextResponse.json(
         { error: 'Email, password, and name are required' },
@@ -25,7 +15,6 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // メールアドレスの形式チェック
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
     if (!emailRegex.test(email)) {
       return NextResponse.json(
@@ -34,7 +23,6 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // パスワードの長さチェック
     if (password.length < 8) {
       return NextResponse.json(
         { error: 'Password must be at least 8 characters' },
@@ -42,91 +30,64 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // 既存ユーザーのチェック
-    // ClickHouse接続可能な場合は、ClickHouseを優先してチェック
-    // メモリ内ストレージはフォールバックとして使用
-    try {
-      const clickhouse = await getClickHouseClientAsync()
-      const result = await clickhouse.query({
-        query: `SELECT id FROM clickinsight.users WHERE email = {email:String}`,
-        query_params: { email },
-        format: 'JSONEachRow',
-      })
-      const existing = await result.json()
-      if (existing.length > 0) {
-        return NextResponse.json(
-          { error: 'User with this email already exists' },
-          { status: 409 }
-        )
-      }
-    } catch (error: any) {
-      // ClickHouse接続不可時はメモリ内ストレージをチェック
-      console.warn('ClickHouse not connected, checking memory storage only:', error?.message || error)
-      const existingUser = users.find(u => u.email === email)
-      if (existingUser) {
-        return NextResponse.json(
-          { error: 'User with this email already exists' },
-          { status: 409 }
-        )
-      }
+    const clickhouse = await getClickHouseClientAsync()
+
+    // 既存ユーザーチェック
+    const result = await clickhouse.query({
+      query: `SELECT id FROM clickinsight.users WHERE email = {email:String}`,
+      query_params: { email },
+      format: 'JSONEachRow',
+    })
+    const existing = await result.json() as any[]
+    if (existing.length > 0) {
+      return NextResponse.json(
+        { error: 'User with this email already exists' },
+        { status: 409 }
+      )
     }
 
-    // パスワードのハッシュ化
     const hashedPassword = await bcrypt.hash(password, 10)
-
-    // ユーザーIDの生成
     const userId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-    const createdAt = new Date().toISOString()
+    const now = new Date().toISOString().replace('T', ' ').substring(0, 19)
 
-    const newUser = {
-      id: userId,
-      email,
-      password: hashedPassword,
-      name,
-      created_at: createdAt,
-    }
-
-    // ClickHouseに保存（接続されている場合）
-    // ClickHouse接続可能な場合は、ClickHouseを優先して保存
-    // メモリ内ストレージはフォールバックとして使用
-    let savedToClickHouse = false
-    try {
-      const clickhouse = await getClickHouseClientAsync()
-      await clickhouse.insert({
-        table: 'clickinsight.users',
-        values: [{
-          id: userId,
-          email,
-          password: hashedPassword,
-          name,
-          created_at: createdAt.replace('T', ' ').substring(0, 19),
-          updated_at: createdAt.replace('T', ' ').substring(0, 19),
-          plan: 'free',
-          status: 'active',
-        }],
-        format: 'JSONEachRow',
-      })
-      savedToClickHouse = true
-      console.log('User saved to ClickHouse successfully')
-      // ClickHouseに保存成功した場合、メモリ内ストレージにも保存（キャッシュとして）
-      users.push(newUser)
-    } catch (error: any) {
-      // ClickHouse接続不可時はメモリ内ストレージのみに保存
-      console.warn('ClickHouse not connected, user saved in memory only:', error?.message || error)
-      console.warn('WARNING: Data will be lost on server restart. Please configure ClickHouse connection.')
-      users.push(newUser)
-    }
-
-    return NextResponse.json({
-      success: true,
-      user: {
+    await clickhouse.insert({
+      table: 'clickinsight.users',
+      values: [{
         id: userId,
         email,
+        password: hashedPassword,
         name,
-        created_at: createdAt,
-      },
-      warning: savedToClickHouse ? undefined : 'User saved in memory only. Data will be lost on server restart. Please configure ClickHouse connection.',
+        created_at: now,
+        updated_at: now,
+        plan: 'free',
+        status: 'active',
+      }],
+      format: 'JSONEachRow',
+    })
+
+    // JWTトークン生成
+    const token = await signToken({
+      sub: userId,
+      email,
+      name,
+      plan: 'free',
+    })
+
+    const response = NextResponse.json({
+      success: true,
+      user: { id: userId, email, name, plan: 'free' },
+      token,
     }, { status: 201 })
+
+    response.cookies.set('ugokimap_token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 60 * 60 * 24,
+      path: '/',
+    })
+
+    return response
   } catch (error) {
     console.error('Error registering user:', error)
     return NextResponse.json(
@@ -135,8 +96,3 @@ export async function POST(request: NextRequest) {
     )
   }
 }
-
-
-
-
-

@@ -1,0 +1,92 @@
+カテゴリ,機能名,説明,実装状況,使用テーブル,APIエンドポイント,備考
+クリック分析,クリックヒートマップ,ページ上のクリック密度をヒートマップで可視化,✅ 実装済,events / heatmap_events,/api/heatmap?heatmap_type=click,heatmap.jsで描画
+クリック分析,トップクリック要素ランキング,最もクリックされた要素を一覧表示,✅ 実装済,events,/api/clicks,要素タグ・ID・クラスで集約
+クリック分析,デッドクリック検出,非インタラクティブ要素へのクリックを検出,✅ 実装済,events (event_type=dead_click),/api/track,tracking.jsで自動判定
+クリック分析,レイジクリック検出,同じ位置への連続クリック（2秒以内に3回以上）を検出,✅ 実装済,events (event_type=rage_click),/api/track,UXフラストレーションの指標
+クリック分析,要素別CTR,各要素のクリック率をセッション数ベースで算出,✅ 実装済,events,/api/clicks,clicks / unique_sessions × 100
+クリック分析,クリック座標マッピング,クリックのX/Y絶対座標を記録・表示,✅ 実装済,events / heatmap_events,/api/heatmap,ページプレビュー上にオーバーレイ
+スクロール分析,スクロール深度ヒートマップ,ページのどこまでスクロールされたかをSVGファネルで可視化,✅ 実装済,heatmap_events,/api/heatmap?heatmap_type=scroll,累積到達率で単調減少保証
+スクロール分析,スクロール到達率,各Y座標での到達セッション割合を算出,✅ 実装済,heatmap_events,/api/heatmap,100px区切りでバケット化
+スクロール分析,最終スクロール深度,ページ離脱時の最大スクロール%を記録,✅ 実装済,events (event_type=scroll_depth),/api/track,beforeunloadで送信
+スクロール分析,平均スクロール深度,サイト全体の平均スクロール深度,✅ 実装済,events,/api/statistics,KPIカードに表示
+熟読分析,熟読エリアヒートマップ,ユーザーが500ms以上滞在したエリアをグラデーションで可視化,✅ 実装済,heatmap_events,/api/heatmap?heatmap_type=read,CSSグラデーション描画
+熟読分析,滞在時間分布,Y座標ごとの平均・合計滞在時間を集計,✅ 実装済,heatmap_events,/api/heatmap,intensity値で正規化
+画像分析,画像閲覧スコア,各画像の視認度を0-100で数値化,✅ 実装済,image_visibility,/api/image-visibility,avg_duration × avg_ratio を正規化
+画像分析,画像別閲覧ランキング,画像をスコア順にランキング表示,✅ 実装済,image_visibility,/api/image-visibility,サムネイル付きテーブル
+画像分析,画像視認時間計測,各画像のビューポート内表示時間を計測,✅ 実装済,image_visibility,/api/image-visibility,Intersection Observer使用
+画像分析,画像表示割合計測,画像がどの程度ビューポートに入っていたかの割合,✅ 実装済,image_visibility,/api/image-visibility,threshold: 0/0.25/0.5/0.75/1.0
+画像分析,画像閲覧率,全セッション中その画像を見たセッションの割合,✅ 実装済,image_visibility + events,/api/image-visibility,unique_sessions / total_sessions
+画像分析,画像オーバーレイ表示,ページプレビュー上に画像スコアバッジと枠線を表示,✅ 実装済,image_visibility,/api/image-visibility,クリックで詳細モーダル
+セッション分析,ユニークセッション数,重複排除済みのセッション数を集計,✅ 実装済,events,/api/statistics,uniq(session_id)
+セッション分析,平均滞在時間,セッションの平均滞在時間を算出,✅ 実装済,events,/api/statistics,session_start〜session_endの差分
+セッション分析,直帰率,1ページのみ閲覧したセッションの割合,✅ 実装済,events,/api/statistics,page_views <= 1のセッション率
+セッション分析,セッション録画,rrwebによるセッションリプレイの記録・再生,✅ 実装済,session_recordings,/api/recordings,recording.jsで収集
+セッション分析,ランディングページ分析,セッション開始ページの特定,✅ 実装済,sessions,/api/statistics,landing_page列
+セッション分析,離脱ページ分析,セッション終了ページの特定,✅ 実装済,sessions,/api/statistics,exit_page列
+流入元分析,リファラー別セッション数,流入元URLごとのセッション数を集計,✅ 実装済,events,/api/traffic-sources,organic/social/referral/direct自動分類
+流入元分析,UTMパラメータ追跡,utm_source/medium/campaign/term/contentの記録・分析,✅ 実装済,events,/api/traffic-sources,トラッキングスクリプトで自動取得
+流入元分析,広告ID追跡,Google Click ID (gclid)・Facebook Click ID (fbclid)の記録,✅ 実装済,events,/api/track,広告効果測定用
+デバイス分析,デバイスタイプ別集計,desktop/tablet/mobileごとのイベント数・セッション数,✅ 実装済,events,/api/statistics,viewport_widthから自動判定
+デバイス分析,ビューポートサイズ記録,ユーザーの画面サイズを記録,✅ 実装済,events,/api/track,viewport_width / viewport_height
+ページ分析,ページ別PV集計,URLごとのページビュー数を集計,✅ 実装済,events,/api/pages,event_type=pageviewでカウント
+ページ分析,ページプロキシ表示,実際のページをiframeでプロキシ表示,✅ 実装済,-,/api/proxy-page,ヒートマップのベースレイヤー
+A/Bテスト,テスト作成・管理,A/BテストとMVTテストの設定管理,✅ 実装済,tests,/api/tests,draft/running/completed状態管理
+A/Bテスト,テスト結果集計,バリアント別のセッション数・クリック数を集計,✅ 実装済,tests + events,/api/tests,テスト詳細ページで表示予定
+外部連携,Google Search Console連携,GSCデータの取得・保存・クエリ分析,✅ 実装済,gsc_data,/api/gsc,検索クエリ×ヒートマップ統合
+パフォーマンス,PageSpeed Insights連携,Googleの速度テスト結果を表示,✅ 実装済,-,/api/pagespeed,外部API呼び出し
+パフォーマンス,Core Web Vitals表示,LCP/INP/CLS/TTFB/FCPの表示,✅ 実装済,-,/api/performance,PageSpeed APIから取得
+コンバージョン,収益データ記録,イベントごとの収益額を記録,✅ 実装済,events (event_revenue),/api/track,Decimal(10,2)
+コンバージョン,コンバージョン種別記録,コンバージョンの種類と金額を記録,✅ 実装済,events (conversion_type/value),/api/track,セッション単位でも集計
+リアルタイム,ライブイベントストリーム,発生中のイベントをリアルタイム表示,✅ 実装済,events + Redis,/api/track (GET),5秒間隔で自動更新
+リアルタイム,リアルタイム統計,現在のアクティブユーザー・イベント数を表示,✅ 実装済,events + Redis,/api/track (GET),Redis Pub/Sub使用
+キャッシュ,ヒートマップサマリーキャッシュ,集計済みヒートマップデータのキャッシュ,✅ 実装済,heatmap_summary,/api/heatmap,ReplacingMergeTree使用
+キャッシュ,Redis統計キャッシュ,統計データのRedisキャッシュ,✅ 実装済,-,/api/statistics,TTL: 2時間
+プライバシー,IP匿名化,IPアドレスの末尾をマスク,✅ 実装済,-,/api/track,lib/privacy.ts
+プライバシー,オプトアウト機能,ユーザーがトラッキングを無効化,✅ 実装済,-,-,localStorage判定
+マルチテナント,サイト別データ分離,site_idによるデータのマルチテナント分離,✅ 実装済,全テーブル,全API,tracking_idベース
+マルチテナント,ユーザー・組織管理,ユーザー・組織・プラン・ロール管理,✅ 実装済,users / sites,-,org_id / role対応
+フォーム分析,フォーム入力追跡,フォームフィールドの入力開始・完了・放棄を計測,✅ トラッキング実装済,form_interactions,/api/track,focusin/focusout/submitイベントで自動取得
+フォーム分析,フォーム完了率,フォーム表示→送信のコンバージョン率,✅ トラッキング実装済,form_interactions,/api/track,form_view→form_submitの比率で算出可能
+フォーム分析,フィールド別離脱率,どのフォームフィールドでユーザーが離脱したか,✅ トラッキング実装済,form_interactions,/api/track,form_abandonイベントでlast_fieldを記録
+動画分析,動画再生トラッキング,video/iframe要素の再生開始・停止・完了を計測,✅ トラッキング実装済,video_events,/api/track,HTML5 Video APIのplay/pause/endedをフック
+動画分析,動画視聴率,動画を何%まで視聴したか,✅ トラッキング実装済,video_events,/api/track,25%/50%/75%マイルストーン + video_progress記録
+動画分析,動画エンゲージメント,再生・一時停止・シーク・音量変更の回数,✅ トラッキング実装済,video_events,/api/track,video_summaryイベントでinteractions合計を記録
+要素可視性,任意要素の視認追跡,CTA・バナー・セクション等の視認時間を計測,✅ トラッキング実装済,element_visibility,/api/track,data-track-visibility属性 + CTA系クラス自動検出
+要素可視性,CTA表示→クリック率,CTAが見えてからクリックされるまでの割合,✅ トラッキング実装済,element_visibility,/api/track,element_clicked列で視認→クリックを紐付け
+ユーザー行動フロー,ページ遷移フロー,ユーザーのページ遷移パスをサンキーチャートで可視化,✅ トラッキング実装済,events,既存データで集計可能,session_id×url×timestampで遷移チェーンを構築
+ユーザー行動フロー,離脱フロー分析,どのページからどこへ離脱したかを可視化,✅ トラッキング実装済,events + sessions,既存データで集計可能,exit_page + referrerの組み合わせ
+ユーザー行動フロー,ファネル分析,任意のステップ定義によるコンバージョンファネル,✅ トラッキング実装済,events,/api/funnel,lib/session-aggregator.ts
+ユーザー行動フロー,ユーザージャーニーマップ,セッション内の全アクションを時系列で表示,✅ トラッキング実装済,events,既存データで集計可能,session_idで絞り込み timestamp順
+コホート分析,リテンション分析,初回訪問日ベースの再訪問率をコホート表示,✅ トラッキング実装済,events,既存データで集計可能,user_id × 初回timestamp × 再訪日で集計
+コホート分析,ユーザーセグメント比較,流入元・デバイス・行動パターンでセグメント比較,✅ トラッキング実装済,events,既存データで集計可能,WHERE条件を動的に組み合わせ
+コホート分析,新規vs再訪問者比較,初回セッションとリピートセッションの行動差異,✅ トラッキング実装済,events,既存データで集計可能,user_id単位で初回session_idを特定
+エンゲージメント,エンゲージメントスコア,クリック+スクロール+熟読+滞在時間の複合スコア,✅ トラッキング実装済,events,既存データで集計可能,各指標を正規化して加重平均
+エンゲージメント,アクティブ時間計測,タブがアクティブだった実時間を計測,✅ トラッキング実装済,events (event_type=active_time),/api/track,visibilitychange APIで取得・ページ離脱時に送信
+エンゲージメント,インタラクション密度,単位時間あたりのインタラクション回数,✅ トラッキング実装済,events,既存データで集計可能,events_count / active_duration
+テキスト分析,テキスト選択（コピー）追跡,ユーザーがコピーしたテキスト内容と位置を記録,🔲 未実装,events（拡張）,新規API必要,selectionchangeイベントで取得
+テキスト分析,テキスト選択ヒートマップ,どのテキスト部分が最も選択されたかを可視化,🔲 未実装,events（拡張）,新規API必要,Y座標ベースで熟読と同様に描画
+エラー分析,JavaScriptエラー追跡,ページ上のJSエラーを自動キャプチャ,🔲 未実装,events（拡張）,新規API必要,window.onerror / unhandledrejectionで取得
+エラー分析,エラー×ページ×デバイスクロス集計,どのページ・デバイスでエラーが多発しているか,🔲 未実装,events（拡張）,新規API必要,既存のデバイス・ページ分析基盤を流用
+エラー分析,404ページ検出,存在しないURLへのアクセスを集計,🔲 未実装,events（拡張）,新規API必要,ステータスコードまたはDOM内容で判定
+予測分析,離脱予測,行動パターンから離脱リスクをリアルタイム予測,🔲 未実装,events,新規API必要,MLモデルで過去データから学習
+予測分析,コンバージョン予測,セッション中の行動からCV確率を予測,🔲 未実装,events + sessions,新規API必要,ロジスティック回帰やXGBoost
+予測分析,収益予測,トラフィック・行動パターンから将来収益を予測,🔲 未実装,events + sessions,新規API必要,時系列予測モデル
+異常検出,トラフィック異常アラート,急激なPV増減・エラー率上昇を自動検出,🔲 未実装,events,新規API必要,ClickHouseの時系列関数で移動平均との乖離を検出
+異常検出,ボット検出,異常な行動パターン（超高速クリック等）を検出,🔲 未実装,events,新規API必要,セッション内のイベント間隔・パターン分析
+異常検出,パフォーマンス劣化検出,Core Web Vitalsの急激な悪化を検出,🔲 未実装,events（拡張）,新規API必要,PerformanceObserver APIで収集しClickHouseに記録
+SEO連携,クエリ別ヒートマップ,検索クエリごとに異なるクリックパターンを表示,✅ 実装済,events + gsc_data,/api/heatmap/query,検索意図×行動の統合分析
+SEO連携,ランディングページ×クエリマトリクス,どのクエリでどのページに流入しどう行動したか,🔲 未実装,events + gsc_data,新規API必要,GSCデータとイベントをURLで結合
+SEO連携,検索順位×行動相関分析,検索順位とページ内行動の相関を分析,🔲 未実装,gsc_data + events,新規API必要,position × scroll_depth等のクロス集計
+広告連携,広告ID別ROI分析,gclid/fbclid別のコンバージョン・収益を集計,🔲 未実装,events,新規API必要,event_revenue × gclid/fbclidで集約
+広告連携,広告別ヒートマップ,広告経由ユーザーとオーガニックの行動差異を比較,🔲 未実装,events,新規API必要,gclid IS NOT NULLでフィルタ
+広告連携,キャンペーン別コンバージョンパス,UTMキャンペーンごとのCV導線を分析,🔲 未実装,events + sessions,新規API必要,utm_campaign × ページ遷移フロー
+EC連携,商品クリック追跡,商品要素のクリック→購入のコンバージョン追跡,🔲 未実装,events,新規API必要,element_href + conversion_valueの紐付け
+EC連携,カート放棄分析,カートページでの行動と離脱パターンを分析,🔲 未実装,events + sessions,新規API必要,特定URLのexit率 + 行動パターン
+EC連携,Revenue per Click,クリック位置ごとの収益貢献度を算出,🔲 未実装,events,新規API必要,click座標 × event_revenueの集約
+レポート,定期レポート自動生成,日次/週次/月次のレポートを自動生成,🔲 未実装,全テーブル,新規API必要,ClickHouseの集計 → HTML/PDFレンダリング
+レポート,カスタムダッシュボード,ユーザーが自由にウィジェットを配置,🔲 未実装,全テーブル,新規API必要,クエリビルダー + グリッドレイアウト
+レポート,データエクスポート,CSV/JSON/PDFでのデータエクスポート,🔲 未実装,全テーブル,新規API必要,ClickHouseのFORMAT CSV出力を利用
+ClickHouse最適化,マテリアライズドビュー,リアルタイム集計の自動更新,🔲 未実装,-,-,INSERT時に自動集計しsummaryテーブルへ
+ClickHouse最適化,TTL自動削除,古いデータの自動パージ,🔲 未実装,-,-,TTL timestamp + INTERVAL 1 YEAR DELETE
+ClickHouse最適化,サンプリングクエリ,大量データの近似集計で高速化,🔲 未実装,-,-,SAMPLE 0.1で10%サンプリング
+ClickHouse最適化,Projection,よくあるクエリパターンの事前最適化,🔲 未実装,-,-,ALTER TABLE ADD PROJECTION

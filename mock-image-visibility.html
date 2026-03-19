@@ -1,0 +1,1061 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UGOKI MAP - ヒートマップ 画像タブ モック</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  body { font-family: 'Inter', sans-serif; }
+  .sidebar-active { background: #eff6ff; color: #2563eb; }
+  .tab-active { background: #fff; color: #1d4ed8; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .score-high { background: #dcfce7; color: #166534; }
+  .score-mid { background: #fef9c3; color: #854d0e; }
+  .score-low { background: #fed7aa; color: #9a3412; }
+  .score-bad { background: #fecaca; color: #991b1b; }
+  .badge-outline {
+    backdrop-filter: blur(4px);
+    border: 2px solid;
+    font-weight: 700;
+    font-size: 13px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    line-height: 1.4;
+  }
+  .badge-high { background: rgba(220,252,231,0.92); border-color: #22c55e; color: #166534; }
+  .badge-mid { background: rgba(254,249,195,0.92); border-color: #eab308; color: #854d0e; }
+  .badge-low { background: rgba(254,215,170,0.92); border-color: #f97316; color: #9a3412; }
+  .badge-bad { background: rgba(254,202,202,0.92); border-color: #ef4444; color: #991b1b; }
+  .img-overlay {
+    position: absolute;
+    border: 3px solid;
+    border-radius: 4px;
+    pointer-events: none;
+    transition: opacity 0.2s;
+  }
+  .img-overlay-high { border-color: rgba(34,197,94,0.7); background: rgba(34,197,94,0.08); }
+  .img-overlay-mid { border-color: rgba(234,179,8,0.7); background: rgba(234,179,8,0.08); }
+  .img-overlay-low { border-color: rgba(249,115,22,0.7); background: rgba(249,115,22,0.08); }
+  .img-overlay-bad { border-color: rgba(239,68,68,0.7); background: rgba(239,68,68,0.08); }
+  .mock-page { background: #fff; position: relative; }
+  .mock-page-content {
+    padding: 40px;
+    max-width: 100%;
+  }
+  /* fake page content styles */
+  .fake-nav { background: #1e293b; color: #fff; padding: 16px 40px; display: flex; justify-content: space-between; align-items: center; }
+  .fake-hero { background: linear-gradient(135deg, #3b82f6, #8b5cf6); color: #fff; padding: 60px 40px; text-align: center; }
+  .fake-section { padding: 40px; }
+  .fake-img-placeholder {
+    background: #e5e7eb;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #9ca3af;
+    font-size: 14px;
+    overflow: hidden;
+    position: relative;
+  }
+  .fake-img-placeholder img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  /* Clickable overlay */
+  .img-clickable {
+    position: absolute;
+    border: 3px solid;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+    z-index: 5;
+  }
+  .img-clickable:hover {
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.3);
+    transform: scale(1.01);
+  }
+  .img-clickable-high { border-color: rgba(34,197,94,0.7); background: rgba(34,197,94,0.05); }
+  .img-clickable-mid { border-color: rgba(234,179,8,0.7); background: rgba(234,179,8,0.05); }
+  .img-clickable-low { border-color: rgba(249,115,22,0.7); background: rgba(249,115,22,0.05); }
+  .img-clickable-bad { border-color: rgba(239,68,68,0.7); background: rgba(239,68,68,0.05); }
+  .img-clickable-high:hover { background: rgba(34,197,94,0.12); }
+  .img-clickable-mid:hover { background: rgba(234,179,8,0.12); }
+  .img-clickable-low:hover { background: rgba(249,115,22,0.12); }
+  .img-clickable-bad:hover { background: rgba(239,68,68,0.12); }
+  /* Table row clickable */
+  tr[data-img] { cursor: pointer; }
+  tr[data-img]:hover { background: #f0f9ff !important; }
+  /* Modal */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none; transition: opacity 0.2s;
+  }
+  .modal-backdrop.active { opacity: 1; pointer-events: auto; }
+  .modal-panel {
+    background: #fff; border-radius: 16px; width: 720px; max-width: 90vw;
+    max-height: 90vh; overflow-y: auto; box-shadow: 0 25px 50px rgba(0,0,0,0.25);
+    transform: scale(0.95) translateY(10px); transition: transform 0.2s;
+  }
+  .modal-backdrop.active .modal-panel { transform: scale(1) translateY(0); }
+  /* Device bar chart */
+  .device-bar { height: 24px; border-radius: 4px; display: flex; align-items: center; padding: 0 8px; font-size: 11px; font-weight: 600; color: #fff; min-width: 32px; }
+  /* Score ring */
+  .score-ring { position: relative; width: 96px; height: 96px; }
+  .score-ring svg { transform: rotate(-90deg); }
+  .score-ring-label { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+</style>
+</head>
+<body class="bg-gray-50">
+<div class="flex h-screen overflow-hidden">
+
+  <!-- Sidebar -->
+  <div class="w-64 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
+    <div class="p-6 border-b border-gray-200">
+      <div class="flex items-center gap-2">
+        <div class="w-8 h-8 bg-gradient-to-br from-pink-500 via-blue-500 to-blue-600 rounded-lg flex items-center justify-center shadow-md">
+          <span class="text-white font-bold text-sm">U</span>
+        </div>
+        <span class="font-bold text-lg">UGOKI MAP</span>
+      </div>
+    </div>
+    <nav class="flex-1 p-4 space-y-1">
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+        <span class="font-medium">ダッシュボード</span>
+      </a>
+      <a href="#" class="sidebar-active flex items-center gap-3 px-4 py-3 rounded-lg">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"></path></svg>
+        <span class="font-medium">ヒートマップ</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+        <span class="font-medium">パフォーマンス</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+        <span class="font-medium">テスト</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path></svg>
+        <span class="font-medium">サイト管理</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+        <span class="font-medium">セッション録画</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+        <span class="font-medium">設定</span>
+      </a>
+    </nav>
+  </div>
+
+  <!-- Main Content -->
+  <div class="flex-1 flex flex-col overflow-hidden">
+
+    <!-- Header -->
+    <div class="p-6 pb-0">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h1 class="text-2xl font-bold">ヒートマップ分析</h1>
+          <p class="text-sm text-gray-500 mt-1">実際のページ上にクリック・スクロール・熟読・画像閲覧データをオーバーレイ表示</p>
+        </div>
+        <button class="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+          エクスポート
+        </button>
+      </div>
+
+      <!-- Filter Bar -->
+      <div class="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-500 mb-1">サイト</label>
+            <select class="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white">
+              <option>example.com (https://example.com)</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-500 mb-1">期間</label>
+            <select class="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white">
+              <option>過去30日間</option>
+              <option>過去7日間</option>
+              <option>過去90日間</option>
+              <option>全期間</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-500 mb-1">ページ</label>
+            <select class="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white">
+              <option>/ (3,241)</option>
+              <option>/about (1,523)</option>
+              <option>/products (892)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab Bar + Controls -->
+      <div class="flex items-center justify-between flex-wrap gap-2 mb-4">
+        <div class="flex items-center gap-3">
+          <!-- Heatmap Type Tabs -->
+          <div class="flex gap-1 bg-gray-100 rounded-lg p-1">
+            <button class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"></path></svg>
+              クリック
+            </button>
+            <button class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"></path></svg>
+              スクロール
+            </button>
+            <button class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
+              熟読
+            </button>
+            <button class="tab-active flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+              画像
+            </button>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <!-- Mini stats -->
+          <span class="text-xs text-gray-500">8 画像検出 / 平均スコア 62</span>
+
+          <!-- Fullscreen toggle -->
+          <button class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium border border-gray-200 bg-white hover:bg-gray-50 transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
+            全画面
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Heatmap Viewer (Scrollable) -->
+    <div class="flex-1 overflow-auto mx-6 mb-6 bg-gray-100 border border-gray-200 rounded-lg relative">
+      <div class="mock-page mx-auto" style="width: 1280px; transform-origin: top left;">
+
+        <!-- Fake Page: Navigation -->
+        <div class="fake-nav">
+          <div class="font-bold text-lg">SampleSite</div>
+          <div class="flex gap-6 text-sm">
+            <span>ホーム</span><span>製品</span><span>料金</span><span>お問い合わせ</span>
+          </div>
+        </div>
+
+        <!-- Fake Page: Hero -->
+        <div class="fake-hero relative">
+          <h2 class="text-3xl font-bold mb-4">ビジネスを加速する<br>次世代プラットフォーム</h2>
+          <p class="text-lg opacity-80 mb-6">データドリブンな意思決定を、すべてのチームに。</p>
+          <button class="bg-white text-blue-600 px-6 py-3 rounded-lg font-semibold">無料で始める</button>
+
+          <!-- Hero image overlay (score badge) -->
+          <div class="absolute" style="right: 40px; top: 20px; width: 280px; height: 180px;">
+            <div class="fake-img-placeholder w-full h-full" style="background: linear-gradient(135deg, #c7d2fe, #a5b4fc);">
+              <span>hero-dashboard.png</span>
+            </div>
+            <!-- Clickable overlay -->
+            <div class="img-clickable img-clickable-high" style="inset: -3px;" onclick="openModal('hero')"></div>
+            <!-- Score badge -->
+            <div class="absolute -top-3 -right-3 badge-outline badge-high" style="pointer-events:none;">92</div>
+            <!-- Duration label -->
+            <div class="absolute bottom-1 left-1 text-xs bg-black/60 text-white px-2 py-0.5 rounded" style="backdrop-filter:blur(2px); pointer-events:none;">
+              avg 4.2s / 閲覧率 94%
+            </div>
+          </div>
+        </div>
+
+        <!-- Fake Page: Features Section -->
+        <div class="fake-section">
+          <h3 class="text-2xl font-bold text-center mb-8">主な機能</h3>
+          <div class="grid grid-cols-3 gap-8">
+
+            <!-- Feature 1 with image -->
+            <div class="text-center relative">
+              <div class="fake-img-placeholder mx-auto mb-4" style="width: 200px; height: 140px; background: linear-gradient(135deg, #bbf7d0, #86efac);">
+                <span>feature-analytics.png</span>
+              </div>
+              <div class="img-clickable img-clickable-high" style="left: calc(50% - 103px); top: 0; width: 206px; height: 146px;" onclick="openModal('feat1')"></div>
+              <div class="absolute badge-outline badge-high" style="left: calc(50% + 90px); top: -6px; pointer-events:none;">85</div>
+              <div class="absolute text-xs bg-black/60 text-white px-2 py-0.5 rounded" style="left: calc(50% - 97px); top: 122px; backdrop-filter:blur(2px); pointer-events:none;">
+                avg 3.1s / 閲覧率 88%
+              </div>
+              <h4 class="font-semibold mb-2">リアルタイム分析</h4>
+              <p class="text-sm text-gray-500">アクセスデータをリアルタイムで可視化</p>
+            </div>
+
+            <!-- Feature 2 with image -->
+            <div class="text-center relative">
+              <div class="fake-img-placeholder mx-auto mb-4" style="width: 200px; height: 140px; background: linear-gradient(135deg, #fef08a, #fde047);">
+                <span>feature-reports.png</span>
+              </div>
+              <div class="img-clickable img-clickable-mid" style="left: calc(50% - 103px); top: 0; width: 206px; height: 146px;" onclick="openModal('feat2')"></div>
+              <div class="absolute badge-outline badge-mid" style="left: calc(50% + 90px); top: -6px; pointer-events:none;">58</div>
+              <div class="absolute text-xs bg-black/60 text-white px-2 py-0.5 rounded" style="left: calc(50% - 97px); top: 122px; backdrop-filter:blur(2px); pointer-events:none;">
+                avg 1.8s / 閲覧率 72%
+              </div>
+              <h4 class="font-semibold mb-2">自動レポート</h4>
+              <p class="text-sm text-gray-500">毎週・毎月の定期レポートを自動生成</p>
+            </div>
+
+            <!-- Feature 3 with image -->
+            <div class="text-center relative">
+              <div class="fake-img-placeholder mx-auto mb-4" style="width: 200px; height: 140px; background: linear-gradient(135deg, #fecaca, #fca5a5);">
+                <span>feature-alerts.png</span>
+              </div>
+              <div class="img-clickable img-clickable-mid" style="left: calc(50% - 103px); top: 0; width: 206px; height: 146px;" onclick="openModal('feat3')"></div>
+              <div class="absolute badge-outline badge-mid" style="left: calc(50% + 90px); top: -6px; pointer-events:none;">51</div>
+              <div class="absolute text-xs bg-black/60 text-white px-2 py-0.5 rounded" style="left: calc(50% - 97px); top: 122px; backdrop-filter:blur(2px); pointer-events:none;">
+                avg 1.5s / 閲覧率 65%
+              </div>
+              <h4 class="font-semibold mb-2">アラート通知</h4>
+              <p class="text-sm text-gray-500">異常値を検出して即座に通知</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Fake Page: Testimonial Section -->
+        <div class="fake-section bg-gray-50">
+          <h3 class="text-2xl font-bold text-center mb-8">導入事例</h3>
+          <div class="grid grid-cols-2 gap-8 max-w-4xl mx-auto">
+
+            <!-- Testimonial 1 -->
+            <div class="bg-white rounded-xl p-6 shadow-sm relative">
+              <div class="flex items-center gap-4 mb-4">
+                <div class="fake-img-placeholder rounded-full" style="width: 56px; height: 56px; background: linear-gradient(135deg, #c4b5fd, #a78bfa);">
+                  <span style="font-size:10px;">avatar1</span>
+                </div>
+                <div class="img-clickable img-clickable-low rounded-full" style="left: 21px; top: 21px; width: 62px; height: 62px;" onclick="openModal('avatar1')"></div>
+                <div class="absolute badge-outline badge-low" style="left: 72px; top: 14px; font-size: 11px; padding: 1px 6px; pointer-events:none;">32</div>
+                <div>
+                  <p class="font-semibold">田中太郎</p>
+                  <p class="text-xs text-gray-500">株式会社ABC マーケティング部長</p>
+                </div>
+              </div>
+              <p class="text-sm text-gray-600">"導入後、コンバージョン率が30%向上しました。データに基づいた改善が効率的に行えるようになりました。"</p>
+            </div>
+
+            <!-- Testimonial 2 -->
+            <div class="bg-white rounded-xl p-6 shadow-sm relative">
+              <div class="flex items-center gap-4 mb-4">
+                <div class="fake-img-placeholder rounded-full" style="width: 56px; height: 56px; background: linear-gradient(135deg, #99f6e4, #5eead4);">
+                  <span style="font-size:10px;">avatar2</span>
+                </div>
+                <div class="img-clickable img-clickable-bad rounded-full" style="left: 21px; top: 21px; width: 62px; height: 62px;" onclick="openModal('avatar2')"></div>
+                <div class="absolute badge-outline badge-bad" style="left: 72px; top: 14px; font-size: 11px; padding: 1px 6px; pointer-events:none;">14</div>
+                <div>
+                  <p class="font-semibold">佐藤花子</p>
+                  <p class="text-xs text-gray-500">DEF株式会社 CTO</p>
+                </div>
+              </div>
+              <p class="text-sm text-gray-600">"技術チームの生産性が飛躍的に向上。ダッシュボードで全体像がすぐ把握できます。"</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Fake Page: CTA Section with large image -->
+        <div class="fake-section relative">
+          <div class="grid grid-cols-2 gap-8 items-center max-w-5xl mx-auto">
+            <div>
+              <h3 class="text-2xl font-bold mb-4">今すぐ始めましょう</h3>
+              <p class="text-gray-600 mb-6">14日間の無料トライアルで、すべての機能をお試しいただけます。</p>
+              <button class="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold">無料トライアルを開始</button>
+            </div>
+            <div class="relative">
+              <div class="fake-img-placeholder" style="width: 100%; height: 280px; background: linear-gradient(135deg, #dbeafe, #bfdbfe);">
+                <span>cta-illustration.png</span>
+              </div>
+              <div class="img-clickable img-clickable-low" style="inset: -3px;" onclick="openModal('cta')"></div>
+              <div class="absolute -top-3 -right-3 badge-outline badge-low" style="pointer-events:none;">28</div>
+              <div class="absolute bottom-1 left-1 text-xs bg-black/60 text-white px-2 py-0.5 rounded" style="backdrop-filter:blur(2px); pointer-events:none;">
+                avg 0.8s / 閲覧率 38%
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Fake Page: Footer -->
+        <div style="background: #1e293b; color: #94a3b8; padding: 40px; text-align: center; font-size: 14px;">
+          <div class="relative inline-block mb-4">
+            <div class="fake-img-placeholder" style="width: 120px; height: 32px; background: #334155; display: inline-flex;">
+              <span style="font-size: 10px;">logo-footer.png</span>
+            </div>
+            <div class="img-clickable img-clickable-bad" style="inset: -3px;" onclick="openModal('footer')"></div>
+            <div class="absolute -top-3 -right-3 badge-outline badge-bad" style="font-size: 10px; padding: 0px 5px; pointer-events:none;">8</div>
+          </div>
+          <p>&copy; 2026 SampleSite. All rights reserved.</p>
+        </div>
+      </div>
+
+      <!-- Legend (floating) -->
+      <div class="sticky bottom-4 float-right mr-4 bg-white/95 backdrop-blur-sm rounded-lg shadow-md px-4 py-3 z-10" style="width: 220px;">
+        <div class="text-xs text-gray-500 mb-2 font-medium">画像閲覧スコア</div>
+        <div class="space-y-1.5">
+          <div class="flex items-center gap-2">
+            <span class="badge-outline badge-high text-xs" style="font-size:11px; padding: 0 6px;">80-100</span>
+            <span class="text-xs text-gray-500">よく見られている</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="badge-outline badge-mid text-xs" style="font-size:11px; padding: 0 6px;">50-79</span>
+            <span class="text-xs text-gray-500">まずまず</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="badge-outline badge-low text-xs" style="font-size:11px; padding: 0 6px;">20-49</span>
+            <span class="text-xs text-gray-500">見られにくい</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="badge-outline badge-bad text-xs" style="font-size:11px; padding: 0 6px;">0-19</span>
+            <span class="text-xs text-gray-500">ほぼスルー</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Image Ranking Table (below heatmap) -->
+    <div class="mx-6 mb-6">
+      <div class="bg-white border border-gray-200 rounded-lg">
+        <div class="px-6 py-4 border-b border-gray-100">
+          <h3 class="font-semibold flex items-center gap-2">
+            <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+            画像別閲覧ランキング
+          </h3>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-gray-100 bg-gray-50/50">
+                <th class="text-left py-3 px-4 text-gray-500 font-medium w-8">#</th>
+                <th class="text-left py-3 px-4 text-gray-500 font-medium">画像</th>
+                <th class="text-left py-3 px-4 text-gray-500 font-medium">
+                  <span class="flex items-center gap-1 cursor-pointer hover:text-gray-700">
+                    スコア
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"></path></svg>
+                  </span>
+                </th>
+                <th class="text-left py-3 px-4 text-gray-500 font-medium">平均視認時間</th>
+                <th class="text-left py-3 px-4 text-gray-500 font-medium">最大表示率</th>
+                <th class="text-left py-3 px-4 text-gray-500 font-medium">閲覧率</th>
+                <th class="text-left py-3 px-4 text-gray-500 font-medium">Y座標</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Row 1: Hero image -->
+              <tr class="border-b border-gray-50" data-img="hero" onclick="openModal('hero')">
+                <td class="py-3 px-4 text-gray-400">1</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-3">
+                    <div class="w-12 h-12 rounded border border-gray-200 overflow-hidden flex-shrink-0" style="background: linear-gradient(135deg, #c7d2fe, #a5b4fc);"></div>
+                    <div>
+                      <p class="text-xs font-medium text-gray-700">hero-dashboard.png</p>
+                      <p class="text-xs text-gray-400">Dashboard preview image</p>
+                      <p class="text-xs text-gray-300">280x180</p>
+                    </div>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold score-high">92</span>
+                    <span class="text-xs text-gray-400">よく見られている</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4 font-medium">4.2s</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <div class="w-16 bg-gray-100 rounded-full h-2"><div class="bg-green-500 h-2 rounded-full" style="width:98%"></div></div>
+                    <span class="text-xs text-gray-500">98%</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <span class="font-medium">94%</span>
+                  <span class="text-xs text-gray-400 ml-1">(3,047/3,241)</span>
+                </td>
+                <td class="py-3 px-4 text-xs text-gray-500">120px</td>
+              </tr>
+
+              <!-- Row 2 -->
+              <tr class="border-b border-gray-50" data-img="feat1" onclick="openModal('feat1')">
+                <td class="py-3 px-4 text-gray-400">2</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-3">
+                    <div class="w-12 h-12 rounded border border-gray-200 overflow-hidden flex-shrink-0" style="background: linear-gradient(135deg, #bbf7d0, #86efac);"></div>
+                    <div>
+                      <p class="text-xs font-medium text-gray-700">feature-analytics.png</p>
+                      <p class="text-xs text-gray-400">Analytics feature screenshot</p>
+                      <p class="text-xs text-gray-300">200x140</p>
+                    </div>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold score-high">85</span>
+                    <span class="text-xs text-gray-400">よく見られている</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4 font-medium">3.1s</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <div class="w-16 bg-gray-100 rounded-full h-2"><div class="bg-green-500 h-2 rounded-full" style="width:92%"></div></div>
+                    <span class="text-xs text-gray-500">92%</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <span class="font-medium">88%</span>
+                  <span class="text-xs text-gray-400 ml-1">(2,852/3,241)</span>
+                </td>
+                <td class="py-3 px-4 text-xs text-gray-500">480px</td>
+              </tr>
+
+              <!-- Row 3 -->
+              <tr class="border-b border-gray-50" data-img="feat2" onclick="openModal('feat2')">
+                <td class="py-3 px-4 text-gray-400">3</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-3">
+                    <div class="w-12 h-12 rounded border border-gray-200 overflow-hidden flex-shrink-0" style="background: linear-gradient(135deg, #fef08a, #fde047);"></div>
+                    <div>
+                      <p class="text-xs font-medium text-gray-700">feature-reports.png</p>
+                      <p class="text-xs text-gray-400">Report generation preview</p>
+                      <p class="text-xs text-gray-300">200x140</p>
+                    </div>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold score-mid">58</span>
+                    <span class="text-xs text-gray-400">まずまず</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4 font-medium">1.8s</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <div class="w-16 bg-gray-100 rounded-full h-2"><div class="bg-yellow-500 h-2 rounded-full" style="width:78%"></div></div>
+                    <span class="text-xs text-gray-500">78%</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <span class="font-medium">72%</span>
+                  <span class="text-xs text-gray-400 ml-1">(2,334/3,241)</span>
+                </td>
+                <td class="py-3 px-4 text-xs text-gray-500">480px</td>
+              </tr>
+
+              <!-- Row 4 -->
+              <tr class="border-b border-gray-50" data-img="feat3" onclick="openModal('feat3')">
+                <td class="py-3 px-4 text-gray-400">4</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-3">
+                    <div class="w-12 h-12 rounded border border-gray-200 overflow-hidden flex-shrink-0" style="background: linear-gradient(135deg, #fecaca, #fca5a5);"></div>
+                    <div>
+                      <p class="text-xs font-medium text-gray-700">feature-alerts.png</p>
+                      <p class="text-xs text-gray-400">Alert notification preview</p>
+                      <p class="text-xs text-gray-300">200x140</p>
+                    </div>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold score-mid">51</span>
+                    <span class="text-xs text-gray-400">まずまず</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4 font-medium">1.5s</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <div class="w-16 bg-gray-100 rounded-full h-2"><div class="bg-yellow-500 h-2 rounded-full" style="width:70%"></div></div>
+                    <span class="text-xs text-gray-500">70%</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <span class="font-medium">65%</span>
+                  <span class="text-xs text-gray-400 ml-1">(2,107/3,241)</span>
+                </td>
+                <td class="py-3 px-4 text-xs text-gray-500">480px</td>
+              </tr>
+
+              <!-- Row 5 -->
+              <tr class="border-b border-gray-50" data-img="avatar1" onclick="openModal('avatar1')">
+                <td class="py-3 px-4 text-gray-400">5</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-3">
+                    <div class="w-12 h-12 rounded border border-gray-200 overflow-hidden flex-shrink-0" style="background: linear-gradient(135deg, #c4b5fd, #a78bfa);"></div>
+                    <div>
+                      <p class="text-xs font-medium text-gray-700">avatar-tanaka.png</p>
+                      <p class="text-xs text-gray-400">田中太郎</p>
+                      <p class="text-xs text-gray-300">56x56</p>
+                    </div>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold score-low">32</span>
+                    <span class="text-xs text-gray-400">見られにくい</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4 font-medium">0.6s</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <div class="w-16 bg-gray-100 rounded-full h-2"><div class="bg-orange-500 h-2 rounded-full" style="width:55%"></div></div>
+                    <span class="text-xs text-gray-500">55%</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <span class="font-medium">48%</span>
+                  <span class="text-xs text-gray-400 ml-1">(1,556/3,241)</span>
+                </td>
+                <td class="py-3 px-4 text-xs text-gray-500">920px</td>
+              </tr>
+
+              <!-- Row 6: CTA image -->
+              <tr class="border-b border-gray-50" data-img="cta" onclick="openModal('cta')">
+                <td class="py-3 px-4 text-gray-400">6</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-3">
+                    <div class="w-12 h-12 rounded border border-gray-200 overflow-hidden flex-shrink-0" style="background: linear-gradient(135deg, #dbeafe, #bfdbfe);"></div>
+                    <div>
+                      <p class="text-xs font-medium text-gray-700">cta-illustration.png</p>
+                      <p class="text-xs text-gray-400">CTA section illustration</p>
+                      <p class="text-xs text-gray-300">560x280</p>
+                    </div>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold score-low">28</span>
+                    <span class="text-xs text-gray-400">見られにくい</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4 font-medium">0.8s</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <div class="w-16 bg-gray-100 rounded-full h-2"><div class="bg-orange-500 h-2 rounded-full" style="width:45%"></div></div>
+                    <span class="text-xs text-gray-500">45%</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <span class="font-medium">38%</span>
+                  <span class="text-xs text-gray-400 ml-1">(1,232/3,241)</span>
+                </td>
+                <td class="py-3 px-4 text-xs text-gray-500">1,180px</td>
+              </tr>
+
+              <!-- Row 7: Avatar 2 -->
+              <tr class="border-b border-gray-50" data-img="avatar2" onclick="openModal('avatar2')">
+                <td class="py-3 px-4 text-gray-400">7</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-3">
+                    <div class="w-12 h-12 rounded border border-gray-200 overflow-hidden flex-shrink-0" style="background: linear-gradient(135deg, #99f6e4, #5eead4);"></div>
+                    <div>
+                      <p class="text-xs font-medium text-gray-700">avatar-sato.png</p>
+                      <p class="text-xs text-gray-400">佐藤花子</p>
+                      <p class="text-xs text-gray-300">56x56</p>
+                    </div>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold score-bad">14</span>
+                    <span class="text-xs text-gray-400">ほぼスルー</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4 font-medium">0.3s</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <div class="w-16 bg-gray-100 rounded-full h-2"><div class="bg-red-500 h-2 rounded-full" style="width:30%"></div></div>
+                    <span class="text-xs text-gray-500">30%</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <span class="font-medium">22%</span>
+                  <span class="text-xs text-gray-400 ml-1">(713/3,241)</span>
+                </td>
+                <td class="py-3 px-4 text-xs text-gray-500">920px</td>
+              </tr>
+
+              <!-- Row 8: Footer logo -->
+              <tr data-img="footer" onclick="openModal('footer')">
+                <td class="py-3 px-4 text-gray-400">8</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-3">
+                    <div class="w-12 h-12 rounded border border-gray-200 overflow-hidden flex-shrink-0" style="background: #334155;"></div>
+                    <div>
+                      <p class="text-xs font-medium text-gray-700">logo-footer.png</p>
+                      <p class="text-xs text-gray-400">Footer logo</p>
+                      <p class="text-xs text-gray-300">120x32</p>
+                    </div>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold score-bad">8</span>
+                    <span class="text-xs text-gray-400">ほぼスルー</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4 font-medium">0.2s</td>
+                <td class="py-3 px-4">
+                  <div class="flex items-center gap-2">
+                    <div class="w-16 bg-gray-100 rounded-full h-2"><div class="bg-red-500 h-2 rounded-full" style="width:15%"></div></div>
+                    <span class="text-xs text-gray-500">15%</span>
+                  </div>
+                </td>
+                <td class="py-3 px-4">
+                  <span class="font-medium">12%</span>
+                  <span class="text-xs text-gray-400 ml-1">(389/3,241)</span>
+                </td>
+                <td class="py-3 px-4 text-xs text-gray-500">1,480px</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+<!-- Detail Modal -->
+<div class="modal-backdrop" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="modal-panel" id="modalPanel">
+    <!-- Header -->
+    <div class="flex items-center justify-between p-6 border-b border-gray-100">
+      <h3 class="text-lg font-bold flex items-center gap-2" id="modalTitle">
+        <svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+        画像詳細
+      </h3>
+      <button onclick="closeModal()" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+      </button>
+    </div>
+
+    <!-- Body -->
+    <div class="p-6">
+      <!-- Top: Image preview + Score ring -->
+      <div class="flex gap-6 mb-6">
+        <!-- Image preview -->
+        <div class="flex-shrink-0">
+          <div id="modalImage" class="rounded-lg border border-gray-200 overflow-hidden" style="width: 280px; min-height: 120px; max-height: 300px; background: linear-gradient(135deg, #c7d2fe, #a5b4fc); display: flex; align-items: center; justify-content: center; color: #9ca3af;">
+            hero-dashboard.png
+          </div>
+          <div class="mt-2 text-xs text-gray-400" id="modalMeta">
+            <span id="modalFilename">hero-dashboard.png</span> &middot; <span id="modalSize">280x180</span> &middot; Y: <span id="modalY">120</span>px
+          </div>
+          <div class="mt-1 text-xs text-gray-300" id="modalPath">div.hero > img.dashboard</div>
+        </div>
+
+        <!-- Score ring + summary -->
+        <div class="flex-1">
+          <div class="flex items-start gap-6">
+            <!-- Score ring -->
+            <div class="score-ring flex-shrink-0">
+              <svg width="96" height="96" viewBox="0 0 96 96">
+                <circle cx="48" cy="48" r="42" fill="none" stroke="#e5e7eb" stroke-width="8" />
+                <circle cx="48" cy="48" r="42" fill="none" stroke-width="8" stroke-linecap="round"
+                  id="modalRingCircle"
+                  stroke="#22c55e"
+                  stroke-dasharray="264"
+                  stroke-dashoffset="21" />
+              </svg>
+              <div class="score-ring-label">
+                <span class="text-2xl font-bold" id="modalScore">92</span>
+                <span class="text-xs text-gray-400">スコア</span>
+              </div>
+            </div>
+
+            <!-- Quick stats -->
+            <div class="flex-1 grid grid-cols-2 gap-3">
+              <div class="bg-gray-50 rounded-lg p-3">
+                <div class="text-xs text-gray-400 mb-0.5">平均視認時間</div>
+                <div class="text-lg font-bold" id="modalDuration">4.2s</div>
+              </div>
+              <div class="bg-gray-50 rounded-lg p-3">
+                <div class="text-xs text-gray-400 mb-0.5">最大視認時間</div>
+                <div class="text-lg font-bold" id="modalMaxDuration">12.8s</div>
+              </div>
+              <div class="bg-gray-50 rounded-lg p-3">
+                <div class="text-xs text-gray-400 mb-0.5">閲覧率</div>
+                <div class="text-lg font-bold" id="modalViewRate">94%</div>
+              </div>
+              <div class="bg-gray-50 rounded-lg p-3">
+                <div class="text-xs text-gray-400 mb-0.5">最大表示率</div>
+                <div class="text-lg font-bold" id="modalMaxRatio">98%</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Evaluation -->
+          <div class="mt-4 p-3 rounded-lg border" id="modalEval" style="background: #f0fdf4; border-color: #bbf7d0;">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold score-high" id="modalEvalBadge">よく見られている</span>
+            </div>
+            <p class="text-xs text-gray-600" id="modalEvalText">ファーストビューに配置されており、ほとんどのユーザーに十分な時間閲覧されています。画像の効果は最大限発揮されています。</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Device breakdown -->
+      <div class="mb-6">
+        <h4 class="text-sm font-semibold text-gray-700 mb-3">デバイス別比較</h4>
+        <div class="space-y-3">
+          <div>
+            <div class="flex items-center justify-between text-xs text-gray-500 mb-1">
+              <span class="flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+                Desktop
+              </span>
+              <span id="modalDesktopStats">avg 4.8s / 閲覧率 96% / スコア 95</span>
+            </div>
+            <div class="w-full bg-gray-100 rounded-full h-3">
+              <div class="device-bar bg-blue-500 rounded-full" id="modalDesktopBar" style="width: 95%;">95</div>
+            </div>
+          </div>
+          <div>
+            <div class="flex items-center justify-between text-xs text-gray-500 mb-1">
+              <span class="flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
+                Tablet
+              </span>
+              <span id="modalTabletStats">avg 3.5s / 閲覧率 91% / スコア 88</span>
+            </div>
+            <div class="w-full bg-gray-100 rounded-full h-3">
+              <div class="device-bar bg-purple-500 rounded-full" id="modalTabletBar" style="width: 88%;">88</div>
+            </div>
+          </div>
+          <div>
+            <div class="flex items-center justify-between text-xs text-gray-500 mb-1">
+              <span class="flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
+                Mobile
+              </span>
+              <span id="modalMobileStats">avg 2.9s / 閲覧率 89% / スコア 82</span>
+            </div>
+            <div class="w-full bg-gray-100 rounded-full h-3">
+              <div class="device-bar bg-green-500 rounded-full" id="modalMobileBar" style="width: 82%;">82</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Session detail -->
+      <div>
+        <h4 class="text-sm font-semibold text-gray-700 mb-3">セッション詳細</h4>
+        <div class="grid grid-cols-3 gap-3">
+          <div class="text-center bg-gray-50 rounded-lg p-3">
+            <div class="text-xs text-gray-400">総セッション数</div>
+            <div class="text-xl font-bold" id="modalSessions">3,047</div>
+            <div class="text-xs text-gray-400">/ 3,241 PV</div>
+          </div>
+          <div class="text-center bg-gray-50 rounded-lg p-3">
+            <div class="text-xs text-gray-400">合計視認時間</div>
+            <div class="text-xl font-bold" id="modalTotalTime">3.6h</div>
+            <div class="text-xs text-gray-400">全セッション合計</div>
+          </div>
+          <div class="text-center bg-gray-50 rounded-lg p-3">
+            <div class="text-xs text-gray-400">表示回数</div>
+            <div class="text-xl font-bold" id="modalViewCount">3,182</div>
+            <div class="text-xs text-gray-400">ユニーク表示</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Mock image data
+const imageData = {
+  hero: {
+    name: 'hero-dashboard.png', alt: 'Dashboard preview image', size: '280x180', y: 120,
+    path: 'div.fake-hero > div > div.fake-img-placeholder',
+    color: 'linear-gradient(135deg, #c7d2fe, #a5b4fc)',
+    score: 92, avgDur: '4.2s', maxDur: '12.8s', viewRate: '94%', maxRatio: '98%',
+    sessions: '3,047', totalTime: '3.6h', viewCount: '3,182',
+    evalClass: 'score-high', evalBg: '#f0fdf4', evalBorder: '#bbf7d0',
+    evalLabel: 'よく見られている',
+    evalText: 'ファーストビューに配置されており、ほとんどのユーザーに十分な時間閲覧されています。画像の効果は最大限発揮されています。',
+    ringColor: '#22c55e', ringOffset: 21,
+    desktop: { stats: 'avg 4.8s / 閲覧率 96% / スコア 95', score: 95 },
+    tablet:  { stats: 'avg 3.5s / 閲覧率 91% / スコア 88', score: 88 },
+    mobile:  { stats: 'avg 2.9s / 閲覧率 89% / スコア 82', score: 82 },
+    imgW: 280, imgH: 180,
+  },
+  feat1: {
+    name: 'feature-analytics.png', alt: 'Analytics feature screenshot', size: '200x140', y: 480,
+    path: 'div.fake-section > div > div:nth-child(1) > div.fake-img-placeholder',
+    color: 'linear-gradient(135deg, #bbf7d0, #86efac)',
+    score: 85, avgDur: '3.1s', maxDur: '9.4s', viewRate: '88%', maxRatio: '92%',
+    sessions: '2,852', totalTime: '2.5h', viewCount: '2,940',
+    evalClass: 'score-high', evalBg: '#f0fdf4', evalBorder: '#bbf7d0',
+    evalLabel: 'よく見られている',
+    evalText: '機能紹介セクションの最初の画像として注目度が高い位置にあります。スクロール到達率も高く、効果的に機能しています。',
+    ringColor: '#22c55e', ringOffset: 40,
+    desktop: { stats: 'avg 3.5s / 閲覧率 92% / スコア 89', score: 89 },
+    tablet:  { stats: 'avg 2.8s / 閲覧率 85% / スコア 80', score: 80 },
+    mobile:  { stats: 'avg 2.1s / 閲覧率 78% / スコア 72', score: 72 },
+    imgW: 200, imgH: 140,
+  },
+  feat2: {
+    name: 'feature-reports.png', alt: 'Report generation preview', size: '200x140', y: 480,
+    path: 'div.fake-section > div > div:nth-child(2) > div.fake-img-placeholder',
+    color: 'linear-gradient(135deg, #fef08a, #fde047)',
+    score: 58, avgDur: '1.8s', maxDur: '6.2s', viewRate: '72%', maxRatio: '78%',
+    sessions: '2,334', totalTime: '1.2h', viewCount: '2,410',
+    evalClass: 'score-mid', evalBg: '#fefce8', evalBorder: '#fde68a',
+    evalLabel: 'まずまず',
+    evalText: '2番目の機能画像のため、左右の視線移動で見落とされるケースがあります。画像のコントラストを強くするか、サイズを大きくすると改善が見込めます。',
+    ringColor: '#eab308', ringOffset: 111,
+    desktop: { stats: 'avg 2.1s / 閲覧率 78% / スコア 64', score: 64 },
+    tablet:  { stats: 'avg 1.5s / 閲覧率 68% / スコア 52', score: 52 },
+    mobile:  { stats: 'avg 1.0s / 閲覧率 62% / スコア 44', score: 44 },
+    imgW: 200, imgH: 140,
+  },
+  feat3: {
+    name: 'feature-alerts.png', alt: 'Alert notification preview', size: '200x140', y: 480,
+    path: 'div.fake-section > div > div:nth-child(3) > div.fake-img-placeholder',
+    color: 'linear-gradient(135deg, #fecaca, #fca5a5)',
+    score: 51, avgDur: '1.5s', maxDur: '5.1s', viewRate: '65%', maxRatio: '70%',
+    sessions: '2,107', totalTime: '0.9h', viewCount: '2,198',
+    evalClass: 'score-mid', evalBg: '#fefce8', evalBorder: '#fde68a',
+    evalLabel: 'まずまず',
+    evalText: '3列目の画像は視線が届きにくい傾向があります。モバイルでは縦積みになるため閲覧率が上がりますが、デスクトップでは改善の余地があります。',
+    ringColor: '#eab308', ringOffset: 130,
+    desktop: { stats: 'avg 1.7s / 閲覧率 70% / スコア 55', score: 55 },
+    tablet:  { stats: 'avg 1.3s / 閲覧率 62% / スコア 48', score: 48 },
+    mobile:  { stats: 'avg 1.2s / 閲覧率 68% / スコア 52', score: 52 },
+    imgW: 200, imgH: 140,
+  },
+  avatar1: {
+    name: 'avatar-tanaka.png', alt: '田中太郎', size: '56x56', y: 920,
+    path: 'div.fake-section > div > div:nth-child(1) > div > div.fake-img-placeholder',
+    color: 'linear-gradient(135deg, #c4b5fd, #a78bfa)',
+    score: 32, avgDur: '0.6s', maxDur: '2.8s', viewRate: '48%', maxRatio: '55%',
+    sessions: '1,556', totalTime: '0.3h', viewCount: '1,620',
+    evalClass: 'score-low', evalBg: '#fff7ed', evalBorder: '#fed7aa',
+    evalLabel: '見られにくい',
+    evalText: '小さなアバター画像のため、テキスト内容に視線が集中し画像自体は注目されにくい状態です。テスティモニアルの写真サイズを大きくすると信頼性向上に繋がります。',
+    ringColor: '#f97316', ringOffset: 180,
+    desktop: { stats: 'avg 0.7s / 閲覧率 52% / スコア 36', score: 36 },
+    tablet:  { stats: 'avg 0.5s / 閲覧率 45% / スコア 28', score: 28 },
+    mobile:  { stats: 'avg 0.4s / 閲覧率 40% / スコア 24', score: 24 },
+    imgW: 56, imgH: 56,
+  },
+  cta: {
+    name: 'cta-illustration.png', alt: 'CTA section illustration', size: '560x280', y: 1180,
+    path: 'div.fake-section > div > div:nth-child(2) > div.fake-img-placeholder',
+    color: 'linear-gradient(135deg, #dbeafe, #bfdbfe)',
+    score: 28, avgDur: '0.8s', maxDur: '3.5s', viewRate: '38%', maxRatio: '45%',
+    sessions: '1,232', totalTime: '0.3h', viewCount: '1,310',
+    evalClass: 'score-low', evalBg: '#fff7ed', evalBorder: '#fed7aa',
+    evalLabel: '見られにくい',
+    evalText: 'ページ下部のCTAセクションに配置されているため、多くのユーザーがここまでスクロールしていません。CTAを上部に移動するか、スクロール誘導を改善することを推奨します。',
+    ringColor: '#f97316', ringOffset: 190,
+    desktop: { stats: 'avg 1.0s / 閲覧率 42% / スコア 32', score: 32 },
+    tablet:  { stats: 'avg 0.6s / 閲覧率 35% / スコア 24', score: 24 },
+    mobile:  { stats: 'avg 0.5s / 閲覧率 30% / スコア 20', score: 20 },
+    imgW: 280, imgH: 140,
+  },
+  avatar2: {
+    name: 'avatar-sato.png', alt: '佐藤花子', size: '56x56', y: 920,
+    path: 'div.fake-section > div > div:nth-child(2) > div > div.fake-img-placeholder',
+    color: 'linear-gradient(135deg, #99f6e4, #5eead4)',
+    score: 14, avgDur: '0.3s', maxDur: '1.5s', viewRate: '22%', maxRatio: '30%',
+    sessions: '713', totalTime: '0.1h', viewCount: '748',
+    evalClass: 'score-bad', evalBg: '#fef2f2', evalBorder: '#fecaca',
+    evalLabel: 'ほぼスルー',
+    evalText: '2番目のテスティモニアルは、1番目で満足して読み飛ばされるパターンが多いです。より目を引く人物写真に差し替えるか、レイアウトを変更することを検討してください。',
+    ringColor: '#ef4444', ringOffset: 227,
+    desktop: { stats: 'avg 0.4s / 閲覧率 25% / スコア 16', score: 16 },
+    tablet:  { stats: 'avg 0.2s / 閲覧率 18% / スコア 10', score: 10 },
+    mobile:  { stats: 'avg 0.2s / 閲覧率 15% / スコア 8', score: 8 },
+    imgW: 56, imgH: 56,
+  },
+  footer: {
+    name: 'logo-footer.png', alt: 'Footer logo', size: '120x32', y: 1480,
+    path: 'div > div.fake-img-placeholder',
+    color: '#334155',
+    score: 8, avgDur: '0.2s', maxDur: '0.8s', viewRate: '12%', maxRatio: '15%',
+    sessions: '389', totalTime: '0.02h', viewCount: '402',
+    evalClass: 'score-bad', evalBg: '#fef2f2', evalBorder: '#fecaca',
+    evalLabel: 'ほぼスルー',
+    evalText: 'フッターロゴはページ最下部にあり、到達するユーザーが非常に少ない状態です。フッターロゴの閲覧は一般的に低いため、これ自体は問題ではありません。',
+    ringColor: '#ef4444', ringOffset: 243,
+    desktop: { stats: 'avg 0.2s / 閲覧率 14% / スコア 10', score: 10 },
+    tablet:  { stats: 'avg 0.1s / 閲覧率 10% / スコア 6', score: 6 },
+    mobile:  { stats: 'avg 0.1s / 閲覧率 8% / スコア 4', score: 4 },
+    imgW: 120, imgH: 32,
+  },
+};
+
+function openModal(id) {
+  const d = imageData[id];
+  if (!d) return;
+
+  // Image preview
+  const imgEl = document.getElementById('modalImage');
+  const previewW = Math.min(280, d.imgW * 2);
+  const previewH = Math.min(300, Math.round(previewW * (d.imgH / d.imgW)));
+  imgEl.style.width = previewW + 'px';
+  imgEl.style.minHeight = previewH + 'px';
+  imgEl.style.maxHeight = '300px';
+  imgEl.style.background = d.color;
+  imgEl.textContent = d.name;
+
+  // Meta
+  document.getElementById('modalFilename').textContent = d.name;
+  document.getElementById('modalSize').textContent = d.size;
+  document.getElementById('modalY').textContent = d.y;
+  document.getElementById('modalPath').textContent = d.path;
+  document.getElementById('modalTitle').lastChild.textContent = ' ' + d.name;
+
+  // Score ring
+  document.getElementById('modalScore').textContent = d.score;
+  const circle = document.getElementById('modalRingCircle');
+  circle.setAttribute('stroke', d.ringColor);
+  circle.setAttribute('stroke-dashoffset', d.ringOffset);
+
+  // Stats
+  document.getElementById('modalDuration').textContent = d.avgDur;
+  document.getElementById('modalMaxDuration').textContent = d.maxDur;
+  document.getElementById('modalViewRate').textContent = d.viewRate;
+  document.getElementById('modalMaxRatio').textContent = d.maxRatio;
+
+  // Eval
+  const evalEl = document.getElementById('modalEval');
+  evalEl.style.background = d.evalBg;
+  evalEl.style.borderColor = d.evalBorder;
+  document.getElementById('modalEvalBadge').className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold ' + d.evalClass;
+  document.getElementById('modalEvalBadge').textContent = d.evalLabel;
+  document.getElementById('modalEvalText').textContent = d.evalText;
+
+  // Device bars
+  document.getElementById('modalDesktopStats').textContent = d.desktop.stats;
+  document.getElementById('modalDesktopBar').style.width = d.desktop.score + '%';
+  document.getElementById('modalDesktopBar').textContent = d.desktop.score;
+  document.getElementById('modalTabletStats').textContent = d.tablet.stats;
+  document.getElementById('modalTabletBar').style.width = d.tablet.score + '%';
+  document.getElementById('modalTabletBar').textContent = d.tablet.score;
+  document.getElementById('modalMobileStats').textContent = d.mobile.stats;
+  document.getElementById('modalMobileBar').style.width = d.mobile.score + '%';
+  document.getElementById('modalMobileBar').textContent = d.mobile.score;
+
+  // Sessions
+  document.getElementById('modalSessions').textContent = d.sessions;
+  document.getElementById('modalTotalTime').textContent = d.totalTime;
+  document.getElementById('modalViewCount').textContent = d.viewCount;
+
+  // Show
+  document.getElementById('modal').classList.add('active');
+}
+
+function closeModal() {
+  document.getElementById('modal').classList.remove('active');
+}
+
+// ESC to close
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeModal();
+});
+</script>
+</body>
+</html>

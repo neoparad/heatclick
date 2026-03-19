@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
-import { publishRealtimeData } from '@/lib/redis'
+import { publishRealtimeData, pushEventBuffer } from '@/lib/redis'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { anonymizeIp } from '@/lib/privacy'
+
+// Vercel Serverless タイムアウト設定（秒）
+export const maxDuration = 60
 
 // メモリ内データストレージ（フォールバック用）
 let trackingData: any[] = []
@@ -122,72 +125,131 @@ export async function POST(request: NextRequest) {
       device_type: event.device_type || null,
     }))
 
-    // Prepare heatmap_events for ClickHouse
-    const heatmapEvents: any[] = []
+    // Prepare image_visibility events
+    const imageVisibilityEvents: any[] = []
     for (const event of events) {
       const eventType = event.event_type || event.eventType
-      const pageUrl = event.url || event.page_url || ''
-      const sessionId = event.session_id || event.sessionId
-
-      if (eventType === 'click' && event.click_x !== undefined && event.click_y !== undefined) {
-        heatmapEvents.push({
+      if (eventType === 'image_visibility' && event.image_src) {
+        imageVisibilityEvents.push({
           id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          session_id: sessionId,
-          page_url: pageUrl,
-          event_type: 'click',
-          x: event.click_x || 0,
-          y: event.click_y || 0,
-          value: 1, // クリックは1として記録
-          created_at: event.timestamp ? new Date(event.timestamp).toISOString().replace('T', ' ').replace('Z', '').substring(0, 19) : new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
-        })
-      } else if (eventType === 'scroll' || eventType === 'scroll_depth') {
-        const scrollY = event.scroll_y || 0
-        const scrollPercentage = event.scroll_percentage || 0
-        if (scrollY > 0 || scrollPercentage > 0) {
-          heatmapEvents.push({
-            id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-            session_id: sessionId,
-            page_url: pageUrl,
-            event_type: 'scroll',
-            x: 0,
-            y: scrollY,
-            value: scrollPercentage,
-            created_at: event.timestamp ? new Date(event.timestamp).toISOString().replace('T', ' ').replace('Z', '').substring(0, 19) : new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
-          })
-        }
-      } else if (eventType === 'read_area' && event.read_y !== undefined && event.read_duration !== undefined) {
-        heatmapEvents.push({
-          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          session_id: sessionId,
-          page_url: pageUrl,
-          event_type: 'read',
-          x: 0,
-          y: event.read_y || 0,
-          value: event.read_duration || 0,
-          created_at: event.timestamp ? new Date(event.timestamp).toISOString().replace('T', ' ').replace('Z', '').substring(0, 19) : new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
+          site_id: event.site_id || event.siteId,
+          session_id: event.session_id || event.sessionId,
+          page_url: event.url || event.page_url || '',
+          image_src: event.image_src || '',
+          image_alt: event.image_alt || '',
+          element_path: event.element_path || '',
+          image_y: event.image_y || 0,
+          image_width: event.image_width || 0,
+          image_height: event.image_height || 0,
+          visible_duration_ms: event.visible_duration_ms || 0,
+          max_visible_ratio: event.max_visible_ratio || 0,
+          device_type: event.device_type || null,
+          created_at: new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
         })
       }
     }
 
-    // Store in ClickHouse (primary storage)
-    try {
-      const clickhouse = await getClickHouseClientAsync()
-      await clickhouse.insert({
-        table: 'clickinsight.events',
-        values: clickHouseEvents,
-        format: 'JSONEachRow',
-      })
-
-      // Store heatmap_events if any
-      if (heatmapEvents.length > 0) {
-        await clickhouse.insert({
-          table: 'clickinsight.heatmap_events',
-          values: heatmapEvents,
-          format: 'JSONEachRow',
+    // Prepare form_interactions events
+    const formEvents: any[] = []
+    const formEventTypes = ['form_view', 'form_field_focus', 'form_field_blur', 'form_submit', 'form_abandon']
+    for (const event of events) {
+      const eventType = event.event_type || event.eventType
+      if (formEventTypes.includes(eventType)) {
+        formEvents.push({
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          site_id: event.site_id || event.siteId || '',
+          session_id: event.session_id || event.sessionId || '',
+          page_url: event.url || event.page_url || '',
+          event_type: eventType,
+          form_id: event.form_id || '',
+          form_action: event.form_action || '',
+          field_name: event.field_name || '',
+          field_type: event.field_type || '',
+          field_duration_ms: event.field_duration_ms || 0,
+          field_filled: event.field_filled || 0,
+          field_count: event.field_count || 0,
+          filled_count: event.filled_count || 0,
+          fields_touched: event.fields_touched || 0,
+          last_field: event.last_field || '',
+          device_type: event.device_type || null,
+          created_at: new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
         })
       }
-      
-      // Publish realtime data via Redis
+    }
+
+    // Prepare video_events
+    const videoEvents: any[] = []
+    const videoEventTypes = ['video_play', 'video_pause', 'video_complete', 'video_milestone', 'video_summary']
+    for (const event of events) {
+      const eventType = event.event_type || event.eventType
+      if (videoEventTypes.includes(eventType)) {
+        videoEvents.push({
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          site_id: event.site_id || event.siteId || '',
+          session_id: event.session_id || event.sessionId || '',
+          page_url: event.url || event.page_url || '',
+          event_type: eventType,
+          video_src: event.video_src || '',
+          element_path: event.element_path || '',
+          video_current_time: event.video_current_time || 0,
+          video_duration: event.video_duration || 0,
+          video_progress: event.video_progress || 0,
+          video_milestone: event.video_milestone || 0,
+          video_played_ms: event.video_played_ms || 0,
+          video_completed: event.video_completed || 0,
+          video_interactions: event.video_interactions || 0,
+          device_type: event.device_type || null,
+          created_at: new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
+        })
+      }
+    }
+
+    // Prepare element_visibility events
+    const elementVisibilityEvents: any[] = []
+    for (const event of events) {
+      const eventType = event.event_type || event.eventType
+      if (eventType === 'element_visibility' && event.element_selector) {
+        elementVisibilityEvents.push({
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          site_id: event.site_id || event.siteId || '',
+          session_id: event.session_id || event.sessionId || '',
+          page_url: event.url || event.page_url || '',
+          element_selector: event.element_selector || '',
+          element_tag: event.element_tag || '',
+          element_text: event.element_text || '',
+          element_y: event.element_y || 0,
+          visible_duration_ms: event.visible_duration_ms || 0,
+          max_visible_ratio: event.max_visible_ratio || 0,
+          element_clicked: event.element_clicked || 0,
+          device_type: event.device_type || null,
+          created_at: new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
+        })
+      }
+    }
+
+    // Redisバッファ経由でClickHouseに書き込み（即レスポンス返却）
+    // Inngest flushEventBuffer が毎分Redisからバッチ取得してClickHouseにINSERT
+    try {
+      const bufferPromises: Promise<void>[] = [
+        pushEventBuffer('clickinsight.events', clickHouseEvents),
+      ]
+
+      if (imageVisibilityEvents.length > 0) {
+        bufferPromises.push(pushEventBuffer('clickinsight.image_visibility', imageVisibilityEvents))
+      }
+      if (formEvents.length > 0) {
+        bufferPromises.push(pushEventBuffer('clickinsight.form_interactions', formEvents))
+      }
+      if (videoEvents.length > 0) {
+        bufferPromises.push(pushEventBuffer('clickinsight.video_events', videoEvents))
+      }
+      if (elementVisibilityEvents.length > 0) {
+        bufferPromises.push(pushEventBuffer('clickinsight.element_visibility', elementVisibilityEvents))
+      }
+
+      await Promise.all(bufferPromises)
+
+      // リアルタイム通知はRedis Pub/Subで即時配信（バッファとは別）
       for (const event of events) {
         const siteId = event.site_id || event.siteId
         if (siteId) {
@@ -195,14 +257,32 @@ export async function POST(request: NextRequest) {
         }
       }
     } catch (error) {
-      console.error('ClickHouse insert error:', error)
-      // Fallback to memory storage if ClickHouse fails
-      events.forEach(event => {
-        trackingData.push({
-          ...event,
-          received_at: new Date().toISOString()
+      console.error('Redis buffer error, falling back to direct ClickHouse insert:', error)
+      // Redisが落ちている場合はClickHouseに直接書き込み（フォールバック）
+      try {
+        const clickhouse = await getClickHouseClientAsync()
+        const insertPromises: Promise<any>[] = [
+          clickhouse.insert({ table: 'clickinsight.events', values: clickHouseEvents, format: 'JSONEachRow' }),
+        ]
+        if (imageVisibilityEvents.length > 0) {
+          insertPromises.push(clickhouse.insert({ table: 'clickinsight.image_visibility', values: imageVisibilityEvents, format: 'JSONEachRow' }))
+        }
+        if (formEvents.length > 0) {
+          insertPromises.push(clickhouse.insert({ table: 'clickinsight.form_interactions', values: formEvents, format: 'JSONEachRow' }))
+        }
+        if (videoEvents.length > 0) {
+          insertPromises.push(clickhouse.insert({ table: 'clickinsight.video_events', values: videoEvents, format: 'JSONEachRow' }))
+        }
+        if (elementVisibilityEvents.length > 0) {
+          insertPromises.push(clickhouse.insert({ table: 'clickinsight.element_visibility', values: elementVisibilityEvents, format: 'JSONEachRow' }))
+        }
+        await Promise.all(insertPromises)
+      } catch (chError) {
+        console.error('ClickHouse direct insert also failed:', chError)
+        events.forEach(event => {
+          trackingData.push({ ...event, received_at: new Date().toISOString() })
         })
-      })
+      }
     }
 
     // Debug log

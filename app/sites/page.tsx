@@ -148,16 +148,7 @@ export default function SitesPage() {
 
   const generateTrackingScript = (site: Site) => {
     const appUrl = typeof window !== 'undefined' ? window.location.origin : 'https://heatclick-ai.vercel.app'
-    return `<!-- UGOKI MAP Tracking -->
-<script>
-    window.CLICKINSIGHT_SITE_ID = '${site.tracking_id}';
-    window.CLICKINSIGHT_DEBUG = false; // 本番環境ではfalse
-    window.CLICKINSIGHT_API_URL = '${appUrl}/api/track';
-    window.CLICKINSIGHT_RECORDING_SAMPLE_RATE = 0.1; // 10%のセッションを録画
-</script>
-<script src="${appUrl}/tracking.js" data-site-id="${site.tracking_id}" async></script>
-<script src="${appUrl}/recording.js" async></script>
-<!-- End UGOKI MAP -->`
+    return `<script src="${appUrl}/tracking.js" data-site-id="${site.tracking_id}" async></script>`
   }
 
   const copyToClipboard = async (text: string) => {

@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UGOKI MAP - Performance</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  body { font-family: 'Inter', sans-serif; }
+  .score-ring {
+    width: 80px; height: 80px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 24px; font-weight: 700;
+    position: relative;
+  }
+  .score-ring::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 6px solid #e5e7eb;
+  }
+  .score-good { color: #16a34a; }
+  .score-good::before { border-color: #bbf7d0; border-top-color: #16a34a; border-right-color: #16a34a; }
+  .score-average { color: #f59e0b; }
+  .score-average::before { border-color: #fef3c7; border-top-color: #f59e0b; border-right-color: #f59e0b; }
+  .score-poor { color: #dc2626; }
+  .score-poor::before { border-color: #fecaca; border-top-color: #dc2626; }
+
+  .tab-active {
+    background: #eff6ff;
+    color: #2563eb;
+    border-bottom: 2px solid #2563eb;
+  }
+
+  .metric-good { background: #f0fdf4; border-left: 4px solid #16a34a; }
+  .metric-avg { background: #fffbeb; border-left: 4px solid #f59e0b; }
+  .metric-poor { background: #fef2f2; border-left: 4px solid #dc2626; }
+
+  .dot-scatter {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    position: absolute;
+  }
+
+  .sidebar-active {
+    background: #eff6ff;
+    color: #2563eb;
+  }
+
+  .row-hover:hover {
+    background: #f9fafb;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body class="bg-gray-50">
+
+<div class="flex h-screen">
+  <!-- Sidebar -->
+  <div class="w-64 bg-white border-r border-gray-200 flex flex-col hidden lg:flex">
+    <div class="p-6 border-b border-gray-200">
+      <div class="flex items-center">
+        <div class="w-10 h-10 bg-gradient-to-br from-pink-500 via-blue-500 to-blue-600 rounded-lg flex items-center justify-center shadow-md">
+          <span class="text-white font-bold text-xl">U</span>
+        </div>
+        <span class="ml-3 font-bold text-lg text-gray-800">UGOKI MAP</span>
+      </div>
+    </div>
+
+    <nav class="flex-1 p-4 space-y-1">
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+        <span class="font-medium">ダッシュボード</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+        <span class="font-medium">ヒートマップ</span>
+      </a>
+      <!-- Performance: Active -->
+      <a href="#" class="sidebar-active flex items-center gap-3 px-4 py-3 rounded-lg">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+        <span class="font-medium">パフォーマンス</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/></svg>
+        <span class="font-medium">サイト管理</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+        <span class="font-medium">セッション録画</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        <span class="font-medium">設定</span>
+      </a>
+    </nav>
+
+    <div class="p-4 border-t border-gray-200">
+      <div class="bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg p-4">
+        <div class="flex items-center gap-2 mb-2">
+          <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+          <span class="font-semibold text-sm">Professional プラン</span>
+        </div>
+        <p class="text-xs text-gray-600 mb-2">今月の使用量</p>
+        <div class="w-full bg-gray-200 rounded-full h-2 mb-2">
+          <div class="bg-blue-600 h-2 rounded-full" style="width: 42%"></div>
+        </div>
+        <p class="text-xs text-gray-500">21,000 / 50,000 PV</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div class="flex-1 flex flex-col overflow-hidden">
+    <!-- Header -->
+    <header class="bg-white border-b border-gray-200 px-6 py-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h1 class="text-2xl font-bold text-gray-900">パフォーマンス</h1>
+          <p class="text-sm text-gray-500 mt-1">PageSpeed Insights × ユーザー行動データの統合分析</p>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="text-xs text-gray-400">最終計測: 2026-03-16 09:15</span>
+          <button class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+            再計測
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Content -->
+    <main class="flex-1 overflow-y-auto p-6">
+      <div class="space-y-6">
+
+        <!-- Site & Filter -->
+        <div class="bg-white rounded-lg border border-gray-200 p-4">
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">サイトを選択</label>
+              <select class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                <option>example.com (https://example.com)</option>
+                <option>shop.example.com (https://shop.example.com)</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">デバイス</label>
+              <select class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                <option>モバイル</option>
+                <option>デスクトップ</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">行動データ期間</label>
+              <select class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                <option>過去30日間</option>
+                <option>過去7日間</option>
+                <option>過去90日間</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="bg-white rounded-lg border border-gray-200">
+          <div class="flex border-b border-gray-200">
+            <button id="tab-overview" onclick="switchTab('overview')" class="tab-active px-6 py-3 text-sm font-medium flex items-center gap-2">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>
+              サイト全体
+            </button>
+            <button id="tab-detail" onclick="switchTab('detail')" class="px-6 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 flex items-center gap-2">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+              ページ別
+            </button>
+          </div>
+
+          <!-- ===== Tab 1: サイト全体 ===== -->
+          <div id="content-overview" class="p-6 space-y-6">
+
+            <!-- Summary Cards -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div class="bg-white rounded-lg border border-gray-200 p-5">
+                <div class="flex items-center justify-between mb-3">
+                  <span class="text-sm font-medium text-gray-600">平均スコア</span>
+                  <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                </div>
+                <div class="text-3xl font-bold text-amber-500">74</div>
+                <div class="text-sm text-gray-500 mt-1">Performance</div>
+              </div>
+              <div class="bg-white rounded-lg border border-gray-200 p-5">
+                <div class="flex items-center justify-between mb-3">
+                  <span class="text-sm font-medium text-gray-600">平均LCP</span>
+                  <svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                </div>
+                <div class="text-3xl font-bold text-amber-500">2.8s</div>
+                <div class="text-sm text-gray-500 mt-1">目標: &lt; 2.5s</div>
+              </div>
+              <div class="bg-white rounded-lg border border-gray-200 p-5">
+                <div class="flex items-center justify-between mb-3">
+                  <span class="text-sm font-medium text-gray-600">問題ページ</span>
+                  <svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+                </div>
+                <div class="text-3xl font-bold text-red-600">3</div>
+                <div class="text-sm text-gray-500 mt-1">Score &lt; 50 のページ</div>
+              </div>
+              <div class="bg-white rounded-lg border border-gray-200 p-5">
+                <div class="flex items-center justify-between mb-3">
+                  <span class="text-sm font-medium text-gray-600">平均CVR</span>
+                  <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                </div>
+                <div class="text-3xl font-bold">2.4%</div>
+                <div class="text-sm text-gray-500 mt-1">全ページ平均</div>
+              </div>
+            </div>
+
+            <!-- Page List Table -->
+            <div class="bg-white rounded-lg border border-gray-200">
+              <div class="px-6 py-4 border-b border-gray-200">
+                <h3 class="text-lg font-semibold">ページ別パフォーマンス一覧</h3>
+                <p class="text-sm text-gray-500 mt-1">行クリックでページ詳細を表示</p>
+              </div>
+              <div class="overflow-x-auto">
+                <table class="w-full">
+                  <thead>
+                    <tr class="bg-gray-50">
+                      <th class="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">ページURL</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Score</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">LCP</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">CLS</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">INP</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">CVR</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Sessions</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Scroll到達</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Rage Click</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-200">
+                    <tr class="row-hover" onclick="switchTab('detail')">
+                      <td class="px-6 py-4 text-sm font-medium text-blue-600">/lp/summer-sale</td>
+                      <td class="px-4 py-4 text-center"><span class="inline-flex items-center px-2.5 py-1 rounded-full text-sm font-bold bg-green-100 text-green-700">92</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-green-600 font-medium">1.8s</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-green-600 font-medium">0.02</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-green-600 font-medium">65ms</span></td>
+                      <td class="px-4 py-4 text-center text-sm font-bold text-green-600">4.2%</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-700">1,200</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-700">72%</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-500">3</td>
+                    </tr>
+                    <tr class="row-hover" onclick="switchTab('detail')">
+                      <td class="px-6 py-4 text-sm font-medium text-blue-600">/products/detail</td>
+                      <td class="px-4 py-4 text-center"><span class="inline-flex items-center px-2.5 py-1 rounded-full text-sm font-bold bg-green-100 text-green-700">85</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-green-600 font-medium">2.1s</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-green-600 font-medium">0.05</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-green-600 font-medium">80ms</span></td>
+                      <td class="px-4 py-4 text-center text-sm font-bold">3.5%</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-700">950</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-700">65%</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-500">5</td>
+                    </tr>
+                    <tr class="row-hover" onclick="switchTab('detail')">
+                      <td class="px-6 py-4 text-sm font-medium text-blue-600">/lp/new-arrival</td>
+                      <td class="px-4 py-4 text-center"><span class="inline-flex items-center px-2.5 py-1 rounded-full text-sm font-bold bg-amber-100 text-amber-700">71</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-amber-600 font-medium">3.5s</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-amber-600 font-medium">0.15</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-amber-600 font-medium">150ms</span></td>
+                      <td class="px-4 py-4 text-center text-sm font-bold text-amber-600">1.8%</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-700">800</td>
+                      <td class="px-4 py-4 text-center text-sm text-amber-600">42%</td>
+                      <td class="px-4 py-4 text-center text-sm text-amber-600 font-medium">12</td>
+                    </tr>
+                    <tr class="row-hover" onclick="switchTab('detail')">
+                      <td class="px-6 py-4 text-sm font-medium text-blue-600">/contact</td>
+                      <td class="px-4 py-4 text-center"><span class="inline-flex items-center px-2.5 py-1 rounded-full text-sm font-bold bg-amber-100 text-amber-700">62</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-amber-600 font-medium">3.1s</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-amber-600 font-medium">0.12</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-amber-600 font-medium">180ms</span></td>
+                      <td class="px-4 py-4 text-center text-sm font-bold text-amber-600">1.2%</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-700">600</td>
+                      <td class="px-4 py-4 text-center text-sm text-amber-600">38%</td>
+                      <td class="px-4 py-4 text-center text-sm text-amber-600 font-medium">8</td>
+                    </tr>
+                    <tr class="row-hover" onclick="switchTab('detail')">
+                      <td class="px-6 py-4 text-sm font-medium text-blue-600">/lp/campaign-spring</td>
+                      <td class="px-4 py-4 text-center"><span class="inline-flex items-center px-2.5 py-1 rounded-full text-sm font-bold bg-red-100 text-red-700">45</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-red-600 font-medium">5.1s</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-red-600 font-medium">0.32</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-red-600 font-medium">320ms</span></td>
+                      <td class="px-4 py-4 text-center text-sm font-bold text-red-600">0.9%</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-700">500</td>
+                      <td class="px-4 py-4 text-center text-sm text-red-600">25%</td>
+                      <td class="px-4 py-4 text-center text-sm text-red-600 font-bold">24</td>
+                    </tr>
+                    <tr class="row-hover" onclick="switchTab('detail')">
+                      <td class="px-6 py-4 text-sm font-medium text-blue-600">/blog/seo-guide</td>
+                      <td class="px-4 py-4 text-center"><span class="inline-flex items-center px-2.5 py-1 rounded-full text-sm font-bold bg-red-100 text-red-700">38</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-red-600 font-medium">6.2s</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-red-600 font-medium">0.28</span></td>
+                      <td class="px-4 py-4 text-center text-sm"><span class="text-red-600 font-medium">450ms</span></td>
+                      <td class="px-4 py-4 text-center text-sm font-bold text-red-600">0.5%</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-700">350</td>
+                      <td class="px-4 py-4 text-center text-sm text-red-600">18%</td>
+                      <td class="px-4 py-4 text-center text-sm text-red-600 font-bold">31</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Scatter Chart: Performance × CVR -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div class="bg-white rounded-lg border border-gray-200 p-6">
+                <h3 class="text-lg font-semibold mb-2">Performance Score × CVR 相関</h3>
+                <p class="text-sm text-gray-500 mb-4">スコアが高いページほどCVRが高い傾向</p>
+                <!-- Scatter Plot Mock -->
+                <div class="relative bg-gray-50 rounded-lg p-4" style="height: 260px;">
+                  <!-- Y axis -->
+                  <div class="absolute left-0 top-4 bottom-8 w-8 flex flex-col justify-between text-xs text-gray-400 text-right">
+                    <span>5%</span><span>4%</span><span>3%</span><span>2%</span><span>1%</span><span>0%</span>
+                  </div>
+                  <!-- X axis -->
+                  <div class="absolute left-10 right-4 bottom-0 flex justify-between text-xs text-gray-400">
+                    <span>30</span><span>40</span><span>50</span><span>60</span><span>70</span><span>80</span><span>90</span><span>100</span>
+                  </div>
+                  <!-- Dots -->
+                  <div class="dot-scatter bg-green-500" style="left: 82%; bottom: 80%; opacity: 0.8;" title="/lp/summer-sale: Score 92, CVR 4.2%"></div>
+                  <div class="dot-scatter bg-green-500" style="left: 72%; bottom: 65%; opacity: 0.8;" title="/products/detail: Score 85, CVR 3.5%"></div>
+                  <div class="dot-scatter bg-amber-500" style="left: 55%; bottom: 34%; opacity: 0.8;" title="/lp/new-arrival: Score 71, CVR 1.8%"></div>
+                  <div class="dot-scatter bg-amber-500" style="left: 45%; bottom: 24%; opacity: 0.8;" title="/contact: Score 62, CVR 1.2%"></div>
+                  <div class="dot-scatter bg-red-500" style="left: 25%; bottom: 18%; opacity: 0.8;" title="/lp/campaign-spring: Score 45, CVR 0.9%"></div>
+                  <div class="dot-scatter bg-red-500" style="left: 15%; bottom: 12%; opacity: 0.8;" title="/blog/seo-guide: Score 38, CVR 0.5%"></div>
+                  <!-- Trend line -->
+                  <div class="absolute" style="left: 12%; bottom: 10%; width: 75%; height: 1px; background: #3b82f6; transform: rotate(-25deg); transform-origin: left bottom; opacity: 0.4;"></div>
+                </div>
+                <div class="mt-3 flex items-center gap-2">
+                  <span class="text-sm font-medium text-gray-600">相関係数:</span>
+                  <span class="text-sm font-bold text-blue-600">0.94（強い正の相関）</span>
+                </div>
+              </div>
+
+              <!-- Improvement Impact -->
+              <div class="bg-white rounded-lg border border-gray-200 p-6">
+                <h3 class="text-lg font-semibold mb-2">改善インパクト試算 TOP3</h3>
+                <p class="text-sm text-gray-500 mb-4">パフォーマンス改善による推定CV増加数</p>
+                <div class="space-y-4">
+                  <div class="metric-poor rounded-lg p-4">
+                    <div class="flex items-center justify-between mb-2">
+                      <span class="font-medium text-gray-900">/lp/campaign-spring</span>
+                      <span class="text-xs px-2 py-1 bg-red-100 text-red-700 rounded-full font-medium">Score: 45</span>
+                    </div>
+                    <div class="text-sm text-gray-600 mb-2">LCP 5.1s → 2.0s に改善した場合</div>
+                    <div class="flex items-center gap-4">
+                      <div>
+                        <span class="text-xs text-gray-500">推定CVR</span>
+                        <div class="text-sm"><span class="text-red-600">0.9%</span> → <span class="text-green-600 font-bold">2.8%</span></div>
+                      </div>
+                      <div>
+                        <span class="text-xs text-gray-500">月間CV増</span>
+                        <div class="text-lg font-bold text-green-600">+10件</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="metric-poor rounded-lg p-4">
+                    <div class="flex items-center justify-between mb-2">
+                      <span class="font-medium text-gray-900">/blog/seo-guide</span>
+                      <span class="text-xs px-2 py-1 bg-red-100 text-red-700 rounded-full font-medium">Score: 38</span>
+                    </div>
+                    <div class="text-sm text-gray-600 mb-2">LCP 6.2s → 2.5s に改善した場合</div>
+                    <div class="flex items-center gap-4">
+                      <div>
+                        <span class="text-xs text-gray-500">推定CVR</span>
+                        <div class="text-sm"><span class="text-red-600">0.5%</span> → <span class="text-green-600 font-bold">2.2%</span></div>
+                      </div>
+                      <div>
+                        <span class="text-xs text-gray-500">月間CV増</span>
+                        <div class="text-lg font-bold text-green-600">+6件</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="metric-avg rounded-lg p-4">
+                    <div class="flex items-center justify-between mb-2">
+                      <span class="font-medium text-gray-900">/lp/new-arrival</span>
+                      <span class="text-xs px-2 py-1 bg-amber-100 text-amber-700 rounded-full font-medium">Score: 71</span>
+                    </div>
+                    <div class="text-sm text-gray-600 mb-2">CLS 0.15 → 0.05 に改善した場合</div>
+                    <div class="flex items-center gap-4">
+                      <div>
+                        <span class="text-xs text-gray-500">推定CVR</span>
+                        <div class="text-sm"><span class="text-amber-600">1.8%</span> → <span class="text-green-600 font-bold">2.8%</span></div>
+                      </div>
+                      <div>
+                        <span class="text-xs text-gray-500">月間CV増</span>
+                        <div class="text-lg font-bold text-green-600">+8件</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- ===== Tab 2: ページ別 ===== -->
+          <div id="content-detail" class="p-6 space-y-6" style="display: none;">
+
+            <!-- Page Selector -->
+            <div class="flex items-center gap-4">
+              <label class="text-sm font-medium text-gray-700">ページ選択:</label>
+              <select class="flex-1 max-w-md px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+                <option>/lp/campaign-spring （Score: 45 | CVR: 0.9%）</option>
+                <option>/blog/seo-guide （Score: 38 | CVR: 0.5%）</option>
+                <option>/lp/new-arrival （Score: 71 | CVR: 1.8%）</option>
+                <option>/contact （Score: 62 | CVR: 1.2%）</option>
+                <option>/products/detail （Score: 85 | CVR: 3.5%）</option>
+                <option>/lp/summer-sale （Score: 92 | CVR: 4.2%）</option>
+              </select>
+              <button class="px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 rounded-lg flex items-center gap-1">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+                ヒートマップで見る
+              </button>
+            </div>
+
+            <!-- Lighthouse Scores -->
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <div class="bg-white rounded-lg border border-gray-200 p-5 text-center">
+                <div class="score-ring score-poor mx-auto mb-2">45</div>
+                <div class="text-sm font-medium text-gray-700">Performance</div>
+              </div>
+              <div class="bg-white rounded-lg border border-gray-200 p-5 text-center">
+                <div class="score-ring score-good mx-auto mb-2">91</div>
+                <div class="text-sm font-medium text-gray-700">Accessibility</div>
+              </div>
+              <div class="bg-white rounded-lg border border-gray-200 p-5 text-center">
+                <div class="score-ring score-good mx-auto mb-2">88</div>
+                <div class="text-sm font-medium text-gray-700">Best Practices</div>
+              </div>
+              <div class="bg-white rounded-lg border border-gray-200 p-5 text-center">
+                <div class="score-ring score-good mx-auto mb-2">95</div>
+                <div class="text-sm font-medium text-gray-700">SEO</div>
+              </div>
+            </div>
+
+            <!-- Core Web Vitals -->
+            <div class="bg-white rounded-lg border border-gray-200 p-6">
+              <h3 class="text-lg font-semibold mb-4">Core Web Vitals</h3>
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="metric-poor rounded-lg p-4">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium text-gray-700">LCP</span>
+                    <span class="text-xs px-2 py-0.5 bg-red-100 text-red-700 rounded font-medium">POOR</span>
+                  </div>
+                  <div class="text-2xl font-bold text-red-600">5.1s</div>
+                  <div class="text-xs text-gray-500 mt-1">目標: &lt; 2.5s</div>
+                  <div class="w-full bg-gray-200 rounded-full h-1.5 mt-2">
+                    <div class="bg-red-500 h-1.5 rounded-full" style="width: 100%"></div>
+                  </div>
+                </div>
+                <div class="metric-poor rounded-lg p-4">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium text-gray-700">CLS</span>
+                    <span class="text-xs px-2 py-0.5 bg-red-100 text-red-700 rounded font-medium">POOR</span>
+                  </div>
+                  <div class="text-2xl font-bold text-red-600">0.32</div>
+                  <div class="text-xs text-gray-500 mt-1">目標: &lt; 0.1</div>
+                  <div class="w-full bg-gray-200 rounded-full h-1.5 mt-2">
+                    <div class="bg-red-500 h-1.5 rounded-full" style="width: 100%"></div>
+                  </div>
+                </div>
+                <div class="metric-poor rounded-lg p-4">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium text-gray-700">INP</span>
+                    <span class="text-xs px-2 py-0.5 bg-red-100 text-red-700 rounded font-medium">POOR</span>
+                  </div>
+                  <div class="text-2xl font-bold text-red-600">320ms</div>
+                  <div class="text-xs text-gray-500 mt-1">目標: &lt; 200ms</div>
+                  <div class="w-full bg-gray-200 rounded-full h-1.5 mt-2">
+                    <div class="bg-red-500 h-1.5 rounded-full" style="width: 85%"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Behavior Data Cross -->
+            <div class="bg-white rounded-lg border border-gray-200 p-6">
+              <h3 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>
+                行動データとの相関（HeatClick連携）
+              </h3>
+              <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                <div class="bg-gray-50 rounded-lg p-4">
+                  <div class="text-sm text-gray-500 mb-1">セッション数</div>
+                  <div class="text-xl font-bold">500</div>
+                  <div class="text-xs text-gray-400">過去30日</div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                  <div class="text-sm text-gray-500 mb-1">CVR</div>
+                  <div class="text-xl font-bold text-red-600">0.9%</div>
+                  <div class="text-xs text-gray-400">サイト平均: 2.4%</div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                  <div class="text-sm text-gray-500 mb-1">スクロール到達率</div>
+                  <div class="text-xl font-bold text-red-600">25%</div>
+                  <div class="text-xs text-gray-400">CTA位置: 60%地点</div>
+                </div>
+                <div class="bg-gray-50 rounded-lg p-4">
+                  <div class="text-sm text-gray-500 mb-1">レイジクリック</div>
+                  <div class="text-xl font-bold text-red-600">24回</div>
+                  <div class="text-xs text-gray-400">サイト平均: 6回</div>
+                </div>
+              </div>
+
+              <!-- Diagnosis -->
+              <div class="space-y-3">
+                <div class="flex items-start gap-3 p-3 bg-red-50 rounded-lg">
+                  <svg class="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+                  <div>
+                    <div class="font-medium text-red-800">LCP 5.1s → スクロール到達率25%と強い相関</div>
+                    <div class="text-sm text-red-600 mt-1">ページ表示が遅いためユーザーがCTAに到達する前に離脱。CTAは60%地点にあるが、75%のユーザーがそこに到達していない。</div>
+                  </div>
+                </div>
+                <div class="flex items-start gap-3 p-3 bg-red-50 rounded-lg">
+                  <svg class="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+                  <div>
+                    <div class="font-medium text-red-800">CLS 0.32 → レイジクリック24回と一致</div>
+                    <div class="text-sm text-red-600 mt-1">レイアウトシフトにより、ボタンやリンクの位置がずれてクリックできない状態が発生。ヒーローセクション付近でレイジクリックが集中。</div>
+                  </div>
+                </div>
+                <div class="flex items-start gap-3 p-3 bg-amber-50 rounded-lg">
+                  <svg class="w-5 h-5 text-amber-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                  <div>
+                    <div class="font-medium text-amber-800">INP 320ms → フォーム操作時の遅延</div>
+                    <div class="text-sm text-amber-600 mt-1">入力フォーム付近でのデッドクリックが多い。JSの重さがフォーム応答性に影響している可能性。</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Improvement Suggestions -->
+            <div class="bg-white rounded-lg border border-gray-200 p-6">
+              <h3 class="text-lg font-semibold mb-4">改善提案</h3>
+              <div class="space-y-3">
+                <div class="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+                  <div class="flex items-center gap-4">
+                    <span class="flex items-center justify-center w-8 h-8 rounded-full bg-red-100 text-red-700 text-sm font-bold">1</span>
+                    <div>
+                      <div class="font-medium text-gray-900">メインビジュアル画像の最適化</div>
+                      <div class="text-sm text-gray-500 mt-0.5">WebP変換 + srcset設定で LCP -2.5s</div>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-3">
+                    <div class="text-right">
+                      <div class="text-xs text-gray-500">推定CVR改善</div>
+                      <div class="text-sm font-bold text-green-600">+1.2%</div>
+                    </div>
+                    <span class="px-2 py-1 text-xs rounded bg-red-100 text-red-700 font-medium">高優先</span>
+                  </div>
+                </div>
+                <div class="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+                  <div class="flex items-center gap-4">
+                    <span class="flex items-center justify-center w-8 h-8 rounded-full bg-red-100 text-red-700 text-sm font-bold">2</span>
+                    <div>
+                      <div class="font-medium text-gray-900">画像・動画の width/height 属性追加</div>
+                      <div class="text-sm text-gray-500 mt-0.5">レイアウトシフト防止で CLS -0.25</div>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-3">
+                    <div class="text-right">
+                      <div class="text-xs text-gray-500">推定レイジクリック</div>
+                      <div class="text-sm font-bold text-green-600">-80%</div>
+                    </div>
+                    <span class="px-2 py-1 text-xs rounded bg-red-100 text-red-700 font-medium">高優先</span>
+                  </div>
+                </div>
+                <div class="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+                  <div class="flex items-center gap-4">
+                    <span class="flex items-center justify-center w-8 h-8 rounded-full bg-amber-100 text-amber-700 text-sm font-bold">3</span>
+                    <div>
+                      <div class="font-medium text-gray-900">未使用JavaScript削除</div>
+                      <div class="text-sm text-gray-500 mt-0.5">バンドルサイズ40%削減で INP -150ms</div>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-3">
+                    <div class="text-right">
+                      <div class="text-xs text-gray-500">推定フォームCV</div>
+                      <div class="text-sm font-bold text-green-600">+0.5%</div>
+                    </div>
+                    <span class="px-2 py-1 text-xs rounded bg-amber-100 text-amber-700 font-medium">中優先</span>
+                  </div>
+                </div>
+                <div class="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+                  <div class="flex items-center gap-4">
+                    <span class="flex items-center justify-center w-8 h-8 rounded-full bg-amber-100 text-amber-700 text-sm font-bold">4</span>
+                    <div>
+                      <div class="font-medium text-gray-900">フォントの preload 設定</div>
+                      <div class="text-sm text-gray-500 mt-0.5">テキスト表示を高速化し FCP -0.8s</div>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-3">
+                    <div class="text-right">
+                      <div class="text-xs text-gray-500">推定滞在時間</div>
+                      <div class="text-sm font-bold text-green-600">+15%</div>
+                    </div>
+                    <span class="px-2 py-1 text-xs rounded bg-amber-100 text-amber-700 font-medium">中優先</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<script>
+function switchTab(tab) {
+  // Reset tabs
+  document.getElementById('tab-overview').className = 'px-6 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 flex items-center gap-2';
+  document.getElementById('tab-detail').className = 'px-6 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 flex items-center gap-2';
+  document.getElementById('content-overview').style.display = 'none';
+  document.getElementById('content-detail').style.display = 'none';
+
+  // Activate selected tab
+  document.getElementById('tab-' + tab).className = 'tab-active px-6 py-3 text-sm font-medium flex items-center gap-2';
+  document.getElementById('content-' + tab).style.display = 'block';
+}
+</script>
+
+</body>
+</html>

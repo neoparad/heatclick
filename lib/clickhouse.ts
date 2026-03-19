@@ -300,7 +300,9 @@ export async function getHeatmapData(
 ): Promise<any[]> {
   try {
     const client = await getClickHouseClientAsync()
-    
+    // 日付のみの場合 '2026-03-16' → '2026-03-16 23:59:59' に補完（当日データを含める）
+    if (endDate && endDate.length === 10) endDate = endDate + ' 23:59:59'
+
     // クリックヒートマップの場合（既存のロジック）
     if (heatmapType === 'click') {
       let query = `
@@ -355,36 +357,49 @@ export async function getHeatmapData(
     
     // スクロール深度ヒートマップの場合
     if (heatmapType === 'scroll') {
-      // heatmap_eventsテーブルからスクロール深度データを取得
-      // 各Y座標ごとの到達率を計算（到達したセッション数 / 全セッション数）
+      // eventsテーブルから直接取得（heatmap_events統合済み）
+      // 各セッションの最大到達Y座標を求め、100px区切りでバケット化
       let query = `
-        SELECT 
-          y as scroll_y,
-          count() as session_count,
-          uniq(session_id) as unique_sessions,
-          avg(value) as avg_scroll_percentage,
-          max(value) as max_scroll_percentage
-        FROM clickinsight.heatmap_events
-        WHERE page_url = {page_url:String}
-          AND event_type = 'scroll'
-      `
-      
+        SELECT
+          bucket as scroll_y,
+          countIf(max_y >= bucket) as unique_sessions,
+          0 as session_count,
+          0 as avg_scroll_percentage,
+          0 as max_scroll_percentage
+        FROM (
+          SELECT intDiv(number, 1) * 100 as bucket
+          FROM numbers(500)
+        ) AS buckets
+        CROSS JOIN (
+          SELECT
+            session_id,
+            max(scroll_y) as max_y
+          FROM clickinsight.events
+          WHERE url = {page_url:String}
+            AND event_type IN ('scroll', 'scroll_depth')
+            AND site_id = {site_id:String}
+            AND scroll_y > 0`
+
       const params: Record<string, any> = {
+        site_id: siteId,
         page_url: pageUrl,
       }
 
       if (startDate) {
-        query += ` AND created_at >= {start_date:String}`
+        query += ` AND timestamp >= {start_date:String}`
         params.start_date = startDate
       }
 
       if (endDate) {
-        query += ` AND created_at <= {end_date:String}`
+        query += ` AND timestamp <= {end_date:String}`
         params.end_date = endDate
       }
 
       query += `
-        GROUP BY y
+          GROUP BY session_id
+        ) AS sessions
+        GROUP BY bucket
+        HAVING unique_sessions > 0
         ORDER BY scroll_y ASC
       `
       
@@ -396,25 +411,28 @@ export async function getHeatmapData(
       
       const scrollData = await result.json() as any[]
       
-      // 全セッション数を取得
+      // 全セッション数をページビュー（eventsテーブル）から取得
+      // スクロールしなかったユーザーも分母に含めるため
       let totalSessionsQuery = `
         SELECT uniq(session_id) as total_sessions
-        FROM clickinsight.heatmap_events
-        WHERE page_url = {page_url:String}
-          AND event_type = 'scroll'
+        FROM clickinsight.events
+        WHERE site_id = {site_id:String}
+          AND url = {page_url:String}
+          AND (event_type = 'pageview' OR event_type = 'page_view')
       `
-      
+
       const totalSessionsParams: Record<string, any> = {
+        site_id: siteId,
         page_url: pageUrl,
       }
-      
+
       if (startDate) {
-        totalSessionsQuery += ` AND created_at >= {start_date:String}`
+        totalSessionsQuery += ` AND timestamp >= {start_date:String}`
         totalSessionsParams.start_date = startDate
       }
 
       if (endDate) {
-        totalSessionsQuery += ` AND created_at <= {end_date:String}`
+        totalSessionsQuery += ` AND timestamp <= {end_date:String}`
         totalSessionsParams.end_date = endDate
       }
       
@@ -440,37 +458,40 @@ export async function getHeatmapData(
     
     // 熟読エリアヒートマップの場合
     if (heatmapType === 'read') {
-      // heatmap_eventsテーブルから熟読エリアデータを取得
-      // 各Y座標ごとの総滞在時間を合計
+      // eventsテーブルから直接取得（heatmap_events統合済み）
+      // 100px区切りでバケット化し、各区間の総滞在時間を合計
       let query = `
-        SELECT 
-          y as read_y,
-          sum(value) as total_duration,
-          avg(value) as avg_duration,
-          max(value) as max_duration,
+        SELECT
+          intDiv(read_y, 100) * 100 as read_y,
+          sum(read_duration) as total_duration,
+          avg(read_duration) as avg_duration,
+          max(read_duration) as max_duration,
           count() as read_count,
           uniq(session_id) as unique_sessions
-        FROM clickinsight.heatmap_events
-        WHERE page_url = {page_url:String}
-          AND event_type = 'read'
+        FROM clickinsight.events
+        WHERE url = {page_url:String}
+          AND event_type = 'read_area'
+          AND site_id = {site_id:String}
+          AND read_y > 0
       `
-      
+
       const params: Record<string, any> = {
+        site_id: siteId,
         page_url: pageUrl,
       }
 
       if (startDate) {
-        query += ` AND created_at >= {start_date:String}`
+        query += ` AND timestamp >= {start_date:String}`
         params.start_date = startDate
       }
 
       if (endDate) {
-        query += ` AND created_at <= {end_date:String}`
+        query += ` AND timestamp <= {end_date:String}`
         params.end_date = endDate
       }
 
       query += `
-        GROUP BY y
+        GROUP BY read_y
         ORDER BY total_duration DESC
       `
       
@@ -521,8 +542,11 @@ export async function getStatistics(
   endDate?: string
 ): Promise<any> {
   try {
+    // 日付のみの場合 '2026-03-16' → '2026-03-16 23:59:59' に補完（当日データを含める）
+    if (endDate && endDate.length === 10) endDate = endDate + ' 23:59:59'
+
     let query = `
-      SELECT 
+      SELECT
         count() as total_events,
         countIf(event_type = 'click') as clicks,
         countIf(event_type = 'scroll') as scrolls,
@@ -671,6 +695,7 @@ export async function getTrafficSources(
   endDate?: string
 ): Promise<any> {
   try {
+    if (endDate && endDate.length === 10) endDate = endDate + ' 23:59:59'
     const client = await getClickHouseClientAsync()
     
     // リファラー別の統計
@@ -863,6 +888,8 @@ export async function initializeDatabase(): Promise<void> {
           click_y UInt16,
           scroll_y UInt16,
           scroll_percentage UInt8,
+          read_y UInt16 DEFAULT 0,
+          read_duration Float32 DEFAULT 0,
           event_revenue Decimal(10, 2) DEFAULT 0,
           utm_source Nullable(String),
           utm_medium Nullable(String),
@@ -882,23 +909,17 @@ export async function initializeDatabase(): Promise<void> {
       `,
     })
     
-    // heatmap_eventsテーブルの作成（ヒートマップ専用データ）
-    await client.exec({
-      query: `
-        CREATE TABLE IF NOT EXISTS clickinsight.heatmap_events (
-          id String,
-          session_id String,
-          page_url String,
-          event_type String, -- 'scroll', 'read', 'click'
-          x UInt16, -- クリック or 読了領域のX座標
-          y UInt16, -- スクロール深度・熟読領域のY座標
-          value Float32, -- 深度% or 滞在時間(ms)
-          created_at DateTime DEFAULT now()
-        ) ENGINE = MergeTree()
-        ORDER BY (page_url, event_type, y)
-        PARTITION BY toYYYYMM(created_at)
-      `,
-    })
+    // eventsテーブルにread_y, read_durationカラムを追加（既存テーブル対応）
+    try {
+      await client.exec({
+        query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS read_y UInt16 DEFAULT 0`,
+      })
+      await client.exec({
+        query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS read_duration Float32 DEFAULT 0`,
+      })
+    } catch (e) {
+      // カラムが既に存在する場合は無視
+    }
     
     // sessionsテーブルの作成（セッション集約）
     await client.exec({
@@ -990,6 +1011,132 @@ export async function initializeDatabase(): Promise<void> {
       `,
     })
     
+    // image_visibilityテーブルの作成（画像視認データ）
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.image_visibility (
+          id String,
+          site_id String,
+          session_id String,
+          page_url String,
+          image_src String,
+          image_alt String DEFAULT '',
+          element_path String DEFAULT '',
+          image_y UInt32,
+          image_width UInt16,
+          image_height UInt16,
+          visible_duration_ms UInt32,
+          max_visible_ratio Float32,
+          device_type Nullable(String),
+          created_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree()
+        ORDER BY (site_id, page_url, image_src, created_at)
+        PARTITION BY toYYYYMM(created_at)
+      `,
+    })
+
+    // form_interactionsテーブルの作成（フォーム分析）
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.form_interactions (
+          id String,
+          site_id String,
+          session_id String,
+          page_url String,
+          event_type String,
+          form_id String,
+          form_action String DEFAULT '',
+          field_name String DEFAULT '',
+          field_type String DEFAULT '',
+          field_duration_ms UInt32 DEFAULT 0,
+          field_filled UInt8 DEFAULT 0,
+          field_count UInt16 DEFAULT 0,
+          filled_count UInt16 DEFAULT 0,
+          fields_touched UInt16 DEFAULT 0,
+          last_field String DEFAULT '',
+          device_type Nullable(String),
+          created_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree()
+        ORDER BY (site_id, page_url, form_id, created_at)
+        PARTITION BY toYYYYMM(created_at)
+      `,
+    })
+
+    // video_eventsテーブルの作成（動画分析）
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.video_events (
+          id String,
+          site_id String,
+          session_id String,
+          page_url String,
+          event_type String,
+          video_src String,
+          element_path String DEFAULT '',
+          video_current_time UInt32 DEFAULT 0,
+          video_duration UInt32 DEFAULT 0,
+          video_progress UInt8 DEFAULT 0,
+          video_milestone UInt8 DEFAULT 0,
+          video_played_ms UInt32 DEFAULT 0,
+          video_completed UInt8 DEFAULT 0,
+          video_interactions UInt16 DEFAULT 0,
+          device_type Nullable(String),
+          created_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree()
+        ORDER BY (site_id, page_url, video_src, created_at)
+        PARTITION BY toYYYYMM(created_at)
+      `,
+    })
+
+    // element_visibilityテーブルの作成（CTA・バナー等の要素可視性）
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.element_visibility (
+          id String,
+          site_id String,
+          session_id String,
+          page_url String,
+          element_selector String,
+          element_tag String DEFAULT '',
+          element_text String DEFAULT '',
+          element_y UInt32 DEFAULT 0,
+          visible_duration_ms UInt32,
+          max_visible_ratio Float32,
+          element_clicked UInt8 DEFAULT 0,
+          device_type Nullable(String),
+          created_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree()
+        ORDER BY (site_id, page_url, element_selector, created_at)
+        PARTITION BY toYYYYMM(created_at)
+      `,
+    })
+
+    // testsテーブルの作成（A/B & MVTテスト）
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.tests (
+          id String,
+          site_id String,
+          name String,
+          type String DEFAULT 'ab',
+          status String DEFAULT 'draft',
+          page_url_a String,
+          page_url_b String DEFAULT '',
+          description_a String DEFAULT '',
+          description_b String DEFAULT '',
+          traffic_split_a UInt8 DEFAULT 50,
+          traffic_split_b UInt8 DEFAULT 50,
+          goal_type String DEFAULT 'cvr',
+          confidence_level UInt8 DEFAULT 95,
+          start_date Nullable(Date),
+          end_date Nullable(Date),
+          created_at DateTime DEFAULT now(),
+          updated_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree()
+        ORDER BY (site_id, id)
+      `,
+    })
+
     console.log('ClickHouse database initialized successfully')
   } catch (error) {
     console.error('Error initializing database:', error)

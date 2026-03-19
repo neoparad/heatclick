@@ -1,0 +1,1546 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UGOKI MAP - A/B & MVT テスト</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  body { font-family: 'Inter', sans-serif; }
+  .tab-active { background: #eff6ff; color: #2563eb; border-bottom: 2px solid #2563eb; }
+  .sub-tab-active { background: #fff; color: #2563eb; border: 1px solid #e5e7eb; border-bottom: 1px solid #fff; margin-bottom: -1px; z-index: 1; position: relative; }
+  .sidebar-active { background: #eff6ff; color: #2563eb; }
+  .row-hover:hover { background: #f9fafb; cursor: pointer; }
+  .variant-a { border-left: 4px solid #3b82f6; }
+  .variant-b { border-left: 4px solid #f59e0b; }
+  .variant-c { border-left: 4px solid #8b5cf6; }
+  .winner { background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); border: 1px solid #86efac; }
+  .stat-up { color: #16a34a; }
+  .stat-down { color: #dc2626; }
+  .confidence-high { background: #dcfce7; color: #166534; }
+  .confidence-mid { background: #fef3c7; color: #92400e; }
+  .confidence-low { background: #fee2e2; color: #991b1b; }
+  .badge-running { background: #dbeafe; color: #1e40af; }
+  .badge-completed { background: #dcfce7; color: #166534; }
+  .badge-draft { background: #f3f4f6; color: #4b5563; }
+  .mini-heatmap {
+    background: linear-gradient(180deg,
+      rgba(59,130,246,0.05) 0%,
+      rgba(59,130,246,0.1) 20%,
+      rgba(234,179,8,0.2) 40%,
+      rgba(239,68,68,0.4) 55%,
+      rgba(239,68,68,0.15) 70%,
+      rgba(59,130,246,0.05) 100%
+    );
+  }
+  .mini-heatmap-b {
+    background: linear-gradient(180deg,
+      rgba(59,130,246,0.05) 0%,
+      rgba(59,130,246,0.15) 15%,
+      rgba(234,179,8,0.3) 30%,
+      rgba(239,68,68,0.5) 45%,
+      rgba(239,68,68,0.3) 55%,
+      rgba(234,179,8,0.2) 70%,
+      rgba(59,130,246,0.05) 100%
+    );
+  }
+</style>
+</head>
+<body class="bg-gray-50">
+
+<div class="flex h-screen">
+  <!-- Sidebar -->
+  <div class="w-64 bg-white border-r border-gray-200 flex flex-col hidden lg:flex">
+    <div class="p-6 border-b border-gray-200">
+      <div class="flex items-center">
+        <div class="w-10 h-10 bg-gradient-to-br from-pink-500 via-blue-500 to-blue-600 rounded-lg flex items-center justify-center shadow-md">
+          <span class="text-white font-bold text-xl">U</span>
+        </div>
+        <span class="ml-3 font-bold text-lg text-gray-800">UGOKI MAP</span>
+      </div>
+    </div>
+    <nav class="flex-1 p-4 space-y-1">
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+        <span class="font-medium">ダッシュボード</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+        <span class="font-medium">ヒートマップ</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+        <span class="font-medium">パフォーマンス</span>
+      </a>
+      <!-- A/B Test: Active -->
+      <a href="#" class="sidebar-active flex items-center gap-3 px-4 py-3 rounded-lg">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
+        <span class="font-medium">テスト</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/></svg>
+        <span class="font-medium">サイト管理</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+        <span class="font-medium">セッション録画</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        <span class="font-medium">設定</span>
+      </a>
+    </nav>
+    <div class="p-4 border-t border-gray-200">
+      <div class="bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg p-4">
+        <div class="flex items-center gap-2 mb-2">
+          <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+          <span class="font-semibold text-sm">Professional プラン</span>
+        </div>
+        <p class="text-xs text-gray-600 mb-2">今月の使用量</p>
+        <div class="w-full bg-gray-200 rounded-full h-2 mb-2">
+          <div class="bg-blue-600 h-2 rounded-full" style="width: 42%"></div>
+        </div>
+        <p class="text-xs text-gray-500">21,000 / 50,000 PV</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div class="flex-1 flex flex-col overflow-hidden">
+    <header class="bg-white border-b border-gray-200 px-6 py-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h1 class="text-2xl font-bold text-gray-900">テスト</h1>
+          <p class="text-sm text-gray-500 mt-1">A/Bテスト・多変量テスト（MVT） — 行動データ付き最適化</p>
+        </div>
+        <button onclick="showCreateModal()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+          新規テスト作成
+        </button>
+      </div>
+    </header>
+
+    <main class="flex-1 overflow-y-auto p-6">
+      <div class="space-y-6">
+
+        <!-- Mode Tabs: A/B vs MVT -->
+        <div class="bg-white rounded-lg border border-gray-200">
+          <div class="flex border-b border-gray-200">
+            <button id="tab-ab" onclick="switchMode('ab')" class="tab-active px-6 py-3 text-sm font-medium flex items-center gap-2">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>
+              A/Bテスト
+            </button>
+            <button id="tab-mvt" onclick="switchMode('mvt')" class="px-6 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 flex items-center gap-2">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>
+              多変量テスト（MVT）
+            </button>
+          </div>
+
+          <!-- ===== A/B Test Content ===== -->
+          <div id="content-ab">
+
+            <!-- Sub Tabs: List vs Detail -->
+            <div class="flex border-b border-gray-200 px-6 pt-4">
+              <button id="sub-ab-list" onclick="switchAbSub('list')" class="sub-tab-active px-4 py-2 text-sm font-medium rounded-t-lg">テスト一覧</button>
+              <button id="sub-ab-detail" onclick="switchAbSub('detail')" class="px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 rounded-t-lg">テスト詳細</button>
+            </div>
+
+            <!-- A/B List -->
+            <div id="ab-list" class="p-6">
+              <!-- Summary -->
+              <div class="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
+                <div class="bg-white rounded-lg border border-gray-200 p-4">
+                  <div class="text-sm text-gray-500">実行中</div>
+                  <div class="text-2xl font-bold text-blue-600">3</div>
+                </div>
+                <div class="bg-white rounded-lg border border-gray-200 p-4">
+                  <div class="text-sm text-gray-500">完了</div>
+                  <div class="text-2xl font-bold text-green-600">8</div>
+                </div>
+                <div class="bg-white rounded-lg border border-gray-200 p-4">
+                  <div class="text-sm text-gray-500">平均CVR改善</div>
+                  <div class="text-2xl font-bold text-green-600">+32%</div>
+                </div>
+                <div class="bg-white rounded-lg border border-gray-200 p-4">
+                  <div class="text-sm text-gray-500">月間追加CV</div>
+                  <div class="text-2xl font-bold">+24件</div>
+                </div>
+              </div>
+
+              <!-- Test List Table -->
+              <div class="overflow-x-auto">
+                <table class="w-full">
+                  <thead>
+                    <tr class="bg-gray-50">
+                      <th class="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">テスト名</th>
+                      <th class="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">ページ</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">ステータス</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">期間</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">Sessions</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">CVR A</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">CVR B</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">改善率</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">信頼度</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-200">
+                    <tr class="row-hover" onclick="switchAbSub('detail')">
+                      <td class="px-4 py-4 text-sm font-medium text-blue-600">CTAボタン文言テスト</td>
+                      <td class="px-4 py-4 text-sm text-gray-600">/lp/summer-sale</td>
+                      <td class="px-4 py-4 text-center"><span class="badge-completed px-2 py-1 text-xs rounded-full font-medium">完了</span></td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-500">3/1 - 3/14</td>
+                      <td class="px-4 py-4 text-center text-sm">2,400</td>
+                      <td class="px-4 py-4 text-center text-sm">2.1%</td>
+                      <td class="px-4 py-4 text-center text-sm font-bold text-green-600">3.4%</td>
+                      <td class="px-4 py-4 text-center text-sm font-bold stat-up">+62%</td>
+                      <td class="px-4 py-4 text-center"><span class="confidence-high px-2 py-1 text-xs rounded-full font-medium">97%</span></td>
+                    </tr>
+                    <tr class="row-hover" onclick="switchAbSub('detail')">
+                      <td class="px-4 py-4 text-sm font-medium text-blue-600">ヒーロー画像テスト</td>
+                      <td class="px-4 py-4 text-sm text-gray-600">/lp/new-arrival</td>
+                      <td class="px-4 py-4 text-center"><span class="badge-running px-2 py-1 text-xs rounded-full font-medium">実行中</span></td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-500">3/10 - (進行中)</td>
+                      <td class="px-4 py-4 text-center text-sm">860</td>
+                      <td class="px-4 py-4 text-center text-sm">1.8%</td>
+                      <td class="px-4 py-4 text-center text-sm font-medium">2.5%</td>
+                      <td class="px-4 py-4 text-center text-sm stat-up">+39%</td>
+                      <td class="px-4 py-4 text-center"><span class="confidence-mid px-2 py-1 text-xs rounded-full font-medium">78%</span></td>
+                    </tr>
+                    <tr class="row-hover">
+                      <td class="px-4 py-4 text-sm font-medium text-blue-600">フォーム簡略化テスト</td>
+                      <td class="px-4 py-4 text-sm text-gray-600">/contact</td>
+                      <td class="px-4 py-4 text-center"><span class="badge-running px-2 py-1 text-xs rounded-full font-medium">実行中</span></td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-500">3/12 - (進行中)</td>
+                      <td class="px-4 py-4 text-center text-sm">320</td>
+                      <td class="px-4 py-4 text-center text-sm">1.2%</td>
+                      <td class="px-4 py-4 text-center text-sm font-medium">1.9%</td>
+                      <td class="px-4 py-4 text-center text-sm stat-up">+58%</td>
+                      <td class="px-4 py-4 text-center"><span class="confidence-low px-2 py-1 text-xs rounded-full font-medium">52%</span></td>
+                    </tr>
+                    <tr class="row-hover">
+                      <td class="px-4 py-4 text-sm font-medium text-blue-600">価格表示テスト</td>
+                      <td class="px-4 py-4 text-sm text-gray-600">/products/detail</td>
+                      <td class="px-4 py-4 text-center"><span class="badge-draft px-2 py-1 text-xs rounded-full font-medium">下書き</span></td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-500">—</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-400">—</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-400">—</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-400">—</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-400">—</td>
+                      <td class="px-4 py-4 text-center text-sm text-gray-400">—</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- A/B Detail -->
+            <div id="ab-detail" class="p-6 space-y-6" style="display:none;">
+
+              <!-- Test Header -->
+              <div class="flex items-center justify-between">
+                <div>
+                  <div class="flex items-center gap-3">
+                    <button onclick="switchAbSub('list')" class="text-gray-400 hover:text-gray-600">
+                      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+                    </button>
+                    <h2 class="text-xl font-bold">CTAボタン文言テスト</h2>
+                    <span class="badge-completed px-2 py-1 text-xs rounded-full font-medium">完了</span>
+                  </div>
+                  <p class="text-sm text-gray-500 mt-1 ml-8">ページ: /lp/summer-sale | 期間: 2026/3/1 - 3/14 | 2,400 sessions</p>
+                </div>
+                <div class="flex gap-2">
+                  <button class="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center gap-1">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                    CSV出力
+                  </button>
+                  <button class="px-3 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-1">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    勝者を適用
+                  </button>
+                </div>
+              </div>
+
+              <!-- Variant Comparison Cards -->
+              <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- Variant A -->
+                <div class="variant-a bg-white rounded-lg border border-gray-200 p-5">
+                  <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-2">
+                      <span class="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs font-bold">A（オリジナル）</span>
+                      <span class="text-sm text-gray-500">1,200 sessions</span>
+                    </div>
+                  </div>
+                  <div class="bg-gray-50 rounded-lg p-4 mb-4">
+                    <div class="text-sm text-gray-500 mb-1">CTA文言</div>
+                    <div class="text-lg font-bold text-gray-800 bg-blue-600 text-white rounded-lg px-4 py-2 text-center">今すぐ購入する</div>
+                  </div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div class="bg-gray-50 rounded p-3">
+                      <div class="text-xs text-gray-500">CVR</div>
+                      <div class="text-xl font-bold">2.1%</div>
+                    </div>
+                    <div class="bg-gray-50 rounded p-3">
+                      <div class="text-xs text-gray-500">CTAクリック率</div>
+                      <div class="text-xl font-bold">8.3%</div>
+                    </div>
+                    <div class="bg-gray-50 rounded p-3">
+                      <div class="text-xs text-gray-500">スクロール到達率</div>
+                      <div class="text-xl font-bold">65%</div>
+                    </div>
+                    <div class="bg-gray-50 rounded p-3">
+                      <div class="text-xs text-gray-500">平均滞在時間</div>
+                      <div class="text-xl font-bold">42s</div>
+                    </div>
+                  </div>
+                </div>
+                <!-- Variant B -->
+                <div class="variant-b rounded-lg border border-gray-200 p-5 winner">
+                  <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-2">
+                      <span class="px-2 py-1 bg-amber-100 text-amber-700 rounded text-xs font-bold">B（勝者）</span>
+                      <span class="text-sm text-gray-500">1,200 sessions</span>
+                      <span class="px-2 py-1 bg-green-600 text-white rounded text-xs font-bold">WINNER</span>
+                    </div>
+                  </div>
+                  <div class="bg-white/60 rounded-lg p-4 mb-4">
+                    <div class="text-sm text-gray-500 mb-1">CTA文言</div>
+                    <div class="text-lg font-bold text-gray-800 bg-amber-500 text-white rounded-lg px-4 py-2 text-center">送料無料で今すぐ注文</div>
+                  </div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div class="bg-white/60 rounded p-3">
+                      <div class="text-xs text-gray-500">CVR</div>
+                      <div class="text-xl font-bold text-green-600">3.4% <span class="text-xs stat-up">+62%</span></div>
+                    </div>
+                    <div class="bg-white/60 rounded p-3">
+                      <div class="text-xs text-gray-500">CTAクリック率</div>
+                      <div class="text-xl font-bold text-green-600">12.7% <span class="text-xs stat-up">+53%</span></div>
+                    </div>
+                    <div class="bg-white/60 rounded p-3">
+                      <div class="text-xs text-gray-500">スクロール到達率</div>
+                      <div class="text-xl font-bold text-green-600">71% <span class="text-xs stat-up">+9%</span></div>
+                    </div>
+                    <div class="bg-white/60 rounded p-3">
+                      <div class="text-xs text-gray-500">平均滞在時間</div>
+                      <div class="text-xl font-bold text-green-600">58s <span class="text-xs stat-up">+38%</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- ===== Heatmap Side-by-Side Comparison (User Local Style) ===== -->
+              <div class="bg-white rounded-lg border border-gray-200">
+                <div class="p-4 border-b border-gray-200">
+                  <div class="flex items-center justify-between">
+                    <h3 class="text-lg font-semibold">ヒートマップ比較</h3>
+                    <!-- Heatmap type tabs -->
+                    <div class="flex gap-1 bg-gray-100 rounded-lg p-1">
+                      <button onclick="switchHeatmapTab('scroll')" id="hm-tab-scroll" class="bg-white text-blue-700 shadow-sm flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
+                        終了エリア
+                      </button>
+                      <button onclick="switchHeatmapTab('read')" id="hm-tab-read" class="text-gray-600 hover:text-gray-900 flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+                        熟読エリア
+                      </button>
+                      <button onclick="switchHeatmapTab('click')" id="hm-tab-click" class="text-gray-600 hover:text-gray-900 flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"/></svg>
+                        クリック
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Side-by-side panels -->
+                <div class="grid grid-cols-2 divide-x divide-gray-200">
+                  <!-- Panel A -->
+                  <div>
+                    <div class="px-4 py-3 bg-gray-50 border-b border-gray-200">
+                      <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-2">
+                          <span class="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-bold">A</span>
+                          <span class="text-sm font-medium text-gray-700 truncate">https://example.com/lp_A.html</span>
+                        </div>
+                        <span class="text-xs text-gray-400">1,200 sessions</span>
+                      </div>
+                      <div class="flex items-center gap-3 mt-2">
+                        <select class="text-xs border border-gray-200 rounded px-2 py-1 bg-white" id="hm-select-a">
+                          <option>終了エリア</option><option>熟読エリア</option><option>クリック（最終）</option>
+                        </select>
+                        <div class="flex gap-1">
+                          <button class="p-1 bg-blue-100 text-blue-700 rounded text-xs" title="PC">💻</button>
+                          <button class="p-1 text-gray-400 rounded text-xs hover:bg-gray-100" title="タブレット">📱</button>
+                          <button class="p-1 text-gray-400 rounded text-xs hover:bg-gray-100" title="スマホ">📲</button>
+                        </div>
+                        <span class="text-xs text-gray-400">📅 2026/3/1 - 3/14</span>
+                      </div>
+                    </div>
+                    <!-- Scroll heatmap A -->
+                    <div id="hm-scroll-a" class="relative overflow-hidden" style="height:500px;">
+                      <div class="absolute inset-0 bg-gray-100">
+                        <!-- Mock page content -->
+                        <div class="p-3 bg-white m-2 rounded shadow-sm text-center">
+                          <div class="text-xs text-gray-400 mb-1">ec.example.com/lp_A.html</div>
+                          <div class="bg-gray-200 rounded h-20 mb-2 flex items-center justify-center text-xs text-gray-400">ヒーロー画像</div>
+                          <div class="bg-blue-600 text-white text-xs px-3 py-2 rounded mb-2">今すぐ購入する</div>
+                          <div class="space-y-1">
+                            <div class="bg-gray-100 h-4 rounded"></div>
+                            <div class="bg-gray-100 h-4 rounded w-4/5"></div>
+                            <div class="bg-gray-100 h-4 rounded w-3/5"></div>
+                          </div>
+                          <div class="bg-gray-200 rounded h-16 mt-2 flex items-center justify-center text-xs text-gray-400">商品一覧</div>
+                          <div class="space-y-1 mt-2">
+                            <div class="bg-gray-100 h-4 rounded"></div>
+                            <div class="bg-gray-100 h-4 rounded w-2/3"></div>
+                          </div>
+                        </div>
+                      </div>
+                      <!-- Scroll overlay A (funnel shape using SVG) -->
+                      <svg class="absolute inset-0 w-full h-full" viewBox="0 0 400 500" preserveAspectRatio="none">
+                        <defs>
+                          <linearGradient id="scroll-grad-a" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stop-color="#ff0000" stop-opacity="0.5"/>
+                            <stop offset="20%" stop-color="#ff6600" stop-opacity="0.5"/>
+                            <stop offset="40%" stop-color="#ffcc00" stop-opacity="0.45"/>
+                            <stop offset="55%" stop-color="#88cc00" stop-opacity="0.4"/>
+                            <stop offset="75%" stop-color="#00cc66" stop-opacity="0.35"/>
+                            <stop offset="100%" stop-color="#0088ff" stop-opacity="0.3"/>
+                          </linearGradient>
+                        </defs>
+                        <polygon points="0,0 400,0 380,50 20,50" fill="#ff0000" fill-opacity="0.45"/>
+                        <polygon points="20,50 380,50 360,125 40,125" fill="#ff6600" fill-opacity="0.4"/>
+                        <polygon points="40,125 360,125 320,200 80,200" fill="#ffcc00" fill-opacity="0.4"/>
+                        <polygon points="80,200 320,200 280,300 120,300" fill="#88cc00" fill-opacity="0.35"/>
+                        <polygon points="120,300 280,300 240,400 160,400" fill="#00cc66" fill-opacity="0.3"/>
+                        <polygon points="160,400 240,400 220,500 180,500" fill="#0088ff" fill-opacity="0.25"/>
+                      </svg>
+                      <!-- % labels -->
+                      <div class="absolute left-0 w-full" style="top:0px"><div class="flex items-center"><div class="flex-1 border-t border-dashed border-black/20"></div><div class="bg-black/60 text-white text-[10px] font-bold px-1.5 py-0.5 rounded mr-1">90%</div></div></div>
+                      <div class="absolute left-0 w-full" style="top:100px"><div class="flex items-center"><div class="flex-1 border-t border-dashed border-black/20"></div><div class="bg-black/60 text-white text-[10px] font-bold px-1.5 py-0.5 rounded mr-1">70%</div></div></div>
+                      <div class="absolute left-0 w-full" style="top:225px"><div class="flex items-center"><div class="flex-1 border-t border-dashed border-black/20"></div><div class="bg-black/60 text-white text-[10px] font-bold px-1.5 py-0.5 rounded mr-1">50%</div></div></div>
+                      <div class="absolute left-0 w-full" style="top:375px"><div class="flex items-center"><div class="flex-1 border-t border-dashed border-black/20"></div><div class="bg-black/60 text-white text-[10px] font-bold px-1.5 py-0.5 rounded mr-1">25%</div></div></div>
+                    </div>
+                    <!-- Read heatmap A -->
+                    <div id="hm-read-a" class="relative overflow-hidden" style="height:500px;display:none;">
+                      <div class="absolute inset-0 bg-gray-100">
+                        <div class="p-3 bg-white m-2 rounded shadow-sm text-center">
+                          <div class="text-xs text-gray-400 mb-1">ec.example.com/lp_A.html</div>
+                          <div class="bg-gray-200 rounded h-20 mb-2 flex items-center justify-center text-xs text-gray-400">ヒーロー画像</div>
+                          <div class="bg-blue-600 text-white text-xs px-3 py-2 rounded mb-2">今すぐ購入する</div>
+                          <div class="space-y-1"><div class="bg-gray-100 h-4 rounded"></div><div class="bg-gray-100 h-4 rounded w-4/5"></div><div class="bg-gray-100 h-4 rounded w-3/5"></div></div>
+                          <div class="bg-gray-200 rounded h-16 mt-2 flex items-center justify-center text-xs text-gray-400">商品一覧</div>
+                          <div class="space-y-1 mt-2"><div class="bg-gray-100 h-4 rounded"></div><div class="bg-gray-100 h-4 rounded w-2/3"></div></div>
+                        </div>
+                      </div>
+                      <div class="absolute inset-0" style="background:linear-gradient(to bottom, rgba(255,0,0,0.35) 0%, rgba(255,100,0,0.3) 15%, rgba(255,200,0,0.3) 30%, rgba(100,200,0,0.25) 50%, rgba(0,200,100,0.2) 70%, rgba(0,100,255,0.15) 100%);"></div>
+                    </div>
+                    <!-- Click heatmap A -->
+                    <div id="hm-click-a" class="relative overflow-hidden" style="height:500px;display:none;">
+                      <div class="absolute inset-0 bg-gray-100">
+                        <div class="p-3 bg-white m-2 rounded shadow-sm text-center">
+                          <div class="text-xs text-gray-400 mb-1">ec.example.com/lp_A.html</div>
+                          <div class="bg-gray-200 rounded h-20 mb-2 flex items-center justify-center text-xs text-gray-400">ヒーロー画像</div>
+                          <div class="bg-blue-600 text-white text-xs px-3 py-2 rounded mb-2">今すぐ購入する</div>
+                          <div class="space-y-1"><div class="bg-gray-100 h-4 rounded"></div><div class="bg-gray-100 h-4 rounded w-4/5"></div><div class="bg-gray-100 h-4 rounded w-3/5"></div></div>
+                          <div class="bg-gray-200 rounded h-16 mt-2 flex items-center justify-center text-xs text-gray-400">商品一覧</div>
+                          <div class="space-y-1 mt-2"><div class="bg-gray-100 h-4 rounded"></div><div class="bg-gray-100 h-4 rounded w-2/3"></div></div>
+                        </div>
+                      </div>
+                      <!-- Click dots -->
+                      <div class="absolute" style="top:105px;left:45%;width:60px;height:60px;background:radial-gradient(circle,rgba(255,0,0,0.6) 0%,rgba(255,100,0,0.3) 40%,transparent 70%);border-radius:50%;"></div>
+                      <div class="absolute" style="top:55px;left:30%;width:40px;height:40px;background:radial-gradient(circle,rgba(100,200,0,0.5) 0%,transparent 70%);border-radius:50%;"></div>
+                      <div class="absolute" style="top:55px;left:55%;width:35px;height:35px;background:radial-gradient(circle,rgba(100,200,0,0.4) 0%,transparent 70%);border-radius:50%;"></div>
+                      <div class="absolute" style="top:200px;left:40%;width:30px;height:30px;background:radial-gradient(circle,rgba(0,100,255,0.4) 0%,transparent 70%);border-radius:50%;"></div>
+                      <div class="absolute" style="top:340px;left:35%;width:25px;height:25px;background:radial-gradient(circle,rgba(0,100,255,0.3) 0%,transparent 70%);border-radius:50%;"></div>
+                    </div>
+                  </div>
+
+                  <!-- Panel B -->
+                  <div>
+                    <div class="px-4 py-3 bg-green-50 border-b border-gray-200">
+                      <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-2">
+                          <span class="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold">B</span>
+                          <span class="px-1.5 py-0.5 bg-green-600 text-white rounded text-[10px] font-bold">WINNER</span>
+                          <span class="text-sm font-medium text-gray-700 truncate">https://example.com/lp_B.html</span>
+                        </div>
+                        <span class="text-xs text-gray-400">1,200 sessions</span>
+                      </div>
+                      <div class="flex items-center gap-3 mt-2">
+                        <select class="text-xs border border-gray-200 rounded px-2 py-1 bg-white" id="hm-select-b">
+                          <option>終了エリア</option><option>熟読エリア</option><option>クリック（最終）</option>
+                        </select>
+                        <div class="flex gap-1">
+                          <button class="p-1 bg-blue-100 text-blue-700 rounded text-xs" title="PC">💻</button>
+                          <button class="p-1 text-gray-400 rounded text-xs hover:bg-gray-100" title="タブレット">📱</button>
+                          <button class="p-1 text-gray-400 rounded text-xs hover:bg-gray-100" title="スマホ">📲</button>
+                        </div>
+                        <span class="text-xs text-gray-400">📅 2026/3/1 - 3/14</span>
+                      </div>
+                    </div>
+                    <!-- Scroll heatmap B (better funnel) -->
+                    <div id="hm-scroll-b" class="relative overflow-hidden" style="height:500px;">
+                      <div class="absolute inset-0 bg-gray-100">
+                        <div class="p-3 bg-white m-2 rounded shadow-sm text-center">
+                          <div class="text-xs text-gray-400 mb-1">ec.example.com/lp_B.html</div>
+                          <div class="bg-gray-200 rounded h-20 mb-2 flex items-center justify-center text-xs text-gray-400">ヒーロー画像（改善版）</div>
+                          <div class="bg-amber-500 text-white text-xs px-3 py-2 rounded mb-2">送料無料で今すぐ注文</div>
+                          <div class="space-y-1"><div class="bg-gray-100 h-4 rounded"></div><div class="bg-gray-100 h-4 rounded w-4/5"></div><div class="bg-gray-100 h-4 rounded w-3/5"></div></div>
+                          <div class="bg-gray-200 rounded h-16 mt-2 flex items-center justify-center text-xs text-gray-400">商品一覧</div>
+                          <div class="space-y-1 mt-2"><div class="bg-gray-100 h-4 rounded"></div><div class="bg-gray-100 h-4 rounded w-2/3"></div></div>
+                        </div>
+                      </div>
+                      <svg class="absolute inset-0 w-full h-full" viewBox="0 0 400 500" preserveAspectRatio="none">
+                        <polygon points="0,0 400,0 395,75 5,75" fill="#ff0000" fill-opacity="0.5"/>
+                        <polygon points="5,75 395,75 385,150 15,150" fill="#ff3300" fill-opacity="0.45"/>
+                        <polygon points="15,150 385,150 360,250 40,250" fill="#ff6600" fill-opacity="0.4"/>
+                        <polygon points="40,250 360,250 320,325 80,325" fill="#ffcc00" fill-opacity="0.4"/>
+                        <polygon points="80,325 320,325 280,400 120,400" fill="#88cc00" fill-opacity="0.35"/>
+                        <polygon points="120,400 280,400 250,500 150,500" fill="#00cc66" fill-opacity="0.3"/>
+                      </svg>
+                      <div class="absolute left-0 w-full" style="top:0px"><div class="flex items-center"><div class="flex-1 border-t border-dashed border-black/20"></div><div class="bg-black/60 text-white text-[10px] font-bold px-1.5 py-0.5 rounded mr-1">95%</div></div></div>
+                      <div class="absolute left-0 w-full" style="top:125px"><div class="flex items-center"><div class="flex-1 border-t border-dashed border-black/20"></div><div class="bg-black/60 text-white text-[10px] font-bold px-1.5 py-0.5 rounded mr-1">80%</div></div></div>
+                      <div class="absolute left-0 w-full" style="top:275px"><div class="flex items-center"><div class="flex-1 border-t border-dashed border-black/20"></div><div class="bg-black/60 text-white text-[10px] font-bold px-1.5 py-0.5 rounded mr-1">60%</div></div></div>
+                      <div class="absolute left-0 w-full" style="top:425px"><div class="flex items-center"><div class="flex-1 border-t border-dashed border-black/20"></div><div class="bg-black/60 text-white text-[10px] font-bold px-1.5 py-0.5 rounded mr-1">50%</div></div></div>
+                    </div>
+                    <!-- Read heatmap B -->
+                    <div id="hm-read-b" class="relative overflow-hidden" style="height:500px;display:none;">
+                      <div class="absolute inset-0 bg-gray-100">
+                        <div class="p-3 bg-white m-2 rounded shadow-sm text-center">
+                          <div class="text-xs text-gray-400 mb-1">ec.example.com/lp_B.html</div>
+                          <div class="bg-gray-200 rounded h-20 mb-2 flex items-center justify-center text-xs text-gray-400">ヒーロー画像（改善版）</div>
+                          <div class="bg-amber-500 text-white text-xs px-3 py-2 rounded mb-2">送料無料で今すぐ注文</div>
+                          <div class="space-y-1"><div class="bg-gray-100 h-4 rounded"></div><div class="bg-gray-100 h-4 rounded w-4/5"></div><div class="bg-gray-100 h-4 rounded w-3/5"></div></div>
+                          <div class="bg-gray-200 rounded h-16 mt-2 flex items-center justify-center text-xs text-gray-400">商品一覧</div>
+                          <div class="space-y-1 mt-2"><div class="bg-gray-100 h-4 rounded"></div><div class="bg-gray-100 h-4 rounded w-2/3"></div></div>
+                        </div>
+                      </div>
+                      <div class="absolute inset-0" style="background:linear-gradient(to bottom, rgba(255,0,0,0.45) 0%, rgba(255,0,0,0.35) 20%, rgba(255,100,0,0.35) 35%, rgba(255,200,0,0.3) 50%, rgba(100,200,0,0.25) 65%, rgba(0,200,100,0.2) 80%, rgba(0,100,255,0.15) 100%);"></div>
+                    </div>
+                    <!-- Click heatmap B -->
+                    <div id="hm-click-b" class="relative overflow-hidden" style="height:500px;display:none;">
+                      <div class="absolute inset-0 bg-gray-100">
+                        <div class="p-3 bg-white m-2 rounded shadow-sm text-center">
+                          <div class="text-xs text-gray-400 mb-1">ec.example.com/lp_B.html</div>
+                          <div class="bg-gray-200 rounded h-20 mb-2 flex items-center justify-center text-xs text-gray-400">ヒーロー画像（改善版）</div>
+                          <div class="bg-amber-500 text-white text-xs px-3 py-2 rounded mb-2">送料無料で今すぐ注文</div>
+                          <div class="space-y-1"><div class="bg-gray-100 h-4 rounded"></div><div class="bg-gray-100 h-4 rounded w-4/5"></div><div class="bg-gray-100 h-4 rounded w-3/5"></div></div>
+                          <div class="bg-gray-200 rounded h-16 mt-2 flex items-center justify-center text-xs text-gray-400">商品一覧</div>
+                          <div class="space-y-1 mt-2"><div class="bg-gray-100 h-4 rounded"></div><div class="bg-gray-100 h-4 rounded w-2/3"></div></div>
+                        </div>
+                      </div>
+                      <!-- Stronger click concentration on CTA -->
+                      <div class="absolute" style="top:105px;left:42%;width:80px;height:80px;background:radial-gradient(circle,rgba(255,0,0,0.7) 0%,rgba(255,100,0,0.4) 40%,transparent 70%);border-radius:50%;"></div>
+                      <div class="absolute" style="top:100px;left:52%;width:50px;height:50px;background:radial-gradient(circle,rgba(255,50,0,0.5) 0%,transparent 70%);border-radius:50%;"></div>
+                      <div class="absolute" style="top:55px;left:30%;width:25px;height:25px;background:radial-gradient(circle,rgba(0,100,255,0.3) 0%,transparent 70%);border-radius:50%;"></div>
+                      <div class="absolute" style="top:200px;left:40%;width:20px;height:20px;background:radial-gradient(circle,rgba(0,100,255,0.25) 0%,transparent 70%);border-radius:50%;"></div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Legend -->
+                <div class="px-4 py-3 border-t border-gray-200 flex items-center justify-between">
+                  <div class="flex items-center gap-2 text-xs text-gray-500">
+                    <span>密度:</span>
+                    <div class="flex items-center gap-0.5">
+                      <span>低</span>
+                      <div class="w-20 h-2 rounded-full" style="background:linear-gradient(to right, #0088ff, #00cc66, #ffcc00, #ff6600, #ff0000);"></div>
+                      <span>高</span>
+                    </div>
+                  </div>
+                  <div class="text-xs text-gray-400">※ スクロール同期: 両パネルは連動してスクロールします</div>
+                </div>
+              </div>
+
+              <!-- Data Analysis -->
+              <div class="bg-white rounded-lg border border-gray-200 p-6">
+                <div class="flex items-center gap-2 mb-4">
+                  <svg class="w-5 h-5 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>
+                  <h3 class="text-lg font-semibold">データ分析</h3>
+                </div>
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+                  <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-sm font-medium text-gray-700 mb-2">要素別クリック数</div>
+                    <div class="space-y-2">
+                      <div class="flex justify-between text-sm">
+                        <span class="text-gray-600">CTA ボタン</span>
+                        <div><span class="text-blue-600">A: 100</span> / <span class="text-amber-600 font-bold">B: 152</span></div>
+                      </div>
+                      <div class="flex justify-between text-sm">
+                        <span class="text-gray-600">商品画像</span>
+                        <div><span class="text-blue-600">A: 84</span> / <span class="text-amber-600">B: 78</span></div>
+                      </div>
+                      <div class="flex justify-between text-sm">
+                        <span class="text-gray-600">ナビゲーション</span>
+                        <div><span class="text-blue-600">A: 67</span> / <span class="text-amber-600">B: 41</span></div>
+                      </div>
+                      <div class="flex justify-between text-sm">
+                        <span class="text-gray-600">フッターリンク</span>
+                        <div><span class="text-blue-600">A: 32</span> / <span class="text-amber-600">B: 18</span></div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-sm font-medium text-gray-700 mb-2">スクロール深度分布</div>
+                    <div class="space-y-2">
+                      <div class="flex items-center justify-between text-sm">
+                        <span class="text-gray-600">25%到達</span>
+                        <div><span class="text-blue-600">A: 89%</span> / <span class="text-amber-600">B: 92%</span></div>
+                      </div>
+                      <div class="flex items-center justify-between text-sm">
+                        <span class="text-gray-600">50%到達</span>
+                        <div><span class="text-blue-600">A: 65%</span> / <span class="text-amber-600 font-bold">B: 71%</span></div>
+                      </div>
+                      <div class="flex items-center justify-between text-sm">
+                        <span class="text-gray-600">75%到達</span>
+                        <div><span class="text-blue-600">A: 38%</span> / <span class="text-amber-600 font-bold">B: 52%</span></div>
+                      </div>
+                      <div class="flex items-center justify-between text-sm">
+                        <span class="text-gray-600">100%到達</span>
+                        <div><span class="text-blue-600">A: 12%</span> / <span class="text-amber-600 font-bold">B: 21%</span></div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bg-gray-50 rounded-lg p-4">
+                    <div class="text-sm font-medium text-gray-700 mb-2">行動品質指標</div>
+                    <div class="space-y-2">
+                      <div class="flex justify-between text-sm">
+                        <span class="text-gray-600">レイジクリック</span>
+                        <div><span class="text-blue-600">A: 18</span> / <span class="text-amber-600 font-bold">B: 5</span></div>
+                      </div>
+                      <div class="flex justify-between text-sm">
+                        <span class="text-gray-600">デッドクリック</span>
+                        <div><span class="text-blue-600">A: 42</span> / <span class="text-amber-600 font-bold">B: 15</span></div>
+                      </div>
+                      <div class="flex justify-between text-sm">
+                        <span class="text-gray-600">直帰率</span>
+                        <div><span class="text-blue-600">A: 45%</span> / <span class="text-amber-600 font-bold">B: 32%</span></div>
+                      </div>
+                      <div class="flex justify-between text-sm">
+                        <span class="text-gray-600">平均読了時間</span>
+                        <div><span class="text-blue-600">A: 28s</span> / <span class="text-amber-600 font-bold">B: 41s</span></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- AI Insight -->
+                <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                  <div class="flex items-start gap-3">
+                    <svg class="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                    <div>
+                      <div class="font-medium text-blue-800">AI分析サマリー</div>
+                      <div class="text-sm text-blue-700 mt-1">
+                        バリアントBの「送料無料」という訴求がユーザーの購買意欲を高め、CTAクリック率が+53%向上。
+                        さらに、Bではナビゲーション離脱（67→41回）とフッター離脱（32→18回）が大幅に減少しており、ユーザーがCTAに集中していることがデータから確認できます。
+                        スクロール深度75%到達率が38%→52%に改善されたことから、ページ下部のコンテンツへの関心も高まっています。
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Statistical Significance -->
+              <div class="bg-white rounded-lg border border-gray-200 p-6">
+                <h3 class="text-lg font-semibold mb-4">統計的有意性</h3>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div class="text-center p-4 bg-green-50 rounded-lg">
+                    <div class="text-sm text-gray-500 mb-1">信頼度</div>
+                    <div class="text-3xl font-bold text-green-600">97.2%</div>
+                    <div class="text-xs text-green-600 mt-1">95%以上で統計的に有意</div>
+                  </div>
+                  <div class="text-center p-4 bg-gray-50 rounded-lg">
+                    <div class="text-sm text-gray-500 mb-1">p値</div>
+                    <div class="text-3xl font-bold">0.028</div>
+                    <div class="text-xs text-gray-500 mt-1">p &lt; 0.05 で有意</div>
+                  </div>
+                  <div class="text-center p-4 bg-gray-50 rounded-lg">
+                    <div class="text-sm text-gray-500 mb-1">必要サンプル数</div>
+                    <div class="text-3xl font-bold">2,100 <span class="text-green-600 text-lg">/ 2,400</span></div>
+                    <div class="text-xs text-green-600 mt-1">十分なサンプル数に到達</div>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- ===== MVT Content ===== -->
+          <div id="content-mvt" style="display:none;">
+
+            <div class="flex border-b border-gray-200 px-6 pt-4">
+              <button id="sub-mvt-list" onclick="switchMvtSub('list')" class="sub-tab-active px-4 py-2 text-sm font-medium rounded-t-lg">テスト一覧</button>
+              <button id="sub-mvt-detail" onclick="switchMvtSub('detail')" class="px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 rounded-t-lg">テスト詳細</button>
+            </div>
+
+            <!-- MVT List -->
+            <div id="mvt-list" class="p-6">
+              <div class="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
+                <div class="bg-white rounded-lg border border-gray-200 p-4">
+                  <div class="text-sm text-gray-500">実行中</div>
+                  <div class="text-2xl font-bold text-blue-600">1</div>
+                </div>
+                <div class="bg-white rounded-lg border border-gray-200 p-4">
+                  <div class="text-sm text-gray-500">完了</div>
+                  <div class="text-2xl font-bold text-green-600">2</div>
+                </div>
+                <div class="bg-white rounded-lg border border-gray-200 p-4">
+                  <div class="text-sm text-gray-500">テスト中の組み合わせ</div>
+                  <div class="text-2xl font-bold">18</div>
+                </div>
+                <div class="bg-white rounded-lg border border-gray-200 p-4">
+                  <div class="text-sm text-gray-500">最適組み合わせCVR</div>
+                  <div class="text-2xl font-bold text-green-600">5.1%</div>
+                </div>
+              </div>
+
+              <div class="overflow-x-auto">
+                <table class="w-full">
+                  <thead>
+                    <tr class="bg-gray-50">
+                      <th class="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">テスト名</th>
+                      <th class="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">ページ</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">ステータス</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">要素数</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">組み合わせ</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">Sessions</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">最低CVR</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">最高CVR</th>
+                      <th class="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">信頼度</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-200">
+                    <tr class="row-hover" onclick="switchMvtSub('detail')">
+                      <td class="px-4 py-4 text-sm font-medium text-blue-600">LP全体最適化テスト</td>
+                      <td class="px-4 py-4 text-sm text-gray-600">/lp/summer-sale</td>
+                      <td class="px-4 py-4 text-center"><span class="badge-completed px-2 py-1 text-xs rounded-full font-medium">完了</span></td>
+                      <td class="px-4 py-4 text-center text-sm">3要素</td>
+                      <td class="px-4 py-4 text-center text-sm">18通り</td>
+                      <td class="px-4 py-4 text-center text-sm">5,400</td>
+                      <td class="px-4 py-4 text-center text-sm text-red-600">1.2%</td>
+                      <td class="px-4 py-4 text-center text-sm font-bold text-green-600">5.1%</td>
+                      <td class="px-4 py-4 text-center"><span class="confidence-high px-2 py-1 text-xs rounded-full font-medium">95%</span></td>
+                    </tr>
+                    <tr class="row-hover">
+                      <td class="px-4 py-4 text-sm font-medium text-blue-600">商品ページ構成テスト</td>
+                      <td class="px-4 py-4 text-sm text-gray-600">/products/detail</td>
+                      <td class="px-4 py-4 text-center"><span class="badge-running px-2 py-1 text-xs rounded-full font-medium">実行中</span></td>
+                      <td class="px-4 py-4 text-center text-sm">2要素</td>
+                      <td class="px-4 py-4 text-center text-sm">6通り</td>
+                      <td class="px-4 py-4 text-center text-sm">1,200</td>
+                      <td class="px-4 py-4 text-center text-sm">2.8%</td>
+                      <td class="px-4 py-4 text-center text-sm font-medium">4.2%</td>
+                      <td class="px-4 py-4 text-center"><span class="confidence-mid px-2 py-1 text-xs rounded-full font-medium">72%</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- MVT Detail -->
+            <div id="mvt-detail" class="p-6 space-y-6" style="display:none;">
+
+              <div class="flex items-center justify-between">
+                <div>
+                  <div class="flex items-center gap-3">
+                    <button onclick="switchMvtSub('list')" class="text-gray-400 hover:text-gray-600">
+                      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+                    </button>
+                    <h2 class="text-xl font-bold">LP全体最適化テスト</h2>
+                    <span class="badge-completed px-2 py-1 text-xs rounded-full font-medium">完了</span>
+                  </div>
+                  <p class="text-sm text-gray-500 mt-1 ml-8">ページ: /lp/summer-sale | 3要素 × 18組み合わせ | 5,400 sessions</p>
+                </div>
+                <button class="px-3 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-1">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                  最適組み合わせを適用
+                </button>
+              </div>
+
+              <!-- Test Variables -->
+              <div class="bg-white rounded-lg border border-gray-200 p-6">
+                <h3 class="text-lg font-semibold mb-4">テスト変数</h3>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div class="border border-gray-200 rounded-lg p-4">
+                    <div class="text-sm font-medium text-gray-500 mb-3">要素1: 見出し</div>
+                    <div class="space-y-2">
+                      <div class="flex items-center gap-2 p-2 bg-blue-50 rounded text-sm">
+                        <span class="w-5 h-5 rounded bg-blue-500 text-white text-xs flex items-center justify-center font-bold">A</span>
+                        「今だけの特別価格」
+                      </div>
+                      <div class="flex items-center gap-2 p-2 bg-amber-50 rounded text-sm">
+                        <span class="w-5 h-5 rounded bg-amber-500 text-white text-xs flex items-center justify-center font-bold">B</span>
+                        「送料無料キャンペーン」
+                      </div>
+                      <div class="flex items-center gap-2 p-2 bg-purple-50 rounded text-sm">
+                        <span class="w-5 h-5 rounded bg-purple-500 text-white text-xs flex items-center justify-center font-bold">C</span>
+                        「残りわずか！限定品」
+                      </div>
+                    </div>
+                  </div>
+                  <div class="border border-gray-200 rounded-lg p-4">
+                    <div class="text-sm font-medium text-gray-500 mb-3">要素2: メイン画像</div>
+                    <div class="space-y-2">
+                      <div class="flex items-center gap-2 p-2 bg-blue-50 rounded text-sm">
+                        <span class="w-5 h-5 rounded bg-blue-500 text-white text-xs flex items-center justify-center font-bold">X</span>
+                        商品単体写真
+                      </div>
+                      <div class="flex items-center gap-2 p-2 bg-amber-50 rounded text-sm">
+                        <span class="w-5 h-5 rounded bg-amber-500 text-white text-xs flex items-center justify-center font-bold">Y</span>
+                        利用シーン写真
+                      </div>
+                    </div>
+                  </div>
+                  <div class="border border-gray-200 rounded-lg p-4">
+                    <div class="text-sm font-medium text-gray-500 mb-3">要素3: CTA色</div>
+                    <div class="space-y-2">
+                      <div class="flex items-center gap-2 p-2 rounded text-sm bg-red-50">
+                        <span class="w-5 h-5 rounded bg-red-500"></span>
+                        レッド
+                      </div>
+                      <div class="flex items-center gap-2 p-2 rounded text-sm bg-green-50">
+                        <span class="w-5 h-5 rounded bg-green-500"></span>
+                        グリーン
+                      </div>
+                      <div class="flex items-center gap-2 p-2 rounded text-sm bg-orange-50">
+                        <span class="w-5 h-5 rounded bg-orange-500"></span>
+                        オレンジ
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Combination Ranking -->
+              <div class="bg-white rounded-lg border border-gray-200 p-6">
+                <h3 class="text-lg font-semibold mb-2">組み合わせランキング TOP5</h3>
+                <p class="text-sm text-gray-500 mb-4">18通りの組み合わせから、CVR上位5パターンを表示</p>
+                <div class="overflow-x-auto">
+                  <table class="w-full">
+                    <thead>
+                      <tr class="bg-gray-50">
+                        <th class="text-center px-3 py-3 text-xs font-medium text-gray-500 uppercase w-12">#</th>
+                        <th class="text-left px-3 py-3 text-xs font-medium text-gray-500 uppercase">見出し</th>
+                        <th class="text-left px-3 py-3 text-xs font-medium text-gray-500 uppercase">画像</th>
+                        <th class="text-left px-3 py-3 text-xs font-medium text-gray-500 uppercase">CTA色</th>
+                        <th class="text-center px-3 py-3 text-xs font-medium text-gray-500 uppercase">Sessions</th>
+                        <th class="text-center px-3 py-3 text-xs font-medium text-gray-500 uppercase">CVR</th>
+                        <th class="text-center px-3 py-3 text-xs font-medium text-gray-500 uppercase">CTAクリック</th>
+                        <th class="text-center px-3 py-3 text-xs font-medium text-gray-500 uppercase">Scroll到達</th>
+                        <th class="text-center px-3 py-3 text-xs font-medium text-gray-500 uppercase">滞在時間</th>
+                        <th class="text-center px-3 py-3 text-xs font-medium text-gray-500 uppercase">Rage Click</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-200">
+                      <tr class="bg-green-50/50">
+                        <td class="px-3 py-3 text-center"><span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-green-600 text-white text-xs font-bold">1</span></td>
+                        <td class="px-3 py-3 text-sm"><span class="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-bold mr-1">C</span>残りわずか</td>
+                        <td class="px-3 py-3 text-sm"><span class="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold mr-1">Y</span>利用シーン</td>
+                        <td class="px-3 py-3 text-sm"><span class="inline-block w-3 h-3 rounded bg-orange-500 mr-1"></span>オレンジ</td>
+                        <td class="px-3 py-3 text-center text-sm">300</td>
+                        <td class="px-3 py-3 text-center text-sm font-bold text-green-600">5.1%</td>
+                        <td class="px-3 py-3 text-center text-sm font-medium text-green-600">15.2%</td>
+                        <td class="px-3 py-3 text-center text-sm text-green-600">78%</td>
+                        <td class="px-3 py-3 text-center text-sm">62s</td>
+                        <td class="px-3 py-3 text-center text-sm text-green-600">2</td>
+                      </tr>
+                      <tr>
+                        <td class="px-3 py-3 text-center"><span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-gray-400 text-white text-xs font-bold">2</span></td>
+                        <td class="px-3 py-3 text-sm"><span class="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-bold mr-1">C</span>残りわずか</td>
+                        <td class="px-3 py-3 text-sm"><span class="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold mr-1">Y</span>利用シーン</td>
+                        <td class="px-3 py-3 text-sm"><span class="inline-block w-3 h-3 rounded bg-red-500 mr-1"></span>レッド</td>
+                        <td class="px-3 py-3 text-center text-sm">300</td>
+                        <td class="px-3 py-3 text-center text-sm font-bold">4.7%</td>
+                        <td class="px-3 py-3 text-center text-sm">13.8%</td>
+                        <td class="px-3 py-3 text-center text-sm">75%</td>
+                        <td class="px-3 py-3 text-center text-sm">58s</td>
+                        <td class="px-3 py-3 text-center text-sm">3</td>
+                      </tr>
+                      <tr>
+                        <td class="px-3 py-3 text-center"><span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-gray-400 text-white text-xs font-bold">3</span></td>
+                        <td class="px-3 py-3 text-sm"><span class="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold mr-1">B</span>送料無料</td>
+                        <td class="px-3 py-3 text-sm"><span class="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold mr-1">Y</span>利用シーン</td>
+                        <td class="px-3 py-3 text-sm"><span class="inline-block w-3 h-3 rounded bg-orange-500 mr-1"></span>オレンジ</td>
+                        <td class="px-3 py-3 text-center text-sm">300</td>
+                        <td class="px-3 py-3 text-center text-sm font-bold">4.3%</td>
+                        <td class="px-3 py-3 text-center text-sm">12.1%</td>
+                        <td class="px-3 py-3 text-center text-sm">72%</td>
+                        <td class="px-3 py-3 text-center text-sm">55s</td>
+                        <td class="px-3 py-3 text-center text-sm">4</td>
+                      </tr>
+                      <tr>
+                        <td class="px-3 py-3 text-center"><span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-gray-400 text-white text-xs font-bold">4</span></td>
+                        <td class="px-3 py-3 text-sm"><span class="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-bold mr-1">C</span>残りわずか</td>
+                        <td class="px-3 py-3 text-sm"><span class="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-bold mr-1">X</span>商品単体</td>
+                        <td class="px-3 py-3 text-sm"><span class="inline-block w-3 h-3 rounded bg-orange-500 mr-1"></span>オレンジ</td>
+                        <td class="px-3 py-3 text-center text-sm">300</td>
+                        <td class="px-3 py-3 text-center text-sm font-bold">3.8%</td>
+                        <td class="px-3 py-3 text-center text-sm">11.5%</td>
+                        <td class="px-3 py-3 text-center text-sm">68%</td>
+                        <td class="px-3 py-3 text-center text-sm">51s</td>
+                        <td class="px-3 py-3 text-center text-sm">5</td>
+                      </tr>
+                      <tr>
+                        <td class="px-3 py-3 text-center"><span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-gray-400 text-white text-xs font-bold">5</span></td>
+                        <td class="px-3 py-3 text-sm"><span class="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold mr-1">B</span>送料無料</td>
+                        <td class="px-3 py-3 text-sm"><span class="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-bold mr-1">X</span>商品単体</td>
+                        <td class="px-3 py-3 text-sm"><span class="inline-block w-3 h-3 rounded bg-green-500 mr-1"></span>グリーン</td>
+                        <td class="px-3 py-3 text-center text-sm">300</td>
+                        <td class="px-3 py-3 text-center text-sm font-bold">3.5%</td>
+                        <td class="px-3 py-3 text-center text-sm">10.8%</td>
+                        <td class="px-3 py-3 text-center text-sm">64%</td>
+                        <td class="px-3 py-3 text-center text-sm">48s</td>
+                        <td class="px-3 py-3 text-center text-sm">7</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Element Contribution Analysis -->
+              <div class="bg-white rounded-lg border border-gray-200 p-6">
+                <div class="flex items-center gap-2 mb-4">
+                  <svg class="w-5 h-5 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>
+                  <h3 class="text-lg font-semibold">要素別 影響度分析</h3>
+                </div>
+                <p class="text-sm text-gray-500 mb-4">各要素がCVR・行動指標にどの程度影響しているか</p>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <!-- Headline Impact -->
+                  <div class="border border-gray-200 rounded-lg p-4">
+                    <div class="text-sm font-medium text-gray-700 mb-3">見出し（影響度: 高）</div>
+                    <div class="space-y-3">
+                      <div>
+                        <div class="flex justify-between text-sm mb-1">
+                          <span><span class="px-1 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-bold">A</span> 特別価格</span>
+                          <span>CVR 2.4%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2"><div class="bg-blue-500 h-2 rounded-full" style="width:47%"></div></div>
+                      </div>
+                      <div>
+                        <div class="flex justify-between text-sm mb-1">
+                          <span><span class="px-1 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold">B</span> 送料無料</span>
+                          <span>CVR 3.6%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2"><div class="bg-amber-500 h-2 rounded-full" style="width:71%"></div></div>
+                      </div>
+                      <div>
+                        <div class="flex justify-between text-sm mb-1">
+                          <span><span class="px-1 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-bold">C</span> 残りわずか</span>
+                          <span class="font-bold text-green-600">CVR 4.5%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2"><div class="bg-green-500 h-2 rounded-full" style="width:88%"></div></div>
+                      </div>
+                    </div>
+                    <div class="mt-3 text-xs text-gray-500 bg-gray-50 rounded p-2">
+                      希少性の訴求が最もスクロール深度とCTAクリックに貢献
+                    </div>
+                  </div>
+
+                  <!-- Image Impact -->
+                  <div class="border border-gray-200 rounded-lg p-4">
+                    <div class="text-sm font-medium text-gray-700 mb-3">画像（影響度: 中）</div>
+                    <div class="space-y-3">
+                      <div>
+                        <div class="flex justify-between text-sm mb-1">
+                          <span><span class="px-1 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-bold">X</span> 商品単体</span>
+                          <span>CVR 3.0%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2"><div class="bg-blue-500 h-2 rounded-full" style="width:59%"></div></div>
+                      </div>
+                      <div>
+                        <div class="flex justify-between text-sm mb-1">
+                          <span><span class="px-1 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold">Y</span> 利用シーン</span>
+                          <span class="font-bold text-green-600">CVR 4.0%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2"><div class="bg-green-500 h-2 rounded-full" style="width:78%"></div></div>
+                      </div>
+                    </div>
+                    <div class="mt-3 text-xs text-gray-500 bg-gray-50 rounded p-2">
+                      利用シーン画像は滞在時間+22%、スクロール到達率+15%
+                    </div>
+                  </div>
+
+                  <!-- CTA Color Impact -->
+                  <div class="border border-gray-200 rounded-lg p-4">
+                    <div class="text-sm font-medium text-gray-700 mb-3">CTA色（影響度: 低〜中）</div>
+                    <div class="space-y-3">
+                      <div>
+                        <div class="flex justify-between text-sm mb-1">
+                          <span><span class="inline-block w-3 h-3 rounded bg-red-500 mr-1"></span>レッド</span>
+                          <span>CVR 3.4%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2"><div class="bg-red-500 h-2 rounded-full" style="width:67%"></div></div>
+                      </div>
+                      <div>
+                        <div class="flex justify-between text-sm mb-1">
+                          <span><span class="inline-block w-3 h-3 rounded bg-green-500 mr-1"></span>グリーン</span>
+                          <span>CVR 3.2%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2"><div class="bg-green-500 h-2 rounded-full" style="width:63%"></div></div>
+                      </div>
+                      <div>
+                        <div class="flex justify-between text-sm mb-1">
+                          <span><span class="inline-block w-3 h-3 rounded bg-orange-500 mr-1"></span>オレンジ</span>
+                          <span class="font-bold text-green-600">CVR 3.9%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2"><div class="bg-orange-500 h-2 rounded-full" style="width:76%"></div></div>
+                      </div>
+                    </div>
+                    <div class="mt-3 text-xs text-gray-500 bg-gray-50 rounded p-2">
+                      オレンジはCTAクリック率が最高だが、色単体の影響は小さい
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- AI Insight for MVT -->
+              <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <div class="flex items-start gap-3">
+                  <svg class="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                  <div>
+                    <div class="font-medium text-blue-800">AI分析サマリー</div>
+                    <div class="text-sm text-blue-700 mt-1 space-y-2">
+                      <p><strong>最適組み合わせ:</strong> 見出しC「残りわずか」+ 画像Y「利用シーン」+ CTAオレンジ → CVR 5.1%（ベースラインから+325%）</p>
+                      <p><strong>最大の影響要素は「見出し」</strong>です。希少性を訴求する見出しCは、他の見出しと比較してスクロール到達率が平均+18%、CTA付近での滞在時間が+35%となっています。ヒートマップデータからも、見出しC表示時にファーストビューでの離脱が大幅に減少していることが確認できます。</p>
+                      <p><strong>画像は中程度の影響</strong>で、利用シーン画像はユーザーの共感を生み、商品理解を促進。CTA色は統計的に有意な差が小さく、オレンジがやや優位ですが、見出しや画像ほどのインパクトはありません。</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script>
+// Heatmap comparison tab switching
+function switchHeatmapTab(type) {
+  const types = ['scroll', 'read', 'click'];
+  types.forEach(t => {
+    const tabEl = document.getElementById('hm-tab-' + t);
+    const panelA = document.getElementById('hm-' + t + '-a');
+    const panelB = document.getElementById('hm-' + t + '-b');
+    if (t === type) {
+      tabEl.className = 'bg-white text-blue-700 shadow-sm flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors';
+      if (panelA) panelA.style.display = 'block';
+      if (panelB) panelB.style.display = 'block';
+    } else {
+      tabEl.className = 'text-gray-600 hover:text-gray-900 flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors';
+      if (panelA) panelA.style.display = 'none';
+      if (panelB) panelB.style.display = 'none';
+    }
+  });
+}
+
+function switchMode(mode) {
+  document.getElementById('tab-ab').className = 'px-6 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 flex items-center gap-2';
+  document.getElementById('tab-mvt').className = 'px-6 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 flex items-center gap-2';
+  document.getElementById('content-ab').style.display = 'none';
+  document.getElementById('content-mvt').style.display = 'none';
+  document.getElementById('tab-' + mode).className = 'tab-active px-6 py-3 text-sm font-medium flex items-center gap-2';
+  document.getElementById('content-' + mode).style.display = 'block';
+}
+
+function switchAbSub(sub) {
+  document.getElementById('sub-ab-list').className = 'px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 rounded-t-lg';
+  document.getElementById('sub-ab-detail').className = 'px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 rounded-t-lg';
+  document.getElementById('ab-list').style.display = 'none';
+  document.getElementById('ab-detail').style.display = 'none';
+  document.getElementById('sub-ab-' + sub).className = 'sub-tab-active px-4 py-2 text-sm font-medium rounded-t-lg';
+  document.getElementById('ab-' + sub).style.display = 'block';
+}
+
+function switchMvtSub(sub) {
+  document.getElementById('sub-mvt-list').className = 'px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 rounded-t-lg';
+  document.getElementById('sub-mvt-detail').className = 'px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 rounded-t-lg';
+  document.getElementById('mvt-list').style.display = 'none';
+  document.getElementById('mvt-detail').style.display = 'none';
+  document.getElementById('sub-mvt-' + sub).className = 'sub-tab-active px-4 py-2 text-sm font-medium rounded-t-lg';
+  document.getElementById('mvt-' + sub).style.display = 'block';
+}
+
+// ===== Create Test Modal =====
+let createStep = 1;
+const totalSteps = 5;
+let mvtElements = [
+  { name: '見出し', variants: ['パターンA', 'パターンB'] },
+  { name: 'メイン画像', variants: ['パターンA', 'パターンB'] },
+];
+
+function getTestType() {
+  const el = document.querySelector('input[name="test-type"]:checked');
+  return el ? el.value : 'ab';
+}
+
+function showCreateModal() {
+  createStep = 1;
+  mvtElements = [
+    { name: '見出し', variants: ['パターンA', 'パターンB'] },
+    { name: 'メイン画像', variants: ['パターンA', 'パターンB'] },
+  ];
+  document.getElementById('create-modal').style.display = 'flex';
+  renderCreateStep();
+}
+
+function closeCreateModal() {
+  document.getElementById('create-modal').style.display = 'none';
+}
+
+function nextStep() {
+  if (createStep < totalSteps) { createStep++; renderCreateStep(); }
+}
+
+function prevStep() {
+  if (createStep > 1) { createStep--; renderCreateStep(); }
+}
+
+function addMvtElement() {
+  mvtElements.push({ name: '要素' + (mvtElements.length + 1), variants: ['パターンA', 'パターンB'] });
+  renderCreateStep();
+}
+
+function removeMvtElement(idx) {
+  if (mvtElements.length > 2) { mvtElements.splice(idx, 1); renderCreateStep(); }
+}
+
+function addMvtVariant(elIdx) {
+  const el = mvtElements[elIdx];
+  el.variants.push('パターン' + String.fromCharCode(65 + el.variants.length));
+  renderCreateStep();
+}
+
+function removeMvtVariant(elIdx, vIdx) {
+  if (mvtElements[elIdx].variants.length > 2) { mvtElements[elIdx].variants.splice(vIdx, 1); renderCreateStep(); }
+}
+
+function getMvtCombinations() {
+  return mvtElements.reduce((acc, el) => acc * el.variants.length, 1);
+}
+
+function renderCreateStep() {
+  const isMvt = getTestType() === 'mvt';
+  // Progress bar
+  const progressEl = document.getElementById('create-progress');
+  progressEl.innerHTML = '';
+  const labels = isMvt
+    ? ['タイプ選択', 'ページ設定', '要素・バリアント', 'トラフィック配分', '目標・開始']
+    : ['タイプ選択', 'ページ設定', 'バリアント設定', 'トラフィック配分', '目標・開始'];
+  for (let i = 1; i <= totalSteps; i++) {
+    const isActive = i === createStep;
+    const isDone = i < createStep;
+    progressEl.innerHTML += `
+      <div class="flex items-center ${i < totalSteps ? 'flex-1' : ''}">
+        <div class="flex items-center gap-2">
+          <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold
+            ${isDone ? 'bg-blue-600 text-white' : isActive ? 'bg-blue-600 text-white ring-4 ring-blue-100' : 'bg-gray-200 text-gray-500'}">
+            ${isDone ? '✓' : i}
+          </div>
+          <span class="text-xs font-medium ${isActive ? 'text-blue-700' : 'text-gray-400'} hidden sm:inline">${labels[i-1]}</span>
+        </div>
+        ${i < totalSteps ? '<div class="flex-1 h-px mx-3 ' + (isDone ? 'bg-blue-400' : 'bg-gray-200') + '"></div>' : ''}
+      </div>`;
+  }
+
+  // Body
+  const bodyEl = document.getElementById('create-body');
+
+  if (createStep === 1) {
+    bodyEl.innerHTML = `
+      <h3 class="text-lg font-semibold mb-1">テストタイプを選択</h3>
+      <p class="text-sm text-gray-500 mb-6">実施したいテストの種類を選んでください</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <label class="cursor-pointer">
+          <input type="radio" name="test-type" value="ab" checked class="hidden peer">
+          <div class="peer-checked:border-blue-500 peer-checked:bg-blue-50 peer-checked:ring-2 peer-checked:ring-blue-200 border-2 border-gray-200 rounded-xl p-5 transition-all hover:border-gray-300">
+            <div class="flex items-center gap-3 mb-3">
+              <div class="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
+                <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>
+              </div>
+              <span class="font-semibold text-gray-800">A/Bテスト</span>
+            </div>
+            <p class="text-sm text-gray-500">2つのページバリアントを比較。シンプルで統計的に明確な結果が得られます。</p>
+            <div class="mt-3 text-xs text-gray-400">推奨: CTA文言変更、画像差し替え、レイアウト変更</div>
+          </div>
+        </label>
+        <label class="cursor-pointer">
+          <input type="radio" name="test-type" value="mvt" class="hidden peer">
+          <div class="peer-checked:border-blue-500 peer-checked:bg-blue-50 peer-checked:ring-2 peer-checked:ring-blue-200 border-2 border-gray-200 rounded-xl p-5 transition-all hover:border-gray-300">
+            <div class="flex items-center gap-3 mb-3">
+              <div class="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
+                <svg class="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>
+              </div>
+              <span class="font-semibold text-gray-800">多変量テスト（MVT）</span>
+            </div>
+            <p class="text-sm text-gray-500">複数要素を同時にテスト。最適な組み合わせを発見できます。</p>
+            <div class="mt-3 text-xs text-gray-400">推奨: 見出し×画像×CTAの組み合わせ最適化</div>
+          </div>
+        </label>
+      </div>
+      <div class="mt-6">
+        <label class="block text-sm font-medium text-gray-700 mb-1">テスト名</label>
+        <input type="text" placeholder="例: CTAボタン文言テスト" class="w-full px-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500" value="">
+      </div>`;
+  } else if (createStep === 2) {
+    bodyEl.innerHTML = `
+      <h3 class="text-lg font-semibold mb-1">対象ページの設定</h3>
+      <p class="text-sm text-gray-500 mb-6">テスト対象のサイトとページを選択してください</p>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">対象サイト</label>
+          <select class="w-full px-4 py-2.5 border border-gray-200 rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-500">
+            <option>コスメ部 (https://bihadashop.jp)</option>
+            <option>防水工事 (https://bousuikouji.info)</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">オリジナルページ URL（バリアント A）</label>
+          <input type="url" placeholder="https://example.com/lp/original" value="https://bihadashop.jp/entry/tirtir-cushion-foundation" class="w-full px-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
+          <p class="text-xs text-gray-400 mt-1">現在のページURL。変更しない場合はそのままにしてください。</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">テストページ URL（バリアント B）</label>
+          <input type="url" placeholder="https://example.com/lp/variant-b" class="w-full px-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
+          <p class="text-xs text-gray-400 mt-1">テストしたい別バージョンのページURL</p>
+        </div>
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-3">
+          <div class="flex items-start gap-2">
+            <svg class="w-4 h-4 text-blue-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <p class="text-xs text-blue-700">両方のページにUGOKI MAPのトラッキングタグが設置されている必要があります。</p>
+          </div>
+        </div>
+      </div>`;
+  } else if (createStep === 3 && !isMvt) {
+    // A/B: バリアント設定
+    bodyEl.innerHTML = `
+      <h3 class="text-lg font-semibold mb-1">バリアント設定</h3>
+      <p class="text-sm text-gray-500 mb-6">各バリアントの変更点をメモしておくと、後で結果分析に役立ちます</p>
+      <div class="space-y-4">
+        <div class="border border-gray-200 rounded-xl p-4" style="border-left: 4px solid #3b82f6;">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-bold">A（オリジナル）</span>
+          </div>
+          <div class="bg-gray-50 rounded-lg p-3 mb-3">
+            <div class="text-xs text-gray-500 mb-1">URL</div>
+            <div class="text-sm font-mono text-gray-700 truncate">https://bihadashop.jp/entry/tirtir-cushion-foundation</div>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 mb-1">変更内容メモ（任意）</label>
+            <input type="text" value="現行ページ（変更なし）" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm">
+          </div>
+        </div>
+        <div class="border border-gray-200 rounded-xl p-4" style="border-left: 4px solid #f59e0b;">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold">B（テスト版）</span>
+          </div>
+          <div class="bg-gray-50 rounded-lg p-3 mb-3">
+            <div class="text-xs text-gray-500 mb-1">URL</div>
+            <div class="text-sm font-mono text-gray-700 truncate">https://bihadashop.jp/entry/tirtir-cushion-foundation-v2</div>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 mb-1">変更内容メモ（任意）</label>
+            <input type="text" placeholder="例: CTAボタンを赤に変更、見出し文言変更" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm">
+          </div>
+        </div>
+        <button class="text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+          バリアント C を追加
+        </button>
+      </div>`;
+  } else if (createStep === 3 && isMvt) {
+    // MVT: 要素×バリアント設定
+    const colors = ['#3b82f6','#f59e0b','#8b5cf6','#ef4444','#10b981','#ec4899'];
+    const colorBg = ['blue','amber','purple','red','green','pink'];
+    let elHtml = '';
+    mvtElements.forEach((el, eIdx) => {
+      const c = colors[eIdx % colors.length];
+      const cb = colorBg[eIdx % colorBg.length];
+      let variantsHtml = '';
+      el.variants.forEach((v, vIdx) => {
+        const letter = String.fromCharCode(65 + vIdx);
+        variantsHtml += `
+          <div class="flex items-center gap-2">
+            <span class="w-6 h-6 rounded bg-${cb}-500 text-white text-xs flex items-center justify-center font-bold flex-shrink-0">${letter}</span>
+            <input type="text" value="${v}" onchange="mvtElements[${eIdx}].variants[${vIdx}]=this.value"
+              class="flex-1 px-3 py-1.5 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
+            ${el.variants.length > 2 ? `<button onclick="removeMvtVariant(${eIdx},${vIdx})" class="text-gray-400 hover:text-red-500 text-xs p-1" title="削除">✕</button>` : ''}
+          </div>`;
+      });
+      elHtml += `
+        <div class="border border-gray-200 rounded-xl p-4" style="border-left: 4px solid ${c};">
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-2">
+              <span class="px-2 py-0.5 bg-${cb}-100 text-${cb}-700 rounded text-xs font-bold">要素${eIdx + 1}</span>
+              <input type="text" value="${el.name}" onchange="mvtElements[${eIdx}].name=this.value"
+                class="px-2 py-1 border border-gray-200 rounded text-sm font-medium focus:ring-2 focus:ring-blue-500 w-40">
+            </div>
+            ${mvtElements.length > 2 ? `<button onclick="removeMvtElement(${eIdx})" class="text-xs text-gray-400 hover:text-red-500 px-2 py-1">要素を削除</button>` : ''}
+          </div>
+          <div class="space-y-2 mb-3">
+            ${variantsHtml}
+          </div>
+          <button onclick="addMvtVariant(${eIdx})" class="text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+            バリアント追加
+          </button>
+        </div>`;
+    });
+
+    const combos = getMvtCombinations();
+
+    bodyEl.innerHTML = `
+      <h3 class="text-lg font-semibold mb-1">テスト要素 & バリアント設定</h3>
+      <p class="text-sm text-gray-500 mb-4">変更する要素ごとにバリアント（パターン）を設定。全組み合わせが自動生成されます。</p>
+
+      <div class="bg-purple-50 border border-purple-200 rounded-lg p-3 mb-5 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <svg class="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6z"/></svg>
+          <span class="text-sm font-medium text-purple-800">自動生成される組み合わせ</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="text-sm text-purple-700">${mvtElements.map(e => e.variants.length).join(' × ')} =</span>
+          <span class="text-xl font-bold text-purple-700">${combos}通り</span>
+        </div>
+      </div>
+
+      <div class="space-y-4">
+        ${elHtml}
+      </div>
+
+      <button onclick="addMvtElement()" class="mt-4 text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+        テスト要素を追加
+      </button>
+
+      ${combos > 20 ? `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2">
+        <svg class="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+        <p class="text-xs text-amber-800">組み合わせが多い場合、各パターンに十分なトラフィックが配分されるまで時間がかかります。20通り以下を推奨します。</p>
+      </div>` : ''}`;
+  } else if (createStep === 4) {
+    const combos = isMvt ? getMvtCombinations() : 2;
+    const perCombo = Math.round(100 / combos * 10) / 10;
+    const dailyPv = 340;
+    const samplePerCombo = 300;
+    const estDays = Math.ceil((samplePerCombo * combos) / dailyPv);
+
+    if (isMvt) {
+      bodyEl.innerHTML = `
+        <h3 class="text-lg font-semibold mb-1">トラフィック配分</h3>
+        <p class="text-sm text-gray-500 mb-6">MVTでは全組み合わせに均等配分されます</p>
+        <div class="space-y-6">
+          <div class="bg-purple-50 border border-purple-200 rounded-xl p-5">
+            <div class="flex items-center justify-between mb-4">
+              <span class="text-sm font-medium text-purple-800">均等配分</span>
+              <span class="text-lg font-bold text-purple-700">${combos}組み合わせ × 各${perCombo.toFixed(1)}%</span>
+            </div>
+            <div class="flex gap-1 h-8 rounded-lg overflow-hidden">
+              ${Array.from({length: Math.min(combos, 12)}, (_, i) => {
+                const hue = Math.round((i / combos) * 300);
+                return `<div class="flex-1" style="background:hsl(${hue},60%,60%)" title="組み合わせ${i+1}"></div>`;
+              }).join('')}
+              ${combos > 12 ? '<div class="flex-1 bg-gray-300 flex items-center justify-center text-xs text-gray-600">+' + (combos - 12) + '</div>' : ''}
+            </div>
+            <p class="text-xs text-purple-600 mt-2">各組み合わせに約${perCombo.toFixed(1)}%ずつ均等配分</p>
+          </div>
+
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-sm font-medium text-gray-700">テスト対象トラフィック</span>
+              <span class="text-lg font-bold text-blue-600" id="mvt-traffic-val">100%</span>
+            </div>
+            <input type="range" min="20" max="100" value="100" step="10" class="w-full accent-blue-600"
+              oninput="document.getElementById('mvt-traffic-val').textContent=this.value+'%'">
+            <p class="text-xs text-gray-400 mt-1">残りのトラフィックはオリジナルページに配信されます</p>
+          </div>
+
+          <div class="bg-gray-50 rounded-lg p-4">
+            <div class="text-sm font-medium text-gray-700 mb-3">推定所要期間</div>
+            <div class="grid grid-cols-4 gap-3 text-center">
+              <div>
+                <div class="text-xs text-gray-500">日次PV</div>
+                <div class="text-lg font-bold">~${dailyPv}</div>
+              </div>
+              <div>
+                <div class="text-xs text-gray-500">組み合わせ数</div>
+                <div class="text-lg font-bold">${combos}通り</div>
+              </div>
+              <div>
+                <div class="text-xs text-gray-500">各${samplePerCombo}サンプル</div>
+                <div class="text-lg font-bold">${(samplePerCombo * combos).toLocaleString()}</div>
+              </div>
+              <div>
+                <div class="text-xs text-gray-500">推定所要日数</div>
+                <div class="text-lg font-bold text-blue-600">~${estDays}日</div>
+              </div>
+            </div>
+          </div>
+
+          ${estDays > 30 ? `<div class="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2">
+            <svg class="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+            <p class="text-xs text-amber-800">所要日数が30日を超えています。要素やバリアントを減らすか、トラフィックの多いページでの実施を検討してください。</p>
+          </div>` : ''}
+        </div>`;
+    } else {
+      // A/B traffic
+      bodyEl.innerHTML = `
+        <h3 class="text-lg font-semibold mb-1">トラフィック配分</h3>
+        <p class="text-sm text-gray-500 mb-6">各バリアントに振り分けるトラフィックの割合を設定</p>
+        <div class="space-y-6">
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center gap-2">
+                <span class="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-bold">A</span>
+                <span class="text-sm font-medium">オリジナル</span>
+              </div>
+              <span class="text-lg font-bold text-blue-600" id="traffic-a-val">50%</span>
+            </div>
+            <input type="range" min="10" max="90" value="50" class="w-full accent-blue-600" oninput="document.getElementById('traffic-a-val').textContent=this.value+'%'; document.getElementById('traffic-b-range').value=100-this.value; document.getElementById('traffic-b-val').textContent=(100-this.value)+'%'">
+          </div>
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center gap-2">
+                <span class="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-bold">B</span>
+                <span class="text-sm font-medium">テスト版</span>
+              </div>
+              <span class="text-lg font-bold text-amber-600" id="traffic-b-val">50%</span>
+            </div>
+            <input type="range" min="10" max="90" value="50" class="w-full accent-amber-500" id="traffic-b-range" oninput="document.getElementById('traffic-b-val').textContent=this.value+'%'; document.getElementById('traffic-a-val').textContent=(100-this.value)+'%'">
+          </div>
+          <div class="bg-gray-50 rounded-lg p-4">
+            <div class="text-sm font-medium text-gray-700 mb-3">推定所要期間</div>
+            <div class="grid grid-cols-3 gap-3 text-center">
+              <div>
+                <div class="text-xs text-gray-500">現在の日次PV</div>
+                <div class="text-lg font-bold">~340</div>
+              </div>
+              <div>
+                <div class="text-xs text-gray-500">必要サンプル数</div>
+                <div class="text-lg font-bold">各1,000</div>
+              </div>
+              <div>
+                <div class="text-xs text-gray-500">推定所要日数</div>
+                <div class="text-lg font-bold text-blue-600">~6日</div>
+              </div>
+          </div>
+        </div>
+      </div>`;
+  } else if (createStep === 5) {
+    bodyEl.innerHTML = `
+      <h3 class="text-lg font-semibold mb-1">目標設定 & テスト開始</h3>
+      <p class="text-sm text-gray-500 mb-6">テストの成功条件とスケジュールを設定</p>
+      <div class="space-y-5">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">主要目標（KPI）</label>
+          <div class="space-y-2">
+            <label class="flex items-center gap-3 p-3 border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50">
+              <input type="radio" name="goal" checked class="accent-blue-600">
+              <div>
+                <div class="text-sm font-medium">コンバージョン率（CVR）</div>
+                <div class="text-xs text-gray-400">購入、申込み、問い合わせなどの完了率</div>
+              </div>
+            </label>
+            <label class="flex items-center gap-3 p-3 border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50">
+              <input type="radio" name="goal" class="accent-blue-600">
+              <div>
+                <div class="text-sm font-medium">CTAクリック率</div>
+                <div class="text-xs text-gray-400">指定ボタン・リンクのクリック率</div>
+              </div>
+            </label>
+            <label class="flex items-center gap-3 p-3 border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50">
+              <input type="radio" name="goal" class="accent-blue-600">
+              <div>
+                <div class="text-sm font-medium">スクロール到達率</div>
+                <div class="text-xs text-gray-400">ページ下部（75%以上）への到達率</div>
+              </div>
+            </label>
+            <label class="flex items-center gap-3 p-3 border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50">
+              <input type="radio" name="goal" class="accent-blue-600">
+              <div>
+                <div class="text-sm font-medium">直帰率の低減</div>
+                <div class="text-xs text-gray-400">1ページのみ閲覧して離脱する割合</div>
+              </div>
+            </label>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">開始日</label>
+            <input type="date" value="2026-03-17" class="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">終了日（自動判定も可）</label>
+            <input type="date" class="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm" placeholder="未設定 = 統計的有意差で自動終了">
+            <p class="text-xs text-gray-400 mt-1">空欄: 有意差95%到達で自動終了</p>
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">統計的有意水準</label>
+          <select class="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm bg-white">
+            <option selected>95%（推奨）</option>
+            <option>90%</option>
+            <option>99%</option>
+          </select>
+        </div>
+        <div class="bg-green-50 border border-green-200 rounded-lg p-4">
+          <div class="flex items-start gap-3">
+            <svg class="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <div>
+              <div class="font-medium text-green-800 text-sm">テスト開始の準備ができました</div>
+              <div class="text-xs text-green-700 mt-1">「テスト開始」をクリックすると、トラフィック配分が開始され、データ収集が始まります。テスト中はいつでも一時停止・中止できます。</div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // Footer buttons
+  document.getElementById('create-prev').style.display = createStep > 1 ? 'inline-flex' : 'none';
+  document.getElementById('create-next').style.display = createStep < totalSteps ? 'inline-flex' : 'none';
+  document.getElementById('create-submit').style.display = createStep === totalSteps ? 'inline-flex' : 'none';
+}
+</script>
+
+<!-- ===== Create Test Modal ===== -->
+<div id="create-modal" class="fixed inset-0 z-50 flex items-center justify-center" style="display:none; background:rgba(0,0,0,0.5);">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col">
+    <!-- Header -->
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+      <h2 class="text-lg font-bold text-gray-900">新規テスト作成</h2>
+      <button onclick="closeCreateModal()" class="text-gray-400 hover:text-gray-600 p-1">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <!-- Progress -->
+    <div class="px-6 py-3 border-b border-gray-100">
+      <div class="flex items-center" id="create-progress"></div>
+    </div>
+    <!-- Body -->
+    <div class="flex-1 overflow-y-auto px-6 py-5" id="create-body"></div>
+    <!-- Footer -->
+    <div class="flex items-center justify-between px-6 py-4 border-t border-gray-200 bg-gray-50 rounded-b-2xl">
+      <button id="create-prev" onclick="prevStep()" class="items-center gap-1 px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-white" style="display:none;">
+        <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        戻る
+      </button>
+      <div class="flex gap-2 ml-auto">
+        <button onclick="closeCreateModal()" class="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-white">キャンセル</button>
+        <button id="create-next" onclick="nextStep()" class="items-center gap-1 px-5 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">
+          次へ
+          <svg class="w-4 h-4 inline ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        </button>
+        <button id="create-submit" onclick="alert('テストが作成されました！（デモ）'); closeCreateModal();" class="items-center gap-1 px-5 py-2 text-sm font-medium text-white bg-green-600 rounded-lg hover:bg-green-700" style="display:none;">
+          <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          テスト開始
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

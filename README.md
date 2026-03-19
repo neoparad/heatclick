@@ -156,11 +156,16 @@ Vercelダッシュボードで以下の環境変数を設定してください�
 
 ## 📚 ドキュメント
 
-- [要件定義書](./docs/requirements.md)
-- [技術仕様書](./docs/technical-spec.md)
-- [データベース設計](./docs/database-design.md)
-- [開発計画](./docs/development-plan.md)
-- [API仕様書](./docs/api-spec.md)
+### コアドキュメント（必須・常に最新）
+- [開発状況](./docs/STATUS.md) - 現在の開発状況と次のアクション
+- [仕様書](./docs/SPECIFICATIONS.md) - 機能仕様と要件定義
+- [システムアーキテクチャ](./docs/ARCHITECTURE.md) - アーキテクチャとデータフロー
+- [実装サマリー](./docs/IMPLEMENTATION.md) - 実装済み機能とファイル一覧
+
+### 参考ドキュメント
+- [ドキュメント戦略](./docs/DOCUMENTATION_STRATEGY.md) - ドキュメント整理戦略
+- [差別化設計書](./docs/differentiation-specification.md) - Heatmap.comとの比較
+- [Inngestセットアップ手順](./docs/inngest-setup-instructions.md) - Inngest設定ガイド
 
 ## 🤝 コントリビューション
 

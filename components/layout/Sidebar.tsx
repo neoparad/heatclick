@@ -3,29 +3,25 @@
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
-import { 
-  BarChart3, 
-  Map, 
-  MousePointerClick, 
-  Brain, 
-  FileText, 
-  Settings, 
+import {
+  BarChart3,
+  Map,
+  Brain,
+  Settings,
   Globe,
+  Video,
   Zap,
-  Activity,
-  Video
+  ClipboardList,
 } from 'lucide-react'
 import { getCurrentUser } from '@/lib/auth'
 
 const menuItems = [
   { id: 'dashboard', icon: BarChart3, label: 'ダッシュボード', href: '/dashboard' },
-  { id: 'realtime', icon: Activity, label: 'リアルタイム', href: '/realtime' },
   { id: 'heatmap', icon: Map, label: 'ヒートマップ', href: '/heatmap' },
+  { id: 'performance', icon: Zap, label: 'パフォーマンス', href: '/performance' },
+  { id: 'tests', icon: ClipboardList, label: 'テスト', href: '/tests' },
   { id: 'sites', icon: Globe, label: 'サイト管理', href: '/sites' },
-  { id: 'clicks', icon: MousePointerClick, label: 'クリック分析', href: '/clicks' },
   { id: 'recordings', icon: Video, label: 'セッション録画', href: '/recordings' },
-  { id: 'ai-insights', icon: Brain, label: 'AI分析', href: '/ai-insights' },
-  { id: 'reports', icon: FileText, label: 'レポート', href: '/reports' },
   { id: 'settings', icon: Settings, label: '設定', href: '/settings' },
 ]
 

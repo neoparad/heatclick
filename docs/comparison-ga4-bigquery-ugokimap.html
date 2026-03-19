@@ -1,0 +1,1795 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GA4 vs BigQuery vs Clarity vs UGOKI MAP - 比較レポート</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+  body { font-family: 'Inter', sans-serif; background: #f8fafc; }
+  .yes { color: #16a34a; }
+  .no { color: #dc2626; }
+  .partial { color: #d97706; }
+  .planned { color: #2563eb; }
+  .highlight-row { background: #f0fdf4; }
+  table th, table td { font-size: 13px; }
+  .tab-btn { padding: 10px 20px; font-size: 14px; font-weight: 600; border-bottom: 2px solid transparent; color: #6b7280; cursor: pointer; transition: all 0.15s; }
+  .tab-btn:hover { color: #374151; }
+  .tab-btn.active { color: #1d4ed8; border-bottom-color: #2563eb; }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+  .step-num { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+  .code-block { background: #1e293b; color: #e2e8f0; border-radius: 8px; padding: 16px; font-family: 'Courier New', monospace; font-size: 13px; line-height: 1.6; overflow-x: auto; }
+  .code-comment { color: #64748b; }
+  .code-key { color: #7dd3fc; }
+  .code-str { color: #86efac; }
+  .code-func { color: #c4b5fd; }
+  .warn-box { background: #fef3c7; border: 1px solid #fde68a; border-radius: 8px; padding: 12px 16px; }
+  .ok-box { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 12px 16px; }
+  @media print { body { background: #fff; } .no-print { display: none; } }
+</style>
+</head>
+<body>
+<div class="max-w-7xl mx-auto py-10 px-6">
+
+  <!-- Header -->
+  <div class="mb-10">
+    <div class="flex items-center gap-3 mb-3">
+      <div class="w-10 h-10 bg-gradient-to-br from-pink-500 via-blue-500 to-blue-600 rounded-lg flex items-center justify-center shadow">
+        <span class="text-white font-bold text-lg">U</span>
+      </div>
+      <div>
+        <h1 class="text-2xl font-extrabold text-gray-900">Web行動分析ツール比較レポート</h1>
+        <p class="text-sm text-gray-500">GA4 / BigQuery Export / Microsoft Clarity / UGOKI MAP</p>
+      </div>
+    </div>
+    <p class="text-xs text-gray-400">2026年3月 作成</p>
+  </div>
+
+  <!-- Tab Navigation -->
+  <div class="flex border-b border-gray-200 mb-8">
+    <button class="tab-btn active" onclick="switchTab('comparison')">機能比較</button>
+    <button class="tab-btn" onclick="switchTab('cvpath')">CV経路分析</button>
+    <button class="tab-btn" onclick="switchTab('userid')">会員ID紐付け</button>
+  </div>
+
+  <!-- ========== Tab 1: 機能比較 ========== -->
+  <div id="tab-comparison" class="tab-content active">
+
+  <!-- ポジショニングサマリー -->
+  <div class="grid grid-cols-4 gap-4 mb-10">
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <div class="flex items-center gap-2 mb-2">
+        <div class="w-8 h-8 bg-orange-100 rounded-lg flex items-center justify-center">
+          <span class="text-orange-600 font-bold text-sm">G</span>
+        </div>
+        <h3 class="font-bold text-sm">GA4</h3>
+      </div>
+      <p class="text-xs text-gray-600">全体傾向の把握に強い無料ツール。Google広告と直結。詳細分析には制限多い。</p>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <div class="flex items-center gap-2 mb-2">
+        <div class="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
+          <span class="text-blue-600 font-bold text-sm">BQ</span>
+        </div>
+        <h3 class="font-bold text-sm">BigQuery Export</h3>
+      </div>
+      <p class="text-xs text-gray-600">GA4の生データをSQL分析。サンプリング解除。ただしGA4の収集制限は残る。</p>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <div class="flex items-center gap-2 mb-2">
+        <div class="w-8 h-8 bg-teal-100 rounded-lg flex items-center justify-center">
+          <span class="text-teal-600 font-bold text-sm">C</span>
+        </div>
+        <h3 class="font-bold text-sm">MS Clarity</h3>
+      </div>
+      <p class="text-xs text-gray-600">無料のUX分析特化ツール。セッション録画とヒートマップが強い。データ分析機能は限定的。</p>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 border-blue-300 ring-1 ring-blue-200">
+      <div class="flex items-center gap-2 mb-2">
+        <div class="w-8 h-8 bg-gradient-to-br from-pink-500 to-blue-600 rounded-lg flex items-center justify-center">
+          <span class="text-white font-bold text-sm">U</span>
+        </div>
+        <h3 class="font-bold text-sm">UGOKI MAP</h3>
+      </div>
+      <p class="text-xs text-gray-600">収集レイヤーから独自設計。全ツールで取得不可能な粒度のデータを制限なしで保持。</p>
+    </div>
+  </div>
+
+  <!-- メイン比較表 -->
+  <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-10">
+    <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
+      <h2 class="font-bold">機能比較</h2>
+    </div>
+    <div class="overflow-x-auto">
+    <table class="w-full">
+      <thead>
+        <tr class="border-b border-gray-200 bg-gray-50/50">
+          <th class="text-left py-3 px-4 text-gray-500 font-semibold" style="min-width:220px;">機能</th>
+          <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:110px;">GA4</th>
+          <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:110px;">BigQuery</th>
+          <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:110px;">Clarity</th>
+          <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:130px;">UGOKI MAP</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- データ基盤 -->
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">データ基盤</td></tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">経路ステップ数上限</td>
+          <td class="text-center no font-medium">10ステップ</td>
+          <td class="text-center yes font-medium">無制限</td>
+          <td class="text-center no font-medium">なし<br><span class="text-xs text-gray-400">経路分析機能なし</span></td>
+          <td class="text-center yes font-medium">無制限</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">サンプリング</td>
+          <td class="text-center no font-medium">あり</td>
+          <td class="text-center yes font-medium">なし</td>
+          <td class="text-center yes font-medium">なし</td>
+          <td class="text-center yes font-medium">なし</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">データ保持期間</td>
+          <td class="text-center no font-medium">14ヶ月</td>
+          <td class="text-center yes font-medium">無制限</td>
+          <td class="text-center partial font-medium">13ヶ月</td>
+          <td class="text-center yes font-medium">無制限</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">カスタムイベント</td>
+          <td class="text-center no font-medium">500種</td>
+          <td class="text-center no font-medium">500種<span class="text-xs text-gray-400">*</span></td>
+          <td class="text-center no font-medium">カスタムタグのみ</td>
+          <td class="text-center yes font-medium">無制限</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">生データへのSQLアクセス</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">可能</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">可能</td>
+        </tr>
+
+        <!-- CV分析 -->
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">CV分析</td></tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">セッション跨ぎの全経路追跡</td>
+          <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">10ステップ制限</span></td>
+          <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQL必須</span></td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">可能</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">再訪問〜CV全行動の再現</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQL必須・同一client_id内</span></td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">可能</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">CVまでの日数・訪問回数</td>
+          <td class="text-center partial font-medium">概算のみ</td>
+          <td class="text-center yes font-medium">正確<br><span class="text-xs text-gray-400">SQL必須</span></td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">正確</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">会員IDとの紐付け</td>
+          <td class="text-center no font-medium">個人経路の追跡不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
+          <td class="text-center yes font-medium">user_id結合可<br><span class="text-xs text-gray-400">保存済みデータは永久</span></td>
+          <td class="text-center partial font-medium">カスタムID設定<br><span class="text-xs text-gray-400">録画フィルターのみ</span></td>
+          <td class="text-center yes font-medium">JS1行のみ<br><span class="text-xs text-gray-400">ログイン前行動も自動紐付</span></td>
+        </tr>
+
+        <!-- 会員行動の分析粒度 -->
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">会員行動の分析粒度（ID紐付け後）</td></tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">会員のページ遷移・流入元・CV</td>
+          <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
+          <td class="text-center yes font-medium">追える</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">追える</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">会員のスクロール深度</td>
+          <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
+          <td class="text-center yes font-medium">追える</td>
+          <td class="text-center partial font-medium">録画で確認</td>
+          <td class="text-center yes font-bold">追える</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">会員のクリック位置（X/Y座標）</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可<br><span class="text-xs text-gray-400">GA4は座標を収集しない</span></td>
+          <td class="text-center partial font-medium">録画で確認</td>
+          <td class="text-center yes font-bold">追える</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">会員がどの画像を見たか</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">追える</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">会員がフォームのどこで迷ったか</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">追える</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">会員がCTAを見て押さなかったか</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">追える</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">会員がどのエリアを熟読したか</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">追える</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">会員の動画視聴%・操作</td>
+          <td class="text-center partial">基本のみ<br><span class="text-xs text-gray-400">再生/完了</span></td>
+          <td class="text-center partial">基本のみ</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">全操作記録</td>
+        </tr>
+
+        <!-- UX詳細分析 -->
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">UX詳細分析</td></tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">ヒートマップ（クリック）</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">あり</td>
+          <td class="text-center yes font-bold">あり</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">ヒートマップ（スクロール）</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">あり</td>
+          <td class="text-center yes font-bold">あり（ファネル表示）</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">セッション録画</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">あり（強い）</td>
+          <td class="text-center yes font-medium">あり（rrweb）</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">デッドクリック・レイジクリック</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">あり</td>
+          <td class="text-center yes font-bold">あり</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">熟読エリア（Y座標×滞在時間）</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">自動収集</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">フォームフィールド別離脱分析</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">自動収集</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">画像閲覧スコア（視認時間+表示率）</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">自動収集</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">CTA視認→クリック率</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">自動収集</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">動画視聴%・操作の詳細記録</td>
+          <td class="text-center partial">基本のみ</td>
+          <td class="text-center partial">基本のみ</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">全操作記録</td>
+        </tr>
+
+        <!-- パフォーマンス分析 -->
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">パフォーマンス分析</td></tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">Core Web Vitals<br><span class="text-xs text-gray-400">（LCP / INP / CLS / TTFB / FCP）</span></td>
+          <td class="text-center partial font-medium">CrUXデータ<br><span class="text-xs text-gray-400">28日集計・概要のみ</span></td>
+          <td class="text-center partial font-medium">同左</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center yes font-bold">あり</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">ページ速度スコア</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center yes font-bold">あり</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">改善提案・診断項目</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center yes font-bold">あり</td>
+        </tr>
+
+        <!-- 広告・外部連携 -->
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">広告・外部連携</td></tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">Google広告との直接連携</td>
+          <td class="text-center yes font-bold">直結</td>
+          <td class="text-center yes font-bold">直結</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center partial font-medium">UTM/gclid経由</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">クロスデバイス追跡</td>
+          <td class="text-center yes font-medium">Googleアカウント</td>
+          <td class="text-center yes font-medium">同左</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center no font-medium">localStorage依存<span class="planned text-xs ml-1">(計画中)</span></td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">予測オーディエンス（ML）</td>
+          <td class="text-center yes font-medium">あり</td>
+          <td class="text-center yes font-medium">あり</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium"><span class="planned text-xs">(計画中)</span></td>
+        </tr>
+
+        <!-- 運用 -->
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">運用</td></tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">月額コスト（100万PV想定）</td>
+          <td class="text-center font-medium">無料</td>
+          <td class="text-center font-medium">$50〜200</td>
+          <td class="text-center font-medium">無料</td>
+          <td class="text-center font-bold text-green-600">無料〜$20</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">SQLスキル要否</td>
+          <td class="text-center yes font-medium">不要</td>
+          <td class="text-center no font-medium">必須</td>
+          <td class="text-center yes font-medium">不要</td>
+          <td class="text-center yes font-medium">不要（UI完結）</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">導入工数</td>
+          <td class="text-center font-medium">GTM設定</td>
+          <td class="text-center font-medium">GA4+BQ連携+SQL</td>
+          <td class="text-center font-medium">タグ1行</td>
+          <td class="text-center font-bold text-green-600">タグ1行</td>
+        </tr>
+
+        <!-- AI/MCP連携 -->
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">AI / MCP連携</td></tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">AIエージェントからの直接クエリ</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center partial font-medium">BQ MCP経由<br><span class="text-xs text-gray-400">GA4データに限定</span></td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">全データアクセス可</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">AIによるUX詳細分析<br><span class="text-xs text-gray-400">（フォーム・画像・CTA等）</span></td>
+          <td class="text-center no font-medium">データなし</td>
+          <td class="text-center no font-medium">データなし</td>
+          <td class="text-center no font-medium">データなし</td>
+          <td class="text-center yes font-bold">全項目分析可能</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">AIによる個別ユーザー行動分析</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center partial font-medium">制限付き</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">完全な行動再現</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">AIによるCV改善提案</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center partial font-medium">SQL結果を手動で渡す</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">MCP経由で自動分析</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="px-5 py-3 bg-gray-50 text-xs text-gray-400 border-t border-gray-100">
+      <span class="text-gray-500">*</span> BigQueryはGA4の生データエクスポートのため、GA4の収集時制限（イベント500種・パラメータ25個等）を継承。ただし生データへのSQLアクセスにより、GA4標準レポートの制限（10ステップ・サンプリング等）は解除される
+    </div>
+  </div>
+
+  <!-- 結論 -->
+  <div class="bg-white rounded-xl border border-gray-200 p-6 mb-10">
+    <h2 class="font-bold mb-4">使い分けの結論</h2>
+    <div class="grid grid-cols-4 gap-4">
+      <div class="rounded-lg bg-orange-50 border border-orange-200 p-4">
+        <h3 class="font-bold text-sm mb-2 text-orange-800">GA4</h3>
+        <ul class="text-xs text-orange-700 space-y-1">
+          <li>- トラフィック全体傾向の把握</li>
+          <li>- Google広告の効果測定</li>
+          <li>- クロスデバイス分析</li>
+          <li>- 予測オーディエンス活用</li>
+        </ul>
+      </div>
+      <div class="rounded-lg bg-blue-50 border border-blue-200 p-4">
+        <h3 class="font-bold text-sm mb-2 text-blue-800">BigQuery</h3>
+        <ul class="text-xs text-blue-700 space-y-1">
+          <li>- GA4データの大規模SQL分析</li>
+          <li>- サンプリングなしの正確値</li>
+          <li>- 長期データ保持</li>
+          <li>- GCPサービスとの連携</li>
+        </ul>
+      </div>
+      <div class="rounded-lg bg-teal-50 border border-teal-200 p-4">
+        <h3 class="font-bold text-sm mb-2 text-teal-800">Clarity</h3>
+        <ul class="text-xs text-teal-700 space-y-1">
+          <li>- 無料のセッション録画</li>
+          <li>- 手軽なヒートマップ確認</li>
+          <li>- レイジクリック検出</li>
+          <li>- GA4との補完的利用</li>
+        </ul>
+      </div>
+      <div class="rounded-lg bg-green-50 border border-green-200 p-4 ring-1 ring-green-300">
+        <h3 class="font-bold text-sm mb-2 text-green-800">UGOKI MAP</h3>
+        <ul class="text-xs text-green-700 space-y-1">
+          <li>- CV導線の完全な再現・分析</li>
+          <li>- UX詳細分析（フォーム・CTA・画像）</li>
+          <li>- 長期検討プロセスの追跡</li>
+          <li>- AI/MCP連携による自動分析</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- UGOKI MAP独自機能 -->
+  <div class="bg-gradient-to-br from-blue-50 to-purple-50 rounded-xl border border-blue-200 p-6">
+    <h2 class="font-bold mb-1">UGOKI MAP 独自機能（他ツールでは実現不可能）</h2>
+    <p class="text-xs text-gray-500 mb-4">収集レイヤーから独自設計しているため、GA4・BigQuery・Clarityのいずれでも取得できないデータを保持</p>
+    <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm">
+      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>フォームフィールド単位の離脱分析</span></div>
+      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>画像別閲覧スコア（0-100）</span></div>
+      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>CTA・バナーの視認→クリック率</span></div>
+      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>熟読エリア（Y座標×滞在時間）ヒートマップ</span></div>
+      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>動画の全操作詳細記録（シーク・音量含む）</span></div>
+      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>ページ遷移ステップ数の制限なし</span></div>
+      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>再訪問〜CV完了の全行動を1画面で表示</span></div>
+      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>MCP経由でAIが全データを直接分析</span></div>
+    </div>
+  </div>
+
+  </div><!-- /tab-comparison -->
+
+  <!-- ========== Tab: CV経路分析 ========== -->
+  <div id="tab-cvpath" class="tab-content">
+
+    <!-- 概要 -->
+    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-8">
+      <h2 class="text-lg font-bold mb-2">CV経路分析 — 「流入メディア × ユーザー回遊経路」を可視化できるか？</h2>
+      <p class="text-sm text-gray-500">CVに至るまでのユーザー回遊経路を視覚的に分析する機能。GA4の探索レポートでは経路図を作成できるが、流入メディア（organic / cpc / referral等）をステップに含めることができない。BigQueryならデータとしては取得可能だが、ビジュアライゼーションに大きな制約がある。</p>
+    </div>
+
+    <!-- ========== GA4 モック ========== -->
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-8">
+      <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
+        <div class="flex items-center gap-2">
+          <div class="w-6 h-6 bg-orange-100 rounded flex items-center justify-center"><span class="text-orange-600 font-bold text-xs">G</span></div>
+          <h3 class="font-bold text-sm">GA4 探索レポート — 経路データ探索（モック再現）</h3>
+        </div>
+        <p class="text-xs text-gray-400 mt-1">GA4の経路分析UIを再現。ページタイトルでの経路表示は可能だが、<span class="text-red-500 font-semibold">流入メディア列は設定できない</span></p>
+      </div>
+      <div class="p-6" style="background:#fff;">
+        <!-- GA4 header bar mock -->
+        <div style="border-bottom:1px solid #e5e7eb; padding-bottom:12px; margin-bottom:16px;">
+          <span style="font-size:13px; color:#202124; font-weight:500;">オーガニック トラフィック</span>
+        </div>
+        <!-- Step headers -->
+        <div id="ga4-sankey" style="position:relative; width:100%; overflow-x:auto;">
+          <div style="min-width:900px;">
+            <!-- Column headers -->
+            <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
+              <div style="width:18%; text-align:center;">
+                <span style="font-size:11px; color:#5f6368;">ステップ -4</span>
+                <span style="font-size:10px; color:#9aa0a6; margin-left:4px; cursor:pointer;">&#9998;</span>
+                <div style="display:inline-flex; align-items:center; gap:4px; border:1px solid #dadce0; border-radius:4px; padding:4px 10px; margin-top:4px; font-size:11px; color:#3c4043;">
+                  <span style="color:#5f6368;">&#9634;</span> ページ タイトルとス...
+                  <span style="color:#9aa0a6; font-size:9px;">&#9660;</span>
+                </div>
+              </div>
+              <div style="width:2%; display:flex; align-items:center; justify-content:center; color:#9aa0a6; font-size:16px;">&rarr;</div>
+              <div style="width:18%; text-align:center;">
+                <span style="font-size:11px; color:#5f6368;">ステップ -3</span>
+                <span style="font-size:10px; color:#9aa0a6; margin-left:4px; cursor:pointer;">&#9998;</span>
+                <div style="display:inline-flex; align-items:center; gap:4px; border:1px solid #dadce0; border-radius:4px; padding:4px 10px; margin-top:4px; font-size:11px; color:#3c4043;">
+                  <span style="color:#5f6368;">&#9634;</span> ページ タイトルとス...
+                  <span style="color:#9aa0a6; font-size:9px;">&#9660;</span>
+                </div>
+              </div>
+              <div style="width:2%; display:flex; align-items:center; justify-content:center; color:#9aa0a6; font-size:16px;">&rarr;</div>
+              <div style="width:18%; text-align:center;">
+                <span style="font-size:11px; color:#5f6368;">ステップ -2</span>
+                <span style="font-size:10px; color:#9aa0a6; margin-left:4px; cursor:pointer;">&#9998;</span>
+                <div style="display:inline-flex; align-items:center; gap:4px; border:1px solid #dadce0; border-radius:4px; padding:4px 10px; margin-top:4px; font-size:11px; color:#3c4043;">
+                  <span style="color:#5f6368;">&#9634;</span> ページ タイトルとス...
+                  <span style="color:#9aa0a6; font-size:9px;">&#9660;</span>
+                </div>
+              </div>
+              <div style="width:2%; display:flex; align-items:center; justify-content:center; color:#9aa0a6; font-size:16px;">&rarr;</div>
+              <div style="width:18%; text-align:center;">
+                <span style="font-size:11px; color:#5f6368;">ステップ -1</span>
+                <span style="font-size:10px; color:#9aa0a6; margin-left:4px; cursor:pointer;">&#9998;</span>
+                <div style="display:inline-flex; align-items:center; gap:4px; border:1px solid #dadce0; border-radius:4px; padding:4px 10px; margin-top:4px; font-size:11px; color:#3c4043;">
+                  <span style="color:#5f6368;">&#9634;</span> ページ タイトルとス...
+                  <span style="color:#9aa0a6; font-size:9px;">&#9660;</span>
+                </div>
+              </div>
+              <div style="width:2%; display:flex; align-items:center; justify-content:center; color:#9aa0a6; font-size:16px;">&rarr;</div>
+              <div style="width:12%; text-align:center;">
+                <span style="font-size:11px; color:#5f6368;">CV</span>
+                <div style="display:inline-flex; align-items:center; gap:4px; border:1px solid #dadce0; border-radius:4px; padding:4px 10px; margin-top:4px; font-size:11px; color:#3c4043;">
+                  <span style="color:#1a73e8;">&#9873;</span> イベント
+                </div>
+              </div>
+            </div>
+
+            <!-- Sankey body -->
+            <svg id="ga4-svg" width="100%" height="520" style="display:block;"></svg>
+          </div>
+        </div>
+
+        <!-- 流入メディア欠落の注意 -->
+        <div style="margin-top:16px; background:#fef7f0; border:1px solid #fde68a; border-radius:8px; padding:14px 18px; display:flex; align-items:flex-start; gap:10px;">
+          <span style="color:#d97706; font-size:18px; flex-shrink:0;">&#9888;</span>
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#92400e; margin-bottom:4px;">GA4の制約：流入メディア列を追加できない</div>
+            <div style="font-size:12px; color:#78716c;">GA4の経路データ探索では、ステップに設定できるディメンションは「ページタイトル」「スクリーン名」「イベント名」のみ。<br><strong>「セッションのメディア」「参照元」等をステップ列として追加することは仕様上不可能</strong>です。<br>そのため「organic経由のユーザーはどのページを経てCVしたか？」という分析が、このグラフ上ではできません。</div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4 mt-4">
+          <div class="rounded-lg bg-green-50 border border-green-200 p-4">
+            <div class="text-sm font-semibold text-green-800 mb-2">GA4でできること</div>
+            <ul class="text-xs text-green-700 space-y-1.5">
+              <li class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>ページタイトル/スクリーン名でのステップ分析</li>
+              <li class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>最大10ステップまでの経路表示</li>
+              <li class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>イベント名での経路分析</li>
+              <li class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>セグメントによるフィルタリング</li>
+            </ul>
+          </div>
+          <div class="rounded-lg bg-red-50 border border-red-200 p-4">
+            <div class="text-sm font-semibold text-red-800 mb-2">GA4でできないこと</div>
+            <ul class="text-xs text-red-700 space-y-1.5">
+              <li class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span><strong>流入メディア（medium）をステップに含められない</strong></li>
+              <li class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span>「organic → ページA → ページB → CV」のような流入元起点の経路図が作れない</li>
+              <li class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span>11ステップ以上の経路は表示不可</li>
+              <li class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span>セッションを跨いだ経路の統合表示が不可</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== UGOKI MAP モック ========== -->
+    <div class="bg-white rounded-xl border border-blue-300 overflow-hidden mb-8 ring-1 ring-blue-100">
+      <div class="px-6 py-4 border-b border-blue-100" style="background:linear-gradient(135deg,#eff6ff,#f5f3ff);">
+        <div class="flex items-center gap-2">
+          <div class="w-6 h-6 bg-gradient-to-br from-pink-500 to-blue-600 rounded flex items-center justify-center"><span class="text-white font-bold text-xs">U</span></div>
+          <h3 class="font-bold text-sm">UGOKI MAP — CV経路分析（流入メディア付き）</h3>
+        </div>
+        <p class="text-xs text-gray-400 mt-1">流入メディアをステップ0として表示。フィルターで絞り込み可能。<span class="text-blue-600 font-semibold">GA4では実現できない「流入元起点の経路分析」</span>をUI上で完結</p>
+      </div>
+
+      <!-- Toolbar -->
+      <div style="padding:12px 24px; border-bottom:1px solid #e5e7eb; background:#f8fafc; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <div style="font-size:12px; color:#6b7280; font-weight:600;">フィルター:</div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <button class="ugoki-filter active" data-medium="all" onclick="filterUgoki('all', this)" style="font-size:11px; padding:4px 12px; border-radius:20px; border:1px solid #d1d5db; background:#2563eb; color:#fff; cursor:pointer; font-weight:600; transition:all .15s;">全て</button>
+          <button class="ugoki-filter" data-medium="organic" onclick="filterUgoki('organic', this)" style="font-size:11px; padding:4px 12px; border-radius:20px; border:1px solid #d1d5db; background:#fff; color:#374151; cursor:pointer; font-weight:500; transition:all .15s;">organic</button>
+          <button class="ugoki-filter" data-medium="cpc" onclick="filterUgoki('cpc', this)" style="font-size:11px; padding:4px 12px; border-radius:20px; border:1px solid #d1d5db; background:#fff; color:#374151; cursor:pointer; font-weight:500; transition:all .15s;">cpc</button>
+          <button class="ugoki-filter" data-medium="referral" onclick="filterUgoki('referral', this)" style="font-size:11px; padding:4px 12px; border-radius:20px; border:1px solid #d1d5db; background:#fff; color:#374151; cursor:pointer; font-weight:500; transition:all .15s;">referral</button>
+          <button class="ugoki-filter" data-medium="social" onclick="filterUgoki('social', this)" style="font-size:11px; padding:4px 12px; border-radius:20px; border:1px solid #d1d5db; background:#fff; color:#374151; cursor:pointer; font-weight:500; transition:all .15s;">social</button>
+          <button class="ugoki-filter" data-medium="direct" onclick="filterUgoki('direct', this)" style="font-size:11px; padding:4px 12px; border-radius:20px; border:1px solid #d1d5db; background:#fff; color:#374151; cursor:pointer; font-weight:500; transition:all .15s;">direct / none</button>
+        </div>
+        <div style="margin-left:auto; font-size:11px; color:#9ca3af;">
+          期間: <span style="color:#374151; font-weight:600;">2026/02/15 - 2026/03/16</span>
+          <span style="margin-left:8px; color:#374151;">CV: <strong id="ugoki-cv-total">48</strong> 件</span>
+        </div>
+      </div>
+
+      <div class="p-6" style="background:#fff;">
+        <!-- Step count selector -->
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap;">
+          <div style="font-size:12px; color:#6b7280; font-weight:600;">表示ステップ数:</div>
+          <div style="display:flex; gap:4px;">
+            <button class="step-select" onclick="changeStepCount(5, this)" style="font-size:11px; padding:3px 10px; border-radius:4px; border:1px solid #d1d5db; background:#fff; color:#374151; cursor:pointer;">5</button>
+            <button class="step-select" onclick="changeStepCount(10, this)" style="font-size:11px; padding:3px 10px; border-radius:4px; border:1px solid #d1d5db; background:#fff; color:#374151; cursor:pointer;">10</button>
+            <button class="step-select active" onclick="changeStepCount(20, this)" style="font-size:11px; padding:3px 10px; border-radius:4px; border:1px solid #2563eb; background:#2563eb; color:#fff; cursor:pointer; font-weight:600;">20</button>
+          </div>
+          <div style="font-size:10px; color:#9ca3af;">GA4上限: 10ステップ</div>
+          <div style="margin-left:auto; font-size:10px; color:#6b7280;">
+            <span style="color:#ef4444; font-weight:600;">&#9654;</span> 横スクロールで全ステップを閲覧
+          </div>
+        </div>
+
+        <!-- Dynamic header + SVG container -->
+        <div id="ugoki-scroll-container" style="overflow-x:auto; border:1px solid #e5e7eb; border-radius:8px; background:#fafbfc;">
+          <div id="ugoki-header-row" style="display:flex; border-bottom:1px solid #e5e7eb; background:#f8fafc; position:sticky; top:0; z-index:2;"></div>
+          <svg id="ugoki-svg" height="580" style="display:block;"></svg>
+        </div>
+        <div style="margin-top:6px; text-align:center; font-size:10px; color:#9ca3af;">
+          &#8592; 横スクロールで全20ステップの経路を閲覧できます &#8594;
+        </div>
+
+        <!-- Stats bar -->
+        <div id="ugoki-stats" style="margin-top:16px; display:grid; grid-template-columns:repeat(5,1fr); gap:12px;">
+          <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:8px; padding:10px 14px; text-align:center;">
+            <div style="font-size:20px; font-weight:800; color:#16a34a;" id="stat-organic">22</div>
+            <div style="font-size:10px; color:#6b7280;">organic CV</div>
+          </div>
+          <div style="background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; padding:10px 14px; text-align:center;">
+            <div style="font-size:20px; font-weight:800; color:#2563eb;" id="stat-cpc">12</div>
+            <div style="font-size:10px; color:#6b7280;">cpc CV</div>
+          </div>
+          <div style="background:#fefce8; border:1px solid #fde68a; border-radius:8px; padding:10px 14px; text-align:center;">
+            <div style="font-size:20px; font-weight:800; color:#ca8a04;" id="stat-referral">6</div>
+            <div style="font-size:10px; color:#6b7280;">referral CV</div>
+          </div>
+          <div style="background:#fdf2f8; border:1px solid #fbcfe8; border-radius:8px; padding:10px 14px; text-align:center;">
+            <div style="font-size:20px; font-weight:800; color:#db2777;" id="stat-social">5</div>
+            <div style="font-size:10px; color:#6b7280;">social CV</div>
+          </div>
+          <div style="background:#f5f5f4; border:1px solid #d6d3d1; border-radius:8px; padding:10px 14px; text-align:center;">
+            <div style="font-size:20px; font-weight:800; color:#57534e;" id="stat-direct">3</div>
+            <div style="font-size:10px; color:#6b7280;">direct CV</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Advantage callout -->
+      <div style="padding:14px 24px; background:linear-gradient(135deg,#eff6ff,#f0fdf4); border-top:1px solid #d1fae5; display:flex; align-items:center; gap:10px;">
+        <span style="color:#16a34a; font-size:18px; flex-shrink:0;">&#10003;</span>
+        <div style="font-size:12px; color:#065f46;">
+          <strong>UGOKI MAP独自機能</strong>：流入メディアを経路のステップ0として表示可能。GA4の探索レポートでは仕様上、mediumをステップ列に追加できません。BigQuery+Pythonなら実現可能ですが、別途Vertex AI Workbench等の有料環境（月額$50〜300+）が必要です。
+        </div>
+      </div>
+    </div>
+
+    <!-- 比較表 -->
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-8">
+      <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
+        <h3 class="font-bold text-sm">CV経路の可視化 — ツール別比較</h3>
+      </div>
+      <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-gray-200 bg-gray-50/50">
+            <th class="text-left py-3 px-4 text-gray-500 font-semibold" style="min-width:240px;">機能</th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:130px;">GA4<br><span class="text-xs font-normal">（探索レポート）</span></th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:130px;">BigQuery<br><span class="text-xs font-normal">（+ Looker Studio）</span></th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:130px;">BigQuery<br><span class="text-xs font-normal">（+ Python可視化）</span></th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:130px;">UGOKI MAP</th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- 経路データ -->
+          <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">経路データの取得</td></tr>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4">ページ遷移の経路データ</td>
+            <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">10ステップまで</span></td>
+            <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQL必須</span></td>
+            <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQL必須</span></td>
+            <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">無制限</span></td>
+          </tr>
+          <tr class="border-b border-gray-50 highlight-row">
+            <td class="py-2.5 px-4 font-medium">流入メディア（medium）を経路に含める</td>
+            <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">ステップに設定不可</span></td>
+            <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQLで結合可能</span></td>
+            <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQLで結合可能</span></td>
+            <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">UTM/referrer自動収集</span></td>
+          </tr>
+          <tr class="border-b border-gray-50 highlight-row">
+            <td class="py-2.5 px-4 font-medium">流入キーワード × 経路の紐付け</td>
+            <td class="text-center no font-medium">不可</td>
+            <td class="text-center partial font-medium">部分的<br><span class="text-xs text-gray-400">GSCデータは別結合</span></td>
+            <td class="text-center partial font-medium">部分的<br><span class="text-xs text-gray-400">GSCデータは別結合</span></td>
+            <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">landing_url+UTM自動</span></td>
+          </tr>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4">セッション跨ぎの経路統合</td>
+            <td class="text-center no font-medium">不可</td>
+            <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">client_id結合</span></td>
+            <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">client_id結合</span></td>
+            <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">user_id自動追跡</span></td>
+          </tr>
+
+          <!-- ビジュアライゼーション -->
+          <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">ビジュアライゼーション（可視化）</td></tr>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4">Sankey風の経路グラフ</td>
+            <td class="text-center yes font-medium">標準搭載<br><span class="text-xs text-gray-400">探索レポート内</span></td>
+            <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">Sankeyチャートなし</span></td>
+            <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">Plotly/Matplotlib等</span></td>
+            <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">UI標準搭載</span></td>
+          </tr>
+          <tr class="border-b border-gray-50 highlight-row">
+            <td class="py-2.5 px-4 font-medium">流入メディア付きの経路グラフ</td>
+            <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">mediumをステップに<br>設定できない</span></td>
+            <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">Looker StudioにSankey<br>チャートがない</span></td>
+            <td class="text-center partial font-medium">可能だが…<br><span class="text-xs text-red-400">下記の制約あり</span></td>
+            <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">流入元 → 経路 → CV<br>を1画面で表示</span></td>
+          </tr>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4">操作不要でグラフ表示</td>
+            <td class="text-center yes font-medium">探索で設定後表示</td>
+            <td class="text-center partial font-medium">Looker Studio設定必須</td>
+            <td class="text-center no font-medium">コーディング必須</td>
+            <td class="text-center yes font-bold">ダッシュボードで即表示</td>
+          </tr>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4">非エンジニアでも作成・閲覧可能</td>
+            <td class="text-center yes font-medium">可能</td>
+            <td class="text-center partial font-medium">Looker Studioは可<br><span class="text-xs text-gray-400">クエリ作成はSQL必須</span></td>
+            <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">Python環境が必要</span></td>
+            <td class="text-center yes font-bold">可能</td>
+          </tr>
+
+          <!-- コスト・環境 -->
+          <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">コスト・環境要件</td></tr>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4">追加コスト</td>
+            <td class="text-center font-medium text-green-600">無料</td>
+            <td class="text-center font-medium">BQクエリ費用<br><span class="text-xs text-gray-400">Looker Studioは無料</span></td>
+            <td class="text-center no font-medium">BQクエリ費用<br>+ 実行環境費用<br><span class="text-xs text-red-400">下記参照</span></td>
+            <td class="text-center font-medium text-green-600">標準プラン内</td>
+          </tr>
+          <tr class="border-b border-gray-50 highlight-row">
+            <td class="py-2.5 px-4 font-medium">Python可視化の実行環境</td>
+            <td class="text-center text-gray-300">—</td>
+            <td class="text-center text-gray-300">—</td>
+            <td class="text-center no font-medium">
+              Vertex AI Workbench<br>
+              <span class="text-xs text-red-400">or Colab Enterprise<br>
+              月額 $50〜300+</span>
+            </td>
+            <td class="text-center text-gray-300">—<br><span class="text-xs text-gray-400">環境構築不要</span></td>
+          </tr>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4">必要スキル</td>
+            <td class="text-center font-medium">GA4操作</td>
+            <td class="text-center font-medium">SQL</td>
+            <td class="text-center no font-medium">SQL + Python<br><span class="text-xs text-gray-400">Plotly/Matplotlib</span></td>
+            <td class="text-center yes font-bold">不要（UI完結）</td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <!-- BigQuery + Python可視化の制約 -->
+    <div class="bg-white rounded-xl border border-orange-200 p-6 mb-8">
+      <div class="flex items-center gap-2 mb-4">
+        <div class="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
+          <span class="text-blue-600 font-bold text-sm">BQ</span>
+        </div>
+        <h3 class="font-bold">BigQuery + Pythonで「流入メディア付き経路図」を作る場合の現実</h3>
+      </div>
+
+      <div class="grid grid-cols-2 gap-6">
+        <!-- 技術的にできること -->
+        <div>
+          <div class="text-sm font-semibold text-blue-700 mb-3">技術的にできること</div>
+          <div class="space-y-3">
+            <div class="flex gap-3">
+              <div class="step-num bg-blue-100 text-blue-700">1</div>
+              <div class="text-xs text-gray-600">BigQueryでGA4のイベントデータをSQLクエリし、<code class="bg-gray-100 px-1 rounded">session_start</code>のmedium/sourceと後続のpage_viewを結合</div>
+            </div>
+            <div class="flex gap-3">
+              <div class="step-num bg-blue-100 text-blue-700">2</div>
+              <div class="text-xs text-gray-600">Pythonの<code class="bg-gray-100 px-1 rounded">plotly.graph_objects.Sankey</code>でフロー図を生成</div>
+            </div>
+            <div class="flex gap-3">
+              <div class="step-num bg-blue-100 text-blue-700">3</div>
+              <div class="text-xs text-gray-600">インタラクティブなHTMLグラフとして出力</div>
+            </div>
+          </div>
+          <div class="code-block mt-4 text-xs">
+            <span class="code-comment"># BigQuery SQL例</span><br>
+            <span class="code-key">SELECT</span><br>
+            &nbsp;&nbsp;traffic_source.medium,<br>
+            &nbsp;&nbsp;page_location,<br>
+            &nbsp;&nbsp;event_timestamp<br>
+            <span class="code-key">FROM</span> <span class="code-str">`project.analytics.events_*`</span><br>
+            <span class="code-key">WHERE</span> user_pseudo_id <span class="code-key">IN</span> (<br>
+            &nbsp;&nbsp;<span class="code-comment">-- CVしたユーザー</span><br>
+            &nbsp;&nbsp;<span class="code-key">SELECT</span> user_pseudo_id<br>
+            &nbsp;&nbsp;<span class="code-key">FROM</span> ... <span class="code-key">WHERE</span> event_name = <span class="code-str">'purchase'</span><br>
+            )
+          </div>
+        </div>
+
+        <!-- 制約・コスト -->
+        <div>
+          <div class="text-sm font-semibold text-red-700 mb-3">実運用の壁</div>
+          <div class="space-y-3">
+            <div class="warn-box">
+              <div class="text-xs font-semibold text-amber-800 mb-1">Python実行環境が必要</div>
+              <div class="text-xs text-amber-700">BigQuery単体ではグラフを生成できない。Pythonコードを実行する環境が別途必要。</div>
+            </div>
+            <div class="warn-box">
+              <div class="text-xs font-semibold text-amber-800 mb-1">GCP上で動かす場合のコスト</div>
+              <div class="text-xs text-amber-700">
+                <div class="space-y-1 mt-1">
+                  <div><strong>Vertex AI Workbench</strong>: Jupyter Notebook環境 — 月額 $50〜200+</div>
+                  <div><strong>Colab Enterprise</strong>: GCP版Colab — 月額 $100〜300+</div>
+                  <div><strong>Cloud Functions + Cloud Run</strong>: 定期実行する場合 — 月額 $20〜100</div>
+                </div>
+              </div>
+            </div>
+            <div class="warn-box">
+              <div class="text-xs font-semibold text-amber-800 mb-1">無料Colabでは不十分</div>
+              <div class="text-xs text-amber-700">Google Colabの無料枠では、BigQuery認証・スケジュール実行・社内共有に制約が多い。本番運用には向かない。</div>
+            </div>
+            <div class="warn-box">
+              <div class="text-xs font-semibold text-amber-800 mb-1">運用保守コスト</div>
+              <div class="text-xs text-amber-700">SQL + Pythonコードの保守、ライブラリ更新、GA4スキーマ変更への追従が継続的に発生。エンジニアリソースが必須。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Looker Studioの制約 -->
+    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-8">
+      <div class="flex items-center gap-2 mb-4">
+        <div class="w-8 h-8 bg-yellow-100 rounded-lg flex items-center justify-center">
+          <span class="text-yellow-600 font-bold text-sm">LS</span>
+        </div>
+        <h3 class="font-bold">Looker Studio（無料）の制約</h3>
+      </div>
+      <div class="grid grid-cols-3 gap-4">
+        <div class="rounded-lg bg-red-50 border border-red-200 p-4">
+          <div class="text-xs font-semibold text-red-800 mb-2">Sankeyチャートなし</div>
+          <div class="text-xs text-red-700">Looker Studioには経路フロー（Sankey）チャートが標準搭載されていない。棒グラフ・円グラフ・表のみ。</div>
+        </div>
+        <div class="rounded-lg bg-red-50 border border-red-200 p-4">
+          <div class="text-xs font-semibold text-red-800 mb-2">カスタム可視化は有料</div>
+          <div class="text-xs text-red-700">コミュニティビジュアライゼーションでSankey風チャートを追加できるが、品質・保守性に問題があり、本番運用には不向き。</div>
+        </div>
+        <div class="rounded-lg bg-red-50 border border-red-200 p-4">
+          <div class="text-xs font-semibold text-red-800 mb-2">Looker Pro（有料）が必要</div>
+          <div class="text-xs text-red-700">本格的なカスタムビジュアルを使うにはLooker（有料版）が必要。月額 $5,000〜が目安。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 結論 -->
+    <div class="bg-gradient-to-br from-blue-50 to-purple-50 rounded-xl border border-blue-200 p-6 mb-8">
+      <h3 class="font-bold mb-4">結論：「流入メディア × CV経路」の可視化</h3>
+      <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-blue-200">
+            <th class="text-left py-3 px-4 text-gray-700 font-semibold" style="min-width:100px;">ツール</th>
+            <th class="text-center py-3 px-3 text-gray-700 font-semibold">経路データ</th>
+            <th class="text-center py-3 px-3 text-gray-700 font-semibold">流入メディア</th>
+            <th class="text-center py-3 px-3 text-gray-700 font-semibold">グラフ可視化</th>
+            <th class="text-center py-3 px-3 text-gray-700 font-semibold">総合評価</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="border-b border-blue-100">
+            <td class="py-3 px-4 font-bold">GA4</td>
+            <td class="text-center yes font-medium">取得可能</td>
+            <td class="text-center no font-medium">含められない</td>
+            <td class="text-center yes font-medium">標準搭載</td>
+            <td class="text-center"><span class="inline-block bg-orange-100 text-orange-700 px-3 py-1 rounded-full text-xs font-bold">経路図は作れるが流入元が欠落</span></td>
+          </tr>
+          <tr class="border-b border-blue-100">
+            <td class="py-3 px-4 font-bold">BigQuery<br><span class="text-xs font-normal text-gray-400">+ Looker Studio</span></td>
+            <td class="text-center yes font-medium">取得可能</td>
+            <td class="text-center yes font-medium">含められる</td>
+            <td class="text-center no font-medium">Sankeyなし</td>
+            <td class="text-center"><span class="inline-block bg-orange-100 text-orange-700 px-3 py-1 rounded-full text-xs font-bold">データはあるがグラフ化できない</span></td>
+          </tr>
+          <tr class="border-b border-blue-100">
+            <td class="py-3 px-4 font-bold">BigQuery<br><span class="text-xs font-normal text-gray-400">+ Python</span></td>
+            <td class="text-center yes font-medium">取得可能</td>
+            <td class="text-center yes font-medium">含められる</td>
+            <td class="text-center partial font-medium">可能だが有料環境</td>
+            <td class="text-center"><span class="inline-block bg-yellow-100 text-yellow-700 px-3 py-1 rounded-full text-xs font-bold">実現可能だが月額$50〜300+の環境費用</span></td>
+          </tr>
+          <tr>
+            <td class="py-3 px-4 font-bold text-blue-700">UGOKI MAP</td>
+            <td class="text-center yes font-bold">取得可能</td>
+            <td class="text-center yes font-bold">含められる</td>
+            <td class="text-center yes font-bold">標準搭載</td>
+            <td class="text-center"><span class="inline-block bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-bold">追加費用なし・UI標準で完結</span></td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <!-- UGOKI MAPの優位性 -->
+    <div class="bg-white rounded-xl border border-green-200 p-6 ring-1 ring-green-100">
+      <div class="flex items-center gap-2 mb-4">
+        <div class="w-8 h-8 bg-gradient-to-br from-pink-500 to-blue-600 rounded-lg flex items-center justify-center">
+          <span class="text-white font-bold text-sm">U</span>
+        </div>
+        <h3 class="font-bold">UGOKI MAPなら — 流入メディア × CV経路を1画面で完結</h3>
+      </div>
+      <div class="grid grid-cols-3 gap-4">
+        <div class="rounded-lg bg-green-50 p-4">
+          <div class="text-sm font-semibold text-green-800 mb-2">流入元を自動取得</div>
+          <div class="text-xs text-green-700">UTMパラメータ・referrer・gclid等を各セッションに自動記録。GA4のように経路図にmediumを含められない制約がない。</div>
+        </div>
+        <div class="rounded-lg bg-green-50 p-4">
+          <div class="text-sm font-semibold text-green-800 mb-2">環境構築不要</div>
+          <div class="text-xs text-green-700">BigQuery + Python環境のような追加インフラ不要。ダッシュボードのUIから直接、流入メディア別のCV経路を表示。</div>
+        </div>
+        <div class="rounded-lg bg-green-50 p-4">
+          <div class="text-sm font-semibold text-green-800 mb-2">SQLスキル不要</div>
+          <div class="text-xs text-green-700">BigQueryで同等の分析をするにはSQLとPythonの両方が必要。UGOKI MAPはUI操作のみで同じ結果を得られる。</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /tab-cvpath -->
+
+  <!-- ========== Tab 2: 会員ID紐付け ========== -->
+  <div id="tab-userid" class="tab-content">
+
+    <!-- 概要 -->
+    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-8">
+      <h2 class="text-lg font-bold mb-2">会員IDとの紐付け — ツール別設定方法と制限</h2>
+      <p class="text-sm text-gray-500">自社会員データとWeb行動データを紐付けることで、「誰が」「どのように行動して」CVしたかを分析可能にする。各ツールの導入手順・できること・できないことを比較。</p>
+    </div>
+
+    <!-- 比較サマリー表 -->
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-8">
+      <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
+        <h3 class="font-bold text-sm">紐付け方法サマリー</h3>
+      </div>
+      <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-gray-200 bg-gray-50/50">
+            <th class="text-left py-3 px-4 text-gray-500 font-semibold" style="min-width:180px;"></th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">GA4単体</th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">BigQuery</th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">Clarity</th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">UGOKI MAP</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4 font-medium">設定箇所</td>
+            <td class="text-center">管理画面 + GTM + JS<br><span class="text-xs text-gray-400">3箇所の設定</span></td>
+            <td class="text-center">GA4設定 + BQ連携</td>
+            <td class="text-center">JS のみ</td>
+            <td class="text-center yes font-bold">JS のみ<br><span class="text-xs text-gray-400">1行で完了</span></td>
+          </tr>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4 font-medium">ログイン後の個人経路追跡</td>
+            <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">集計データのみ</span></td>
+            <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQL必須</span></td>
+            <td class="text-center partial font-medium">録画で確認<br><span class="text-xs text-gray-400">集計は不可</span></td>
+            <td class="text-center yes font-bold">可能</td>
+          </tr>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4 font-medium">ログイン後データの永続性</td>
+            <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
+            <td class="text-center yes font-medium">BQ保存済みデータは永久<br><span class="text-xs text-gray-400">Cookie切れ影響なし</span></td>
+            <td class="text-center no font-medium">13ヶ月で消失</td>
+            <td class="text-center yes font-bold">永久保持<br><span class="text-xs text-gray-400">Cookie切れ影響なし</span></td>
+          </tr>
+          <tr class="border-b border-gray-50 highlight-row">
+            <td class="py-2.5 px-4 font-medium">ログイン前の匿名行動の紐付け</td>
+            <td class="text-center no font-medium">不可</td>
+            <td class="text-center partial font-medium">client_id後付け結合<br><span class="text-xs text-gray-400">Cookie切れ時のみ紐付け不可</span></td>
+            <td class="text-center no font-medium">不可</td>
+            <td class="text-center yes font-bold">自動紐付け<br><span class="text-xs text-gray-400">localStorage永続</span></td>
+          </tr>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4 font-medium">外部DB（AWS等）との結合</td>
+            <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
+            <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQL必須・遅延あり</span></td>
+            <td class="text-center no font-medium">不可</td>
+            <td class="text-center yes font-bold">external_idで即時結合</td>
+          </tr>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4 font-medium">標準レポートでの表示</td>
+            <td class="text-center no font-medium">非表示<br><span class="text-xs text-gray-400">探索で手動作成</span></td>
+            <td class="text-center no font-medium">なし<br><span class="text-xs text-gray-400">SQLクエリ結果のみ</span></td>
+            <td class="text-center no font-medium">フィルターのみ</td>
+            <td class="text-center yes font-bold">全レポートで統合</td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <!-- 会員行動の分析粒度 -->
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-8">
+      <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
+        <h3 class="font-bold text-sm">会員行動の分析粒度（ID紐付け後にどこまで追えるか）</h3>
+      </div>
+      <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-gray-200 bg-gray-50/50">
+            <th class="text-left py-3 px-4 text-gray-500 font-semibold" style="min-width:220px;">分析内容</th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">GA4単体</th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">BigQuery</th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">Clarity</th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">UGOKI MAP</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4">会員のページ遷移・流入元</td>
+            <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
+            <td class="text-center yes font-medium">追える</td>
+            <td class="text-center no font-medium">不可</td>
+            <td class="text-center yes font-bold">追える</td>
+          </tr>
+          <tr class="border-b border-gray-50">
+            <td class="py-2.5 px-4">会員のスクロール深度</td>
+            <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
+            <td class="text-center yes font-medium">追える</td>
+            <td class="text-center partial font-medium">録画で確認</td>
+            <td class="text-center yes font-bold">追える</td>
+          </tr>
+          <tr class="border-b border-gray-50 highlight-row">
+            <td class="py-2.5 px-4">会員のクリック位置（X/Y座標）</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center no">不可<br><span class="text-xs text-gray-400">GA4は座標を収集しない</span></td>
+            <td class="text-center partial font-medium">録画で確認</td>
+            <td class="text-center yes font-bold">追える</td>
+          </tr>
+          <tr class="border-b border-gray-50 highlight-row">
+            <td class="py-2.5 px-4">会員がどの画像を見たか</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center yes font-bold">追える</td>
+          </tr>
+          <tr class="border-b border-gray-50 highlight-row">
+            <td class="py-2.5 px-4">会員がフォームのどこで迷ったか</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center yes font-bold">追える</td>
+          </tr>
+          <tr class="border-b border-gray-50 highlight-row">
+            <td class="py-2.5 px-4">会員がCTAを見て押さなかったか</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center yes font-bold">追える</td>
+          </tr>
+          <tr class="border-b border-gray-50 highlight-row">
+            <td class="py-2.5 px-4">会員がどのエリアを熟読したか</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center yes font-bold">追える</td>
+          </tr>
+          <tr>
+            <td class="py-2.5 px-4">会員の動画視聴%・操作</td>
+            <td class="text-center partial">基本のみ<br><span class="text-xs text-gray-400">再生/完了</span></td>
+            <td class="text-center partial">基本のみ</td>
+            <td class="text-center no">不可</td>
+            <td class="text-center yes font-bold">全操作記録</td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <!-- GA4の設定手順 -->
+    <div class="grid grid-cols-2 gap-6 mb-8">
+      <div class="bg-white rounded-xl border border-gray-200 p-6">
+        <div class="flex items-center gap-2 mb-4">
+          <div class="w-8 h-8 bg-orange-100 rounded-lg flex items-center justify-center">
+            <span class="text-orange-600 font-bold text-sm">G</span>
+          </div>
+          <h3 class="font-bold">GA4 の設定手順</h3>
+        </div>
+
+        <!-- Step 1 -->
+        <div class="flex gap-3 mb-4">
+          <div class="step-num bg-orange-100 text-orange-700">1</div>
+          <div>
+            <div class="text-sm font-semibold mb-1">GA4管理画面で有効化</div>
+            <div class="text-xs text-gray-500">プロパティ設定 → レポート用識別子 → 「User-IDとデバイスのデータに基づく」を選択</div>
+            <div class="warn-box mt-2 text-xs text-amber-700">これをやらないとUser-IDが機能しない</div>
+          </div>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="flex gap-3 mb-4">
+          <div class="step-num bg-orange-100 text-orange-700">2</div>
+          <div class="flex-1">
+            <div class="text-sm font-semibold mb-1">GTMで変数を作成（GTM利用時）</div>
+            <div class="text-xs text-gray-500 mb-2">GTM → 変数 → 新規 → データレイヤー変数「userId」を作成</div>
+          </div>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="flex gap-3 mb-4">
+          <div class="step-num bg-orange-100 text-orange-700">3</div>
+          <div class="flex-1">
+            <div class="text-sm font-semibold mb-1">サイト側JSでdataLayerに送信</div>
+            <div class="code-block mt-2">
+              <span class="code-comment">// ログイン成功時に実行</span><br>
+              <span class="code-func">dataLayer</span>.<span class="code-func">push</span>({<br>
+              &nbsp;&nbsp;<span class="code-key">userId</span>: <span class="code-str">'member_5821'</span><br>
+              });
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 4 -->
+        <div class="flex gap-3 mb-4">
+          <div class="step-num bg-orange-100 text-orange-700">4</div>
+          <div class="flex-1">
+            <div class="text-sm font-semibold mb-1">GTMのGA4タグにUser-IDを紐付け</div>
+            <div class="text-xs text-gray-500">GA4設定タグ → 「User-IDを設定」フィールドに変数を割り当て → GTMを公開</div>
+          </div>
+        </div>
+
+        <!-- Alternative -->
+        <div class="border-t border-gray-100 pt-4 mt-2">
+          <div class="text-xs text-gray-500 mb-2 font-semibold">gtag.js直書きの場合（GTM不使用時）</div>
+          <div class="code-block">
+            <span class="code-func">gtag</span>(<span class="code-str">'config'</span>, <span class="code-str">'G-XXXXXXX'</span>, {<br>
+            &nbsp;&nbsp;<span class="code-key">'user_id'</span>: <span class="code-str">'member_5821'</span><br>
+            });
+          </div>
+        </div>
+
+        <!-- できること -->
+        <div class="mt-4 space-y-2">
+          <div class="text-sm font-semibold text-green-600">できること</div>
+          <div class="text-xs text-gray-600 space-y-1.5">
+            <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>ログイン後のuser_id付きデータをAWS会員DBと結合可能（BQ経由）</div>
+            <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>会員別のCV時流入元・ページ遷移・プラン別比較</div>
+          </div>
+        </div>
+        <!-- 注意点 -->
+        <div class="mt-3 space-y-2">
+          <div class="text-sm font-semibold text-red-600">制限</div>
+          <div class="text-xs text-gray-600 space-y-1.5">
+            <div class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span>設定前の過去データには遡及適用されない</div>
+            <div class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span>ログイン前の匿名行動はCookie(client_id)切れリスクで紐付け不確実</div>
+            <div class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span>User-IDレポートは「探索」から手動で作成が必要</div>
+            <div class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span>標準レポートにUser-ID軸はデフォルト非表示</div>
+            <div class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span>経路分析は10ステップ制限が残る</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- UGOKI MAP -->
+      <div class="bg-white rounded-xl border border-blue-200 p-6 ring-1 ring-blue-100">
+        <div class="flex items-center gap-2 mb-4">
+          <div class="w-8 h-8 bg-gradient-to-br from-pink-500 to-blue-600 rounded-lg flex items-center justify-center">
+            <span class="text-white font-bold text-sm">U</span>
+          </div>
+          <h3 class="font-bold">UGOKI MAP の設定手順</h3>
+        </div>
+
+        <!-- Step 1 only -->
+        <div class="flex gap-3 mb-4">
+          <div class="step-num bg-blue-100 text-blue-700">1</div>
+          <div class="flex-1">
+            <div class="text-sm font-semibold mb-1">ログイン成功時にJSを1行追加</div>
+            <div class="code-block mt-2">
+              <span class="code-comment">// これだけ。管理画面の設定変更なし</span><br>
+              <span class="code-func">ClickInsight</span>.<span class="code-func">track</span>({<br>
+              &nbsp;&nbsp;<span class="code-key">event_type</span>: <span class="code-str">'identify'</span>,<br>
+              &nbsp;&nbsp;<span class="code-key">user_external_id</span>: <span class="code-str">'member_5821'</span><br>
+              });
+            </div>
+          </div>
+        </div>
+
+        <div class="ok-box mb-4">
+          <div class="text-xs text-green-700 font-semibold mb-1">これで完了。他に必要な設定はありません。</div>
+        </div>
+
+        <!-- メリット -->
+        <div class="space-y-2">
+          <div class="text-sm font-semibold text-green-600">できること</div>
+          <div class="text-xs text-gray-600 space-y-1.5">
+            <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>管理画面の設定変更不要</div>
+            <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>GTM不要</div>
+            <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span><strong>ログイン前の匿名行動も自動紐付け</strong><br>（localStorage の user_id が同一のため）</div>
+            <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>全レポートで即座に会員IDで分析可能</div>
+            <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>ステップ数制限なし — 全ページ遷移を追跡</div>
+            <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>AWS等の外部DBとexternal_idで即時結合</div>
+          </div>
+        </div>
+
+        <!-- 仕組み図 -->
+        <div class="mt-6 p-4 bg-gray-50 rounded-lg">
+          <div class="text-xs font-semibold text-gray-700 mb-3">紐付けの仕組み</div>
+          <div class="space-y-2 text-xs text-gray-600">
+            <div class="flex items-center gap-2">
+              <span class="bg-gray-200 text-gray-600 px-2 py-0.5 rounded font-mono">初回訪問</span>
+              <span class="text-gray-400">&rarr;</span>
+              <span>user_id: <span class="font-mono text-blue-600">abc123</span>（自動生成・匿名）</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="bg-gray-200 text-gray-600 px-2 py-0.5 rounded font-mono">2回目訪問</span>
+              <span class="text-gray-400">&rarr;</span>
+              <span>user_id: <span class="font-mono text-blue-600">abc123</span>（同一localStorage）</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="bg-green-100 text-green-700 px-2 py-0.5 rounded font-mono">会員登録</span>
+              <span class="text-gray-400">&rarr;</span>
+              <span>user_id: <span class="font-mono text-blue-600">abc123</span> = external_id: <span class="font-mono text-green-600">member_5821</span></span>
+            </div>
+            <div class="mt-2 text-xs text-green-700 font-medium">→ 初回訪問〜会員登録までの全行動が member_5821 に紐付く</div>
+          </div>
+        </div>
+
+        <!-- GA4との比較 -->
+        <div class="mt-6 p-4 bg-orange-50 rounded-lg">
+          <div class="text-xs font-semibold text-orange-700 mb-2">GA4 + BigQuery の場合、同じシナリオで起こること</div>
+          <div class="space-y-2 text-xs text-gray-600">
+            <div class="flex items-center gap-2">
+              <span class="bg-gray-200 text-gray-600 px-2 py-0.5 rounded font-mono">初回訪問</span>
+              <span class="text-gray-400">&rarr;</span>
+              <span>client_id: <span class="font-mono text-gray-500">xyz789</span>（匿名Cookie）</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="bg-gray-200 text-gray-600 px-2 py-0.5 rounded font-mono">2回目訪問</span>
+              <span class="text-gray-400">&rarr;</span>
+              <span>client_id: <span class="font-mono text-gray-500">xyz789</span>（同一Cookieなら同一）</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="bg-orange-100 text-orange-700 px-2 py-0.5 rounded font-mono">会員登録</span>
+              <span class="text-gray-400">&rarr;</span>
+              <span>user_id: <span class="font-mono text-orange-600">member_5821</span> を送信</span>
+            </div>
+            <div class="mt-2 text-xs text-orange-700">
+              <span class="font-medium text-green-700">→ ログイン後のデータはuser_idでAWS会員DBと結合可能（BQ保存済みなら永久）</span><br>
+              <span class="font-medium">→ ログイン前の匿名行動はBQでclient_id結合を試みることが可能</span><br>
+              <span class="text-red-600">→ ただし初回訪問〜ログインまでにCookieが切れていた場合のみ紐付け不可</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Clarity -->
+    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-8">
+      <div class="flex items-center gap-2 mb-4">
+        <div class="w-8 h-8 bg-teal-100 rounded-lg flex items-center justify-center">
+          <span class="text-teal-600 font-bold text-sm">C</span>
+        </div>
+        <h3 class="font-bold">Microsoft Clarity の設定手順</h3>
+      </div>
+      <div class="grid grid-cols-2 gap-6">
+        <div>
+          <div class="flex gap-3 mb-3">
+            <div class="step-num bg-teal-100 text-teal-700">1</div>
+            <div class="flex-1">
+              <div class="text-sm font-semibold mb-1">JS APIでカスタムIDを設定</div>
+              <div class="code-block mt-2">
+                <span class="code-func">clarity</span>(<span class="code-str">'identify'</span>, <span class="code-str">'member_5821'</span>);
+              </div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="text-sm font-semibold text-gray-700 mb-2">制限</div>
+          <div class="text-xs text-gray-600 space-y-1.5">
+            <div class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span>セッション録画のフィルターとしてのみ使用可能</div>
+            <div class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span>会員ID単位での行動集計・分析は不可</div>
+            <div class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span>外部DBとの結合機能なし</div>
+            <div class="flex gap-2"><span class="text-red-500 flex-shrink-0">&#10007;</span>過去データへの遡及不可</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ユースケース -->
+    <div class="bg-gradient-to-br from-blue-50 to-purple-50 rounded-xl border border-blue-200 p-6">
+      <h3 class="font-bold mb-4">会員ID紐付けで可能になる分析（UGOKI MAP）</h3>
+      <div class="grid grid-cols-2 gap-4">
+        <div class="bg-white rounded-lg p-4">
+          <div class="text-sm font-semibold mb-2">会員別の全行動履歴</div>
+          <div class="text-xs text-gray-500">田中さんが初回訪問〜CV〜利用開始まで、全ページ遷移・クリック・スクロール・フォーム入力を閲覧</div>
+        </div>
+        <div class="bg-white rounded-lg p-4">
+          <div class="text-sm font-semibold mb-2">プラン別の事前行動パターン</div>
+          <div class="text-xs text-gray-500">プランA契約者 vs プランB契約者が、CV前にどのページを見ていたかを比較</div>
+        </div>
+        <div class="bg-white rounded-lg p-4">
+          <div class="text-sm font-semibold mb-2">LTV × 流入元の分析</div>
+          <div class="text-xs text-gray-500">高LTV顧客がどの広告・キーワード経由で来たかを特定し、広告予算を最適化</div>
+        </div>
+        <div class="bg-white rounded-lg p-4">
+          <div class="text-sm font-semibold mb-2">解約予兆の検出</div>
+          <div class="text-xs text-gray-500">ログイン後の行動パターン変化（利用頻度低下・特定ページ未訪問）をアラート</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /tab-userid -->
+
+</div>
+
+<script>
+function switchTab(tabId) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + tabId).classList.add('active');
+  event.target.classList.add('active');
+  if (tabId === 'cvpath') { setTimeout(()=>{ drawGA4Sankey(); drawUgokiSankey('all'); }, 50); }
+}
+
+/* ======== GA4 Sankey ======== */
+function drawGA4Sankey() {
+  const svg = document.getElementById('ga4-svg');
+  if (!svg) return;
+  const W = svg.parentElement.offsetWidth || 900;
+  svg.setAttribute('width', W);
+  svg.innerHTML = '';
+
+  const cols = [
+    { x: 0, w: W*0.18, items: [
+      { label:'(not set)', v:1 },
+      { label:'サービス紹介|リフ...', v:1 },
+      { label:'施工の流れ|リフ...', v:1 },
+      { label:'施工実績一覧|リ...', v:1 },
+    ]},
+    { x: W*0.20, w: W*0.18, items: [
+      { label:'サービス紹介|リフ...', v:8 },
+      { label:'料金プラン|リフォ...', v:2 },
+      { label:'施工実績一覧|リ...', v:1 },
+      { label:'対応エリア|リフォ...', v:1 },
+      { label:'よくある質問|リフ...', v:1 },
+    ]},
+    { x: W*0.40, w: W*0.18, items: [
+      { label:'CONTACT|リフォ...', v:12 },
+      { label:'料金プラン|リフォ...', v:3 },
+      { label:'施工実績 事例...',  v:2 },
+      { label:'会社概要|リフォ...', v:1 },
+      { label:'お客様の声|リフ...', v:1 },
+      { label:'ブログ一覧|リフ...', v:1 },
+    ]},
+    { x: W*0.60, w: W*0.18, items: [
+      { label:'THANK|リフォーム...', v:22 },
+    ]},
+    { x: W*0.82, w: W*0.14, items: [
+      { label:'CV完了', v:22 },
+    ]},
+  ];
+
+  // flows between columns
+  const flows = [
+    // col0 -> col1
+    {from:[0,0],to:[1,0],v:1},{from:[0,1],to:[1,0],v:1},{from:[0,2],to:[1,1],v:1},{from:[0,3],to:[1,0],v:1},
+    // col1 -> col2
+    {from:[1,0],to:[2,0],v:6},{from:[1,0],to:[2,1],v:1},{from:[1,0],to:[2,2],v:1},
+    {from:[1,1],to:[2,0],v:2},{from:[1,2],to:[2,0],v:1},
+    {from:[1,3],to:[2,3],v:1},{from:[1,4],to:[2,0],v:1},
+    // col2 -> col3
+    {from:[2,0],to:[3,0],v:12},{from:[2,1],to:[3,0],v:3},{from:[2,2],to:[3,0],v:2},
+    {from:[2,3],to:[3,0],v:1},{from:[2,4],to:[3,0],v:1},{from:[2,5],to:[3,0],v:1},
+    // col3 -> col4
+    {from:[3,0],to:[4,0],v:22},
+  ];
+
+  const barH = 6, gap = 8, maxV = 22, topPad = 10;
+  const color = '#8ab4f8';
+  const barColor = '#8ab4f8';
+
+  // compute y positions
+  cols.forEach(col => {
+    let y = topPad;
+    col.items.forEach(item => {
+      const h = Math.max(barH, (item.v / maxV) * 120);
+      item.y = y; item.h = h;
+      y += h + gap;
+    });
+  });
+
+  // draw bars + labels
+  cols.forEach((col, ci) => {
+    col.items.forEach((item, ii) => {
+      const rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
+      rect.setAttribute('x', col.x); rect.setAttribute('y', item.y);
+      rect.setAttribute('width', col.w * 0.85); rect.setAttribute('height', item.h);
+      rect.setAttribute('fill', barColor); rect.setAttribute('rx', 2); rect.setAttribute('opacity', 0.7);
+      svg.appendChild(rect);
+
+      const txt = document.createElementNS('http://www.w3.org/2000/svg','text');
+      txt.setAttribute('x', col.x);
+      txt.setAttribute('y', item.y - 3);
+      txt.setAttribute('font-size', '11'); txt.setAttribute('fill', '#3c4043'); txt.setAttribute('font-family', 'Inter, sans-serif');
+      txt.textContent = item.label;
+      svg.appendChild(txt);
+
+      const numTxt = document.createElementNS('http://www.w3.org/2000/svg','text');
+      numTxt.setAttribute('x', col.x + col.w * 0.85 + 4);
+      numTxt.setAttribute('y', item.y + item.h / 2 + 4);
+      numTxt.setAttribute('font-size', '11'); numTxt.setAttribute('fill', '#5f6368'); numTxt.setAttribute('font-weight', '600'); numTxt.setAttribute('font-family', 'Inter, sans-serif');
+      numTxt.textContent = item.v;
+      svg.appendChild(numTxt);
+    });
+  });
+
+  // draw flows
+  flows.forEach(f => {
+    const sc = cols[f.from[0]], si = sc.items[f.from[1]];
+    const dc = cols[f.to[0]], di = dc.items[f.to[1]];
+    const sx = sc.x + sc.w * 0.85, sy = si.y + si.h / 2;
+    const dx = dc.x, dy = di.y + di.h / 2;
+    const thickness = Math.max(2, (f.v / maxV) * 40);
+    const mx = (sx + dx) / 2;
+    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+    path.setAttribute('d', `M${sx},${sy} C${mx},${sy} ${mx},${dy} ${dx},${dy}`);
+    path.setAttribute('fill', 'none'); path.setAttribute('stroke', barColor);
+    path.setAttribute('stroke-width', thickness); path.setAttribute('opacity', 0.25);
+    svg.appendChild(path);
+  });
+
+  // red overlay - no medium column
+  const overlay = document.createElementNS('http://www.w3.org/2000/svg','g');
+  const dashLine = document.createElementNS('http://www.w3.org/2000/svg','line');
+  dashLine.setAttribute('x1', 0); dashLine.setAttribute('y1', 0);
+  dashLine.setAttribute('x2', 0); dashLine.setAttribute('y2', 520);
+  dashLine.setAttribute('stroke', '#ef4444'); dashLine.setAttribute('stroke-width', 2);
+  dashLine.setAttribute('stroke-dasharray', '6,4'); dashLine.setAttribute('opacity', 0.6);
+  overlay.appendChild(dashLine);
+  const noLabel = document.createElementNS('http://www.w3.org/2000/svg','text');
+  noLabel.setAttribute('x', 4); noLabel.setAttribute('y', 510);
+  noLabel.setAttribute('font-size', '10'); noLabel.setAttribute('fill', '#ef4444'); noLabel.setAttribute('font-weight', '600');
+  noLabel.textContent = '流入メディア列なし';
+  overlay.appendChild(noLabel);
+  svg.appendChild(overlay);
+
+  svg.setAttribute('height', Math.max(350, cols.reduce((m,c) => Math.max(m, c.items.reduce((s,i) => Math.max(s, i.y+i.h), 0)), 0) + 40));
+}
+
+/* ======== UGOKI MAP Sankey ======== */
+/* ======== 20-step UGOKI MAP data & renderer ======== */
+let ugokiStepCount = 20;
+let ugokiTooltip = null;
+
+const ugokiPages = [
+  'トップページ','サービス紹介','料金プラン','施工実績','会社概要','お客様の声',
+  'ブログ記事','対応エリア','よくある質問','スタッフ紹介','採用情報',
+  'ブログ詳細A','ブログ詳細B','施工事例 詳細','料金シミュレーション',
+  'お知らせ一覧','お知らせ詳細','プライバシーポリシー','サイトマップ','特商法表記',
+  'LP(広告専用)','LP(キャンペーン)','資料請求','無料相談','見積もり依頼',
+];
+
+const ugokiMediums = [
+  { id:'organic', label:'organic / google', v:22, color:'#16a34a' },
+  { id:'cpc', label:'cpc / google', v:12, color:'#2563eb' },
+  { id:'referral', label:'referral / suumo', v:6, color:'#ca8a04' },
+  { id:'social', label:'social / instagram', v:5, color:'#db2777' },
+  { id:'direct', label:'direct / (none)', v:3, color:'#57534e' },
+];
+
+// Generate realistic 20-step paths (seeded pseudo-random for consistency)
+function generatePaths(stepCount) {
+  const seed = 42; let rng = seed;
+  function rand() { rng = (rng * 16807 + 0) % 2147483647; return (rng & 0xfffffff) / 0xfffffff; }
+
+  const pathsByMedium = {};
+  const landingPages = {
+    organic: ['トップページ','サービス紹介','ブログ記事','施工実績','対応エリア'],
+    cpc: ['LP(広告専用)','LP(キャンペーン)','LP(広告専用)'],
+    referral: ['施工実績','トップページ','お客様の声'],
+    social: ['施工実績','ブログ記事'],
+    direct: ['トップページ','料金プラン'],
+  };
+
+  const browsePages = ['サービス紹介','料金プラン','施工実績','会社概要','お客様の声',
+    'ブログ記事','対応エリア','よくある質問','スタッフ紹介','採用情報',
+    'ブログ詳細A','ブログ詳細B','施工事例 詳細','料金シミュレーション',
+    'お知らせ一覧','お知らせ詳細','プライバシーポリシー','サイトマップ'];
+  const cvPages = ['お問い合わせ','資料請求','無料相談','見積もり依頼'];
+
+  ugokiMediums.forEach(med => {
+    const paths = [];
+    const lps = landingPages[med.id];
+    const numPaths = Math.max(2, Math.ceil(med.v / 3));
+
+    let remaining = med.v;
+    for (let i = 0; i < numPaths && remaining > 0; i++) {
+      const v = i === numPaths - 1 ? remaining : Math.max(1, Math.round(remaining * (0.3 + rand() * 0.4)));
+      remaining -= v;
+      const steps = [lps[Math.floor(rand() * lps.length)]];
+      const actualSteps = Math.max(2, stepCount - 2); // minus medium col and CV result
+      for (let s = 1; s < actualSteps - 1; s++) {
+        let next;
+        do { next = browsePages[Math.floor(rand() * browsePages.length)]; } while (next === steps[steps.length - 1]);
+        steps.push(next);
+      }
+      steps.push(cvPages[Math.floor(rand() * cvPages.length)]);
+      paths.push({ steps, v });
+    }
+    pathsByMedium[med.id] = paths;
+  });
+  return pathsByMedium;
+}
+
+function changeStepCount(count, btn) {
+  ugokiStepCount = count;
+  document.querySelectorAll('.step-select').forEach(b => {
+    b.style.background = '#fff'; b.style.color = '#374151'; b.style.border = '1px solid #d1d5db'; b.style.fontWeight = '500';
+  });
+  btn.style.background = '#2563eb'; btn.style.color = '#fff'; btn.style.border = '1px solid #2563eb'; btn.style.fontWeight = '600';
+  // re-read current filter
+  const activeFilter = document.querySelector('.ugoki-filter[style*="background: rgb(37, 99, 235)"],.ugoki-filter[style*="background:#2563eb"]');
+  const medium = activeFilter ? activeFilter.dataset.medium : 'all';
+  drawUgokiSankey(medium);
+}
+
+function filterUgoki(medium, btn) {
+  document.querySelectorAll('.ugoki-filter').forEach(b => {
+    b.style.background = '#fff'; b.style.color = '#374151'; b.style.fontWeight = '500';
+  });
+  btn.style.background = '#2563eb'; btn.style.color = '#fff'; btn.style.fontWeight = '600';
+  drawUgokiSankey(medium);
+}
+
+function drawUgokiSankey(filterMedium) {
+  const svg = document.getElementById('ugoki-svg');
+  const headerRow = document.getElementById('ugoki-header-row');
+  if (!svg || !headerRow) return;
+  svg.innerHTML = '';
+  headerRow.innerHTML = '';
+
+  if (!ugokiTooltip) {
+    ugokiTooltip = document.createElement('div');
+    ugokiTooltip.style.cssText = 'position:fixed;pointer-events:none;background:#1e293b;color:#f1f5f9;font-size:11px;padding:8px 12px;border-radius:6px;z-index:9999;display:none;max-width:320px;line-height:1.5;box-shadow:0 4px 12px rgba(0,0,0,.25);';
+    document.body.appendChild(ugokiTooltip);
+  }
+
+  const stepCount = ugokiStepCount;
+  const paths = generatePaths(stepCount);
+  const mediums = filterMedium === 'all' ? ugokiMediums : ugokiMediums.filter(m => m.id === filterMedium);
+
+  // Total columns: 1(medium) + (stepCount-2)(pages) + 1(CV result) = stepCount
+  const numPageCols = stepCount - 2; // page columns between medium and CV result
+  const totalCols = stepCount; // medium + page cols + CV result
+  const colWidth = 130;
+  const colGap = 20;
+  const totalW = totalCols * colWidth + (totalCols - 1) * colGap + 40;
+  const topPad = 10, gap = 8, barMinH = 8;
+
+  svg.setAttribute('width', totalW);
+
+  // Build header
+  const headerLabels = ['流入メディア'];
+  headerLabels.push('ランディング');
+  for (let i = 1; i < numPageCols - 1; i++) headerLabels.push('回遊 ' + i);
+  headerLabels.push('CVページ');
+  headerLabels.push('結果');
+
+  headerLabels.forEach((label, i) => {
+    const div = document.createElement('div');
+    div.style.cssText = `min-width:${colWidth}px; width:${colWidth}px; text-align:center; padding:8px 4px; font-size:10px; font-weight:600; color:${i === 0 ? '#6366f1' : i === totalCols - 1 ? '#16a34a' : '#5f6368'};`;
+    if (i === 0) {
+      div.innerHTML = '<div style="font-weight:700;text-transform:uppercase;letter-spacing:.5px;">流入メディア</div><div style="font-size:9px;color:#a5b4fc;margin-top:1px;">Medium / Source</div>';
+    } else {
+      div.textContent = label;
+    }
+    // GA4 limit indicator
+    if (i === 11) { // step 10 = GA4 limit
+      div.style.borderLeft = '2px dashed #ef4444';
+      div.title = 'GA4はここまで（10ステップ上限）';
+    }
+    headerRow.appendChild(div);
+    if (i < headerLabels.length - 1) {
+      const arrow = document.createElement('div');
+      arrow.style.cssText = `min-width:${colGap}px; width:${colGap}px; display:flex; align-items:center; justify-content:center; color:#d1d5db; font-size:12px;`;
+      arrow.textContent = '\u2192';
+      headerRow.appendChild(arrow);
+    }
+  });
+
+  // Collect nodes per column
+  const colNodes = [];
+  for (let c = 0; c < totalCols; c++) colNodes.push({});
+
+  mediums.forEach(med => {
+    colNodes[0][med.label] = (colNodes[0][med.label] || 0) + med.v;
+    (paths[med.id] || []).forEach(p => {
+      p.steps.forEach((page, si) => {
+        const ci = si + 1; // column index (0 = medium)
+        if (ci < totalCols - 1) {
+          colNodes[ci][page] = (colNodes[ci][page] || 0) + p.v;
+        }
+      });
+    });
+  });
+  // CV result column
+  const totalCV = mediums.reduce((s, m) => s + m.v, 0);
+  colNodes[totalCols - 1]['CV完了'] = totalCV;
+
+  // Convert to sorted arrays
+  const columns = colNodes.map(obj =>
+    Object.entries(obj).sort((a, b) => b[1] - a[1]).map(([label, v]) => ({ label, v, y: 0, h: 0 }))
+  );
+
+  const totalMaxV = Math.max(...columns.map(c => c.reduce((s, n) => s + n.v, 0)), 1);
+
+  // Layout Y positions
+  columns.forEach(col => {
+    let y = topPad;
+    col.forEach(node => {
+      node.h = Math.max(barMinH, (node.v / totalMaxV) * 220);
+      node.y = y;
+      y += node.h + gap;
+    });
+  });
+
+  // Column X positions
+  const colXs = [];
+  for (let c = 0; c < totalCols; c++) colXs.push(20 + c * (colWidth + colGap));
+
+  function findNode(ci, label) { return columns[ci]?.find(n => n.label === label) || null; }
+
+  // Draw flows
+  const flowGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  const yOffsets = {};
+  function getOff(k) { return yOffsets[k] || 0; }
+  function addOff(k, v) { yOffsets[k] = (yOffsets[k] || 0) + v; }
+
+  mediums.forEach(med => {
+    (paths[med.id] || []).forEach(p => {
+      const chain = [{ ci: 0, label: med.label }];
+      p.steps.forEach((page, si) => { chain.push({ ci: si + 1, label: page }); });
+      chain.push({ ci: totalCols - 1, label: 'CV完了' });
+
+      const thickness = Math.max(1.5, (p.v / totalMaxV) * 80);
+
+      for (let i = 0; i < chain.length - 1; i++) {
+        const sn = findNode(chain[i].ci, chain[i].label);
+        const dn = findNode(chain[i + 1].ci, chain[i + 1].label);
+        if (!sn || !dn) continue;
+
+        const sK = chain[i].ci + '-' + chain[i].label + '-o';
+        const dK = chain[i + 1].ci + '-' + chain[i + 1].label + '-i';
+        const sx = colXs[chain[i].ci] + colWidth;
+        const sy = sn.y + getOff(sK) + thickness / 2;
+        const dx = colXs[chain[i + 1].ci];
+        const dy = dn.y + getOff(dK) + thickness / 2;
+        const mx = (sx + dx) / 2;
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', `M${sx},${sy} C${mx},${sy} ${mx},${dy} ${dx},${dy}`);
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke', med.color);
+        path.setAttribute('stroke-width', thickness);
+        path.setAttribute('opacity', 0.15);
+        path.style.transition = 'opacity .2s';
+
+        const tooltipHtml = `<strong>${med.label}</strong><br>${p.steps.join(' → ')}<br><strong>${p.v} CV</strong>`;
+        path.addEventListener('mouseenter', function (e) {
+          this.setAttribute('opacity', 0.5);
+          ugokiTooltip.innerHTML = tooltipHtml;
+          ugokiTooltip.style.display = 'block';
+        });
+        path.addEventListener('mousemove', function (e) {
+          ugokiTooltip.style.left = (e.clientX + 12) + 'px';
+          ugokiTooltip.style.top = (e.clientY - 30) + 'px';
+        });
+        path.addEventListener('mouseleave', function () {
+          this.setAttribute('opacity', 0.15);
+          ugokiTooltip.style.display = 'none';
+        });
+        flowGroup.appendChild(path);
+        addOff(sK, thickness);
+        addOff(dK, thickness);
+      }
+    });
+  });
+  svg.appendChild(flowGroup);
+
+  // Draw bars
+  columns.forEach((col, ci) => {
+    const isMedium = ci === 0;
+    const isCvResult = ci === totalCols - 1;
+    col.forEach(node => {
+      const med = isMedium ? ugokiMediums.find(m => m.label === node.label) : null;
+      const barFill = isCvResult ? '#16a34a' : med ? med.color : '#94a3b8';
+      const barOpacity = isMedium || isCvResult ? 0.85 : 0.5;
+
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('x', colXs[ci]); rect.setAttribute('y', node.y);
+      rect.setAttribute('width', colWidth); rect.setAttribute('height', node.h);
+      rect.setAttribute('fill', barFill); rect.setAttribute('rx', 3); rect.setAttribute('opacity', barOpacity);
+      rect.style.cursor = 'pointer'; rect.style.transition = 'opacity .15s';
+      rect.addEventListener('mouseenter', function () { this.setAttribute('opacity', 1); });
+      rect.addEventListener('mouseleave', function () { this.setAttribute('opacity', barOpacity); });
+      svg.appendChild(rect);
+
+      // Label
+      const maxChars = isMedium ? 16 : 10;
+      const dl = node.label.length > maxChars ? node.label.slice(0, maxChars) + '..' : node.label;
+      const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      txt.setAttribute('x', colXs[ci] + 5);
+      txt.setAttribute('y', node.y + node.h / 2 + 4);
+      txt.setAttribute('font-size', '10'); txt.setAttribute('fill', '#fff');
+      txt.setAttribute('font-weight', isMedium ? '700' : '500');
+      txt.setAttribute('font-family', 'Inter, sans-serif');
+      txt.textContent = dl; txt.style.pointerEvents = 'none';
+      svg.appendChild(txt);
+
+      // Count badge (right of bar)
+      const badge = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      badge.setAttribute('x', colXs[ci] + colWidth + 3);
+      badge.setAttribute('y', node.y + node.h / 2 + 4);
+      badge.setAttribute('font-size', '10'); badge.setAttribute('fill', '#374151');
+      badge.setAttribute('font-weight', '700'); badge.setAttribute('font-family', 'Inter, sans-serif');
+      badge.textContent = node.v;
+      svg.appendChild(badge);
+    });
+  });
+
+  // GA4 limit line at step 10
+  if (stepCount > 10) {
+    const limitX = colXs[11] - colGap / 2;
+    const limitLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    limitLine.setAttribute('x1', limitX); limitLine.setAttribute('y1', 0);
+    limitLine.setAttribute('x2', limitX); limitLine.setAttribute('y2', 600);
+    limitLine.setAttribute('stroke', '#ef4444'); limitLine.setAttribute('stroke-width', 2);
+    limitLine.setAttribute('stroke-dasharray', '6,4'); limitLine.setAttribute('opacity', 0.5);
+    svg.appendChild(limitLine);
+    const limitTxt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    limitTxt.setAttribute('x', limitX + 4); limitTxt.setAttribute('y', 14);
+    limitTxt.setAttribute('font-size', '9'); limitTxt.setAttribute('fill', '#ef4444'); limitTxt.setAttribute('font-weight', '600');
+    limitTxt.textContent = 'GA4上限（10ステップ）';
+    svg.appendChild(limitTxt);
+  }
+
+  // Update SVG height
+  const maxH = Math.max(...columns.map(c => c.length ? c[c.length - 1].y + c[c.length - 1].h : 0)) + 30;
+  svg.setAttribute('height', maxH);
+
+  // Update stats
+  document.getElementById('ugoki-cv-total').textContent = totalCV;
+  ugokiMediums.forEach(m => {
+    const el = document.getElementById('stat-' + m.id);
+    if (el) el.parentElement.style.opacity = (filterMedium === 'all' || filterMedium === m.id) ? '1' : '0.3';
+  });
+}
+
+// Auto-draw when cvpath tab is visible on load
+document.addEventListener('DOMContentLoaded', function() {
+  if (document.getElementById('tab-cvpath')?.classList.contains('active')) {
+    drawGA4Sankey(); drawUgokiSankey('all');
+  }
+});
+</script>
+</body>
+</html>

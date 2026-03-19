@@ -210,16 +210,39 @@
     return sessionId;
   };
 
-  // User ID management
+  // Root domain cookie helpers
+  const getRootDomain = () => {
+    const parts = location.hostname.split('.');
+    if (parts.length <= 1 || /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname)) return location.hostname;
+    const twoPartTlds = ['co.jp','or.jp','ne.jp','ac.jp','go.jp','com.au','co.uk','org.uk','co.kr'];
+    const last2 = parts.slice(-2).join('.');
+    if (twoPartTlds.includes(last2) && parts.length >= 3) return '.' + parts.slice(-3).join('.');
+    return '.' + parts.slice(-2).join('.');
+  };
+
+  const setCookie = (name, value, maxAgeDays) => {
+    const domain = getRootDomain();
+    document.cookie = `${name}=${value}; domain=${domain}; path=/; max-age=${maxAgeDays * 86400}; SameSite=Lax`;
+  };
+
+  const getCookie = (name) => {
+    const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+    return match ? match[1] : null;
+  };
+
+  // User ID management (root domain cookie)
   const getUserId = () => {
-    let userId = localStorage.getItem('ci_user_id');
+    let userId = getCookie('ci_user_id');
     if (!userId) {
-      userId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-        const r = (Math.random() * 16) | 0;
-        const v = c === 'x' ? r : (r & 0x3) | 0x8;
-        return v.toString(16);
-      });
-      localStorage.setItem('ci_user_id', userId);
+      userId = localStorage.getItem('ci_user_id');
+      if (!userId) {
+        userId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+          const r = (Math.random() * 16) | 0;
+          const v = c === 'x' ? r : (r & 0x3) | 0x8;
+          return v.toString(16);
+        });
+      }
+      setCookie('ci_user_id', userId, 730);
     }
     return userId;
   };
@@ -231,6 +254,11 @@
     initRecording();
   }
 })();
+
+
+
+
+
 
 
 

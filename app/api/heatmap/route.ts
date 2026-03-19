@@ -42,16 +42,50 @@ export async function GET(request: NextRequest) {
 
     if (!heatmapData || heatmapData.length === 0) {
       try {
-        // クリックヒートマップの場合は集約テーブルから取得
+        // クリックヒートマップの場合は集約テーブルから取得を試みる
         if (heatmapType === 'click') {
-          heatmapData = await getHeatmapDataFromQuery({
+          try {
+            heatmapData = await getHeatmapDataFromQuery({
             siteId,
             pageUrl,
             deviceType: deviceType || undefined,
             heatmapType: 'click',
             startDate: startDate || undefined,
             endDate: endDate || undefined,
-          })
+            })
+            
+            // 集約テーブルにデータがない場合、既存ロジックにフォールバック
+            if (!heatmapData || heatmapData.length === 0) {
+              console.log('No data in heatmap_daily_summary, falling back to legacy query')
+              heatmapData = await getHeatmapDataLegacy(
+                siteId,
+                pageUrl,
+                deviceType || undefined,
+                startDate || undefined,
+                endDate || undefined,
+                heatmapType
+              )
+            }
+          } catch (summaryError: any) {
+            // 集約テーブルが存在しない、またはエラーが発生した場合、既存ロジックにフォールバック
+            console.warn('Error fetching from heatmap_daily_summary, falling back to legacy query:', {
+              error: summaryError?.message || String(summaryError),
+              code: summaryError?.code,
+            })
+            try {
+              heatmapData = await getHeatmapDataLegacy(
+                siteId,
+                pageUrl,
+                deviceType || undefined,
+                startDate || undefined,
+                endDate || undefined,
+                heatmapType
+              )
+            } catch (legacyError) {
+              console.error('Error fetching heatmap data from legacy query:', legacyError)
+              throw legacyError
+            }
+          }
         } else {
           // スクロール・熟読ヒートマップは既存ロジックを使用
           heatmapData = await getHeatmapDataLegacy(
@@ -118,17 +152,46 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // ClickHouseからデータを取得（集約テーブルから）
+    // ClickHouseからデータを取得（集約テーブルから、失敗時は既存ロジックにフォールバック）
     let heatmapData: any[] = []
     try {
-      heatmapData = await getHeatmapDataFromQuery({
-        siteId: site_id,
-        pageUrl: page_url,
-        deviceType: device_type || undefined,
-        heatmapType: 'click',
-        startDate: start_date || undefined,
-        endDate: end_date || undefined,
-      })
+      try {
+        heatmapData = await getHeatmapDataFromQuery({
+          siteId: site_id,
+          pageUrl: page_url,
+          deviceType: device_type || undefined,
+          heatmapType: 'click',
+          startDate: start_date || undefined,
+          endDate: end_date || undefined,
+        })
+        
+        // 集約テーブルにデータがない場合、既存ロジックにフォールバック
+        if (!heatmapData || heatmapData.length === 0) {
+          console.log('No data in heatmap_daily_summary, falling back to legacy query')
+          heatmapData = await getHeatmapDataLegacy(
+            site_id,
+            page_url,
+            device_type || undefined,
+            start_date || undefined,
+            end_date || undefined,
+            'click'
+          )
+        }
+      } catch (summaryError: any) {
+        // 集約テーブルが存在しない、またはエラーが発生した場合、既存ロジックにフォールバック
+        console.warn('Error fetching from heatmap_daily_summary, falling back to legacy query:', {
+          error: summaryError?.message || String(summaryError),
+          code: summaryError?.code,
+        })
+        heatmapData = await getHeatmapDataLegacy(
+          site_id,
+          page_url,
+          device_type || undefined,
+          start_date || undefined,
+          end_date || undefined,
+          'click'
+        )
+      }
     } catch (error) {
       console.error('Error fetching heatmap data:', error)
       // エラー時は空配列を返す

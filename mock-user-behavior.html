@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UGOKI MAP - ユーザー行動分析 モック</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  body { font-family: 'Inter', sans-serif; }
+  .sidebar-active { background: #eff6ff; color: #2563eb; }
+  .mode-active { background: #1d4ed8; color: #fff; }
+  .mode-inactive { background: #fff; color: #374151; border: 1px solid #e5e7eb; }
+  .funnel-bar { transition: width 0.5s ease; }
+  /* Sankey mock */
+  .sankey-node { fill: #3b82f6; rx: 4; }
+  .sankey-link { fill: none; stroke-opacity: 0.3; }
+  /* Timeline */
+  .timeline-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .timeline-line { width: 2px; background: #e5e7eb; flex-shrink: 0; }
+  /* Segment pill */
+  .seg-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 9999px; font-size: 12px; font-weight: 500; }
+  /* Score bar */
+  .score-fill { height: 100%; border-radius: 4px; transition: width 0.4s; }
+  /* Modal */
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+  .modal-backdrop.active { opacity: 1; pointer-events: auto; }
+  .modal-panel { background: #fff; border-radius: 16px; max-width: 90vw; max-height: 90vh; overflow-y: auto; box-shadow: 0 25px 50px rgba(0,0,0,0.25); transform: scale(0.95); transition: transform 0.2s; }
+  .modal-backdrop.active .modal-panel { transform: scale(1); }
+  /* Hover row */
+  .hover-row:hover { background: #f0f9ff; }
+  /* Tab underline */
+  .tab-active-ul { border-bottom: 2px solid #2563eb; color: #1d4ed8; }
+</style>
+</head>
+<body class="bg-gray-50">
+<div class="flex h-screen overflow-hidden">
+
+  <!-- Sidebar (minimized for space) -->
+  <div class="w-64 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
+    <div class="p-6 border-b border-gray-200">
+      <div class="flex items-center gap-2">
+        <div class="w-8 h-8 bg-gradient-to-br from-pink-500 via-blue-500 to-blue-600 rounded-lg flex items-center justify-center shadow-md">
+          <span class="text-white font-bold text-sm">U</span>
+        </div>
+        <span class="font-bold text-lg">UGOKI MAP</span>
+      </div>
+    </div>
+    <nav class="flex-1 p-4 space-y-1">
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+        <span class="font-medium">ダッシュボード</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"></path></svg>
+        <span class="font-medium">ヒートマップ</span>
+      </a>
+      <a href="#" class="sidebar-active flex items-center gap-3 px-4 py-3 rounded-lg">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+        <span class="font-medium">行動分析</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+        <span class="font-medium">パフォーマンス</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+        <span class="font-medium">テスト</span>
+      </a>
+      <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-lg text-gray-700 hover:bg-gray-50">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+        <span class="font-medium">設定</span>
+      </a>
+    </nav>
+  </div>
+
+  <!-- Main Content -->
+  <div class="flex-1 overflow-y-auto">
+    <div class="p-6 max-w-[1400px] mx-auto">
+
+      <!-- Header -->
+      <div class="flex items-center justify-between mb-6">
+        <div>
+          <h1 class="text-2xl font-bold">ユーザー行動分析</h1>
+          <p class="text-sm text-gray-500 mt-1">ページ遷移・CV導線・エンゲージメントを可視化</p>
+        </div>
+        <div class="flex items-center gap-3">
+          <select class="px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white">
+            <option>example.com</option>
+          </select>
+          <select class="px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white">
+            <option>過去30日間</option>
+            <option>過去7日間</option>
+            <option>過去90日間</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Mode Switch -->
+      <div class="flex gap-2 mb-6">
+        <button class="mode-active px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors" onclick="switchMode('cv')">
+          CV分析
+        </button>
+        <button class="mode-inactive px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors hover:bg-gray-50" onclick="switchMode('explore')">
+          行動探索
+        </button>
+      </div>
+
+      <!-- Segment Filter Bar -->
+      <div class="flex items-center gap-2 mb-6 flex-wrap">
+        <span class="text-xs text-gray-500 font-medium mr-1">セグメント:</span>
+        <button class="seg-pill bg-blue-100 text-blue-700 border border-blue-200">全ユーザー</button>
+        <button class="seg-pill bg-white text-gray-600 border border-gray-200 hover:bg-gray-50">Organic</button>
+        <button class="seg-pill bg-white text-gray-600 border border-gray-200 hover:bg-gray-50">広告</button>
+        <button class="seg-pill bg-white text-gray-600 border border-gray-200 hover:bg-gray-50">Desktop</button>
+        <button class="seg-pill bg-white text-gray-600 border border-gray-200 hover:bg-gray-50">Mobile</button>
+        <button class="seg-pill bg-white text-gray-600 border border-gray-200 hover:bg-gray-50">新規</button>
+        <button class="seg-pill bg-white text-gray-600 border border-gray-200 hover:bg-gray-50">リピーター</button>
+      </div>
+
+      <!-- ====== CV Analysis Mode ====== -->
+      <div id="cv-mode">
+
+        <!-- KPI Summary -->
+        <div class="grid grid-cols-5 gap-4 mb-6">
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-xs text-gray-500 mb-1">CV率</div>
+            <div class="text-2xl font-bold text-green-600">3.2%</div>
+            <div class="text-xs text-green-500 mt-1">+0.4% vs 前期</div>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-xs text-gray-500 mb-1">CV数</div>
+            <div class="text-2xl font-bold">104</div>
+            <div class="text-xs text-gray-400 mt-1">/ 3,241 セッション</div>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-xs text-gray-500 mb-1">平均CV導線</div>
+            <div class="text-2xl font-bold">3.4<span class="text-sm text-gray-400">ページ</span></div>
+            <div class="text-xs text-gray-400 mt-1">CV到達まで</div>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-xs text-gray-500 mb-1">フォームCV率</div>
+            <div class="text-2xl font-bold">28.5%</div>
+            <div class="text-xs text-orange-500 mt-1">-2.1% vs 前期</div>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-xs text-gray-500 mb-1">CTA クリック率</div>
+            <div class="text-2xl font-bold">8.7%</div>
+            <div class="text-xs text-gray-400 mt-1">視認者ベース</div>
+          </div>
+        </div>
+
+        <!-- CVファネル -->
+        <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-base font-bold">CVファネル</h2>
+            <button class="text-xs text-blue-600 hover:underline">ステップを編集</button>
+          </div>
+          <div class="space-y-3">
+            <!-- Step 1 -->
+            <div class="flex items-center gap-4">
+              <div class="w-8 text-center text-xs font-bold text-gray-400">1</div>
+              <div class="flex-1">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-sm font-medium">トップページ閲覧</span>
+                  <span class="text-sm font-bold">3,241</span>
+                </div>
+                <div class="w-full bg-gray-100 rounded-full h-6 relative">
+                  <div class="funnel-bar bg-blue-500 h-6 rounded-full flex items-center justify-end pr-3" style="width: 100%">
+                    <span class="text-xs text-white font-bold">100%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Step 2 -->
+            <div class="flex items-center gap-4">
+              <div class="w-8 text-center">
+                <div class="text-xs text-red-500 font-bold">-38%</div>
+                <svg class="w-4 h-4 mx-auto text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"></path></svg>
+              </div>
+              <div class="flex-1">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-sm font-medium">商品・サービスページ</span>
+                  <span class="text-sm font-bold">2,009</span>
+                </div>
+                <div class="w-full bg-gray-100 rounded-full h-6 relative">
+                  <div class="funnel-bar bg-blue-500 h-6 rounded-full flex items-center justify-end pr-3" style="width: 62%">
+                    <span class="text-xs text-white font-bold">62%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Step 3 -->
+            <div class="flex items-center gap-4">
+              <div class="w-8 text-center">
+                <div class="text-xs text-red-500 font-bold">-44%</div>
+                <svg class="w-4 h-4 mx-auto text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"></path></svg>
+              </div>
+              <div class="flex-1">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-sm font-medium">お問い合わせフォーム表示</span>
+                  <span class="text-sm font-bold">365</span>
+                </div>
+                <div class="w-full bg-gray-100 rounded-full h-6 relative">
+                  <div class="funnel-bar bg-yellow-500 h-6 rounded-full flex items-center justify-end pr-3" style="width: 11.3%">
+                    <span class="text-xs text-white font-bold">11.3%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Step 4 -->
+            <div class="flex items-center gap-4">
+              <div class="w-8 text-center">
+                <div class="text-xs text-red-500 font-bold">-72%</div>
+                <svg class="w-4 h-4 mx-auto text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"></path></svg>
+              </div>
+              <div class="flex-1">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-sm font-medium">フォーム送信完了</span>
+                  <span class="text-sm font-bold text-green-600">104</span>
+                </div>
+                <div class="w-full bg-gray-100 rounded-full h-6 relative">
+                  <div class="funnel-bar bg-green-500 h-6 rounded-full flex items-center justify-end pr-3" style="width: 3.2%">
+                    <span class="text-xs text-white font-bold">3.2%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- CV導線ランキング + フォーム分析 -->
+        <div class="grid grid-cols-2 gap-6 mb-6">
+          <!-- CV導線ランキング -->
+          <div class="bg-white rounded-xl border border-gray-200 p-6">
+            <h2 class="text-base font-bold mb-4">CV導線ランキング（TOP5）</h2>
+            <div class="space-y-3">
+              <div class="flex items-center gap-3 p-3 bg-green-50 rounded-lg border border-green-100">
+                <span class="text-xs font-bold text-green-600 w-6">1</span>
+                <div class="flex-1">
+                  <div class="flex items-center gap-1.5 text-xs">
+                    <span class="bg-blue-100 text-blue-700 px-2 py-0.5 rounded">/</span>
+                    <span class="text-gray-400">&rarr;</span>
+                    <span class="bg-blue-100 text-blue-700 px-2 py-0.5 rounded">/services</span>
+                    <span class="text-gray-400">&rarr;</span>
+                    <span class="bg-green-100 text-green-700 px-2 py-0.5 rounded">/contact</span>
+                  </div>
+                </div>
+                <div class="text-right">
+                  <div class="text-sm font-bold">38</div>
+                  <div class="text-xs text-gray-400">36.5%</div>
+                </div>
+              </div>
+              <div class="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
+                <span class="text-xs font-bold text-gray-500 w-6">2</span>
+                <div class="flex-1">
+                  <div class="flex items-center gap-1.5 text-xs">
+                    <span class="bg-blue-100 text-blue-700 px-2 py-0.5 rounded">/</span>
+                    <span class="text-gray-400">&rarr;</span>
+                    <span class="bg-blue-100 text-blue-700 px-2 py-0.5 rounded">/about</span>
+                    <span class="text-gray-400">&rarr;</span>
+                    <span class="bg-blue-100 text-blue-700 px-2 py-0.5 rounded">/services</span>
+                    <span class="text-gray-400">&rarr;</span>
+                    <span class="bg-green-100 text-green-700 px-2 py-0.5 rounded">/contact</span>
+                  </div>
+                </div>
+                <div class="text-right">
+                  <div class="text-sm font-bold">24</div>
+                  <div class="text-xs text-gray-400">23.1%</div>
+                </div>
+              </div>
+              <div class="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
+                <span class="text-xs font-bold text-gray-500 w-6">3</span>
+                <div class="flex-1">
+                  <div class="flex items-center gap-1.5 text-xs">
+                    <span class="bg-purple-100 text-purple-700 px-2 py-0.5 rounded">/blog/*</span>
+                    <span class="text-gray-400">&rarr;</span>
+                    <span class="bg-blue-100 text-blue-700 px-2 py-0.5 rounded">/services</span>
+                    <span class="text-gray-400">&rarr;</span>
+                    <span class="bg-green-100 text-green-700 px-2 py-0.5 rounded">/contact</span>
+                  </div>
+                </div>
+                <div class="text-right">
+                  <div class="text-sm font-bold">18</div>
+                  <div class="text-xs text-gray-400">17.3%</div>
+                </div>
+              </div>
+              <div class="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
+                <span class="text-xs font-bold text-gray-500 w-6">4</span>
+                <div class="flex-1">
+                  <div class="flex items-center gap-1.5 text-xs">
+                    <span class="bg-blue-100 text-blue-700 px-2 py-0.5 rounded">/pricing</span>
+                    <span class="text-gray-400">&rarr;</span>
+                    <span class="bg-green-100 text-green-700 px-2 py-0.5 rounded">/contact</span>
+                  </div>
+                </div>
+                <div class="text-right">
+                  <div class="text-sm font-bold">14</div>
+                  <div class="text-xs text-gray-400">13.5%</div>
+                </div>
+              </div>
+              <div class="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
+                <span class="text-xs font-bold text-gray-500 w-6">5</span>
+                <div class="flex-1">
+                  <div class="flex items-center gap-1.5 text-xs">
+                    <span class="bg-orange-100 text-orange-700 px-2 py-0.5 rounded">広告LP</span>
+                    <span class="text-gray-400">&rarr;</span>
+                    <span class="bg-green-100 text-green-700 px-2 py-0.5 rounded">/contact</span>
+                  </div>
+                </div>
+                <div class="text-right">
+                  <div class="text-sm font-bold">10</div>
+                  <div class="text-xs text-gray-400">9.6%</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- フォーム分析 -->
+          <div class="bg-white rounded-xl border border-gray-200 p-6">
+            <h2 class="text-base font-bold mb-4">フォーム分析（/contact）</h2>
+            <!-- Mini funnel -->
+            <div class="space-y-2 mb-5">
+              <div class="flex items-center gap-3">
+                <span class="text-xs text-gray-500 w-24">フォーム表示</span>
+                <div class="flex-1 bg-gray-100 rounded-full h-5">
+                  <div class="bg-blue-500 h-5 rounded-full flex items-center justify-end pr-2" style="width:100%">
+                    <span class="text-xs text-white font-bold">365</span>
+                  </div>
+                </div>
+                <span class="text-xs text-gray-400 w-12 text-right">100%</span>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="text-xs text-gray-500 w-24">入力開始</span>
+                <div class="flex-1 bg-gray-100 rounded-full h-5">
+                  <div class="bg-blue-400 h-5 rounded-full flex items-center justify-end pr-2" style="width:58%">
+                    <span class="text-xs text-white font-bold">212</span>
+                  </div>
+                </div>
+                <span class="text-xs text-gray-400 w-12 text-right">58%</span>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="text-xs text-gray-500 w-24">送信完了</span>
+                <div class="flex-1 bg-gray-100 rounded-full h-5">
+                  <div class="bg-green-500 h-5 rounded-full flex items-center justify-end pr-2" style="width:28.5%">
+                    <span class="text-xs text-white font-bold">104</span>
+                  </div>
+                </div>
+                <span class="text-xs text-gray-400 w-12 text-right">28.5%</span>
+              </div>
+            </div>
+            <!-- Field-level abandonment -->
+            <h3 class="text-sm font-semibold text-gray-700 mb-3">フィールド別離脱ポイント</h3>
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-100">
+                  <th class="text-left py-2 text-gray-500 font-medium">フィールド</th>
+                  <th class="text-right py-2 text-gray-500 font-medium">入力率</th>
+                  <th class="text-right py-2 text-gray-500 font-medium">離脱数</th>
+                  <th class="text-right py-2 text-gray-500 font-medium">平均入力時間</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="border-b border-gray-50"><td class="py-2">名前</td><td class="text-right">95%</td><td class="text-right text-gray-400">4</td><td class="text-right">3.2s</td></tr>
+                <tr class="border-b border-gray-50"><td class="py-2">メール</td><td class="text-right">91%</td><td class="text-right text-gray-400">8</td><td class="text-right">5.1s</td></tr>
+                <tr class="border-b border-gray-50"><td class="py-2">電話番号</td><td class="text-right">72%</td><td class="text-right text-red-500 font-bold">38</td><td class="text-right">4.8s</td></tr>
+                <tr class="border-b border-gray-50 bg-red-50"><td class="py-2 font-medium text-red-700">会社名</td><td class="text-right font-bold text-red-600">54%</td><td class="text-right text-red-600 font-bold">42</td><td class="text-right">6.3s</td></tr>
+                <tr><td class="py-2">お問い合わせ内容</td><td class="text-right">49%</td><td class="text-right text-gray-400">16</td><td class="text-right">18.2s</td></tr>
+              </tbody>
+            </table>
+            <div class="mt-3 p-2 bg-red-50 rounded text-xs text-red-600">
+              「会社名」フィールドで最も離脱が多い（42件）。入力必須を外すか、後で聞く設計を検討。
+            </div>
+          </div>
+        </div>
+
+        <!-- CTA効果 + CV vs 非CV比較 -->
+        <div class="grid grid-cols-2 gap-6 mb-6">
+          <!-- CTA効果測定 -->
+          <div class="bg-white rounded-xl border border-gray-200 p-6">
+            <h2 class="text-base font-bold mb-4">CTA効果測定</h2>
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-100">
+                  <th class="text-left py-2 text-gray-500 font-medium">CTA要素</th>
+                  <th class="text-right py-2 text-gray-500 font-medium">視認数</th>
+                  <th class="text-right py-2 text-gray-500 font-medium">クリック数</th>
+                  <th class="text-right py-2 text-gray-500 font-medium">視認→クリック率</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="border-b border-gray-50 hover-row">
+                  <td class="py-2.5">
+                    <div class="flex items-center gap-2">
+                      <div class="w-3 h-3 bg-green-500 rounded"></div>
+                      <span>「無料相談」ヘッダーボタン</span>
+                    </div>
+                  </td>
+                  <td class="text-right">2,891</td>
+                  <td class="text-right font-bold">312</td>
+                  <td class="text-right"><span class="text-green-600 font-bold">10.8%</span></td>
+                </tr>
+                <tr class="border-b border-gray-50 hover-row">
+                  <td class="py-2.5">
+                    <div class="flex items-center gap-2">
+                      <div class="w-3 h-3 bg-yellow-500 rounded"></div>
+                      <span>「資料請求」セクション末</span>
+                    </div>
+                  </td>
+                  <td class="text-right">1,245</td>
+                  <td class="text-right font-bold">78</td>
+                  <td class="text-right"><span class="text-yellow-600 font-bold">6.3%</span></td>
+                </tr>
+                <tr class="border-b border-gray-50 hover-row">
+                  <td class="py-2.5">
+                    <div class="flex items-center gap-2">
+                      <div class="w-3 h-3 bg-red-500 rounded"></div>
+                      <span>「お問い合わせ」フッター</span>
+                    </div>
+                  </td>
+                  <td class="text-right">489</td>
+                  <td class="text-right font-bold">12</td>
+                  <td class="text-right"><span class="text-red-600 font-bold">2.5%</span></td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="mt-3 p-2 bg-blue-50 rounded text-xs text-blue-600">
+              ヘッダーCTAの視認→クリック率が最も高い。フッターCTAは視認数自体が少なく効果が低い。
+            </div>
+          </div>
+
+          <!-- CV vs 非CV比較 -->
+          <div class="bg-white rounded-xl border border-gray-200 p-6">
+            <h2 class="text-base font-bold mb-4">CV vs 非CV 行動比較</h2>
+            <div class="space-y-4">
+              <div>
+                <div class="flex justify-between text-xs text-gray-500 mb-1"><span>平均PV数</span></div>
+                <div class="flex gap-2 items-center">
+                  <span class="text-xs w-12 text-green-600 font-bold">CV</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-green-500 h-4 rounded-full flex items-center pl-2" style="width:85%"><span class="text-xs text-white font-bold">4.8</span></div></div>
+                </div>
+                <div class="flex gap-2 items-center mt-1">
+                  <span class="text-xs w-12 text-gray-400">非CV</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-gray-400 h-4 rounded-full flex items-center pl-2" style="width:35%"><span class="text-xs text-white font-bold">1.9</span></div></div>
+                </div>
+              </div>
+              <div>
+                <div class="flex justify-between text-xs text-gray-500 mb-1"><span>平均滞在時間</span></div>
+                <div class="flex gap-2 items-center">
+                  <span class="text-xs w-12 text-green-600 font-bold">CV</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-green-500 h-4 rounded-full flex items-center pl-2" style="width:90%"><span class="text-xs text-white font-bold">5分12秒</span></div></div>
+                </div>
+                <div class="flex gap-2 items-center mt-1">
+                  <span class="text-xs w-12 text-gray-400">非CV</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-gray-400 h-4 rounded-full flex items-center pl-2" style="width:25%"><span class="text-xs text-white font-bold">1分24秒</span></div></div>
+                </div>
+              </div>
+              <div>
+                <div class="flex justify-between text-xs text-gray-500 mb-1"><span>平均スクロール深度</span></div>
+                <div class="flex gap-2 items-center">
+                  <span class="text-xs w-12 text-green-600 font-bold">CV</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-green-500 h-4 rounded-full flex items-center justify-end pr-2" style="width:82%"><span class="text-xs text-white font-bold">82%</span></div></div>
+                </div>
+                <div class="flex gap-2 items-center mt-1">
+                  <span class="text-xs w-12 text-gray-400">非CV</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-gray-400 h-4 rounded-full flex items-center justify-end pr-2" style="width:41%"><span class="text-xs text-white font-bold">41%</span></div></div>
+                </div>
+              </div>
+              <div>
+                <div class="flex justify-between text-xs text-gray-500 mb-1"><span>アクティブ時間</span></div>
+                <div class="flex gap-2 items-center">
+                  <span class="text-xs w-12 text-green-600 font-bold">CV</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-green-500 h-4 rounded-full flex items-center pl-2" style="width:78%"><span class="text-xs text-white font-bold">4分08秒</span></div></div>
+                </div>
+                <div class="flex gap-2 items-center mt-1">
+                  <span class="text-xs w-12 text-gray-400">非CV</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-gray-400 h-4 rounded-full flex items-center pl-2" style="width:18%"><span class="text-xs text-white font-bold">0分52秒</span></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ====== Explore Mode (hidden by default) ====== -->
+      <div id="explore-mode" style="display:none;">
+
+        <!-- KPI Summary -->
+        <div class="grid grid-cols-5 gap-4 mb-6">
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-xs text-gray-500 mb-1">総セッション</div>
+            <div class="text-2xl font-bold">3,241</div>
+            <div class="text-xs text-green-500 mt-1">+12% vs 前期</div>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-xs text-gray-500 mb-1">平均PV/セッション</div>
+            <div class="text-2xl font-bold">2.3</div>
+            <div class="text-xs text-gray-400 mt-1">ページ</div>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-xs text-gray-500 mb-1">平均エンゲージメント</div>
+            <div class="text-2xl font-bold text-blue-600">62<span class="text-sm text-gray-400">/100</span></div>
+            <div class="text-xs text-green-500 mt-1">+3 vs 前期</div>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-xs text-gray-500 mb-1">直帰率</div>
+            <div class="text-2xl font-bold">38.2%</div>
+            <div class="text-xs text-red-500 mt-1">+2.1% vs 前期</div>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-xs text-gray-500 mb-1">新規率</div>
+            <div class="text-2xl font-bold">64%</div>
+            <div class="text-xs text-gray-400 mt-1">リピーター 36%</div>
+          </div>
+        </div>
+
+        <!-- ページ遷移サンキー -->
+        <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
+          <h2 class="text-base font-bold mb-4">ページ遷移フロー</h2>
+          <div class="relative" style="height: 360px;">
+            <svg width="100%" height="360" viewBox="0 0 900 360">
+              <!-- Column labels -->
+              <text x="50" y="20" font-size="11" fill="#6b7280" font-weight="600">流入</text>
+              <text x="250" y="20" font-size="11" fill="#6b7280" font-weight="600">2ページ目</text>
+              <text x="480" y="20" font-size="11" fill="#6b7280" font-weight="600">3ページ目</text>
+              <text x="710" y="20" font-size="11" fill="#6b7280" font-weight="600">4ページ目</text>
+
+              <!-- Nodes - Column 1 -->
+              <rect x="30" y="40" width="100" height="120" class="sankey-node" fill="#3b82f6"/>
+              <text x="80" y="95" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">/</text>
+              <text x="80" y="112" font-size="10" fill="#dbeafe" text-anchor="middle">2,180</text>
+
+              <rect x="30" y="180" width="100" height="60" class="sankey-node" fill="#8b5cf6"/>
+              <text x="80" y="207" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">/blog/*</text>
+              <text x="80" y="222" font-size="10" fill="#ede9fe" text-anchor="middle">680</text>
+
+              <rect x="30" y="260" width="100" height="40" class="sankey-node" fill="#f97316"/>
+              <text x="80" y="282" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">広告LP</text>
+              <text x="80" y="295" font-size="10" fill="#ffedd5" text-anchor="middle">381</text>
+
+              <!-- Nodes - Column 2 -->
+              <rect x="230" y="40" width="100" height="90" class="sankey-node" fill="#3b82f6"/>
+              <text x="280" y="80" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">/services</text>
+              <text x="280" y="95" font-size="10" fill="#dbeafe" text-anchor="middle">1,420</text>
+
+              <rect x="230" y="150" width="100" height="50" class="sankey-node" fill="#3b82f6"/>
+              <text x="280" y="177" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">/about</text>
+              <text x="280" y="190" font-size="10" fill="#dbeafe" text-anchor="middle">520</text>
+
+              <rect x="230" y="220" width="100" height="40" class="sankey-node" fill="#3b82f6"/>
+              <text x="280" y="243" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">/pricing</text>
+              <text x="280" y="255" font-size="10" fill="#dbeafe" text-anchor="middle">310</text>
+
+              <rect x="230" y="280" width="100" height="50" class="sankey-node" fill="#ef4444"/>
+              <text x="280" y="307" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">離脱</text>
+              <text x="280" y="320" font-size="10" fill="#fecaca" text-anchor="middle">991</text>
+
+              <!-- Nodes - Column 3 -->
+              <rect x="460" y="40" width="100" height="60" class="sankey-node" fill="#22c55e"/>
+              <text x="510" y="68" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">/contact</text>
+              <text x="510" y="83" font-size="10" fill="#dcfce7" text-anchor="middle">365</text>
+
+              <rect x="460" y="120" width="100" height="50" class="sankey-node" fill="#3b82f6"/>
+              <text x="510" y="147" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">/pricing</text>
+              <text x="510" y="160" font-size="10" fill="#dbeafe" text-anchor="middle">280</text>
+
+              <rect x="460" y="190" width="100" height="40" class="sankey-node" fill="#3b82f6"/>
+              <text x="510" y="213" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">/blog/*</text>
+              <text x="510" y="225" font-size="10" fill="#dbeafe" text-anchor="middle">180</text>
+
+              <rect x="460" y="250" width="100" height="80" class="sankey-node" fill="#ef4444"/>
+              <text x="510" y="290" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">離脱</text>
+              <text x="510" y="305" font-size="10" fill="#fecaca" text-anchor="middle">1,425</text>
+
+              <!-- Nodes - Column 4 -->
+              <rect x="690" y="40" width="100" height="40" class="sankey-node" fill="#22c55e"/>
+              <text x="740" y="62" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">CV完了</text>
+              <text x="740" y="75" font-size="10" fill="#dcfce7" text-anchor="middle">104</text>
+
+              <rect x="690" y="100" width="100" height="70" class="sankey-node" fill="#ef4444"/>
+              <text x="740" y="138" font-size="11" fill="#fff" text-anchor="middle" font-weight="600">離脱</text>
+              <text x="740" y="153" font-size="10" fill="#fecaca" text-anchor="middle">721</text>
+
+              <!-- Links (simplified curves) -->
+              <path d="M130,80 C190,80 190,70 230,70" stroke="#3b82f6" stroke-width="28" class="sankey-link"/>
+              <path d="M130,120 C190,120 190,165 230,165" stroke="#3b82f6" stroke-width="12" class="sankey-link"/>
+              <path d="M130,145 C190,145 190,235 230,235" stroke="#3b82f6" stroke-width="8" class="sankey-link"/>
+              <path d="M130,155 C190,155 190,300 230,300" stroke="#3b82f6" stroke-width="20" class="sankey-link"/>
+              <path d="M130,200 C190,200 190,90 230,90" stroke="#8b5cf6" stroke-width="10" class="sankey-link"/>
+              <path d="M130,225 C190,225 190,305 230,305" stroke="#8b5cf6" stroke-width="8" class="sankey-link"/>
+              <path d="M130,275 C190,275 190,240 230,240" stroke="#f97316" stroke-width="6" class="sankey-link"/>
+
+              <path d="M330,65 C390,65 400,55 460,55" stroke="#3b82f6" stroke-width="14" class="sankey-link"/>
+              <path d="M330,95 C390,95 400,135 460,135" stroke="#3b82f6" stroke-width="8" class="sankey-link"/>
+              <path d="M330,110 C390,110 400,280 460,280" stroke="#3b82f6" stroke-width="25" class="sankey-link"/>
+              <path d="M330,170 C390,170 400,60 460,60" stroke="#3b82f6" stroke-width="6" class="sankey-link"/>
+              <path d="M330,185 C390,185 400,295 460,295" stroke="#3b82f6" stroke-width="10" class="sankey-link"/>
+
+              <path d="M560,55 C620,55 630,50 690,50" stroke="#22c55e" stroke-width="6" class="sankey-link"/>
+              <path d="M560,75 C620,75 630,125 690,125" stroke="#ef4444" stroke-width="10" class="sankey-link"/>
+              <path d="M560,140 C620,140 630,55 690,55" stroke="#22c55e" stroke-width="4" class="sankey-link"/>
+              <path d="M560,155 C620,155 630,135 690,135" stroke="#ef4444" stroke-width="8" class="sankey-link"/>
+            </svg>
+          </div>
+        </div>
+
+        <!-- エンゲージメントスコア + 新規vsリピーター -->
+        <div class="grid grid-cols-2 gap-6 mb-6">
+          <!-- エンゲージメントスコア -->
+          <div class="bg-white rounded-xl border border-gray-200 p-6">
+            <h2 class="text-base font-bold mb-4">ページ別エンゲージメントスコア</h2>
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-100">
+                  <th class="text-left py-2 text-gray-500 font-medium">#</th>
+                  <th class="text-left py-2 text-gray-500 font-medium">ページ</th>
+                  <th class="text-left py-2 text-gray-500 font-medium">スコア</th>
+                  <th class="text-right py-2 text-gray-500 font-medium">滞在</th>
+                  <th class="text-right py-2 text-gray-500 font-medium">スクロール</th>
+                  <th class="text-right py-2 text-gray-500 font-medium">クリック</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="border-b border-gray-50 hover-row">
+                  <td class="py-2.5 text-gray-400">1</td>
+                  <td class="py-2.5 font-medium">/services</td>
+                  <td class="py-2.5">
+                    <div class="flex items-center gap-2">
+                      <div class="w-20 bg-gray-100 rounded-full h-3"><div class="bg-green-500 h-3 rounded-full" style="width:88%"></div></div>
+                      <span class="text-xs font-bold text-green-600">88</span>
+                    </div>
+                  </td>
+                  <td class="text-right">3:42</td>
+                  <td class="text-right">78%</td>
+                  <td class="text-right">4.2</td>
+                </tr>
+                <tr class="border-b border-gray-50 hover-row">
+                  <td class="py-2.5 text-gray-400">2</td>
+                  <td class="py-2.5 font-medium">/pricing</td>
+                  <td class="py-2.5">
+                    <div class="flex items-center gap-2">
+                      <div class="w-20 bg-gray-100 rounded-full h-3"><div class="bg-green-500 h-3 rounded-full" style="width:82%"></div></div>
+                      <span class="text-xs font-bold text-green-600">82</span>
+                    </div>
+                  </td>
+                  <td class="text-right">2:58</td>
+                  <td class="text-right">85%</td>
+                  <td class="text-right">3.8</td>
+                </tr>
+                <tr class="border-b border-gray-50 hover-row">
+                  <td class="py-2.5 text-gray-400">3</td>
+                  <td class="py-2.5 font-medium">/blog/seo-guide</td>
+                  <td class="py-2.5">
+                    <div class="flex items-center gap-2">
+                      <div class="w-20 bg-gray-100 rounded-full h-3"><div class="bg-blue-500 h-3 rounded-full" style="width:71%"></div></div>
+                      <span class="text-xs font-bold text-blue-600">71</span>
+                    </div>
+                  </td>
+                  <td class="text-right">4:15</td>
+                  <td class="text-right">68%</td>
+                  <td class="text-right">1.2</td>
+                </tr>
+                <tr class="border-b border-gray-50 hover-row">
+                  <td class="py-2.5 text-gray-400">4</td>
+                  <td class="py-2.5 font-medium">/about</td>
+                  <td class="py-2.5">
+                    <div class="flex items-center gap-2">
+                      <div class="w-20 bg-gray-100 rounded-full h-3"><div class="bg-yellow-500 h-3 rounded-full" style="width:54%"></div></div>
+                      <span class="text-xs font-bold text-yellow-600">54</span>
+                    </div>
+                  </td>
+                  <td class="text-right">1:45</td>
+                  <td class="text-right">52%</td>
+                  <td class="text-right">2.1</td>
+                </tr>
+                <tr class="hover-row">
+                  <td class="py-2.5 text-gray-400">5</td>
+                  <td class="py-2.5 font-medium">/</td>
+                  <td class="py-2.5">
+                    <div class="flex items-center gap-2">
+                      <div class="w-20 bg-gray-100 rounded-full h-3"><div class="bg-orange-500 h-3 rounded-full" style="width:38%"></div></div>
+                      <span class="text-xs font-bold text-orange-600">38</span>
+                    </div>
+                  </td>
+                  <td class="text-right">0:48</td>
+                  <td class="text-right">35%</td>
+                  <td class="text-right">1.8</td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="mt-3 text-xs text-gray-400">スコア = (滞在時間 × 0.3) + (スクロール深度 × 0.3) + (クリック数 × 0.2) + (熟読時間 × 0.2) を正規化</div>
+          </div>
+
+          <!-- 新規vsリピーター -->
+          <div class="bg-white rounded-xl border border-gray-200 p-6">
+            <h2 class="text-base font-bold mb-4">新規 vs リピーター比較</h2>
+            <div class="space-y-4">
+              <div>
+                <div class="flex justify-between text-xs text-gray-500 mb-1"><span>セッション数</span></div>
+                <div class="flex gap-2 items-center">
+                  <span class="text-xs w-20 text-blue-600 font-bold">新規</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-blue-500 h-4 rounded-full flex items-center pl-2" style="width:64%"><span class="text-xs text-white font-bold">2,074 (64%)</span></div></div>
+                </div>
+                <div class="flex gap-2 items-center mt-1">
+                  <span class="text-xs w-20 text-purple-600 font-bold">リピーター</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-purple-500 h-4 rounded-full flex items-center pl-2" style="width:36%"><span class="text-xs text-white font-bold">1,167 (36%)</span></div></div>
+                </div>
+              </div>
+              <div>
+                <div class="flex justify-between text-xs text-gray-500 mb-1"><span>CV率</span></div>
+                <div class="flex gap-2 items-center">
+                  <span class="text-xs w-20 text-blue-600 font-bold">新規</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-blue-500 h-4 rounded-full flex items-center justify-end pr-2" style="width:18%"><span class="text-xs text-white font-bold">1.8%</span></div></div>
+                </div>
+                <div class="flex gap-2 items-center mt-1">
+                  <span class="text-xs w-20 text-purple-600 font-bold">リピーター</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-purple-500 h-4 rounded-full flex items-center justify-end pr-2" style="width:58%"><span class="text-xs text-white font-bold">5.8%</span></div></div>
+                </div>
+              </div>
+              <div>
+                <div class="flex justify-between text-xs text-gray-500 mb-1"><span>平均PV数</span></div>
+                <div class="flex gap-2 items-center">
+                  <span class="text-xs w-20 text-blue-600 font-bold">新規</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-blue-500 h-4 rounded-full flex items-center pl-2" style="width:30%"><span class="text-xs text-white font-bold">1.6</span></div></div>
+                </div>
+                <div class="flex gap-2 items-center mt-1">
+                  <span class="text-xs w-20 text-purple-600 font-bold">リピーター</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-purple-500 h-4 rounded-full flex items-center pl-2" style="width:65%"><span class="text-xs text-white font-bold">3.5</span></div></div>
+                </div>
+              </div>
+              <div>
+                <div class="flex justify-between text-xs text-gray-500 mb-1"><span>エンゲージメントスコア</span></div>
+                <div class="flex gap-2 items-center">
+                  <span class="text-xs w-20 text-blue-600 font-bold">新規</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-blue-500 h-4 rounded-full flex items-center justify-end pr-2" style="width:45%"><span class="text-xs text-white font-bold">45</span></div></div>
+                </div>
+                <div class="flex gap-2 items-center mt-1">
+                  <span class="text-xs w-20 text-purple-600 font-bold">リピーター</span>
+                  <div class="flex-1 bg-gray-100 rounded-full h-4"><div class="bg-purple-500 h-4 rounded-full flex items-center justify-end pr-2" style="width:78%"><span class="text-xs text-white font-bold">78</span></div></div>
+                </div>
+              </div>
+            </div>
+            <div class="mt-4 p-2 bg-purple-50 rounded text-xs text-purple-600">
+              リピーターのCV率は新規の3.2倍。リピーター獲得（メルマガ等）がCV向上の鍵。
+            </div>
+          </div>
+        </div>
+
+        <!-- 離脱マップ + セッションジャーニー -->
+        <div class="grid grid-cols-2 gap-6 mb-6">
+          <!-- 離脱マップ -->
+          <div class="bg-white rounded-xl border border-gray-200 p-6">
+            <h2 class="text-base font-bold mb-4">離脱マップ（離脱率が高いページ）</h2>
+            <div class="space-y-3">
+              <div class="flex items-center gap-3">
+                <div class="flex-1">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium">/</span>
+                    <span class="text-sm font-bold text-red-600">52.1%</span>
+                  </div>
+                  <div class="w-full bg-gray-100 rounded-full h-3">
+                    <div class="bg-red-500 h-3 rounded-full" style="width:52.1%"></div>
+                  </div>
+                </div>
+                <span class="text-xs text-gray-400 w-16 text-right">1,136離脱</span>
+              </div>
+              <div class="flex items-center gap-3">
+                <div class="flex-1">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium">/blog/*</span>
+                    <span class="text-sm font-bold text-orange-600">44.8%</span>
+                  </div>
+                  <div class="w-full bg-gray-100 rounded-full h-3">
+                    <div class="bg-orange-500 h-3 rounded-full" style="width:44.8%"></div>
+                  </div>
+                </div>
+                <span class="text-xs text-gray-400 w-16 text-right">305離脱</span>
+              </div>
+              <div class="flex items-center gap-3">
+                <div class="flex-1">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium">/about</span>
+                    <span class="text-sm font-bold text-yellow-600">38.5%</span>
+                  </div>
+                  <div class="w-full bg-gray-100 rounded-full h-3">
+                    <div class="bg-yellow-500 h-3 rounded-full" style="width:38.5%"></div>
+                  </div>
+                </div>
+                <span class="text-xs text-gray-400 w-16 text-right">200離脱</span>
+              </div>
+              <div class="flex items-center gap-3">
+                <div class="flex-1">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium">/services</span>
+                    <span class="text-sm font-bold text-green-600">22.3%</span>
+                  </div>
+                  <div class="w-full bg-gray-100 rounded-full h-3">
+                    <div class="bg-green-500 h-3 rounded-full" style="width:22.3%"></div>
+                  </div>
+                </div>
+                <span class="text-xs text-gray-400 w-16 text-right">317離脱</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- セッションジャーニー（サンプル1件） -->
+          <div class="bg-white rounded-xl border border-gray-200 p-6">
+            <div class="flex items-center justify-between mb-4">
+              <h2 class="text-base font-bold">セッションジャーニー</h2>
+              <select class="text-xs border border-gray-200 rounded px-2 py-1 bg-white">
+                <option>CVセッション #a8f2c3</option>
+                <option>非CVセッション #b4d1e9</option>
+              </select>
+            </div>
+            <div class="space-y-0">
+              <!-- Timeline items -->
+              <div class="flex gap-3">
+                <div class="flex flex-col items-center">
+                  <div class="timeline-dot bg-blue-500"></div>
+                  <div class="timeline-line flex-1"></div>
+                </div>
+                <div class="pb-4">
+                  <div class="text-xs text-gray-400">0:00</div>
+                  <div class="text-sm font-medium">ページ表示 <span class="text-blue-600">/</span></div>
+                  <div class="text-xs text-gray-400">Google Organic → desktop</div>
+                </div>
+              </div>
+              <div class="flex gap-3">
+                <div class="flex flex-col items-center">
+                  <div class="timeline-dot bg-green-500"></div>
+                  <div class="timeline-line flex-1"></div>
+                </div>
+                <div class="pb-4">
+                  <div class="text-xs text-gray-400">0:12</div>
+                  <div class="text-sm">スクロール <span class="text-gray-500">深度 65%</span></div>
+                </div>
+              </div>
+              <div class="flex gap-3">
+                <div class="flex flex-col items-center">
+                  <div class="timeline-dot bg-orange-500"></div>
+                  <div class="timeline-line flex-1"></div>
+                </div>
+                <div class="pb-4">
+                  <div class="text-xs text-gray-400">0:18</div>
+                  <div class="text-sm">クリック <span class="text-gray-500">a.nav-link「サービス」</span></div>
+                </div>
+              </div>
+              <div class="flex gap-3">
+                <div class="flex flex-col items-center">
+                  <div class="timeline-dot bg-blue-500"></div>
+                  <div class="timeline-line flex-1"></div>
+                </div>
+                <div class="pb-4">
+                  <div class="text-xs text-gray-400">0:18</div>
+                  <div class="text-sm font-medium">ページ遷移 <span class="text-blue-600">/services</span></div>
+                </div>
+              </div>
+              <div class="flex gap-3">
+                <div class="flex flex-col items-center">
+                  <div class="timeline-dot bg-green-500"></div>
+                  <div class="timeline-line flex-1"></div>
+                </div>
+                <div class="pb-4">
+                  <div class="text-xs text-gray-400">0:45</div>
+                  <div class="text-sm">熟読 <span class="text-gray-500">Y:800px付近 3.2秒</span></div>
+                </div>
+              </div>
+              <div class="flex gap-3">
+                <div class="flex flex-col items-center">
+                  <div class="timeline-dot bg-green-500"></div>
+                  <div class="timeline-line flex-1"></div>
+                </div>
+                <div class="pb-4">
+                  <div class="text-xs text-gray-400">1:20</div>
+                  <div class="text-sm">スクロール <span class="text-gray-500">深度 92%</span></div>
+                </div>
+              </div>
+              <div class="flex gap-3">
+                <div class="flex flex-col items-center">
+                  <div class="timeline-dot bg-orange-500"></div>
+                  <div class="timeline-line flex-1"></div>
+                </div>
+                <div class="pb-4">
+                  <div class="text-xs text-gray-400">1:35</div>
+                  <div class="text-sm">クリック <span class="text-gray-500">button.cta「無料相談」</span></div>
+                </div>
+              </div>
+              <div class="flex gap-3">
+                <div class="flex flex-col items-center">
+                  <div class="timeline-dot bg-blue-500"></div>
+                  <div class="timeline-line flex-1"></div>
+                </div>
+                <div class="pb-4">
+                  <div class="text-xs text-gray-400">1:35</div>
+                  <div class="text-sm font-medium">ページ遷移 <span class="text-blue-600">/contact</span></div>
+                </div>
+              </div>
+              <div class="flex gap-3">
+                <div class="flex flex-col items-center">
+                  <div class="timeline-dot bg-purple-500"></div>
+                  <div class="timeline-line flex-1"></div>
+                </div>
+                <div class="pb-4">
+                  <div class="text-xs text-gray-400">2:10</div>
+                  <div class="text-sm">フォーム入力 <span class="text-gray-500">名前 → メール → 電話 → 内容</span></div>
+                </div>
+              </div>
+              <div class="flex gap-3">
+                <div class="flex flex-col items-center">
+                  <div class="timeline-dot bg-green-600 ring-2 ring-green-200"></div>
+                </div>
+                <div>
+                  <div class="text-xs text-gray-400">3:45</div>
+                  <div class="text-sm font-bold text-green-600">CV完了（フォーム送信）</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function switchMode(mode) {
+  const cvMode = document.getElementById('cv-mode');
+  const exploreMode = document.getElementById('explore-mode');
+  const buttons = document.querySelectorAll('[onclick^="switchMode"]');
+
+  if (mode === 'cv') {
+    cvMode.style.display = 'block';
+    exploreMode.style.display = 'none';
+    buttons[0].className = 'mode-active px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors';
+    buttons[1].className = 'mode-inactive px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors hover:bg-gray-50';
+  } else {
+    cvMode.style.display = 'none';
+    exploreMode.style.display = 'block';
+    buttons[0].className = 'mode-inactive px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors hover:bg-gray-50';
+    buttons[1].className = 'mode-active px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors';
+  }
+}
+</script>
+</body>
+</html>

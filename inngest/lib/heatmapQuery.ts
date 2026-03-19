@@ -17,6 +17,7 @@ export async function getHeatmapData({
   startDate,
   endDate,
 }: GetHeatmapDataParams): Promise<any[]> {
+  if (endDate && endDate.length === 10) endDate = endDate + ' 23:59:59';
   const client = await getClickHouseClientAsync();
 
   if (heatmapType === 'click') {
@@ -75,9 +76,8 @@ export async function getHeatmapData({
     }));
   }
 
-  // スクロール・熟読ヒートマップは既存ロジックを使用
-  // （heatmap_eventsテーブルから取得）
-  // ここでは省略（既存のgetHeatmapData関数を参照）
+  // スクロール・熟読ヒートマップはeventsテーブルから取得
+  // （lib/clickhouse.ts getHeatmapData関数を参照）
   return [];
 }
 
@@ -105,5 +105,8 @@ export async function getPopularPages(limit: number = 100): Promise<Array<{ site
 
   return await result.json() as Array<{ site_id: string; page_url: string }>;
 }
+
+
+
 
 

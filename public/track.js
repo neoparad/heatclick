@@ -21,12 +21,35 @@
     return sessionId;
   }
 
-  // ユーザーID管理
+  // ルートドメイン取得
+  function getRootDomain() {
+    var parts = location.hostname.split('.');
+    if (parts.length <= 1 || /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname)) return location.hostname;
+    var twoPartTlds = ['co.jp','or.jp','ne.jp','ac.jp','go.jp','com.au','co.uk','org.uk','co.kr'];
+    var last2 = parts.slice(-2).join('.');
+    if (twoPartTlds.includes(last2) && parts.length >= 3) return '.' + parts.slice(-3).join('.');
+    return '.' + parts.slice(-2).join('.');
+  }
+
+  function setCookie(name, value, maxAgeDays) {
+    var domain = getRootDomain();
+    document.cookie = name + '=' + value + '; domain=' + domain + '; path=/; max-age=' + (maxAgeDays * 86400) + '; SameSite=Lax';
+  }
+
+  function getCookie(name) {
+    var match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+    return match ? match[1] : null;
+  }
+
+  // ユーザーID管理（ルートドメインCookie）
   function getUserId() {
-    let userId = localStorage.getItem('cip_user_id');
+    var userId = getCookie('cip_user_id');
     if (!userId) {
-      userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-      localStorage.setItem('cip_user_id', userId);
+      userId = localStorage.getItem('cip_user_id');
+      if (!userId) {
+        userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+      }
+      setCookie('cip_user_id', userId, 730);
     }
     return userId;
   }

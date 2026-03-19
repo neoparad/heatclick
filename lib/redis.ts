@@ -295,5 +295,82 @@ export async function getCacheStats(): Promise<any> {
   }
 }
 
+// イベントバッファ: ClickHouseへの直接書き込みを避け、Redisに一時保存
+const EVENT_BUFFER_KEY = 'event_buffer:pending'
+const EVENT_BUFFER_RETRY_KEY = 'event_buffer:retry'
+
+export async function pushEventBuffer(
+  table: string,
+  values: any[]
+): Promise<void> {
+  try {
+    const client = getRedisClient()
+    const payload = JSON.stringify({ table, values, timestamp: Date.now() })
+    await client.rpush(EVENT_BUFFER_KEY, payload)
+  } catch (error) {
+    console.error('Error pushing to event buffer:', error)
+    throw error
+  }
+}
+
+export async function popEventBuffer(batchSize: number = 500): Promise<Array<{ table: string; values: any[]; timestamp: number }>> {
+  try {
+    const client = getRedisClient()
+    const items: Array<{ table: string; values: any[]; timestamp: number }> = []
+
+    // LPOPで最大batchSize件取得
+    for (let i = 0; i < batchSize; i++) {
+      const item = await client.lpop(EVENT_BUFFER_KEY)
+      if (!item) break
+      items.push(JSON.parse(item))
+    }
+
+    return items
+  } catch (error) {
+    console.error('Error popping from event buffer:', error)
+    return []
+  }
+}
+
+export async function pushRetryBuffer(
+  table: string,
+  values: any[]
+): Promise<void> {
+  try {
+    const client = getRedisClient()
+    const payload = JSON.stringify({ table, values, timestamp: Date.now() })
+    await client.rpush(EVENT_BUFFER_RETRY_KEY, payload)
+  } catch (error) {
+    console.error('Error pushing to retry buffer:', error)
+  }
+}
+
+export async function popRetryBuffer(batchSize: number = 100): Promise<Array<{ table: string; values: any[]; timestamp: number }>> {
+  try {
+    const client = getRedisClient()
+    const items: Array<{ table: string; values: any[]; timestamp: number }> = []
+
+    for (let i = 0; i < batchSize; i++) {
+      const item = await client.lpop(EVENT_BUFFER_RETRY_KEY)
+      if (!item) break
+      items.push(JSON.parse(item))
+    }
+
+    return items
+  } catch (error) {
+    console.error('Error popping from retry buffer:', error)
+    return []
+  }
+}
+
+export async function getEventBufferLength(): Promise<number> {
+  try {
+    const client = getRedisClient()
+    return await client.llen(EVENT_BUFFER_KEY)
+  } catch (error) {
+    return 0
+  }
+}
+
 // Export the client getter function
 export { getRedisClient as redis }

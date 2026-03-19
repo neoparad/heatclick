@@ -3,9 +3,18 @@ import { initializeDatabase } from '@/lib/clickhouse'
 
 export async function POST(request: NextRequest) {
   try {
-    console.log('Initializing database tables...')
+    // 認証チェック: INIT_SECRET環境変数または開発環境のみ許可
+    const authHeader = request.headers.get('authorization')
+    const initSecret = process.env.INIT_SECRET
+    const isDev = process.env.NODE_ENV === 'development'
+
+    if (!isDev) {
+      if (!initSecret || authHeader !== `Bearer ${initSecret}`) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+      }
+    }
+
     await initializeDatabase()
-    console.log('Database initialized successfully')
 
     return NextResponse.json({
       success: true,
@@ -14,11 +23,7 @@ export async function POST(request: NextRequest) {
   } catch (error: any) {
     console.error('Database initialization error:', error)
     return NextResponse.json(
-      {
-        success: false,
-        error: 'Failed to initialize database',
-        details: error?.message || String(error)
-      },
+      { success: false, error: 'Failed to initialize database' },
       { status: 500 }
     )
   }

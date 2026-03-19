@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
+import {
+  getMemorySites,
+  addMemorySite,
+  findMemorySiteByUrl,
+  formatDateTime,
+  SiteData,
+} from '@/lib/sites-store'
 
 // CORS headers
 function buildCorsHeaders(request: NextRequest): HeadersInit {
@@ -14,8 +21,7 @@ function buildCorsHeaders(request: NextRequest): HeadersInit {
 }
 
 export async function OPTIONS(request: NextRequest) {
-  const headers = buildCorsHeaders(request)
-  return new NextResponse(null, { headers })
+  return new NextResponse(null, { headers: buildCorsHeaders(request) })
 }
 
 // Generate tracking ID
@@ -41,36 +47,24 @@ function generateId(): string {
 export async function GET(request: NextRequest) {
   try {
     const clickhouse = await getClickHouseClientAsync()
-
     const result = await clickhouse.query({
       query: `
-        SELECT
-          id,
-          name,
-          url,
-          tracking_id,
-          status,
-          created_at,
-          updated_at,
-          last_activity,
-          page_views
+        SELECT id, name, url, tracking_id, status,
+               created_at, updated_at, last_activity, page_views
         FROM clickinsight.sites
         ORDER BY created_at DESC
       `,
       format: 'JSONEachRow',
     })
-
     const sites = await result.json()
-
-    return NextResponse.json({
-      sites: sites,
-      total: sites.length
-    }, { headers: buildCorsHeaders(request) })
+    return NextResponse.json({ sites, total: sites.length }, { headers: buildCorsHeaders(request) })
   } catch (error) {
-    console.error('Failed to fetch sites:', error)
+    console.warn('ClickHouse unavailable, using memory store:', (error as Error).message)
+    // メモリフォールバック
+    const sites = getMemorySites()
     return NextResponse.json(
-      { error: 'Failed to fetch sites' },
-      { status: 500, headers: buildCorsHeaders(request) }
+      { sites, total: sites.length, source: 'memory' },
+      { headers: buildCorsHeaders(request) }
     )
   }
 }
@@ -80,7 +74,6 @@ export async function POST(request: NextRequest) {
   try {
     const data = await request.json()
 
-    // Validate required fields
     if (!data.name || !data.url) {
       return NextResponse.json(
         { error: 'Name and URL are required' },
@@ -88,7 +81,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Validate URL format
+    // Validate URL
     try {
       new URL(data.url)
     } catch {
@@ -98,55 +91,60 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const clickhouse = await getClickHouseClientAsync()
-
-    // Check if URL already exists
-    const existingResult = await clickhouse.query({
-      query: `SELECT id FROM clickinsight.sites WHERE url = {url:String}`,
-      query_params: { url: data.url },
-      format: 'JSONEachRow',
-    })
-
-    const existing = await existingResult.json()
-    if (existing.length > 0) {
-      return NextResponse.json(
-        { error: 'Site with this URL already exists' },
-        { status: 409, headers: buildCorsHeaders(request) }
-      )
-    }
-
-    // Create new site
-    const site = {
+    const now = formatDateTime(new Date())
+    const site: SiteData = {
       id: generateId(),
       name: data.name,
       url: data.url,
       tracking_id: generateTrackingId(),
       status: 'active',
-      created_at: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      updated_at: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      last_activity: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      user_id: null,
+      org_id: null,
+      created_at: now,
+      updated_at: now,
+      last_activity: now,
       page_views: 0,
     }
 
-    await clickhouse.insert({
-      table: 'clickinsight.sites',
-      values: [site],
-      format: 'JSONEachRow',
-    })
+    // ClickHouseに保存を試みる
+    try {
+      const clickhouse = await getClickHouseClientAsync()
 
-    if (process.env.NODE_ENV === 'development') {
-      console.log('Site created:', {
-        id: site.id,
-        name: site.name,
-        tracking_id: site.tracking_id
+      // 重複チェック
+      const existingResult = await clickhouse.query({
+        query: `SELECT id FROM clickinsight.sites WHERE url = {url:String}`,
+        query_params: { url: data.url },
+        format: 'JSONEachRow',
       })
+      const existing = await existingResult.json()
+      if (existing.length > 0) {
+        return NextResponse.json(
+          { error: 'Site with this URL already exists' },
+          { status: 409, headers: buildCorsHeaders(request) }
+        )
+      }
+
+      await clickhouse.insert({
+        table: 'clickinsight.sites',
+        values: [site],
+        format: 'JSONEachRow',
+      })
+    } catch (error) {
+      console.warn('ClickHouse unavailable, saving to memory:', (error as Error).message)
+      // メモリフォールバック: 重複チェック
+      if (findMemorySiteByUrl(data.url)) {
+        return NextResponse.json(
+          { error: 'Site with this URL already exists' },
+          { status: 409, headers: buildCorsHeaders(request) }
+        )
+      }
     }
 
+    // メモリにも常に保存（フォールバック用）
+    addMemorySite(site)
+
     return NextResponse.json(
-      {
-        success: true,
-        site: site
-      },
+      { success: true, site },
       { status: 201, headers: buildCorsHeaders(request) }
     )
   } catch (error) {

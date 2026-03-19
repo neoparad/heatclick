@@ -10,16 +10,11 @@ import { Badge } from '../../components/ui/badge'
 import Loading from '../../components/ui/loading'
 import { getCurrentUser } from '@/lib/auth'
 import { 
-  Settings, 
-  Code, 
-  Copy, 
-  CheckCircle, 
-  AlertCircle, 
+  Settings,
+  Code,
+  Copy,
   Globe,
-  Shield,
-  Bell,
   Database,
-  Zap,
   ExternalLink
 } from 'lucide-react'
 
@@ -91,16 +86,7 @@ export default function SettingsPage() {
 
   const generateTrackingScript = (site: Site) => {
     const appUrl = typeof window !== 'undefined' ? window.location.origin : 'https://heatclick-ai.vercel.app'
-    return `<!-- UGOKI MAP Tracking -->
-<script>
-    window.CLICKINSIGHT_SITE_ID = '${site.tracking_id}';
-    window.CLICKINSIGHT_DEBUG = false; // 本番環境ではfalse
-    window.CLICKINSIGHT_API_URL = '${appUrl}/api/track';
-    window.CLICKINSIGHT_RECORDING_SAMPLE_RATE = 0.1; // 10%のセッションを録画
-</script>
-<script src="${appUrl}/tracking.js" data-site-id="${site.tracking_id}" async></script>
-<script src="${appUrl}/recording.js" async></script>
-<!-- End UGOKI MAP -->`
+    return `<script src="${appUrl}/tracking.js" data-site-id="${site.tracking_id}" async></script>`
   }
 
   const copyToClipboard = async (text: string) => {
@@ -229,41 +215,6 @@ export default function SettingsPage() {
                     {usage.usage.toLocaleString()} / {usage.limit.toLocaleString()} PV
                   </p>
                 </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* 通知設定 */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Bell className="w-5 h-5" />
-              通知設定
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="font-medium">重要な分析結果</h4>
-                  <p className="text-sm text-gray-600">AI分析で重要な改善点が発見された時</p>
-                </div>
-                <Button variant="outline" size="sm">有効</Button>
-              </div>
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="font-medium">週次レポート</h4>
-                  <p className="text-sm text-gray-600">毎週月曜日に分析レポートを送信</p>
-                </div>
-                <Button variant="outline" size="sm">有効</Button>
-              </div>
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="font-medium">システム通知</h4>
-                  <p className="text-sm text-gray-600">メンテナンスやアップデート情報</p>
-                </div>
-                <Button variant="outline" size="sm">有効</Button>
               </div>
             </div>
           </CardContent>
