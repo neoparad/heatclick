@@ -1,8 +1,9 @@
 # UGOKI MAP — API / MCP アーキテクチャ設計書
 
 **作成日**: 2026-03-19
-**バージョン**: 1.0
-**ステータス**: 設計完了 / 実装Phase 1完了
+**最終更新**: 2026-03-19（独立レビュー指摘対応後）
+**バージョン**: 2.0
+**ステータス**: REST API Layer 1-2 + MCP Server 実装済み / Layer 3 AI診断 未実装
 
 ---
 
@@ -504,3 +505,96 @@ GROUP BY age_bracket, gender, country, region, ga.device.category
 | REST API Layer 3（AI診断） | 未実装 |
 | MCP Server（7ツール） | **実装済み** `mcp-server.ts` |
 | BigQuery連携（GA4デモグラフィック） | 未実装（ga_client_idは取得済み） |
+
+---
+
+## 11. 独立レビュー指摘事項と対応
+
+**レビュー日**: 2026-03-19
+**レビュアー**: 第三者プログラマー（独立評価）
+**レビュー時総合評価**: 設計85点 / 実装準備度60点
+
+### 対応済み（4件）
+
+| # | 指摘 | 重要度 | 対応 | ファイル |
+|---|---|---|---|---|
+| 1 | LRANGE+LTRIMの間に2重起動→データ重複 | **致命的** | Luaスクリプトで原子的に実行 | `lib/redis.ts` |
+| 2 | 分析軸SQLの実行コスト見積もりがない | 高 | 全20軸にlight/medium/heavy付与。executeAllAxesでheavyは直列、light/mediumは5並列 | `lib/analysis-axes.ts` |
+| 4 | MCP Serverが未実装 | 高 | 7ツールのMCPサーバー実装（stdio JSON-RPC） | `mcp-server.ts` |
+| 7 | Rate LimitがIP単位のみ | 高 | `checkApiKeyQuota()` — プラン別quota（free:100/h〜business:50000/h） | `lib/rate-limit.ts` |
+
+### 未対応（3件）
+
+| # | 指摘 | 重要度 | 理由 | 対応予定 |
+|---|---|---|---|---|
+| 3 | aiPromptHintが日本語固定 | 低 | 日本市場優先。英語対応はグローバル展開時 | グローバル展開Phase |
+| 5 | AI診断（Layer 3）にWebhook通知がない | 中 | Layer 3自体が未実装。同時に対応 | AI診断実装Phase |
+| 6 | GA4 client_idマッチング率の監視がない | 中 | BigQuery連携自体が未実装。同時に対応 | BigQuery連携Phase |
+
+---
+
+## 12. 実装ファイル一覧
+
+### コア
+
+| ファイル | 役割 |
+|---|---|
+| `public/tracking.js` | トラッキングコア（6.88KB minified / 2.93KB gzip） |
+| `public/tracking-ext-*.js` | 拡張モジュール6本（utils, form, video, image, element, active-time） |
+| `app/api/track/route.ts` | イベント受信→Redisバッファ |
+| `lib/redis.ts` | Redisバッファ（Lua原子的操作）、キャッシュ、Pub/Sub |
+| `inngest/funcs/flushEventBuffer.ts` | 毎分cron: Redis→ClickHouseバッチフラッシュ |
+| `lib/clickhouse.ts` | ClickHouseクライアント、テーブル定義 |
+
+### 分析エンジン
+
+| ファイル | 役割 |
+|---|---|
+| `lib/analysis-axes.ts` | 20軸レジストリ（コスト制御付き）、executeAxis/executeAllAxes |
+
+### REST API
+
+| エンドポイント | ファイル | 用途 |
+|---|---|---|
+| `GET /api/v1/insights/{site_id}` | `app/api/v1/insights/[site_id]/route.ts` | サイトサマリー（Layer 1） |
+| `GET /api/v1/insights/{site_id}/axis/{axis_id}` | `app/api/v1/insights/[site_id]/axis/[axis_id]/route.ts` | 単軸分析（Layer 2） |
+| `GET /api/v1/insights/{site_id}/axis/_list` | 同上 | 利用可能軸の一覧 |
+| `POST /api/v1/insights/{site_id}/multi` | `app/api/v1/insights/[site_id]/multi/route.ts` | 複数軸一括（Layer 2） |
+
+### MCP Server
+
+| ファイル | ツール数 | 起動方法 |
+|---|---|---|
+| `mcp-server.ts` | 7ツール | `npx ts-node mcp-server.ts` |
+
+**MCPツール一覧**: ugokimap_list_sites, ugokimap_site_summary, ugokimap_list_axes, ugokimap_analyze, ugokimap_multi_analyze, ugokimap_heatmap, ugokimap_page_friction
+
+### 認証・セキュリティ
+
+| ファイル | 役割 |
+|---|---|
+| `middleware.ts` | 全API/ページルートにJWT認証強制 |
+| `lib/jwt.ts` | JWT生成・検証（HS256、24h、フォールバックなし） |
+| `lib/api-utils.ts` | 共通エラー、CORS分離、マルチテナント認可 |
+| `lib/rate-limit.ts` | Redis Rate Limiting + APIキー別quota |
+| `components/layout/AuthGuard.tsx` | クライアント側JWT検証＋リダイレクト |
+
+---
+
+## 13. 次のマイルストーン
+
+### 最優先: AI診断（Layer 3）
+- Inngest非同期ジョブで全軸実行→Claude APIでペルソナ/ジャーニー生成
+- Webhook通知対応
+- 結果のキャッシュ（24h TTL）
+
+### 高優先: BigQuery連携
+- GA4 BigQueryエクスポートの設定ガイド
+- ClickHouse外部テーブル or Inngest定期同期
+- デモグラフィック軸4本追加（age_behavior, gender_content, region_cv, demo_persona）
+
+### 中優先: プロダクション準備
+- MCPサーバーのDockerイメージ化
+- API keyの発行・管理UI
+- 使用量ダッシュボード（quota消費状況）
+- aiPromptHintの英語対応
