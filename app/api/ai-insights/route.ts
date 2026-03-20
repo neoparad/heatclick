@@ -87,9 +87,22 @@ export async function POST(request: NextRequest) {
 
         // GA4デモグラフィックデータの取得（設定されている場合のみ）
         let ga4Data = null
-        const ga4ClientEmail = process.env.GA4_CLIENT_EMAIL || process.env.GSC_CLIENT_EMAIL
-        const ga4PrivateKey = process.env.GA4_PRIVATE_KEY || process.env.GSC_PRIVATE_KEY
         const ga4PropertyId = process.env.GA4_PROPERTY_ID
+        const ga4ServiceAccountKey = process.env.GA4_SERVICE_ACCOUNT_KEY
+
+        // Base64エンコードされたサービスアカウントキーから認証情報を取得
+        let ga4ClientEmail = process.env.GA4_CLIENT_EMAIL
+        let ga4PrivateKey = process.env.GA4_PRIVATE_KEY
+
+        if (ga4ServiceAccountKey && ga4PropertyId) {
+          try {
+            const decoded = JSON.parse(Buffer.from(ga4ServiceAccountKey, 'base64').toString('utf8'))
+            ga4ClientEmail = decoded.client_email
+            ga4PrivateKey = decoded.private_key
+          } catch (e: any) {
+            console.error('Failed to decode GA4_SERVICE_ACCOUNT_KEY:', e?.message)
+          }
+        }
 
         if (ga4ClientEmail && ga4PrivateKey && ga4PropertyId) {
           try {
