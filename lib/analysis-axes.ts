@@ -538,7 +538,7 @@ analysisAxes.set('weekday_device_cv', {
       count() as sessions,
       countIf(converted = 1) / greatest(count(), 1) * 100 as cvr
     FROM (
-      SELECT session_id, any(device_type) as device_type,
+      SELECT session_id, multiIf(any(viewport_width) >= 1024, 'desktop', any(viewport_width) >= 768, 'tablet', 'mobile') as device_type,
         min(timestamp) as min_ts, max(conversion_type IS NOT NULL) as converted
       FROM clickinsight.events WHERE site_id = {site_id:String}
       GROUP BY session_id
@@ -1217,7 +1217,7 @@ analysisAxes.set('persona_behavior_profile', {
       SELECT
         session_id,
         any(user_id) as user_id,
-        any(device_type) as device_type,
+        multiIf(any(viewport_width) >= 1024, 'desktop', any(viewport_width) >= 768, 'tablet', 'mobile') as device_type,
         any(utm_source) as utm_source,
         any(utm_medium) as utm_medium,
         argMin(url, timestamp) as landing_page,
