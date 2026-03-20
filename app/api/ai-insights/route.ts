@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
           executeAxis(ch, 'persona_behavior_profile', { site_id }),
           executeAxis(ch, 'persona_query_intent', { site_id }),
           ch.query({
-            query: `SELECT uniq(session_id) as total_sessions, countIf(conversion_type IS NOT NULL) as conversions, countIf(conversion_type IS NOT NULL) / greatest(uniq(session_id), 1) * 100 as cvr FROM clickinsight.events WHERE site_id = {site_id:String}`,
+            query: `SELECT uniq(session_id) as total_sessions, count() as total_events, countIf(event_type = 'click') as total_clicks, countIf(event_type IN ('pageview','page_view')) as total_pageviews, avg(scroll_percentage) as avg_scroll_depth FROM clickinsight.events WHERE site_id = {site_id:String}`,
             query_params: { site_id },
             format: 'JSONEachRow',
           }),
