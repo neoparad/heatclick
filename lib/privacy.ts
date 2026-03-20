@@ -40,11 +40,12 @@ export function simplifyUserAgent(userAgent: string): string {
 }
 
 function getBrowser(userAgent: string): string {
+  // 判定順序が重要: Edge/Operaは Chrome を含むため先に判定する
+  if (userAgent.includes('Edg/') || userAgent.includes('Edge/')) return 'Edge'
+  if (userAgent.includes('OPR/') || userAgent.includes('Opera')) return 'Opera'
   if (userAgent.includes('Chrome')) return 'Chrome'
   if (userAgent.includes('Firefox')) return 'Firefox'
   if (userAgent.includes('Safari')) return 'Safari'
-  if (userAgent.includes('Edge')) return 'Edge'
-  if (userAgent.includes('Opera')) return 'Opera'
   return 'Unknown'
 }
 

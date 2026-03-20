@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
 
 /**
  * ページ単位の統計API
@@ -22,6 +22,11 @@ export async function GET(request: NextRequest) {
     }
 
     const client = await getClickHouseClientAsync()
+
+    // サイトアクセス権限チェック
+    const { authorized } = await verifySiteAccess(request, siteId, client)
+    if (!authorized) return forbidden('Access denied to this site')
+
     const params: Record<string, any> = { site_id: siteId, page_url: pageUrl }
     let dateFilter = ''
 
@@ -108,9 +113,9 @@ export async function GET(request: NextRequest) {
       client.query({ query: imageQuery, query_params: imgParams, format: 'JSONEachRow' }).catch(() => null),
     ])
 
-    const basicData = (await basicResult.json() as any[])[0] || {}
-    const sessionData = (await sessionResult.json() as any[])[0] || {}
-    const imageData = imageResult ? ((await imageResult.json() as any[])[0] || {}) : {}
+    const basicData = (await basicResult.json() as Record<string, string | number>[])[0] || {}
+    const sessionData = (await sessionResult.json() as Record<string, string | number>[])[0] || {}
+    const imageData = imageResult ? ((await imageResult.json() as Record<string, string | number>[])[0] || {}) : {}
 
     const totalSessions = Number(sessionData.total_sessions) || 0
     const bounceSessions = Number(sessionData.bounce_sessions) || 0

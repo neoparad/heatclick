@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { anonymizeIp } from '@/lib/privacy'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
 
 function buildCorsHeaders(request: NextRequest): HeadersInit {
   const origin = request.headers.get('origin') || '*'
@@ -37,6 +37,13 @@ export async function POST(request: NextRequest) {
 
     if (!data.site_id || !data.session_id || !data.events || !Array.isArray(data.events)) {
       return badRequest('Invalid data')
+    }
+
+    // サイトアクセス権限チェック
+    {
+      const ch = await getClickHouseClientAsync()
+      const { authorized } = await verifySiteAccess(request, data.site_id, ch)
+      if (!authorized) return forbidden('Access denied to this site')
     }
 
     // 録画データサイズ制限（5MB）
@@ -95,6 +102,10 @@ export async function GET(request: NextRequest) {
 
     const clickhouse = await getClickHouseClientAsync()
 
+    // サイトアクセス権限チェック
+    const { authorized } = await verifySiteAccess(request, siteId, clickhouse)
+    if (!authorized) return forbidden('Access denied to this site')
+
     let query = `
       SELECT
         id, site_id, session_id, user_id,
@@ -126,13 +137,13 @@ export async function GET(request: NextRequest) {
         ORDER BY created_at ASC
       `
       const dataResult = await clickhouse.query({ query: dataQuery, query_params: { site_id: siteId, session_id: sessionId }, format: 'JSONEachRow' })
-      const dataRows = await dataResult.json() as any[]
+      const dataRows = await dataResult.json() as Record<string, string | number>[]
 
       // 全バッチのイベントを結合
       const allEvents: any[] = []
       for (const row of dataRows) {
         try {
-          const events = JSON.parse(row.recording_data)
+          const events = JSON.parse(String(row.recording_data))
           allEvents.push(...events)
         } catch { /* skip invalid */ }
       }
@@ -148,7 +159,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       success: true,
       recordings,
-      total: (recordings as any[]).length,
+      total: (recordings as Record<string, string | number>[]).length,
     }, { headers: buildCorsHeaders(request) })
   } catch (error: any) {
     console.error('Error fetching recordings:', error)

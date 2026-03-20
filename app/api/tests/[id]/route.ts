@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
+import { getAuthContext, unauthorized, verifySiteAccess, forbidden } from '@/lib/api-utils'
 
 // CORS headers
 function buildCorsHeaders(request: NextRequest): HeadersInit {
@@ -22,6 +23,9 @@ export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const clickhouse = await getClickHouseClientAsync()
     const result = await clickhouse.query({
@@ -29,7 +33,7 @@ export async function GET(
       query_params: { id: params.id },
       format: 'JSONEachRow',
     })
-    const tests = await result.json() as any[]
+    const tests = await result.json() as Record<string, string | number>[]
     if (tests.length === 0) {
       return NextResponse.json(
         { error: 'Test not found' },
@@ -38,6 +42,12 @@ export async function GET(
     }
 
     const test = tests[0]
+
+    // サイトアクセス権限チェック
+    if (test.site_id) {
+      const { authorized } = await verifySiteAccess(request, String(test.site_id), clickhouse)
+      if (!authorized) return forbidden('Access denied to this site')
+    }
 
     // Fetch stats from events
     try {
@@ -58,7 +68,7 @@ export async function GET(
         },
         format: 'JSONEachRow',
       })
-      const statsData = await statsResult.json() as any[]
+      const statsData = await statsResult.json() as Record<string, string | number>[]
       const stats = statsData[0] || {}
       test.sessions_a = Number(stats.sessions_a) || 0
       test.sessions_b = Number(stats.sessions_b) || 0
@@ -86,6 +96,9 @@ export async function PUT(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const data = await request.json()
     const clickhouse = await getClickHouseClientAsync()
@@ -96,7 +109,7 @@ export async function PUT(
       query_params: { id: params.id },
       format: 'JSONEachRow',
     })
-    const existing = await existingResult.json() as any[]
+    const existing = await existingResult.json() as Record<string, string | number>[]
     if (existing.length === 0) {
       return NextResponse.json(
         { error: 'Test not found' },
@@ -105,21 +118,13 @@ export async function PUT(
     }
 
     const updates: string[] = []
-    const queryParams: Record<string, any> = { id: params.id }
+    const queryParams: Record<string, string | number> = { id: params.id }
 
     const allowedFields: Record<string, string> = {
-      name: 'String',
-      status: 'String',
-      page_url_a: 'String',
-      page_url_b: 'String',
-      description_a: 'String',
-      description_b: 'String',
-      goal_type: 'String',
-      traffic_split_a: 'UInt8',
-      traffic_split_b: 'UInt8',
-      confidence_level: 'UInt8',
-      start_date: 'String',
-      end_date: 'String',
+      name: 'String', status: 'String', page_url_a: 'String', page_url_b: 'String',
+      description_a: 'String', description_b: 'String', goal_type: 'String',
+      traffic_split_a: 'UInt8', traffic_split_b: 'UInt8', confidence_level: 'UInt8',
+      start_date: 'String', end_date: 'String',
     }
 
     for (const [field, chType] of Object.entries(allowedFields)) {
@@ -137,16 +142,10 @@ export async function PUT(
       })
     }
 
-    return NextResponse.json(
-      { success: true },
-      { headers: buildCorsHeaders(request) }
-    )
+    return NextResponse.json({ success: true }, { headers: buildCorsHeaders(request) })
   } catch (error) {
     console.error('Failed to update test:', error)
-    return NextResponse.json(
-      { error: 'Failed to update test' },
-      { status: 500, headers: buildCorsHeaders(request) }
-    )
+    return NextResponse.json({ error: 'Failed to update test' }, { status: 500, headers: buildCorsHeaders(request) })
   }
 }
 
@@ -155,40 +154,32 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const clickhouse = await getClickHouseClientAsync()
 
-    // Check existence
     const before = await clickhouse.query({
       query: `SELECT count() as cnt FROM clickinsight.tests WHERE id = {id:String}`,
       query_params: { id: params.id },
       format: 'JSONEachRow',
     })
-    const beforeData = await before.json() as any[]
+    const beforeData = await before.json() as Record<string, string | number>[]
     const countBefore = Number(beforeData[0]?.cnt || 0)
 
     if (countBefore === 0) {
-      return NextResponse.json(
-        { error: 'Test not found' },
-        { status: 404, headers: buildCorsHeaders(request) }
-      )
+      return NextResponse.json({ error: 'Test not found' }, { status: 404, headers: buildCorsHeaders(request) })
     }
 
-    // Use ALTER TABLE DELETE (lightweight delete)
     await clickhouse.command({
       query: `ALTER TABLE clickinsight.tests DELETE WHERE id = {id:String}`,
       query_params: { id: params.id },
     })
 
-    return NextResponse.json(
-      { success: true },
-      { headers: buildCorsHeaders(request) }
-    )
+    return NextResponse.json({ success: true }, { headers: buildCorsHeaders(request) })
   } catch (error) {
     console.error('Failed to delete test:', error)
-    return NextResponse.json(
-      { error: 'Failed to delete test' },
-      { status: 500, headers: buildCorsHeaders(request) }
-    )
+    return NextResponse.json({ error: 'Failed to delete test' }, { status: 500, headers: buildCorsHeaders(request) })
   }
 }

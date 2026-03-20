@@ -91,7 +91,7 @@ export async function POST(request: NextRequest) {
       url: data.url,
       tracking_id: generateTrackingId(),
       status: 'active',
-      user_id: null,
+      user_id: auth.userId,
       org_id: null,
       created_at: now,
       updated_at: now,

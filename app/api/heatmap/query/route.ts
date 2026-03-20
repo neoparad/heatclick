@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
 
 // クエリごとのヒートマップデータ取得
 export async function GET(request: NextRequest) {
@@ -20,6 +20,10 @@ export async function GET(request: NextRequest) {
     }
 
     const clickhouse = await getClickHouseClientAsync()
+
+    // サイトアクセス権限チェック
+    const { authorized } = await verifySiteAccess(request, siteId, clickhouse)
+    if (!authorized) return forbidden('Access denied to this site')
 
     // クエリが指定されている場合、GSCデータとイベントデータを結合
     if (query) {

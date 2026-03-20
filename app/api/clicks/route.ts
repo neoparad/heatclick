@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
 
 export async function GET(request: NextRequest) {
   const auth = getAuthContext(request)
@@ -44,6 +44,10 @@ export async function GET(request: NextRequest) {
         warning: 'ClickHouse connection failed. Returning empty data.',
       })
     }
+
+    // サイトアクセス権限チェック
+    const { authorized } = await verifySiteAccess(request, siteId, client)
+    if (!authorized) return forbidden('Access denied to this site')
 
     // 要素別クリックデータの取得
     let elementQuery = `
@@ -184,7 +188,7 @@ export async function GET(request: NextRequest) {
       format: 'JSONEachRow',
     })
     
-    const statsData = await statsResult.json() as any[]
+    const statsData = await statsResult.json() as Record<string, string | number>[]
     const stats = (statsData && statsData[0]) ? statsData[0] : { total_clicks: 0 }
 
     // 前期間との比較（簡易版）
@@ -223,8 +227,8 @@ export async function GET(request: NextRequest) {
         format: 'JSONEachRow',
       })
       
-      const prevData = await prevResult.json() as any[]
-      prevStats = (prevData && prevData[0]) ? prevData[0] : { total_clicks: 0 }
+      const prevData = await prevResult.json() as Record<string, string | number>[]
+      prevStats = (prevData && prevData[0]) ? { total_clicks: Number(prevData[0].total_clicks) || 0 } : { total_clicks: 0 }
     }
 
     const totalClicks = Number(stats.total_clicks) || 0

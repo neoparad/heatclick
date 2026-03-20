@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
 
 // CORS headers
 function buildCorsHeaders(request: NextRequest): HeadersInit {
@@ -48,6 +48,10 @@ export async function GET(request: NextRequest) {
     const queryParams: Record<string, any> = { type }
 
     if (siteId) {
+      // サイトアクセス権限チェック
+      const { authorized } = await verifySiteAccess(request, siteId, clickhouse)
+      if (!authorized) return forbidden('Access denied to this site')
+
       query += ` AND site_id = {site_id:String}`
       queryParams.site_id = siteId
     }
@@ -64,7 +68,7 @@ export async function GET(request: NextRequest) {
       query_params: queryParams,
       format: 'JSONEachRow',
     })
-    const tests = await result.json() as any[]
+    const tests = await result.json() as Record<string, string | number>[]
 
     // Fetch basic stats for each test from events table
     const testsWithStats = await Promise.all(
@@ -88,7 +92,7 @@ export async function GET(request: NextRequest) {
             },
             format: 'JSONEachRow',
           })
-          const statsData = await statsResult.json() as any[]
+          const statsData = await statsResult.json() as Record<string, string | number>[]
           const stats = statsData[0] || {}
           return {
             ...test,
@@ -132,6 +136,15 @@ export async function POST(request: NextRequest) {
 
     if (!data.name || !data.site_id || !data.page_url_a) {
       return badRequest('name, site_id, and page_url_a are required')
+    }
+
+    // サイトアクセス権限チェック
+    try {
+      const ch = await getClickHouseClientAsync()
+      const { authorized } = await verifySiteAccess(request, data.site_id, ch)
+      if (!authorized) return forbidden('Access denied to this site')
+    } catch {
+      return forbidden('Unable to verify site access')
     }
 
     const now = new Date().toISOString().replace('T', ' ').split('.')[0]

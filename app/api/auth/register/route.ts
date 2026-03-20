@@ -30,6 +30,14 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    // パスワードに大文字・数字・特殊文字を1つ以上含む
+    if (!/[A-Z]/.test(password) || !/[0-9]/.test(password) || !/[^A-Za-z0-9]/.test(password)) {
+      return NextResponse.json(
+        { error: 'Password must contain at least one uppercase letter, one number, and one special character' },
+        { status: 400 }
+      )
+    }
+
     const clickhouse = await getClickHouseClientAsync()
 
     // 既存ユーザーチェック
@@ -38,7 +46,7 @@ export async function POST(request: NextRequest) {
       query_params: { email },
       format: 'JSONEachRow',
     })
-    const existing = await result.json() as any[]
+    const existing = await result.json() as { id: string }[]
     if (existing.length > 0) {
       return NextResponse.json(
         { error: 'User with this email already exists' },
@@ -47,7 +55,7 @@ export async function POST(request: NextRequest) {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10)
-    const userId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    const userId = crypto.randomUUID()
     const now = new Date().toISOString().replace('T', ' ').substring(0, 19)
 
     await clickhouse.insert({

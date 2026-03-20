@@ -8,7 +8,8 @@ import { buildTrackingCorsHeaders as buildCorsHeaders } from '@/lib/api-utils'
 // Vercel Serverless タイムアウト設定（秒）
 export const maxDuration = 60
 
-// メモリ内データストレージ（フォールバック用）
+// メモリ内データストレージ（フォールバック用、上限1000件で古いものを破棄）
+const MAX_MEMORY_EVENTS = 1000
 let trackingData: any[] = []
 
 export async function OPTIONS(request: NextRequest) {
@@ -114,6 +115,7 @@ export async function POST(request: NextRequest) {
       search_query: event.search_query || null,
       device_type: event.device_type || null,
       ga_client_id: event.ga_client_id || null,
+      external_id: event.external_id || null,
     }))
 
     // Prepare image_visibility events
@@ -218,6 +220,21 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Prepare user_mappings for identify events
+    const identifyEvents: any[] = []
+    for (const event of events) {
+      const eventType = event.event_type || event.eventType
+      if (eventType === 'identify' && event.external_id) {
+        identifyEvents.push({
+          site_id: event.site_id || event.siteId || '',
+          anonymous_id: event.user_id || event.userId || '',
+          external_id: event.external_id || '',
+          metadata: event.user_metadata || '',
+          created_at: new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
+        })
+      }
+    }
+
     // Redisバッファ経由でClickHouseに書き込み（即レスポンス返却）
     // Inngest flushEventBuffer が毎分Redisからバッチ取得してClickHouseにINSERT
     try {
@@ -236,6 +253,9 @@ export async function POST(request: NextRequest) {
       }
       if (elementVisibilityEvents.length > 0) {
         bufferPromises.push(pushEventBuffer('clickinsight.element_visibility', elementVisibilityEvents))
+      }
+      if (identifyEvents.length > 0) {
+        bufferPromises.push(pushEventBuffer('clickinsight.user_mappings', identifyEvents))
       }
 
       await Promise.all(bufferPromises)
@@ -267,12 +287,19 @@ export async function POST(request: NextRequest) {
         if (elementVisibilityEvents.length > 0) {
           insertPromises.push(clickhouse.insert({ table: 'clickinsight.element_visibility', values: elementVisibilityEvents, format: 'JSONEachRow' }))
         }
+        if (identifyEvents.length > 0) {
+          insertPromises.push(clickhouse.insert({ table: 'clickinsight.user_mappings', values: identifyEvents, format: 'JSONEachRow' }))
+        }
         await Promise.all(insertPromises)
       } catch (chError) {
         console.error('ClickHouse direct insert also failed:', chError)
         events.forEach(event => {
           trackingData.push({ ...event, received_at: new Date().toISOString() })
         })
+        // メモリ上限を超えたら古いデータを破棄
+        if (trackingData.length > MAX_MEMORY_EVENTS) {
+          trackingData = trackingData.slice(-MAX_MEMORY_EVENTS)
+        }
       }
     }
 
@@ -297,15 +324,27 @@ export async function POST(request: NextRequest) {
 }
 
 export async function GET(request: NextRequest) {
+  // GET /api/track は認証必須（他人のトラッキングデータ閲覧を防止）
+  const { getAuthContext, unauthorized, verifySiteAccess, forbidden } = await import('@/lib/api-utils')
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const { searchParams } = new URL(request.url)
     const siteId = searchParams.get('siteId')
     const eventType = searchParams.get('eventType')
     const limit = parseInt(searchParams.get('limit') || '100')
 
+    // サイトアクセス権限チェック
+    if (siteId) {
+      const ch = await getClickHouseClientAsync()
+      const { authorized } = await verifySiteAccess(request, siteId, ch)
+      if (!authorized) return forbidden('Access denied to this site')
+    }
+
     // ClickHouseからデータを取得を試みる
     let events: any[] = []
-    
+
     try {
       const clickhouse = await getClickHouseClientAsync()
       

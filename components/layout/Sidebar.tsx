@@ -11,6 +11,10 @@ import {
   Globe,
   Zap,
   ClipboardList,
+  FormInput,
+  MousePointerClick,
+  Video,
+  GitBranch,
 } from 'lucide-react'
 import { getCurrentUser } from '@/lib/auth'
 
@@ -18,6 +22,10 @@ const menuItems = [
   { id: 'dashboard', icon: BarChart3, label: 'ダッシュボード', href: '/dashboard' },
   { id: 'heatmap', icon: Map, label: 'ヒートマップ', href: '/heatmap' },
   { id: 'performance', icon: Zap, label: 'パフォーマンス', href: '/performance' },
+  { id: 'form-analysis', icon: FormInput, label: 'フォーム分析', href: '/form-analysis' },
+  { id: 'element-analysis', icon: MousePointerClick, label: 'CTA分析', href: '/element-analysis' },
+  { id: 'video-analysis', icon: Video, label: '動画分析', href: '/video-analysis' },
+  { id: 'cv-paths', icon: GitBranch, label: 'CV経路分析', href: '/cv-paths' },
   { id: 'tests', icon: ClipboardList, label: 'テスト', href: '/tests' },
   { id: 'sites', icon: Globe, label: 'サイト管理', href: '/sites' },
   { id: 'settings', icon: Settings, label: '設定', href: '/settings' },

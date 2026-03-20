@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
 import { redis as getRedisClient } from '@/lib/redis'
 import { PerformanceData, PagePerformance, PageSpeedData } from '@/types/performance'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
 
 export async function GET(request: NextRequest) {
   const auth = getAuthContext(request)
@@ -21,6 +21,10 @@ export async function GET(request: NextRequest) {
 
     const client = await getClickHouseClientAsync()
 
+    // サイトアクセス権限チェック
+    const { authorized } = await verifySiteAccess(request, siteId, client)
+    if (!authorized) return forbidden('Access denied to this site')
+
     // サイト情報取得（tracking_idとURLを取得）
     // eventsテーブルのsite_idにはtracking_idが保存されている
     const siteResult = await client.query({
@@ -28,7 +32,7 @@ export async function GET(request: NextRequest) {
       query_params: { site_id: siteId },
       format: 'JSONEachRow',
     })
-    const siteData = await siteResult.json() as any[]
+    const siteData = await siteResult.json() as Record<string, string | number>[]
 
     if (siteData.length === 0) {
       return NextResponse.json({
@@ -47,7 +51,7 @@ export async function GET(request: NextRequest) {
         query: `SELECT name FROM system.columns WHERE database = 'clickinsight' AND table = 'events' AND name = 'conversion_type'`,
         format: 'JSONEachRow',
       })
-      const cols = await colResult.json() as any[]
+      const cols = await colResult.json() as Record<string, string | number>[]
       hasConversionType = cols.length > 0
     } catch (e) {
       // カラム確認失敗時は無しとして扱う
@@ -110,8 +114,8 @@ export async function GET(request: NextRequest) {
       client.query({ query: rageQuery, query_params: rageParams, format: 'JSONEachRow' }).catch(() => null),
     ])
 
-    const pageData = await pageResult.json() as any[]
-    const rageData = rageResult ? await rageResult.json() as any[] : []
+    const pageData = await pageResult.json() as Record<string, string | number>[]
+    const rageData = rageResult ? await rageResult.json() as Record<string, string | number>[] : []
 
     // レイジクリックをURLでマップ化
     const rageMap: Record<string, number> = {}

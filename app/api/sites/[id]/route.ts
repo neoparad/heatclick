@@ -6,7 +6,7 @@ import {
   deleteMemorySite,
   formatDateTime,
 } from '@/lib/sites-store'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
 
 // CORS headers
 function buildCorsHeaders(request: NextRequest): HeadersInit {
@@ -34,6 +34,11 @@ export async function GET(
 
   try {
     const clickhouse = await getClickHouseClientAsync()
+
+    // サイトアクセス権限チェック
+    const { authorized } = await verifySiteAccess(request, params.id, clickhouse)
+    if (!authorized) return forbidden('Access denied to this site')
+
     const result = await clickhouse.query({
       query: `
         SELECT id, name, url, tracking_id, status,
@@ -85,9 +90,12 @@ export async function PUT(
       }
     }
 
-    // ClickHouseで更新を試みる
+    // サイトアクセス権限チェック＋ClickHouseで更新を試みる
     try {
       const clickhouse = await getClickHouseClientAsync()
+
+      const { authorized } = await verifySiteAccess(request, params.id, clickhouse)
+      if (!authorized) return forbidden('Access denied to this site')
 
       const existingResult = await clickhouse.query({
         query: `SELECT id FROM clickinsight.sites WHERE id = {id:String}`,
@@ -164,10 +172,13 @@ export async function DELETE(
   if (!auth) return unauthorized()
 
   try {
-    // ClickHouseから削除
+    // サイトアクセス権限チェック＋ClickHouseから削除
     let chError: string | null = null
     try {
       const clickhouse = await getClickHouseClientAsync()
+
+      const { authorized } = await verifySiteAccess(request, params.id, clickhouse)
+      if (!authorized) return forbidden('Access denied to this site')
 
       // 削除前にレコード存在確認
       const before = await clickhouse.query({
@@ -175,7 +186,7 @@ export async function DELETE(
         query_params: { id: params.id },
         format: 'JSONEachRow',
       })
-      const beforeData = await before.json() as any[]
+      const beforeData = await before.json() as Record<string, string | number>[]
       const countBefore = Number(beforeData[0]?.cnt || 0)
 
       if (countBefore === 0) {

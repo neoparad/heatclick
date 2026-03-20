@@ -97,11 +97,14 @@
   const _devType = () => { const w = _vp().width; return w >= 1024 ? 'desktop' : w >= 768 ? 'tablet' : 'mobile'; };
   const _refType = (r) => { if (!r) return 'direct'; try { const h = new URL(r).hostname; return /google|bing|yahoo/i.test(h)?'organic':/facebook|instagram|twitter/i.test(h)?'social':'referral'; } catch { return 'direct'; } };
 
+  // External ID (member/customer ID set by site owner)
+  let _externalId = localStorage.getItem('ci_external_id') || null;
+
   // Event Queue
   const _q = []; let _bt = null;
 
   const queueEvent = (ev) => {
-    const d = { ...ev, id: _genId(), site_id: config.siteId, session_id: _getSession(), user_id: _getUserId(), ga_client_id: _gaClientId, timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, device_type: _devType(), referrer_type: _refType(document.referrer), ..._utm };
+    const d = { ...ev, id: _genId(), site_id: config.siteId, session_id: _getSession(), user_id: _getUserId(), external_id: _externalId || null, ga_client_id: _gaClientId, timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, device_type: _devType(), referrer_type: _refType(document.referrer), ..._utm };
     if (!d.site_id || d.site_id.trim() === '') return;
     _q.push(d);
     if (_q.length >= config.batchSize) sendBatch(); else if (!_bt) _bt = setTimeout(sendBatch, config.batchInterval);
@@ -215,9 +218,24 @@
     loadExtensions();
   };
 
+  // identify: link anonymous user to external member/customer ID
+  const identify = (externalId, metadata) => {
+    if (!externalId || typeof externalId !== 'string') return;
+    _externalId = externalId;
+    localStorage.setItem('ci_external_id', externalId);
+    queueEvent({ event_type: 'identify', external_id: externalId, user_metadata: JSON.stringify(metadata || {}) });
+  };
+
+  // trackConversion: fire a conversion event
+  const trackConversion = (type, value) => {
+    if (!type) return;
+    queueEvent({ event_type: 'conversion', conversion_type: type, conversion_value: value || 0 });
+  };
+
   // Public API
   window.ClickInsight = Object.freeze({
     track: queueEvent, flush: sendBatch, getSessionId: _getSession, getUserId: _getUserId,
+    identify: identify, trackConversion: trackConversion,
     registerExtension: registerExtension, extendUtils: extendUtils,
     utils: _utils, config: Object.freeze({...config}),
   });

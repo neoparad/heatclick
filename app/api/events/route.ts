@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
+import { getClickHouseClientAsync } from '@/lib/clickhouse'
 
 export async function POST(request: NextRequest) {
   const auth = getAuthContext(request)
@@ -7,11 +8,16 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json()
-    
+
     // バリデーション
     if (!body.site_id || !body.session_id || !body.page_url) {
       return badRequest('Missing required fields')
     }
+
+    // サイトアクセス権限チェック
+    const ch = await getClickHouseClientAsync()
+    const { authorized } = await verifySiteAccess(request, body.site_id, ch)
+    if (!authorized) return forbidden('Access denied to this site')
 
     // イベントデータの構造化
     const eventData = {

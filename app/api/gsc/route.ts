@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
 import { fetchGSCDailyData, fetchGSCQueryPageData, fetchGSCDataByQuery, fetchGSCDataByPage, GSCConfig } from '@/lib/integrations/gsc'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
 
 // GSCデータの取得と保存
 export async function POST(request: NextRequest) {
@@ -14,6 +14,15 @@ export async function POST(request: NextRequest) {
 
     if (!siteId || !startDate || !endDate) {
       return badRequest('siteId, startDate, endDate are required')
+    }
+
+    // サイトアクセス権限チェック
+    try {
+      const ch = await getClickHouseClientAsync()
+      const { authorized } = await verifySiteAccess(request, siteId, ch)
+      if (!authorized) return forbidden('Access denied to this site')
+    } catch {
+      return forbidden('Unable to verify site access')
     }
 
     // GSC設定を取得（環境変数またはDBから）
@@ -42,13 +51,13 @@ export async function POST(request: NextRequest) {
         format: 'JSONEachRow',
       })
       
-      const siteData = await siteResult.json() as any[]
+      const siteData = await siteResult.json() as Record<string, string | number>[]
       if (siteData && siteData.length > 0 && siteData[0]?.gsc_client_email) {
         // サイトごとの設定が存在する場合はそれを使用
         gscConfig = {
-          clientEmail: siteData[0].gsc_client_email || gscConfig.clientEmail,
-          privateKey: siteData[0].gsc_private_key || gscConfig.privateKey,
-          siteUrl: siteData[0].gsc_site_url || gscConfig.siteUrl,
+          clientEmail: String(siteData[0].gsc_client_email) || gscConfig.clientEmail,
+          privateKey: String(siteData[0].gsc_private_key) || gscConfig.privateKey,
+          siteUrl: String(siteData[0].gsc_site_url) || gscConfig.siteUrl,
         }
       }
     } catch (error) {
@@ -124,6 +133,10 @@ export async function GET(request: NextRequest) {
     }
 
     const clickhouse = await getClickHouseClientAsync()
+
+    // サイトアクセス権限チェック
+    const { authorized } = await verifySiteAccess(request, siteId, clickhouse)
+    if (!authorized) return forbidden('Access denied to this site')
 
     let sqlQuery = `
       SELECT site_id, date, query, page, clicks, impressions, ctr, position, device

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import type { ClickHouseClient } from '@clickhouse/client'
 
 // --- CORS ---
 
@@ -95,17 +96,18 @@ export function getAuthContext(request: NextRequest): AuthContext | null {
 }
 
 // ユーザーがサイトにアクセスする権限があるか確認
+// siteId は sites.id (UUID) または sites.tracking_id (CIP_xxx) のどちらでも可
 export async function verifySiteAccess(
   request: NextRequest,
   siteId: string,
-  clickhouse: any
+  clickhouse: ClickHouseClient
 ): Promise<{ authorized: boolean; auth: AuthContext | null }> {
   const auth = getAuthContext(request)
   if (!auth) return { authorized: false, auth: null }
 
   try {
     const result = await clickhouse.query({
-      query: `SELECT count() as count FROM clickinsight.sites WHERE id = {site_id:String} AND user_id = {user_id:String}`,
+      query: `SELECT count() as count FROM clickinsight.sites WHERE (id = {site_id:String} OR tracking_id = {site_id:String}) AND user_id = {user_id:String}`,
       query_params: { site_id: siteId, user_id: auth.userId },
       format: 'JSONEachRow',
     })

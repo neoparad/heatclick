@@ -1,17 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
 
 export async function GET(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const { searchParams } = new URL(request.url)
     const siteId = searchParams.get('site_id')
 
     if (!siteId) {
-      return NextResponse.json(
-        { error: 'Missing required parameter: site_id' },
-        { status: 400 }
-      )
+      return badRequest('Missing required parameter: site_id')
     }
+
+    // サイトアクセス権限チェック
+    const ch = await getClickHouseClientAsync()
+    const { authorized } = await verifySiteAccess(request, siteId, ch)
+    if (!authorized) return forbidden('Access denied to this site')
 
     // ClickHouseからページURLのリストを取得
     let pages: any[] = []

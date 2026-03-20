@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getStatistics } from '@/lib/clickhouse'
 import { getStatisticsCache, setStatisticsCache } from '@/lib/redis'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
+import { getClickHouseClientAsync } from '@/lib/clickhouse'
 
 export async function GET(request: NextRequest) {
   const auth = getAuthContext(request)
@@ -17,6 +18,11 @@ export async function GET(request: NextRequest) {
       return badRequest('Missing required parameter: site_id'
       )
     }
+
+    // サイトアクセス権限チェック
+    const ch = await getClickHouseClientAsync()
+    const { authorized } = await verifySiteAccess(request, siteId, ch)
+    if (!authorized) return forbidden('Access denied to this site')
 
     // キャッシュから取得を試みる
     let cached = false
@@ -80,16 +86,21 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const body = await request.json()
     const { site_id, start_date, end_date, metrics } = body
 
     if (!site_id) {
-      return NextResponse.json(
-        { error: 'Missing required field: site_id' },
-        { status: 400 }
-      )
+      return badRequest('Missing required field: site_id')
     }
+
+    // サイトアクセス権限チェック
+    const ch = await getClickHouseClientAsync()
+    const { authorized } = await verifySiteAccess(request, site_id, ch)
+    if (!authorized) return forbidden('Access denied to this site')
 
     // ClickHouseから実際のデータを取得
     let basicStats: any = {}

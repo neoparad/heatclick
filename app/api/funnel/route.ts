@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionFunnel, getSessions } from '@/lib/session-aggregator'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
+import { getClickHouseClientAsync } from '@/lib/clickhouse'
 
 // セッションごとのファネル分析
 export async function GET(request: NextRequest) {
@@ -15,7 +16,12 @@ export async function GET(request: NextRequest) {
     if (!siteId) {
       return badRequest('siteId is required')
     }
-    
+
+    // サイトアクセス権限チェック
+    const ch = await getClickHouseClientAsync()
+    const { authorized } = await verifySiteAccess(request, siteId, ch)
+    if (!authorized) return forbidden('Access denied to this site')
+
     // 特定のセッションのファネルを取得
     if (sessionId) {
       const funnel = await getSessionFunnel(siteId, sessionId)

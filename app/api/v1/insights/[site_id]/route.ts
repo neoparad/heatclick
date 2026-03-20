@@ -44,7 +44,7 @@ export async function GET(
       format: 'JSONEachRow',
     })
 
-    const data = await result.json() as any[]
+    const data = await result.json() as Record<string, string | number>[]
     return NextResponse.json({
       site_id: siteId,
       period: { start: startDate, end: endDate },

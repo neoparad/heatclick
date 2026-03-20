@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
 
 export async function GET(request: NextRequest) {
   const auth = getAuthContext(request)
@@ -19,6 +19,10 @@ export async function GET(request: NextRequest) {
     }
 
     const clickhouse = await getClickHouseClientAsync()
+
+    // サイトアクセス権限チェック
+    const { authorized } = await verifySiteAccess(request, siteId, clickhouse)
+    if (!authorized) return forbidden('Access denied to this site')
 
     // 画像ごとの集計: 平均視認時間、最大表示割合、セッション数、閲覧スコア
     let query = `
@@ -73,7 +77,7 @@ export async function GET(request: NextRequest) {
       format: 'JSONEachRow',
     })
 
-    const rawData = await result.json() as any[]
+    const rawData = await result.json() as Record<string, string | number>[]
 
     // 全セッション数を取得（閲覧率の分母）
     let totalSessionsQuery = `
@@ -102,7 +106,7 @@ export async function GET(request: NextRequest) {
       query_params: totalParams,
       format: 'JSONEachRow',
     })
-    const totalData = await totalResult.json() as any[]
+    const totalData = await totalResult.json() as Record<string, string | number>[]
     const totalSessions = Number(totalData[0]?.total_sessions) || 1
 
     // 閲覧スコアを計算: avg_duration * avg_ratio で正規化

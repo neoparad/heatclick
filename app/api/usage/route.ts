@@ -70,8 +70,8 @@ export async function GET(request: NextRequest) {
           format: 'JSONEachRow',
         })
         
-        const usageData = await usageResult.json() as any[]
-        usage = (usageData && usageData[0]) ? (usageData[0].pv_count || 0) : 0
+        const usageData = await usageResult.json() as Record<string, string | number>[]
+        usage = (usageData && usageData[0]) ? Number(usageData[0].pv_count) || 0 : 0
       }
     } catch (error: any) {
       console.error('Error fetching usage:', {

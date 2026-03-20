@@ -1,4 +1,5 @@
 import Redis from 'ioredis'
+import type { EventBufferItem } from './clickhouse/types'
 
 // Redisクライアントの設定
 function getRedisConfig() {
@@ -107,7 +108,7 @@ export async function getHeatmapCache(
   startDate?: string,
   endDate?: string,
   heatmapType?: string
-): Promise<any[] | null> {
+): Promise<Record<string, unknown>[] | null> {
   try {
     const client = getRedisClient()
     // heatmap_typeを含めたキャッシュキーに変更
@@ -123,7 +124,7 @@ export async function getHeatmapCache(
 export async function setHeatmapCache(
   siteId: string,
   pageUrl: string,
-  data: any[],
+  data: Record<string, unknown>[],
   deviceType?: string,
   startDate?: string,
   endDate?: string,
@@ -145,7 +146,7 @@ export async function getStatisticsCache(
   siteId: string,
   startDate?: string,
   endDate?: string
-): Promise<any | null> {
+): Promise<Record<string, unknown> | null> {
   try {
     const key = `stats:${siteId}:${startDate || 'all'}:${endDate || 'all'}`
     const client = getRedisClient()
@@ -159,7 +160,7 @@ export async function getStatisticsCache(
 
 export async function setStatisticsCache(
   siteId: string,
-  data: any,
+  data: Record<string, unknown>,
   startDate?: string,
   endDate?: string,
   ttl: number = CACHE_TTL.STATISTICS
@@ -174,7 +175,7 @@ export async function setStatisticsCache(
 }
 
 // セッションデータのキャッシュ
-export async function getSessionCache(sessionId: string): Promise<any | null> {
+export async function getSessionCache(sessionId: string): Promise<Record<string, unknown> | null> {
   try {
     const key = `session:${sessionId}`
     const client = getRedisClient()
@@ -188,7 +189,7 @@ export async function getSessionCache(sessionId: string): Promise<any | null> {
 
 export async function setSessionCache(
   sessionId: string,
-  data: any,
+  data: Record<string, unknown>,
   ttl: number = CACHE_TTL.SESSION
 ): Promise<void> {
   try {
@@ -201,7 +202,7 @@ export async function setSessionCache(
 }
 
 // ユーザーデータのキャッシュ
-export async function getUserCache(userId: string): Promise<any | null> {
+export async function getUserCache(userId: string): Promise<Record<string, unknown> | null> {
   try {
     const key = `user:${userId}`
     const client = getRedisClient()
@@ -215,7 +216,7 @@ export async function getUserCache(userId: string): Promise<any | null> {
 
 export async function setUserCache(
   userId: string,
-  data: any,
+  data: Record<string, unknown>,
   ttl: number = CACHE_TTL.USER
 ): Promise<void> {
   try {
@@ -230,7 +231,7 @@ export async function setUserCache(
 // リアルタイムデータの管理
 export async function publishRealtimeData(
   siteId: string,
-  data: any
+  data: Record<string, unknown>
 ): Promise<void> {
   try {
     const channel = `realtime:${siteId}`
@@ -243,7 +244,7 @@ export async function publishRealtimeData(
 
 export async function subscribeRealtimeData(
   siteId: string,
-  callback: (data: any) => void
+  callback: (data: Record<string, unknown>) => void
 ): Promise<void> {
   try {
     const channel = `realtime:${siteId}`
@@ -278,7 +279,7 @@ export async function clearCache(pattern: string): Promise<void> {
 }
 
 // キャッシュの統計情報
-export async function getCacheStats(): Promise<any> {
+export async function getCacheStats(): Promise<{ memory: string; keyspace: string; connected: boolean } | null> {
   try {
     const client = getRedisClient()
     const info = await client.info('memory')
@@ -301,7 +302,7 @@ const EVENT_BUFFER_RETRY_KEY = 'event_buffer:retry'
 
 export async function pushEventBuffer(
   table: string,
-  values: any[]
+  values: Record<string, unknown>[]
 ): Promise<void> {
   try {
     const client = getRedisClient()
@@ -322,7 +323,7 @@ const POP_BUFFER_LUA = `
   return items
 `
 
-export async function popEventBuffer(batchSize: number = 500): Promise<Array<{ table: string; values: any[]; timestamp: number }>> {
+export async function popEventBuffer(batchSize: number = 500): Promise<EventBufferItem[]> {
   try {
     const client = getRedisClient()
     const rawItems = await client.eval(POP_BUFFER_LUA, 1, EVENT_BUFFER_KEY, batchSize) as string[]
@@ -336,7 +337,7 @@ export async function popEventBuffer(batchSize: number = 500): Promise<Array<{ t
 
 export async function pushRetryBuffer(
   table: string,
-  values: any[]
+  values: Record<string, unknown>[]
 ): Promise<void> {
   try {
     const client = getRedisClient()
@@ -347,7 +348,7 @@ export async function pushRetryBuffer(
   }
 }
 
-export async function popRetryBuffer(batchSize: number = 100): Promise<Array<{ table: string; values: any[]; timestamp: number }>> {
+export async function popRetryBuffer(batchSize: number = 100): Promise<EventBufferItem[]> {
   try {
     const client = getRedisClient()
     const rawItems = await client.eval(POP_BUFFER_LUA, 1, EVENT_BUFFER_RETRY_KEY, batchSize) as string[]

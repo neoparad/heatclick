@@ -10,6 +10,7 @@
 
 import { executeAxis, executeAllAxes, listAxes } from './lib/analysis-axes'
 import { getClickHouseClientAsync } from './lib/clickhouse'
+import { fetchGA4PersonaData, type GA4Config } from './lib/integrations/ga4'
 
 // MCP protocol types (stdio-based JSON-RPC)
 interface MCPRequest {
@@ -99,6 +100,17 @@ const TOOLS = [
         page_url: { type: 'string', description: 'ページURL' },
       },
       required: ['site_id', 'page_url'],
+    },
+  },
+  {
+    name: 'ugokimap_generate_personas',
+    description: 'サイトの行動データ・検索意図・デバイス情報から、3-5個の行動ベースペルソナを自動生成。従来のデモグラベースではなく、実際の行動パターンからクラスタリングしたペルソナを返す。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        site_id: { type: 'string', description: 'サイトID' },
+      },
+      required: ['site_id'],
     },
   },
 ]
@@ -261,6 +273,94 @@ async function handleTool(name: string, args: any): Promise<any> {
       return {
         rage_dead_clicks: await rageDeadResult.json(),
         form_friction: await formResult.json(),
+      }
+    }
+
+    case 'ugokimap_generate_personas': {
+      // 行動プロファイル + 検索意図 + GA4デモグラを並列実行し、統合データを返す
+      const [profileResult, intentResult, summaryResult] = await Promise.all([
+        executeAxis(ch, 'persona_behavior_profile', { site_id: args.site_id }),
+        executeAxis(ch, 'persona_query_intent', { site_id: args.site_id }),
+        ch.query({
+          query: `
+            SELECT
+              uniq(session_id) as total_sessions,
+              countIf(conversion_type IS NOT NULL) as total_conversions,
+              countIf(conversion_type IS NOT NULL) / greatest(uniq(session_id), 1) * 100 as overall_cvr,
+              uniq(url) as unique_pages,
+              avg(scroll_percentage) as avg_scroll_depth
+            FROM clickinsight.events
+            WHERE site_id = {site_id:String}
+          `,
+          query_params: { site_id: args.site_id },
+          format: 'JSONEachRow',
+        }),
+      ])
+
+      const summaryData = await summaryResult.json() as Record<string, unknown>[]
+
+      // GA4 デモグラフィックデータの取得（設定されている場合のみ）
+      let ga4Data = null
+      const ga4ClientEmail = process.env.GA4_CLIENT_EMAIL || process.env.GSC_CLIENT_EMAIL
+      const ga4PrivateKey = process.env.GA4_PRIVATE_KEY || process.env.GSC_PRIVATE_KEY
+      const ga4PropertyId = process.env.GA4_PROPERTY_ID
+
+      if (ga4ClientEmail && ga4PrivateKey && ga4PropertyId) {
+        try {
+          const endDate = new Date().toISOString().split('T')[0]
+          const startDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+          ga4Data = await fetchGA4PersonaData(
+            { clientEmail: ga4ClientEmail, privateKey: ga4PrivateKey, propertyId: ga4PropertyId },
+            startDate, endDate
+          )
+        } catch (e: any) {
+          console.error('GA4 data fetch failed (continuing without demographics):', e?.message)
+        }
+      }
+
+      return {
+        _description: '行動ベースペルソナ生成用の統合データ。このデータから3-5個のペルソナを生成してください。',
+        site_summary: summaryData[0] || {},
+        behavior_profiles: profileResult?.data || [],
+        query_intent_by_page: intentResult?.data || [],
+        // GA4デモグラデータ（利用可能な場合）
+        ga4_demographics: ga4Data?.demographics || null,
+        ga4_page_demographics: ga4Data?.pageDemographics?.slice(0, 30) || null,
+        ga4_interests: ga4Data?.interestSegments?.slice(0, 20) || null,
+        _ga4_available: !!ga4Data,
+        ai_instruction: profileResult?.axis.aiPromptHint || '',
+        _generation_guide: `
+【ペルソナ出力フォーマット】
+各ペルソナについて以下を出力:
+
+■ ペルソナ名（象徴的な名前）
+  - セッション割合: X%
+  - CVR: X%
+  - 推定デモグラフィック: (GA4データがある場合は年代・性別を統計マッチングで推定)
+  - 行動特徴:
+    • スクロール: (速度/深度)
+    • 熟読: (時間/セクション)
+    • クリック: (頻度/パターン)
+    • 摩擦: (rage/dead click傾向)
+  - デバイス: (主要デバイス)
+  - 流入元: (主要チャネル)
+  - 検索意図: (情報収集/比較検討/購入意図)
+  - 興味関心: (GA4データがある場合)
+  - 典型的なジャーニー: (LP → ページ遷移 → CV or 離脱)
+  - このペルソナへの最適化提案:
+    • LP改善案
+    • コンテンツ戦略
+    • 広告クリエイティブ方針
+
+【GA4デモグラフィック統合ルール】
+ga4_demographicsデータがある場合:
+1. GA4の年代×デバイス別セッション時間・CVRと、
+   ClickHouseの行動タイプ別セッション時間・CVRを比較
+2. 統計的に最も近いGA4セグメントを各行動ペルソナに紐付け
+3. 「推定」であることを明記（例: "推定: 35-44歳 男性が中心"）
+4. ga4_page_demographicsから、各ペルソナのランディングページの
+   年代分布も参照し、推定の裏付けとする
+`,
       }
     }
 

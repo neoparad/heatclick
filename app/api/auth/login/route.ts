@@ -15,7 +15,8 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    let user: any = null
+    interface UserRecord { id: string; email: string; password: string; name: string; plan: string; status: string }
+    let user: UserRecord | null = null
 
     try {
       const clickhouse = await getClickHouseClientAsync()
@@ -24,7 +25,7 @@ export async function POST(request: NextRequest) {
         query_params: { email },
         format: 'JSONEachRow',
       })
-      const usersFromDb = await result.json() as any[]
+      const usersFromDb = await result.json() as UserRecord[]
       if (usersFromDb.length > 0) {
         user = usersFromDb[0]
       }

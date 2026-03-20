@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getTrafficSources } from '@/lib/clickhouse'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
+import { getClickHouseClientAsync } from '@/lib/clickhouse'
 
 export async function GET(request: NextRequest) {
   const auth = getAuthContext(request)
@@ -15,6 +16,11 @@ export async function GET(request: NextRequest) {
     if (!siteId) {
       return badRequest('Missing required parameter: site_id')
     }
+
+    // サイトアクセス権限チェック
+    const ch = await getClickHouseClientAsync()
+    const { authorized } = await verifySiteAccess(request, siteId, ch)
+    if (!authorized) return forbidden('Access denied to this site')
 
     try {
       const trafficSources = await getTrafficSources(

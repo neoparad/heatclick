@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GA4 vs BigQuery vs Clarity vs UGOKI MAP - 比較レポート</title>
+<title>UGOKI MAP仕様</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
@@ -40,8 +40,8 @@
         <span class="text-white font-bold text-lg">U</span>
       </div>
       <div>
-        <h1 class="text-2xl font-extrabold text-gray-900">Web行動分析ツール比較レポート</h1>
-        <p class="text-sm text-gray-500">GA4 / BigQuery Export / Microsoft Clarity / UGOKI MAP</p>
+        <h1 class="text-2xl font-extrabold text-gray-900">UGOKI MAP仕様</h1>
+        <p class="text-sm text-gray-500">GA4 / BigQuery Export / Microsoft Clarity / A社 / UGOKI MAP</p>
       </div>
     </div>
     <p class="text-xs text-gray-400">2026年3月 作成</p>
@@ -52,13 +52,14 @@
     <button class="tab-btn active" onclick="switchTab('comparison')">機能比較</button>
     <button class="tab-btn" onclick="switchTab('cvpath')">CV経路分析</button>
     <button class="tab-btn" onclick="switchTab('userid')">会員ID紐付け</button>
+    <button class="tab-btn" onclick="switchTab('ai-analysis')" style="background: linear-gradient(135deg, #ede9fe 0%, #dbeafe 100%); border-radius: 8px 8px 0 0;">AIユーザー分析</button>
   </div>
 
   <!-- ========== Tab 1: 機能比較 ========== -->
   <div id="tab-comparison" class="tab-content active">
 
   <!-- ポジショニングサマリー -->
-  <div class="grid grid-cols-4 gap-4 mb-10">
+  <div class="grid grid-cols-5 gap-4 mb-10">
     <div class="bg-white rounded-xl border border-gray-200 p-4">
       <div class="flex items-center gap-2 mb-2">
         <div class="w-8 h-8 bg-orange-100 rounded-lg flex items-center justify-center">
@@ -86,6 +87,15 @@
       </div>
       <p class="text-xs text-gray-600">無料のUX分析特化ツール。セッション録画とヒートマップが強い。データ分析機能は限定的。</p>
     </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <div class="flex items-center gap-2 mb-2">
+        <div class="w-8 h-8 bg-rose-100 rounded-lg flex items-center justify-center">
+          <span class="text-rose-600 font-bold text-sm">A</span>
+        </div>
+        <h3 class="font-bold text-sm">A社</h3>
+      </div>
+      <p class="text-xs text-gray-600">国内ヒートマップの老舗。クリック・スクロール・熟読を可視化。高機能だが高価格。</p>
+    </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 border-blue-300 ring-1 ring-blue-200">
       <div class="flex items-center gap-2 mb-2">
         <div class="w-8 h-8 bg-gradient-to-br from-pink-500 to-blue-600 rounded-lg flex items-center justify-center">
@@ -110,16 +120,18 @@
           <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:110px;">GA4</th>
           <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:110px;">BigQuery</th>
           <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:110px;">Clarity</th>
+          <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:110px;">A社</th>
           <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:130px;">UGOKI MAP</th>
         </tr>
       </thead>
       <tbody>
         <!-- データ基盤 -->
-        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">データ基盤</td></tr>
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="6" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">データ基盤</td></tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">経路ステップ数上限</td>
           <td class="text-center no font-medium">10ステップ</td>
           <td class="text-center yes font-medium">無制限</td>
+          <td class="text-center no font-medium">なし<br><span class="text-xs text-gray-400">経路分析機能なし</span></td>
           <td class="text-center no font-medium">なし<br><span class="text-xs text-gray-400">経路分析機能なし</span></td>
           <td class="text-center yes font-medium">無制限</td>
         </tr>
@@ -129,12 +141,14 @@
           <td class="text-center yes font-medium">なし</td>
           <td class="text-center yes font-medium">なし</td>
           <td class="text-center yes font-medium">なし</td>
+          <td class="text-center yes font-medium">なし</td>
         </tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">データ保持期間</td>
           <td class="text-center no font-medium">14ヶ月</td>
           <td class="text-center yes font-medium">無制限</td>
           <td class="text-center partial font-medium">13ヶ月</td>
+          <td class="text-center partial font-medium">12ヶ月</td>
           <td class="text-center yes font-medium">無制限</td>
         </tr>
         <tr class="border-b border-gray-50">
@@ -142,6 +156,7 @@
           <td class="text-center no font-medium">500種</td>
           <td class="text-center no font-medium">500種<span class="text-xs text-gray-400">*</span></td>
           <td class="text-center no font-medium">カスタムタグのみ</td>
+          <td class="text-center no font-medium">限定的</td>
           <td class="text-center yes font-medium">無制限</td>
         </tr>
         <tr class="border-b border-gray-50">
@@ -149,46 +164,52 @@
           <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">可能</td>
           <td class="text-center no font-medium">不可</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">可能</td>
         </tr>
 
         <!-- CV分析 -->
-        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">CV分析</td></tr>
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="6" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">CV分析</td></tr>
         <tr class="border-b border-gray-50 highlight-row">
           <td class="py-2.5 px-4">セッション跨ぎの全経路追跡</td>
           <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">10ステップ制限</span></td>
           <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQL必須</span></td>
           <td class="text-center no font-medium">不可</td>
-          <td class="text-center yes font-bold">可能</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">Sankey + 経路テーブル</span></td>
         </tr>
         <tr class="border-b border-gray-50 highlight-row">
           <td class="py-2.5 px-4">再訪問〜CV全行動の再現</td>
           <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQL必須・同一client_id内</span></td>
           <td class="text-center no font-medium">不可</td>
-          <td class="text-center yes font-bold">可能</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">タイムライン表示</span></td>
         </tr>
         <tr class="border-b border-gray-50 highlight-row">
           <td class="py-2.5 px-4">CVまでの日数・訪問回数</td>
           <td class="text-center partial font-medium">概算のみ</td>
           <td class="text-center yes font-medium">正確<br><span class="text-xs text-gray-400">SQL必須</span></td>
           <td class="text-center no font-medium">不可</td>
-          <td class="text-center yes font-bold">正確</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">正確<br><span class="text-xs text-gray-400">UI表示対応済</span></td>
         </tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">会員IDとの紐付け</td>
           <td class="text-center no font-medium">個人経路の追跡不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
           <td class="text-center yes font-medium">user_id結合可<br><span class="text-xs text-gray-400">保存済みデータは永久</span></td>
           <td class="text-center partial font-medium">カスタムID設定<br><span class="text-xs text-gray-400">録画フィルターのみ</span></td>
-          <td class="text-center yes font-medium">JS1行のみ<br><span class="text-xs text-gray-400">ログイン前行動も自動紐付</span></td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">JS1行のみ<br><span class="text-xs text-gray-400">identify() API実装済<br>ログイン前行動も自動紐付</span></td>
         </tr>
 
         <!-- 会員行動の分析粒度 -->
-        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">会員行動の分析粒度（ID紐付け後）</td></tr>
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="6" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">会員行動の分析粒度（ID紐付け後）</td></tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">会員のページ遷移・流入元・CV</td>
           <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
           <td class="text-center yes font-medium">追える</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">追える</td>
         </tr>
@@ -197,6 +218,7 @@
           <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
           <td class="text-center yes font-medium">追える</td>
           <td class="text-center partial font-medium">録画で確認</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">追える</td>
         </tr>
         <tr class="border-b border-gray-50 highlight-row">
@@ -204,6 +226,7 @@
           <td class="text-center no">不可</td>
           <td class="text-center no">不可<br><span class="text-xs text-gray-400">GA4は座標を収集しない</span></td>
           <td class="text-center partial font-medium">録画で確認</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">追える</td>
         </tr>
         <tr class="border-b border-gray-50 highlight-row">
@@ -211,6 +234,7 @@
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">追える</td>
         </tr>
         <tr class="border-b border-gray-50 highlight-row">
@@ -218,6 +242,7 @@
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">追える</td>
         </tr>
         <tr class="border-b border-gray-50 highlight-row">
@@ -225,6 +250,7 @@
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">追える</td>
         </tr>
         <tr class="border-b border-gray-50 highlight-row">
@@ -232,6 +258,7 @@
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">追える</td>
         </tr>
         <tr class="border-b border-gray-50">
@@ -239,16 +266,18 @@
           <td class="text-center partial">基本のみ<br><span class="text-xs text-gray-400">再生/完了</span></td>
           <td class="text-center partial">基本のみ</td>
           <td class="text-center no">不可</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">全操作記録</td>
         </tr>
 
         <!-- UX詳細分析 -->
-        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">UX詳細分析</td></tr>
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="6" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">UX詳細分析</td></tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">ヒートマップ（クリック）</td>
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
           <td class="text-center yes font-bold">あり</td>
+          <td class="text-center yes font-bold">対応</td>
           <td class="text-center yes font-bold">あり</td>
         </tr>
         <tr class="border-b border-gray-50">
@@ -256,13 +285,47 @@
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
           <td class="text-center yes font-bold">あり</td>
+          <td class="text-center yes font-bold">対応<br><span class="text-xs text-gray-400">到達率表示</span></td>
           <td class="text-center yes font-bold">あり（ファネル表示）</td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">熟読エリア（Y座標×滞在時間）</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">対応<br><span class="text-xs text-gray-400">アテンションHM</span></td>
+          <td class="text-center yes font-bold">自動収集<br><span class="text-xs text-gray-400">ヒートマップUI対応済</span></td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">CV比較ヒートマップ<br><span class="text-xs text-gray-400">CV有/無ユーザーの行動差</span></td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">対応<br><span class="text-xs text-gray-400">並列比較表示</span></td>
+          <td class="text-center yes font-bold">対応<br><span class="text-xs text-gray-400">+32軸AI分析</span></td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">セグメント別ヒートマップ<br><span class="text-xs text-gray-400">流入元/デバイス/新規・リピーター別</span></td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center partial font-medium">基本フィルタ</td>
+          <td class="text-center yes font-bold">対応<br><span class="text-xs text-gray-400">複数条件切替</span></td>
+          <td class="text-center yes font-bold">対応<br><span class="text-xs text-gray-400">+クエリ意図別</span></td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">ページ比較・期間比較</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center no">不可</td>
+          <td class="text-center yes font-bold">対応<br><span class="text-xs text-gray-400">2ページ並列比較</span></td>
+          <td class="text-center yes font-bold">対応</td>
         </tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">セッション録画</td>
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
           <td class="text-center yes font-bold">あり（強い）</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-medium">あり（rrweb）</td>
         </tr>
         <tr class="border-b border-gray-50">
@@ -270,51 +333,50 @@
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
           <td class="text-center yes font-bold">あり</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">あり</td>
-        </tr>
-        <tr class="border-b border-gray-50 highlight-row">
-          <td class="py-2.5 px-4">熟読エリア（Y座標×滞在時間）</td>
-          <td class="text-center no">不可</td>
-          <td class="text-center no">不可</td>
-          <td class="text-center no">不可</td>
-          <td class="text-center yes font-bold">自動収集</td>
         </tr>
         <tr class="border-b border-gray-50 highlight-row">
           <td class="py-2.5 px-4">フォームフィールド別離脱分析</td>
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
-          <td class="text-center yes font-bold">自動収集</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">自動収集<br><span class="text-xs text-gray-400">専用UI対応済</span></td>
         </tr>
         <tr class="border-b border-gray-50 highlight-row">
           <td class="py-2.5 px-4">画像閲覧スコア（視認時間+表示率）</td>
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
-          <td class="text-center yes font-bold">自動収集</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">自動収集<br><span class="text-xs text-gray-400">専用UI対応済</span></td>
         </tr>
         <tr class="border-b border-gray-50 highlight-row">
           <td class="py-2.5 px-4">CTA視認→クリック率</td>
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
           <td class="text-center no">不可</td>
-          <td class="text-center yes font-bold">自動収集</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">自動収集<br><span class="text-xs text-gray-400">専用UI対応済</span></td>
         </tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">動画視聴%・操作の詳細記録</td>
           <td class="text-center partial">基本のみ</td>
           <td class="text-center partial">基本のみ</td>
           <td class="text-center no">不可</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">全操作記録</td>
         </tr>
 
         <!-- パフォーマンス分析 -->
-        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">パフォーマンス分析</td></tr>
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="6" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">パフォーマンス分析</td></tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">Core Web Vitals<br><span class="text-xs text-gray-400">（LCP / INP / CLS / TTFB / FCP）</span></td>
           <td class="text-center partial font-medium">CrUXデータ<br><span class="text-xs text-gray-400">28日集計・概要のみ</span></td>
           <td class="text-center partial font-medium">同左</td>
           <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">あり</td>
         </tr>
         <tr class="border-b border-gray-50">
@@ -322,6 +384,7 @@
           <td class="text-center no font-medium">なし</td>
           <td class="text-center no font-medium">なし</td>
           <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">あり</td>
         </tr>
         <tr class="border-b border-gray-50">
@@ -329,22 +392,25 @@
           <td class="text-center no font-medium">なし</td>
           <td class="text-center no font-medium">なし</td>
           <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">あり</td>
         </tr>
 
         <!-- 広告・外部連携 -->
-        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">広告・外部連携</td></tr>
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="6" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">広告・外部連携</td></tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">Google広告との直接連携</td>
           <td class="text-center yes font-bold">直結</td>
           <td class="text-center yes font-bold">直結</td>
           <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center partial font-medium">UTM/gclid経由</td>
         </tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">クロスデバイス追跡</td>
           <td class="text-center yes font-medium">Googleアカウント</td>
           <td class="text-center yes font-medium">同左</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center no font-medium">不可</td>
           <td class="text-center no font-medium">localStorage依存<span class="planned text-xs ml-1">(計画中)</span></td>
         </tr>
@@ -353,22 +419,25 @@
           <td class="text-center yes font-medium">あり</td>
           <td class="text-center yes font-medium">あり</td>
           <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center no font-medium"><span class="planned text-xs">(計画中)</span></td>
         </tr>
 
         <!-- 運用 -->
-        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">運用</td></tr>
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="6" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">運用</td></tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">月額コスト（100万PV想定）</td>
           <td class="text-center font-medium">無料</td>
           <td class="text-center font-medium">$50〜200</td>
           <td class="text-center font-medium">無料</td>
-          <td class="text-center font-bold text-green-600">無料〜$20</td>
+          <td class="text-center font-medium">月10万円〜</td>
+          <td class="text-center font-bold text-green-600">$30〜50<br><span class="text-xs font-normal text-gray-400">自社インフラ運用</span></td>
         </tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">SQLスキル要否</td>
           <td class="text-center yes font-medium">不要</td>
           <td class="text-center no font-medium">必須</td>
+          <td class="text-center yes font-medium">不要</td>
           <td class="text-center yes font-medium">不要</td>
           <td class="text-center yes font-medium">不要（UI完結）</td>
         </tr>
@@ -377,23 +446,50 @@
           <td class="text-center font-medium">GTM設定</td>
           <td class="text-center font-medium">GA4+BQ連携+SQL</td>
           <td class="text-center font-medium">タグ1行</td>
+          <td class="text-center font-medium">タグ設置<br><span class="text-xs text-gray-400">GTM対応</span></td>
           <td class="text-center font-bold text-green-600">タグ1行</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">レポート出力</td>
+          <td class="text-center partial font-medium">探索レポート<br><span class="text-xs text-gray-400">共有リンク</span></td>
+          <td class="text-center partial font-medium">Looker Studio</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">PDF出力<br><span class="text-xs text-gray-400">クライアント向け</span></td>
+          <td class="text-center yes font-bold">AI生成レポート<br><span class="text-xs text-gray-400">改善提案付き</span></td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">SPA対応（React/Vue等）</td>
+          <td class="text-center yes font-medium">対応</td>
+          <td class="text-center yes font-medium">対応</td>
+          <td class="text-center yes font-medium">対応</td>
+          <td class="text-center yes font-bold">対応</td>
+          <td class="text-center yes font-bold">対応</td>
+        </tr>
+        <tr class="border-b border-gray-50">
+          <td class="py-2.5 px-4">日本語サポート</td>
+          <td class="text-center partial font-medium">ヘルプのみ</td>
+          <td class="text-center no font-medium">英語ドキュメント</td>
+          <td class="text-center no font-medium">英語のみ</td>
+          <td class="text-center yes font-bold">日本語完全対応<br><span class="text-xs text-gray-400">専任サポート</span></td>
+          <td class="text-center yes font-bold">日本語完全対応</td>
         </tr>
 
         <!-- AI/MCP連携 -->
-        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">AI / MCP連携</td></tr>
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="6" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">AI / MCP連携</td></tr>
         <tr class="border-b border-gray-50 highlight-row">
           <td class="py-2.5 px-4">AIエージェントからの直接クエリ</td>
           <td class="text-center no font-medium">不可</td>
           <td class="text-center partial font-medium">BQ MCP経由<br><span class="text-xs text-gray-400">GA4データに限定</span></td>
           <td class="text-center no font-medium">不可</td>
-          <td class="text-center yes font-bold">全データアクセス可</td>
+          <td class="text-center no font-medium">不可</td>
+          <td class="text-center yes font-bold">32軸分析データ<br><span class="text-xs text-gray-400">MCP 8ツール経由</span></td>
         </tr>
         <tr class="border-b border-gray-50 highlight-row">
           <td class="py-2.5 px-4">AIによるUX詳細分析<br><span class="text-xs text-gray-400">（フォーム・画像・CTA等）</span></td>
           <td class="text-center no font-medium">データなし</td>
           <td class="text-center no font-medium">データなし</td>
           <td class="text-center no font-medium">データなし</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">全項目分析可能</td>
         </tr>
         <tr class="border-b border-gray-50">
@@ -401,12 +497,14 @@
           <td class="text-center no font-medium">不可</td>
           <td class="text-center partial font-medium">制限付き</td>
           <td class="text-center no font-medium">不可</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">完全な行動再現</td>
         </tr>
         <tr class="border-b border-gray-50">
           <td class="py-2.5 px-4">AIによるCV改善提案</td>
           <td class="text-center no font-medium">不可</td>
           <td class="text-center partial font-medium">SQL結果を手動で渡す</td>
+          <td class="text-center no font-medium">不可</td>
           <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">MCP経由で自動分析</td>
         </tr>
@@ -421,7 +519,7 @@
   <!-- 結論 -->
   <div class="bg-white rounded-xl border border-gray-200 p-6 mb-10">
     <h2 class="font-bold mb-4">使い分けの結論</h2>
-    <div class="grid grid-cols-4 gap-4">
+    <div class="grid grid-cols-5 gap-4">
       <div class="rounded-lg bg-orange-50 border border-orange-200 p-4">
         <h3 class="font-bold text-sm mb-2 text-orange-800">GA4</h3>
         <ul class="text-xs text-orange-700 space-y-1">
@@ -447,6 +545,15 @@
           <li>- 手軽なヒートマップ確認</li>
           <li>- レイジクリック検出</li>
           <li>- GA4との補完的利用</li>
+        </ul>
+      </div>
+      <div class="rounded-lg bg-rose-50 border border-rose-200 p-4">
+        <h3 class="font-bold text-sm mb-2 text-rose-800">A社</h3>
+        <ul class="text-xs text-rose-700 space-y-1">
+          <li>- 国内老舗のヒートマップ</li>
+          <li>- クリック・スクロール・熟読</li>
+          <li>- 日本語サポート充実</li>
+          <li>- 月額10万円〜の高コスト</li>
         </ul>
       </div>
       <div class="rounded-lg bg-green-50 border border-green-200 p-4 ring-1 ring-green-300">
@@ -595,7 +702,7 @@
           <div class="w-6 h-6 bg-gradient-to-br from-pink-500 to-blue-600 rounded flex items-center justify-center"><span class="text-white font-bold text-xs">U</span></div>
           <h3 class="font-bold text-sm">UGOKI MAP — CV経路分析（流入メディア付き）</h3>
         </div>
-        <p class="text-xs text-gray-400 mt-1">流入メディアをステップ0として表示。フィルターで絞り込み可能。<span class="text-blue-600 font-semibold">GA4では実現できない「流入元起点の経路分析」</span>をUI上で完結</p>
+        <p class="text-xs text-gray-400 mt-1">流入メディアをステップ0として表示。フィルターで絞り込み可能。<span class="text-blue-600 font-semibold">GA4では実現できない「流入元起点の経路分析」</span>をUI上で完結。<span class="text-xs text-green-600 font-medium">Sankey図 + タイムライン表示 実装済み</span></p>
       </div>
 
       <!-- Toolbar -->
@@ -686,17 +793,19 @@
             <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:130px;">GA4<br><span class="text-xs font-normal">（探索レポート）</span></th>
             <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:130px;">BigQuery<br><span class="text-xs font-normal">（+ Looker Studio）</span></th>
             <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:130px;">BigQuery<br><span class="text-xs font-normal">（+ Python可視化）</span></th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:110px;">A社</th>
             <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:130px;">UGOKI MAP</th>
           </tr>
         </thead>
         <tbody>
           <!-- 経路データ -->
-          <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">経路データの取得</td></tr>
+          <tr class="border-b border-gray-100 bg-gray-50"><td colspan="6" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">経路データの取得</td></tr>
           <tr class="border-b border-gray-50">
             <td class="py-2.5 px-4">ページ遷移の経路データ</td>
             <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">10ステップまで</span></td>
             <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQL必須</span></td>
             <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQL必須</span></td>
+            <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">経路分析機能なし</span></td>
             <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">無制限</span></td>
           </tr>
           <tr class="border-b border-gray-50 highlight-row">
@@ -704,6 +813,7 @@
             <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">ステップに設定不可</span></td>
             <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQLで結合可能</span></td>
             <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQLで結合可能</span></td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">UTM/referrer自動収集</span></td>
           </tr>
           <tr class="border-b border-gray-50 highlight-row">
@@ -711,6 +821,7 @@
             <td class="text-center no font-medium">不可</td>
             <td class="text-center partial font-medium">部分的<br><span class="text-xs text-gray-400">GSCデータは別結合</span></td>
             <td class="text-center partial font-medium">部分的<br><span class="text-xs text-gray-400">GSCデータは別結合</span></td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">landing_url+UTM自動</span></td>
           </tr>
           <tr class="border-b border-gray-50">
@@ -718,23 +829,26 @@
             <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">client_id結合</span></td>
             <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">client_id結合</span></td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">user_id自動追跡</span></td>
           </tr>
 
           <!-- ビジュアライゼーション -->
-          <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">ビジュアライゼーション（可視化）</td></tr>
+          <tr class="border-b border-gray-100 bg-gray-50"><td colspan="6" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">ビジュアライゼーション（可視化）</td></tr>
           <tr class="border-b border-gray-50">
             <td class="py-2.5 px-4">Sankey風の経路グラフ</td>
             <td class="text-center yes font-medium">標準搭載<br><span class="text-xs text-gray-400">探索レポート内</span></td>
             <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">Sankeyチャートなし</span></td>
             <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">Plotly/Matplotlib等</span></td>
-            <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">UI標準搭載</span></td>
+            <td class="text-center no font-medium">不可</td>
+            <td class="text-center yes font-bold">標準搭載<br><span class="text-xs text-gray-400">recharts Sankey</span></td>
           </tr>
           <tr class="border-b border-gray-50 highlight-row">
             <td class="py-2.5 px-4 font-medium">流入メディア付きの経路グラフ</td>
             <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">mediumをステップに<br>設定できない</span></td>
             <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">Looker StudioにSankey<br>チャートがない</span></td>
             <td class="text-center partial font-medium">可能だが…<br><span class="text-xs text-red-400">下記の制約あり</span></td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">可能<br><span class="text-xs text-gray-400">流入元 → 経路 → CV<br>を1画面で表示</span></td>
           </tr>
           <tr class="border-b border-gray-50">
@@ -742,6 +856,7 @@
             <td class="text-center yes font-medium">探索で設定後表示</td>
             <td class="text-center partial font-medium">Looker Studio設定必須</td>
             <td class="text-center no font-medium">コーディング必須</td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">ダッシュボードで即表示</td>
           </tr>
           <tr class="border-b border-gray-50">
@@ -749,16 +864,18 @@
             <td class="text-center yes font-medium">可能</td>
             <td class="text-center partial font-medium">Looker Studioは可<br><span class="text-xs text-gray-400">クエリ作成はSQL必須</span></td>
             <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">Python環境が必要</span></td>
+            <td class="text-center yes font-medium">可能</td>
             <td class="text-center yes font-bold">可能</td>
           </tr>
 
           <!-- コスト・環境 -->
-          <tr class="border-b border-gray-100 bg-gray-50"><td colspan="5" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">コスト・環境要件</td></tr>
+          <tr class="border-b border-gray-100 bg-gray-50"><td colspan="6" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider">コスト・環境要件</td></tr>
           <tr class="border-b border-gray-50">
             <td class="py-2.5 px-4">追加コスト</td>
             <td class="text-center font-medium text-green-600">無料</td>
             <td class="text-center font-medium">BQクエリ費用<br><span class="text-xs text-gray-400">Looker Studioは無料</span></td>
             <td class="text-center no font-medium">BQクエリ費用<br>+ 実行環境費用<br><span class="text-xs text-red-400">下記参照</span></td>
+            <td class="text-center font-medium">月10万円〜</td>
             <td class="text-center font-medium text-green-600">標準プラン内</td>
           </tr>
           <tr class="border-b border-gray-50 highlight-row">
@@ -770,6 +887,7 @@
               <span class="text-xs text-red-400">or Colab Enterprise<br>
               月額 $50〜300+</span>
             </td>
+            <td class="text-center text-gray-300">—</td>
             <td class="text-center text-gray-300">—<br><span class="text-xs text-gray-400">環境構築不要</span></td>
           </tr>
           <tr class="border-b border-gray-50">
@@ -777,6 +895,7 @@
             <td class="text-center font-medium">GA4操作</td>
             <td class="text-center font-medium">SQL</td>
             <td class="text-center no font-medium">SQL + Python<br><span class="text-xs text-gray-400">Plotly/Matplotlib</span></td>
+            <td class="text-center yes font-medium">不要</td>
             <td class="text-center yes font-bold">不要（UI完結）</td>
           </tr>
         </tbody>
@@ -917,6 +1036,13 @@
             <td class="text-center partial font-medium">可能だが有料環境</td>
             <td class="text-center"><span class="inline-block bg-yellow-100 text-yellow-700 px-3 py-1 rounded-full text-xs font-bold">実現可能だが月額$50〜300+の環境費用</span></td>
           </tr>
+          <tr class="border-b border-blue-100">
+            <td class="py-3 px-4 font-bold">A社</td>
+            <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">経路分析機能なし</span></td>
+            <td class="text-center no font-medium">不可</td>
+            <td class="text-center no font-medium">不可</td>
+            <td class="text-center"><span class="inline-block bg-red-100 text-red-700 px-3 py-1 rounded-full text-xs font-bold">経路分析機能なし</span></td>
+          </tr>
           <tr>
             <td class="py-3 px-4 font-bold text-blue-700">UGOKI MAP</td>
             <td class="text-center yes font-bold">取得可能</td>
@@ -977,6 +1103,7 @@
             <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">GA4単体</th>
             <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">BigQuery</th>
             <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">Clarity</th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">A社</th>
             <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">UGOKI MAP</th>
           </tr>
         </thead>
@@ -986,6 +1113,7 @@
             <td class="text-center">管理画面 + GTM + JS<br><span class="text-xs text-gray-400">3箇所の設定</span></td>
             <td class="text-center">GA4設定 + BQ連携</td>
             <td class="text-center">JS のみ</td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">JS のみ<br><span class="text-xs text-gray-400">1行で完了</span></td>
           </tr>
           <tr class="border-b border-gray-50">
@@ -993,6 +1121,7 @@
             <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">集計データのみ</span></td>
             <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQL必須</span></td>
             <td class="text-center partial font-medium">録画で確認<br><span class="text-xs text-gray-400">集計は不可</span></td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">可能</td>
           </tr>
           <tr class="border-b border-gray-50">
@@ -1000,6 +1129,7 @@
             <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
             <td class="text-center yes font-medium">BQ保存済みデータは永久<br><span class="text-xs text-gray-400">Cookie切れ影響なし</span></td>
             <td class="text-center no font-medium">13ヶ月で消失</td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">永久保持<br><span class="text-xs text-gray-400">Cookie切れ影響なし</span></td>
           </tr>
           <tr class="border-b border-gray-50 highlight-row">
@@ -1007,12 +1137,14 @@
             <td class="text-center no font-medium">不可</td>
             <td class="text-center partial font-medium">client_id後付け結合<br><span class="text-xs text-gray-400">Cookie切れ時のみ紐付け不可</span></td>
             <td class="text-center no font-medium">不可</td>
-            <td class="text-center yes font-bold">自動紐付け<br><span class="text-xs text-gray-400">localStorage永続</span></td>
+            <td class="text-center no font-medium">不可</td>
+            <td class="text-center yes font-bold">自動紐付け<br><span class="text-xs text-gray-400">localStorage依存<br>クリア時は紐付け不可</span></td>
           </tr>
           <tr class="border-b border-gray-50">
             <td class="py-2.5 px-4 font-medium">外部DB（AWS等）との結合</td>
             <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
             <td class="text-center yes font-medium">可能<br><span class="text-xs text-gray-400">SQL必須・遅延あり</span></td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">external_idで即時結合</td>
           </tr>
@@ -1021,7 +1153,8 @@
             <td class="text-center no font-medium">非表示<br><span class="text-xs text-gray-400">探索で手動作成</span></td>
             <td class="text-center no font-medium">なし<br><span class="text-xs text-gray-400">SQLクエリ結果のみ</span></td>
             <td class="text-center no font-medium">フィルターのみ</td>
-            <td class="text-center yes font-bold">全レポートで統合</td>
+            <td class="text-center no font-medium">不可</td>
+            <td class="text-center yes font-bold">API経由で統合可能<br><span class="text-xs text-gray-400">CV経路画面で表示</span></td>
           </tr>
         </tbody>
       </table>
@@ -1041,6 +1174,7 @@
             <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">GA4単体</th>
             <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">BigQuery</th>
             <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">Clarity</th>
+            <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">A社</th>
             <th class="text-center py-3 px-3 text-gray-500 font-semibold" style="min-width:120px;">UGOKI MAP</th>
           </tr>
         </thead>
@@ -1050,6 +1184,7 @@
             <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
             <td class="text-center yes font-medium">追える</td>
             <td class="text-center no font-medium">不可</td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">追える</td>
           </tr>
           <tr class="border-b border-gray-50">
@@ -1057,6 +1192,7 @@
             <td class="text-center no font-medium">不可<br><span class="text-xs text-gray-400">BQ必須</span></td>
             <td class="text-center yes font-medium">追える</td>
             <td class="text-center partial font-medium">録画で確認</td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">追える</td>
           </tr>
           <tr class="border-b border-gray-50 highlight-row">
@@ -1064,6 +1200,7 @@
             <td class="text-center no">不可</td>
             <td class="text-center no">不可<br><span class="text-xs text-gray-400">GA4は座標を収集しない</span></td>
             <td class="text-center partial font-medium">録画で確認</td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">追える</td>
           </tr>
           <tr class="border-b border-gray-50 highlight-row">
@@ -1071,6 +1208,7 @@
             <td class="text-center no">不可</td>
             <td class="text-center no">不可</td>
             <td class="text-center no">不可</td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">追える</td>
           </tr>
           <tr class="border-b border-gray-50 highlight-row">
@@ -1078,6 +1216,7 @@
             <td class="text-center no">不可</td>
             <td class="text-center no">不可</td>
             <td class="text-center no">不可</td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">追える</td>
           </tr>
           <tr class="border-b border-gray-50 highlight-row">
@@ -1085,6 +1224,7 @@
             <td class="text-center no">不可</td>
             <td class="text-center no">不可</td>
             <td class="text-center no">不可</td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">追える</td>
           </tr>
           <tr class="border-b border-gray-50 highlight-row">
@@ -1092,6 +1232,7 @@
             <td class="text-center no">不可</td>
             <td class="text-center no">不可</td>
             <td class="text-center no">不可</td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">追える</td>
           </tr>
           <tr>
@@ -1099,6 +1240,7 @@
             <td class="text-center partial">基本のみ<br><span class="text-xs text-gray-400">再生/完了</span></td>
             <td class="text-center partial">基本のみ</td>
             <td class="text-center no">不可</td>
+            <td class="text-center no font-medium">不可</td>
             <td class="text-center yes font-bold">全操作記録</td>
           </tr>
         </tbody>
@@ -1205,10 +1347,11 @@
             <div class="text-sm font-semibold mb-1">ログイン成功時にJSを1行追加</div>
             <div class="code-block mt-2">
               <span class="code-comment">// これだけ。管理画面の設定変更なし</span><br>
-              <span class="code-func">ClickInsight</span>.<span class="code-func">track</span>({<br>
-              &nbsp;&nbsp;<span class="code-key">event_type</span>: <span class="code-str">'identify'</span>,<br>
-              &nbsp;&nbsp;<span class="code-key">user_external_id</span>: <span class="code-str">'member_5821'</span><br>
-              });
+              <span class="code-func">ClickInsight</span>.<span class="code-func">identify</span>(<span class="code-str">'member_5821'</span>);
+            </div>
+            <div class="code-block mt-2">
+              <span class="code-comment">// CV計測も1行で完了</span><br>
+              <span class="code-func">ClickInsight</span>.<span class="code-func">trackConversion</span>(<span class="code-str">'purchase'</span>, <span class="code-str">9800</span>);
             </div>
           </div>
         </div>
@@ -1224,7 +1367,7 @@
             <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>管理画面の設定変更不要</div>
             <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>GTM不要</div>
             <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span><strong>ログイン前の匿名行動も自動紐付け</strong><br>（localStorage の user_id が同一のため）</div>
-            <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>全レポートで即座に会員IDで分析可能</div>
+            <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>CV経路画面で会員ID別の全行動を表示</div>
             <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>ステップ数制限なし — 全ページ遷移を追跡</div>
             <div class="flex gap-2"><span class="text-green-500 flex-shrink-0">&#10003;</span>AWS等の外部DBとexternal_idで即時結合</div>
           </div>
@@ -1339,6 +1482,439 @@
 
   </div><!-- /tab-userid -->
 
+  <!-- ========== Tab 4: AIユーザー分析 ========== -->
+  <div id="tab-ai-analysis" class="tab-content">
+
+    <!-- Hero Section -->
+    <div class="relative overflow-hidden rounded-2xl mb-10 p-8 md:p-12" style="background: linear-gradient(135deg, #1e1b4b 0%, #312e81 40%, #4338ca 100%);">
+      <div class="absolute top-0 right-0 w-96 h-96 bg-purple-500/20 rounded-full blur-3xl -translate-y-1/2 translate-x-1/3"></div>
+      <div class="absolute bottom-0 left-0 w-64 h-64 bg-blue-500/20 rounded-full blur-3xl translate-y-1/2 -translate-x-1/3"></div>
+      <div class="relative z-10">
+        <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur rounded-full px-4 py-1.5 mb-4">
+          <span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
+          <span class="text-xs text-purple-200 font-medium">Phase 2 — 32軸分析エンジン稼働</span>
+        </div>
+        <h2 class="text-3xl md:text-4xl font-extrabold text-white mb-4">AIユーザー分析</h2>
+        <p class="text-lg text-purple-200 max-w-2xl mb-6">検索意図 × ピクセル単位の行動 × デモグラフィック。<br>3つのデータを統合し、AIが自動で<strong class="text-white">ペルソナ生成・UX診断・改善提案</strong>を行う。</p>
+        <div class="flex flex-wrap gap-3">
+          <div class="bg-white/10 backdrop-blur rounded-lg px-4 py-2">
+            <div class="text-2xl font-bold text-white">32</div>
+            <div class="text-xs text-purple-300">分析軸</div>
+          </div>
+          <div class="bg-white/10 backdrop-blur rounded-lg px-4 py-2">
+            <div class="text-2xl font-bold text-white">10</div>
+            <div class="text-xs text-purple-300">行動タイプ自動分類</div>
+          </div>
+          <div class="bg-white/10 backdrop-blur rounded-lg px-4 py-2">
+            <div class="text-2xl font-bold text-white">3</div>
+            <div class="text-xs text-purple-300">データソース統合</div>
+          </div>
+          <div class="bg-white/10 backdrop-blur rounded-lg px-4 py-2">
+            <div class="text-2xl font-bold text-white">0</div>
+            <div class="text-xs text-purple-300">BigQuery依存</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- なぜ既存ツールではできないのか -->
+    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-8">
+      <h3 class="font-bold text-lg mb-4 text-gray-900">なぜ既存ツールでは不可能なのか</h3>
+      <div class="grid md:grid-cols-3 gap-6">
+        <div class="border border-red-100 bg-red-50/50 rounded-xl p-5">
+          <div class="text-sm font-bold text-red-700 mb-2">GA4 / Adobe Analytics</div>
+          <p class="text-xs text-gray-600 mb-3">ページ遷移・イベント単位の分析。「ページのどの位置を何秒読んだか」は取得不可。</p>
+          <div class="text-xs text-red-600 font-medium">欠落: 座標レベルの行動データ</div>
+        </div>
+        <div class="border border-red-100 bg-red-50/50 rounded-xl p-5">
+          <div class="text-sm font-bold text-red-700 mb-2">Hotjar / Clarity</div>
+          <p class="text-xs text-gray-600 mb-3">ヒートマップと録画は見れる。しかし「どの検索クエリで来た人がどこをクリックしたか」は出せない。</p>
+          <div class="text-xs text-red-600 font-medium">欠落: 検索意図との紐付け</div>
+        </div>
+        <div class="border border-green-100 bg-green-50/50 rounded-xl p-5">
+          <div class="text-sm font-bold text-green-700 mb-2">UGOKI MAP</div>
+          <p class="text-xs text-gray-600 mb-3">GSC検索意図 × 独自行動データベース × GA4デモグラを統合。AIが3-5個のペルソナを自動生成。</p>
+          <div class="text-xs text-green-600 font-medium">3つの統合は世界初</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3つのデータソース統合図 -->
+    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-8">
+      <h3 class="font-bold text-lg mb-6 text-gray-900">3つのデータソース統合アーキテクチャ</h3>
+      <div class="flex flex-col md:flex-row items-center justify-center gap-4 mb-6">
+        <div class="bg-blue-50 border border-blue-200 rounded-xl p-5 text-center w-full md:w-56">
+          <div class="w-10 h-10 mx-auto mb-2 bg-blue-100 rounded-full flex items-center justify-center"><span class="text-blue-600 font-bold text-lg">G</span></div>
+          <div class="font-bold text-sm text-blue-900">Google Search Console</div>
+          <div class="text-xs text-gray-500 mt-1">検索クエリ・順位・CTR</div>
+          <div class="text-xs text-blue-600 mt-2 font-medium">「なぜ来たか」</div>
+        </div>
+        <div class="text-2xl text-gray-300 hidden md:block">+</div>
+        <div class="bg-purple-50 border border-purple-200 rounded-xl p-5 text-center w-full md:w-56">
+          <div class="w-10 h-10 mx-auto mb-2 bg-purple-100 rounded-full flex items-center justify-center"><span class="text-purple-600 font-bold text-lg">C</span></div>
+          <div class="font-bold text-sm text-purple-900">独自行動データベース</div>
+          <div class="text-xs text-gray-500 mt-1">クリック座標・熟読時間・スクロール速度</div>
+          <div class="text-xs text-purple-600 mt-2 font-medium">「何をしたか」</div>
+        </div>
+        <div class="text-2xl text-gray-300 hidden md:block">+</div>
+        <div class="bg-orange-50 border border-orange-200 rounded-xl p-5 text-center w-full md:w-56">
+          <div class="w-10 h-10 mx-auto mb-2 bg-orange-100 rounded-full flex items-center justify-center"><span class="text-orange-600 font-bold text-lg">A</span></div>
+          <div class="font-bold text-sm text-orange-900">GA4 Data API</div>
+          <div class="text-xs text-gray-500 mt-1">年代・性別・興味関心</div>
+          <div class="text-xs text-orange-600 mt-2 font-medium">「誰か」</div>
+        </div>
+      </div>
+      <div class="flex justify-center mb-4">
+        <svg width="24" height="40" viewBox="0 0 24 40"><path d="M12 0 L12 30 M6 24 L12 30 L18 24" stroke="#6366f1" stroke-width="2.5" fill="none"/></svg>
+      </div>
+      <div class="max-w-md mx-auto bg-gradient-to-r from-indigo-500 to-purple-600 rounded-xl p-5 text-center text-white">
+        <div class="font-bold text-lg mb-1">Claude AI 分析エンジン</div>
+        <div class="text-sm text-indigo-100">32軸の分析結果を統合 → ペルソナ自動生成 → 改善提案</div>
+      </div>
+    </div>
+
+    <!-- ペルソナ自動生成 -->
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-8">
+      <div class="px-6 py-4 border-b border-gray-100 bg-gradient-to-r from-indigo-50 to-purple-50">
+        <h3 class="font-bold text-lg text-gray-900">行動ベースペルソナ自動生成</h3>
+        <p class="text-xs text-gray-500 mt-1">インタビュー不要。実際の行動データから3-5個のペルソナを自動発見</p>
+      </div>
+      <div class="p-6">
+        <div class="grid md:grid-cols-2 gap-6 mb-6">
+          <div>
+            <div class="text-sm font-bold text-gray-700 mb-3">従来のペルソナ作成</div>
+            <div class="space-y-2">
+              <div class="flex items-start gap-2 text-xs text-gray-500"><span class="text-red-400 mt-0.5">&#x2717;</span>インタビュー5-10人（サンプル少）</div>
+              <div class="flex items-start gap-2 text-xs text-gray-500"><span class="text-red-400 mt-0.5">&#x2717;</span>担当者の仮説・思い込みが混入</div>
+              <div class="flex items-start gap-2 text-xs text-gray-500"><span class="text-red-400 mt-0.5">&#x2717;</span>一度作ったら更新されない</div>
+              <div class="flex items-start gap-2 text-xs text-gray-500"><span class="text-red-400 mt-0.5">&#x2717;</span>属性情報偏重（35歳女性、共働き...）</div>
+              <div class="flex items-start gap-2 text-xs text-gray-500"><span class="text-red-400 mt-0.5">&#x2717;</span>施策への落とし込みが曖昧</div>
+            </div>
+          </div>
+          <div>
+            <div class="text-sm font-bold text-gray-700 mb-3">UGOKI MAP のペルソナ生成</div>
+            <div class="space-y-2">
+              <div class="flex items-start gap-2 text-xs text-gray-700"><span class="text-green-500 mt-0.5">&#x2713;</span>全セッションデータから統計的に分類</div>
+              <div class="flex items-start gap-2 text-xs text-gray-700"><span class="text-green-500 mt-0.5">&#x2713;</span>行動が先、属性は後（事実ベース）</div>
+              <div class="flex items-start gap-2 text-xs text-gray-700"><span class="text-green-500 mt-0.5">&#x2713;</span>データ更新で自動的にペルソナも更新</div>
+              <div class="flex items-start gap-2 text-xs text-gray-700"><span class="text-green-500 mt-0.5">&#x2713;</span>行動パターン + 検索意図 + デモグラ統合</div>
+              <div class="flex items-start gap-2 text-xs text-gray-700"><span class="text-green-500 mt-0.5">&#x2713;</span>各ペルソナにLP改善・広告方針を自動提案</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 10タイプ分類 -->
+        <div class="bg-gray-50 rounded-xl p-5 mb-6">
+          <div class="text-sm font-bold text-gray-700 mb-3">自動分類される10タイプ</div>
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
+            <div class="bg-white rounded-lg p-3 border border-gray-200 text-center">
+              <div class="text-lg mb-1">&#9889;</div>
+              <div class="text-xs font-bold text-gray-800">即決型</div>
+              <div class="text-[10px] text-gray-400">quick_converter</div>
+            </div>
+            <div class="bg-white rounded-lg p-3 border border-gray-200 text-center">
+              <div class="text-lg mb-1">&#128214;</div>
+              <div class="text-xs font-bold text-gray-800">精読CV型</div>
+              <div class="text-[10px] text-gray-400">deep_reader_converter</div>
+            </div>
+            <div class="bg-white rounded-lg p-3 border border-gray-200 text-center">
+              <div class="text-lg mb-1">&#128064;</div>
+              <div class="text-xs font-bold text-gray-800">関与高・非CV</div>
+              <div class="text-[10px] text-gray-400">engaged_non_converter</div>
+            </div>
+            <div class="bg-white rounded-lg p-3 border border-gray-200 text-center">
+              <div class="text-lg mb-1">&#128168;</div>
+              <div class="text-xs font-bold text-gray-800">速読者</div>
+              <div class="text-[10px] text-gray-400">skimmer</div>
+            </div>
+            <div class="bg-white rounded-lg p-3 border border-gray-200 text-center">
+              <div class="text-lg mb-1">&#128556;</div>
+              <div class="text-xs font-bold text-gray-800">迷走型</div>
+              <div class="text-[10px] text-gray-400">confused_navigator</div>
+            </div>
+            <div class="bg-white rounded-lg p-3 border border-gray-200 text-center">
+              <div class="text-lg mb-1">&#128545;</div>
+              <div class="text-xs font-bold text-gray-800">不満型</div>
+              <div class="text-[10px] text-gray-400">frustrated_user</div>
+            </div>
+            <div class="bg-white rounded-lg p-3 border border-gray-200 text-center">
+              <div class="text-lg mb-1">&#128694;</div>
+              <div class="text-xs font-bold text-gray-800">即離脱</div>
+              <div class="text-[10px] text-gray-400">bouncer</div>
+            </div>
+            <div class="bg-white rounded-lg p-3 border border-gray-200 text-center">
+              <div class="text-lg mb-1">&#128220;</div>
+              <div class="text-xs font-bold text-gray-800">受動閲覧</div>
+              <div class="text-[10px] text-gray-400">passive_reader</div>
+            </div>
+            <div class="bg-white rounded-lg p-3 border border-gray-200 text-center">
+              <div class="text-lg mb-1">&#9989;</div>
+              <div class="text-xs font-bold text-gray-800">標準CV</div>
+              <div class="text-[10px] text-gray-400">standard_converter</div>
+            </div>
+            <div class="bg-white rounded-lg p-3 border border-gray-200 text-center">
+              <div class="text-lg mb-1">&#128100;</div>
+              <div class="text-xs font-bold text-gray-800">一般訪問者</div>
+              <div class="text-[10px] text-gray-400">standard_visitor</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ペルソナ出力例 -->
+        <div class="text-sm font-bold text-gray-700 mb-3">AI出力例</div>
+        <div class="grid md:grid-cols-3 gap-4">
+          <div class="border border-indigo-200 bg-indigo-50/50 rounded-xl p-4">
+            <div class="font-bold text-sm text-indigo-900 mb-2">&#9889; 即決スプリンター</div>
+            <div class="space-y-1 text-xs text-gray-600">
+              <div>セッション割合: <span class="font-bold">12%</span></div>
+              <div>CVR: <span class="font-bold text-green-600">8.2%</span></div>
+              <div>推定: <span class="font-medium">25-34歳, モバイル中心</span></div>
+              <div>平均: <span class="font-medium">40秒, 3クリック</span></div>
+              <div>検索意図: <span class="font-medium">transactional</span></div>
+            </div>
+            <div class="mt-3 text-[10px] text-indigo-600 bg-indigo-100 rounded p-2">提案: ファーストビューにCTA直置き。料金を最初に表示。フォームを1画面完結に。</div>
+          </div>
+          <div class="border border-purple-200 bg-purple-50/50 rounded-xl p-4">
+            <div class="font-bold text-sm text-purple-900 mb-2">&#128214; 慎重リサーチャー</div>
+            <div class="space-y-1 text-xs text-gray-600">
+              <div>セッション割合: <span class="font-bold">23%</span></div>
+              <div>CVR: <span class="font-bold text-green-600">5.1%</span></div>
+              <div>推定: <span class="font-medium">45-54歳, デスクトップ中心</span></div>
+              <div>平均: <span class="font-medium">3分, 熟読45秒</span></div>
+              <div>検索意図: <span class="font-medium">comparison</span></div>
+            </div>
+            <div class="mt-3 text-[10px] text-purple-600 bg-purple-100 rounded p-2">提案: 比較表を上部に。口コミセクション強化。「無料トライアル」で不安を解消。</div>
+          </div>
+          <div class="border border-amber-200 bg-amber-50/50 rounded-xl p-4">
+            <div class="font-bold text-sm text-amber-900 mb-2">&#128064; もったいないウォッチャー</div>
+            <div class="space-y-1 text-xs text-gray-600">
+              <div>セッション割合: <span class="font-bold">18%</span></div>
+              <div>CVR: <span class="font-bold text-red-500">0.3%</span></div>
+              <div>推定: <span class="font-medium">35-44歳, 性別均等</span></div>
+              <div>平均: <span class="font-medium">2分, スクロール90%超</span></div>
+              <div>検索意図: <span class="font-medium">informational</span></div>
+            </div>
+            <div class="mt-3 text-[10px] text-amber-600 bg-amber-100 rounded p-2">提案: CTA不足。「この記事を読んだ方へ」の文脈CTAを追加。メルマガでナーチャリング。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Phase 2: 10の新分析軸 -->
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-8">
+      <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
+        <h3 class="font-bold text-lg text-gray-900">Phase 2 で追加された10の分析軸</h3>
+        <p class="text-xs text-gray-500 mt-1">既存20軸に加えて、SEO・認知科学・心理学の視点から10軸を追加</p>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead>
+            <tr class="border-b border-gray-200 bg-gray-50/50">
+              <th class="text-left py-2.5 px-4 text-gray-500 font-semibold text-xs" style="width:40px;">#</th>
+              <th class="text-left py-2.5 px-4 text-gray-500 font-semibold text-xs" style="min-width:180px;">分析軸</th>
+              <th class="text-left py-2.5 px-4 text-gray-500 font-semibold text-xs" style="min-width:90px;">カテゴリ</th>
+              <th class="text-left py-2.5 px-4 text-gray-500 font-semibold text-xs" style="min-width:250px;">何がわかるか</th>
+              <th class="text-left py-2.5 px-4 text-gray-500 font-semibold text-xs" style="min-width:200px;">競合ツールとの差</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="border-b border-gray-50">
+              <td class="py-2.5 px-4 text-xs text-gray-400">1</td>
+              <td class="py-2.5 px-4 text-xs font-bold text-gray-800">カニバリゼーション検出</td>
+              <td class="py-2.5 px-4"><span class="text-[10px] font-medium bg-blue-100 text-blue-700 rounded px-2 py-0.5">SEO</span></td>
+              <td class="py-2.5 px-4 text-xs text-gray-600">同一キーワードで複数ページがランクイン → ユーザーがページ間を往復する「混乱行動」を自動検出</td>
+              <td class="py-2.5 px-4 text-xs text-gray-500">GSC + 行動データの結合は他ツールに存在しない</td>
+            </tr>
+            <tr class="border-b border-gray-50 bg-indigo-50/30">
+              <td class="py-2.5 px-4 text-xs text-gray-400">2</td>
+              <td class="py-2.5 px-4 text-xs font-bold text-gray-800">認知負荷スコア</td>
+              <td class="py-2.5 px-4"><span class="text-[10px] font-medium bg-purple-100 text-purple-700 rounded px-2 py-0.5">認知科学</span></td>
+              <td class="py-2.5 px-4 text-xs text-gray-600">スクロール速度の不安定度 + 摩擦クリック密度 + 上下往復率 → ページの「わかりにくさ」を0-100で数値化</td>
+              <td class="py-2.5 px-4 text-xs text-gray-500">学術論文レベルの新指標。行動データからUXを定量評価する世界初の実装</td>
+            </tr>
+            <tr class="border-b border-gray-50">
+              <td class="py-2.5 px-4 text-xs text-gray-400">3</td>
+              <td class="py-2.5 px-4 text-xs font-bold text-gray-800">注目の競合</td>
+              <td class="py-2.5 px-4"><span class="text-[10px] font-medium bg-green-100 text-green-700 rounded px-2 py-0.5">エンゲージメント</span></td>
+              <td class="py-2.5 px-4 text-xs text-gray-600">同一画面に複数のCTA/リンクが同時に見えているとき、どちらが「勝つか」の勝敗マトリクス</td>
+              <td class="py-2.5 px-4 text-xs text-gray-500">Hotjar/Clarityは「どこが押された」のみ。「隣のボタンに負けた」は出ない</td>
+            </tr>
+            <tr class="border-b border-gray-50 bg-indigo-50/30">
+              <td class="py-2.5 px-4 text-xs text-gray-400">4</td>
+              <td class="py-2.5 px-4 text-xs font-bold text-gray-800">検索意図×行動一致度</td>
+              <td class="py-2.5 px-4"><span class="text-[10px] font-medium bg-blue-100 text-blue-700 rounded px-2 py-0.5">SEO</span></td>
+              <td class="py-2.5 px-4 text-xs text-gray-600">GSCクエリを4分類（購入/比較/情報/ナビ）→ ページ上の行動が検索意図に適合しているかをスコア化</td>
+              <td class="py-2.5 px-4 text-xs text-gray-500">最大の差別化ポイント。意図×行動の適合度を出せるツールは存在しない</td>
+            </tr>
+            <tr class="border-b border-gray-50">
+              <td class="py-2.5 px-4 text-xs text-gray-400">5</td>
+              <td class="py-2.5 px-4 text-xs font-bold text-gray-800">セッション録画優先度</td>
+              <td class="py-2.5 px-4"><span class="text-[10px] font-medium bg-gray-200 text-gray-700 rounded px-2 py-0.5">メタ</span></td>
+              <td class="py-2.5 px-4 text-xs text-gray-600">rage click + 迷いスクロール + CV直前離脱 + フォーム放棄 → 「見るべき録画」をAIが優先順位付け</td>
+              <td class="py-2.5 px-4 text-xs text-gray-500">Hotjarは全録画を人手で見る。AIが「この5件を見ろ」と絞る</td>
+            </tr>
+            <tr class="border-b border-gray-50 bg-indigo-50/30">
+              <td class="py-2.5 px-4 text-xs text-gray-400">6</td>
+              <td class="py-2.5 px-4 text-xs font-bold text-gray-800">エンゲージメント減衰曲線</td>
+              <td class="py-2.5 px-4"><span class="text-[10px] font-medium bg-orange-100 text-orange-700 rounded px-2 py-0.5">コンテンツ</span></td>
+              <td class="py-2.5 px-4 text-xs text-gray-600">ページ上部→下部のエンゲージメント強度をプロット。急落する「コンテンツの壁」を自動検出</td>
+              <td class="py-2.5 px-4 text-xs text-gray-500">スクロール深度だけでなく「どこで読む気が消えたか」を可視化</td>
+            </tr>
+            <tr class="border-b border-gray-50">
+              <td class="py-2.5 px-4 text-xs text-gray-400">7</td>
+              <td class="py-2.5 px-4 text-xs font-bold text-gray-800">内部リンク効果測定</td>
+              <td class="py-2.5 px-4"><span class="text-[10px] font-medium bg-blue-100 text-blue-700 rounded px-2 py-0.5">SEO</span></td>
+              <td class="py-2.5 px-4 text-xs text-gray-600">内部リンクのクリック率 × 遷移先でのCV率 → 各リンクのROIを算出</td>
+              <td class="py-2.5 px-4 text-xs text-gray-500">GA4は「リンクが押された」のみ。「押された結果CVしたか」まで追える</td>
+            </tr>
+            <tr class="border-b border-gray-50 bg-indigo-50/30">
+              <td class="py-2.5 px-4 text-xs text-gray-400">8</td>
+              <td class="py-2.5 px-4 text-xs font-bold text-gray-800">ゼロクリック判定</td>
+              <td class="py-2.5 px-4"><span class="text-[10px] font-medium bg-blue-100 text-blue-700 rounded px-2 py-0.5">SEO</span></td>
+              <td class="py-2.5 px-4 text-xs text-gray-600">クリックゼロで熟読のみのページ → GSC検索意図と照合し「成功」か「失敗」かを自動判定</td>
+              <td class="py-2.5 px-4 text-xs text-gray-500">コンテンツマーケの最大盲点。読まれているのにCVゼロのページを発見</td>
+            </tr>
+            <tr class="border-b border-gray-50">
+              <td class="py-2.5 px-4 text-xs text-gray-400">9</td>
+              <td class="py-2.5 px-4 text-xs font-bold text-gray-800">離脱予兆パターン</td>
+              <td class="py-2.5 px-4"><span class="text-[10px] font-medium bg-red-100 text-red-700 rounded px-2 py-0.5">摩擦</span></td>
+              <td class="py-2.5 px-4 text-xs text-gray-600">離脱前5アクションを4パターン分類 → 各パターンに最適な介入施策とタイミングを算出</td>
+              <td class="py-2.5 px-4 text-xs text-gray-500">「なぜ離脱したか」をパターン化。ポップアップの最適タイミング算出</td>
+            </tr>
+            <tr class="border-b border-gray-50 bg-indigo-50/30">
+              <td class="py-2.5 px-4 text-xs text-gray-400">10</td>
+              <td class="py-2.5 px-4 text-xs font-bold text-gray-800">価格感度シグナル</td>
+              <td class="py-2.5 px-4"><span class="text-[10px] font-medium bg-yellow-100 text-yellow-700 rounded px-2 py-0.5">CV</span></td>
+              <td class="py-2.5 px-4 text-xs text-gray-600">料金セクションの滞在比率 × 再訪回数 × 周辺の摩擦 → 「価格がCVブロッカーか」を0-100で判定</td>
+              <td class="py-2.5 px-4 text-xs text-gray-500">GA4は「料金ページを見た」のみ。「料金表で30秒止まって離脱」を検出</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- GA4連携 -->
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-8">
+      <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
+        <h3 class="font-bold text-lg text-gray-900">GA4連携（BigQuery不要）</h3>
+      </div>
+      <div class="p-6">
+        <div class="ok-box mb-6">
+          <div class="text-sm font-bold text-green-800 mb-2">顧客の操作は2ステップだけ</div>
+          <div class="flex flex-col md:flex-row gap-4">
+            <div class="flex items-start gap-3 flex-1">
+              <div class="step-num bg-green-100 text-green-700">1</div>
+              <div>
+                <div class="text-sm font-medium text-gray-800">メアドを追加</div>
+                <div class="text-xs text-gray-500">GA4 管理画面 → アクセス管理 → サービスアカウントのメアドを「閲覧者」として追加</div>
+              </div>
+            </div>
+            <div class="flex items-start gap-3 flex-1">
+              <div class="step-num bg-green-100 text-green-700">2</div>
+              <div>
+                <div class="text-sm font-medium text-gray-800">プロパティIDを入力</div>
+                <div class="text-xs text-gray-500">GA4のプロパティID（数字9桁）をUGOKI MAPの設定画面に入力</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-6">
+          <div>
+            <div class="text-sm font-bold text-gray-700 mb-3">取得できるデータ</div>
+            <div class="space-y-2">
+              <div class="flex items-center gap-2 text-xs"><span class="text-green-500">&#x2713;</span><span class="text-gray-700">年代別セグメント（18-24, 25-34, 35-44, 45-54, 55-64, 65+）</span></div>
+              <div class="flex items-center gap-2 text-xs"><span class="text-green-500">&#x2713;</span><span class="text-gray-700">性別（male / female）</span></div>
+              <div class="flex items-center gap-2 text-xs"><span class="text-green-500">&#x2713;</span><span class="text-gray-700">デバイス別（desktop / mobile / tablet）</span></div>
+              <div class="flex items-center gap-2 text-xs"><span class="text-green-500">&#x2713;</span><span class="text-gray-700">興味関心カテゴリ</span></div>
+              <div class="flex items-center gap-2 text-xs"><span class="text-green-500">&#x2713;</span><span class="text-gray-700">流入元 × 年代 × CVR</span></div>
+              <div class="flex items-center gap-2 text-xs"><span class="text-green-500">&#x2713;</span><span class="text-gray-700">ページ別 × 年代 × 滞在時間</span></div>
+            </div>
+          </div>
+          <div>
+            <div class="text-sm font-bold text-gray-700 mb-3">ペルソナへの統合方法</div>
+            <div class="bg-gray-50 rounded-lg p-4 text-xs text-gray-600 leading-relaxed">
+              GA4 APIはユーザー単位のデモグラを返さない（集計データのみ）。<br><br>
+              UGOKI MAPは<strong>統計的マッチング</strong>で解決:<br>
+              GA4「25-34歳 × モバイル」のセッション時間 = 45秒<br>
+              UGOKI MAP「skimmer」タイプのセッション時間 = 42秒<br>
+              → <strong>推定: skimmer ≒ 25-34歳モバイル中心</strong><br><br>
+              完全一致ではなく推定であることをAI出力に明記。ページ別年代分布で裏付けを取る。
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MCPツール -->
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-8">
+      <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
+        <h3 class="font-bold text-lg text-gray-900">MCP統合 — AIが自律的にサイトを分析</h3>
+      </div>
+      <div class="p-6">
+        <p class="text-sm text-gray-600 mb-4">UGOKI MAPはMCP（Model Context Protocol）サーバーとして動作。Claude AIが必要なデータを自分で取りに行き、分析・提案まで自動で行う。</p>
+        <div class="grid md:grid-cols-4 gap-3 mb-6">
+          <div class="bg-gray-50 rounded-lg p-3 text-center">
+            <div class="text-xs font-bold text-gray-700">ugokimap_list_sites</div>
+            <div class="text-[10px] text-gray-400 mt-1">管理サイト一覧</div>
+          </div>
+          <div class="bg-gray-50 rounded-lg p-3 text-center">
+            <div class="text-xs font-bold text-gray-700">ugokimap_analyze</div>
+            <div class="text-[10px] text-gray-400 mt-1">32軸から選択して分析</div>
+          </div>
+          <div class="bg-gray-50 rounded-lg p-3 text-center">
+            <div class="text-xs font-bold text-gray-700">ugokimap_heatmap</div>
+            <div class="text-[10px] text-gray-400 mt-1">ヒートマップデータ取得</div>
+          </div>
+          <div class="bg-indigo-50 rounded-lg p-3 text-center border border-indigo-200">
+            <div class="text-xs font-bold text-indigo-700">ugokimap_generate_personas</div>
+            <div class="text-[10px] text-indigo-400 mt-1">ペルソナ自動生成 (NEW)</div>
+          </div>
+        </div>
+        <div class="code-block text-xs">
+          <span class="code-comment">// Claude に「このサイトのペルソナを分析して」と言うだけ</span><br>
+          <span class="code-comment">// AIが自動で以下を実行:</span><br><br>
+          <span class="code-func">1.</span> ugokimap_list_sites → サイト一覧取得<br>
+          <span class="code-func">2.</span> ugokimap_generate_personas → 行動プロファイル + GSC意図 + GA4デモグラ統合<br>
+          <span class="code-func">3.</span> 32軸データからペルソナ3-5個を生成<br>
+          <span class="code-func">4.</span> 各ペルソナに LP改善案 / コンテンツ戦略 / 広告方針を提案<br>
+        </div>
+      </div>
+    </div>
+
+    <!-- 軸数の推移 -->
+    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-8">
+      <h3 class="font-bold text-lg mb-4 text-gray-900">分析エンジンの進化</h3>
+      <div class="flex items-end gap-4 justify-center mb-6">
+        <div class="text-center">
+          <div class="bg-gray-200 rounded-lg w-20 flex items-end justify-center" style="height:80px;">
+            <div class="bg-gray-400 rounded-t-lg w-14" style="height:40px;"></div>
+          </div>
+          <div class="text-xs text-gray-500 mt-2">Phase 1</div>
+          <div class="text-lg font-bold text-gray-600">20軸</div>
+        </div>
+        <div class="text-gray-300 text-2xl pb-8">→</div>
+        <div class="text-center">
+          <div class="bg-indigo-100 rounded-lg w-20 flex items-end justify-center" style="height:130px;">
+            <div class="bg-indigo-500 rounded-t-lg w-14" style="height:100px;"></div>
+          </div>
+          <div class="text-xs text-indigo-600 mt-2 font-medium">Phase 2 (現在)</div>
+          <div class="text-lg font-bold text-indigo-700">32軸</div>
+        </div>
+        <div class="text-gray-300 text-2xl pb-8">→</div>
+        <div class="text-center">
+          <div class="bg-purple-100 rounded-lg w-20 flex items-end justify-center border border-dashed border-purple-300" style="height:175px;">
+            <div class="bg-purple-400 rounded-t-lg w-14" style="height:140px;"></div>
+          </div>
+          <div class="text-xs text-purple-500 mt-2">拡張予定</div>
+          <div class="text-lg font-bold text-purple-600">44軸</div>
+        </div>
+      </div>
+      <div class="text-center text-xs text-gray-500">+ ペルソナ自動生成 + GA4デモグラ統合 + MCPツール</div>
+    </div>
+
+  </div><!-- /tab-ai-analysis -->
+
 </div>
 
 <script>
@@ -1348,6 +1924,7 @@ function switchTab(tabId) {
   document.getElementById('tab-' + tabId).classList.add('active');
   event.target.classList.add('active');
   if (tabId === 'cvpath') { setTimeout(()=>{ drawGA4Sankey(); drawUgokiSankey('all'); }, 50); }
+  if (tabId === 'ai-analysis') { window.scrollTo({ top: 0, behavior: 'smooth' }); }
 }
 
 /* ======== GA4 Sankey ======== */

@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getHeatmapData as getHeatmapDataFromQuery } from '@/inngest/lib/heatmapQuery'
 import { getHeatmapData as getHeatmapDataLegacy } from '@/lib/clickhouse'
 import { getHeatmapCache, setHeatmapCache } from '@/lib/redis'
-import { getAuthContext, unauthorized, badRequest } from '@/lib/api-utils'
+import { getAuthContext, unauthorized, badRequest, verifySiteAccess, forbidden } from '@/lib/api-utils'
+import { getClickHouseClientAsync } from '@/lib/clickhouse'
 
 // 集約テーブル使用で10秒で十分
 export const maxDuration = 10
@@ -25,6 +26,16 @@ export async function GET(request: NextRequest) {
         { error: 'Missing required parameters: site_id, page_url' },
         { status: 400 }
       )
+    }
+
+    // サイトアクセス権限チェック
+    try {
+      const ch = await getClickHouseClientAsync()
+      const { authorized } = await verifySiteAccess(request, siteId, ch)
+      if (!authorized) return forbidden('Access denied to this site')
+    } catch {
+      // DB接続エラー時はアクセス拒否
+      return forbidden('Unable to verify site access')
     }
 
     // キャッシュから取得を試みる（heatmap_typeを含めたキャッシュキーを使用）
@@ -145,6 +156,9 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const auth = getAuthContext(request)
+  if (!auth) return unauthorized()
+
   try {
     const body = await request.json()
     const { site_id, page_url, device_type, start_date, end_date } = body
@@ -154,6 +168,15 @@ export async function POST(request: NextRequest) {
         { error: 'Missing required fields: site_id, page_url' },
         { status: 400 }
       )
+    }
+
+    // サイトアクセス権限チェック
+    try {
+      const ch = await getClickHouseClientAsync()
+      const { authorized } = await verifySiteAccess(request, site_id, ch)
+      if (!authorized) return forbidden('Access denied to this site')
+    } catch {
+      return forbidden('Unable to verify site access')
     }
 
     // ClickHouseからデータを取得（集約テーブルから、失敗時は既存ロジックにフォールバック）

@@ -11,18 +11,11 @@ import {
   Clock,
   Users,
   Activity,
-  Settings,
-  FileText,
-  Brain,
-  ChevronDown,
   Calendar,
-  Download,
-  Filter,
-  Search,
   Eye,
-  Map,
   Globe
 } from 'lucide-react'
+import KPICard from '../../components/ui/kpi-card'
 
 interface Site {
   id: string
@@ -431,210 +424,30 @@ export default function DashboardPage() {
 
         {/* KPIカード */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 lg:gap-6">
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-medium text-gray-600">ページビュー数</span>
-              <Eye className="w-5 h-5 text-blue-600" />
-            </div>
-            <div className="text-3xl font-bold mb-2">{kpiData.pageViews.toLocaleString()}</div>
-            <div className="flex items-center gap-1 text-sm">
-              {kpiData.pageViewsChange && (
-                <div className={`flex items-center gap-1 ${kpiData.pageViewsChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
-                  {kpiData.pageViewsChange.isPositive ? (
-                    <TrendingUp className="w-4 h-4" />
-                  ) : (
-                    <TrendingDown className="w-4 h-4" />
-                  )}
-                  <span className="font-medium">{kpiData.pageViewsChange.value}</span>
-                  <span className="text-gray-500">vs 前期間</span>
-                </div>
-              )}
-              {!kpiData.pageViewsChange && (
-                <span className="text-gray-500">アクセス数（ページビュー）</span>
-              )}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-medium text-gray-600">セッション数</span>
-              <Users className="w-5 h-5 text-green-600" />
-            </div>
-            <div className="text-3xl font-bold mb-2">{kpiData.uniqueSessions.toLocaleString()}</div>
-            <div className="flex items-center gap-1 text-sm">
-              {kpiData.sessionsChange && (
-                <div className={`flex items-center gap-1 ${kpiData.sessionsChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
-                  {kpiData.sessionsChange.isPositive ? (
-                    <TrendingUp className="w-4 h-4" />
-                  ) : (
-                    <TrendingDown className="w-4 h-4" />
-                  )}
-                  <span className="font-medium">{kpiData.sessionsChange.value}</span>
-                  <span className="text-gray-500">vs 前期間</span>
-                </div>
-              )}
-              {!kpiData.sessionsChange && (
-                <span className="text-gray-500">ユニークセッション数</span>
-              )}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-medium text-gray-600">総クリック数</span>
-              <MousePointerClick className="w-5 h-5 text-purple-600" />
-            </div>
-            <div className="text-3xl font-bold mb-2">{kpiData.totalClicks.toLocaleString()}</div>
-            <div className="flex items-center gap-1 text-sm">
-              {kpiData.clicksChange && (
-                <div className={`flex items-center gap-1 ${kpiData.clicksChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
-                  {kpiData.clicksChange.isPositive ? (
-                    <TrendingUp className="w-4 h-4" />
-                  ) : (
-                    <TrendingDown className="w-4 h-4" />
-                  )}
-                  <span className="font-medium">{kpiData.clicksChange.value}</span>
-                  <span className="text-gray-500">vs 前期間</span>
-                </div>
-              )}
-              {!kpiData.clicksChange && (
-                <span className="text-gray-500">全クリックイベントの合計</span>
-              )}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-medium text-gray-600">クリック率</span>
-              <Zap className="w-5 h-5 text-yellow-600" />
-            </div>
-            <div className="text-3xl font-bold mb-2">{kpiData.clickRate}%</div>
-            <div className="flex items-center gap-1 text-sm">
-              {kpiData.clickRateChange && (
-                <div className={`flex items-center gap-1 ${kpiData.clickRateChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
-                  {kpiData.clickRateChange.isPositive ? (
-                    <TrendingUp className="w-4 h-4" />
-                  ) : (
-                    <TrendingDown className="w-4 h-4" />
-                  )}
-                  <span className="font-medium">{kpiData.clickRateChange.value}</span>
-                  <span className="text-gray-500">vs 前期間</span>
-                </div>
-              )}
-              {!kpiData.clickRateChange && (
-                <span className="text-gray-500">セッションあたりの平均クリック数</span>
-              )}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-medium text-gray-600">平均滞在時間</span>
-              <Clock className="w-5 h-5 text-green-600" />
-            </div>
-            <div className="text-3xl font-bold mb-2">
-              {kpiData.avgTimeOnPage > 0 ? `${kpiData.avgTimeOnPage}分` : 'データなし'}
-            </div>
-            <div className="flex items-center gap-1 text-sm">
-              {kpiData.avgTimeOnPageChange && kpiData.avgTimeOnPage > 0 && (
-                <div className={`flex items-center gap-1 ${kpiData.avgTimeOnPageChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
-                  {kpiData.avgTimeOnPageChange.isPositive ? (
-                    <TrendingUp className="w-4 h-4" />
-                  ) : (
-                    <TrendingDown className="w-4 h-4" />
-                  )}
-                  <span className="font-medium">{kpiData.avgTimeOnPageChange.value}</span>
-                  <span className="text-gray-500">vs 前期間</span>
-                </div>
-              )}
-              {!kpiData.avgTimeOnPageChange && (
-                <span className="text-gray-500">
-                  {kpiData.avgTimeOnPage > 0 
-                    ? 'セッションあたりの平均滞在時間' 
-                    : 'セッションデータがありません'}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-medium text-gray-600">直帰率</span>
-              <TrendingDown className="w-5 h-5 text-red-600" />
-            </div>
-            <div className="text-3xl font-bold mb-2">
-              {kpiData.bounceRate > 0 ? `${kpiData.bounceRate}%` : 'データなし'}
-            </div>
-            <div className="flex items-center gap-1 text-sm">
-              {kpiData.bounceRateChange && kpiData.bounceRate > 0 && (
-                <div className={`flex items-center gap-1 ${kpiData.bounceRateChange.isPositive ? 'text-red-600' : 'text-green-600'}`}>
-                  {/* 直帰率は低い方が良いので、増加は赤、減少は緑 */}
-                  {kpiData.bounceRateChange.isPositive ? (
-                    <TrendingUp className="w-4 h-4" />
-                  ) : (
-                    <TrendingDown className="w-4 h-4" />
-                  )}
-                  <span className="font-medium">{kpiData.bounceRateChange.value}</span>
-                  <span className="text-gray-500">vs 前期間</span>
-                </div>
-              )}
-              {!kpiData.bounceRateChange && (
-                <span className="text-gray-500">
-                  {kpiData.bounceRate > 0 
-                    ? '1ページビューのセッション割合' 
-                    : 'セッションデータがありません'}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-medium text-gray-600">平均スクロール深度</span>
-              <Activity className="w-5 h-5 text-green-600" />
-            </div>
-            <div className="text-3xl font-bold mb-2">{kpiData.avgScrollDepth}%</div>
-            <div className="flex items-center gap-1 text-sm">
-              {kpiData.avgScrollDepthChange && (
-                <div className={`flex items-center gap-1 ${kpiData.avgScrollDepthChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
-                  {kpiData.avgScrollDepthChange.isPositive ? (
-                    <TrendingUp className="w-4 h-4" />
-                  ) : (
-                    <TrendingDown className="w-4 h-4" />
-                  )}
-                  <span className="font-medium">{kpiData.avgScrollDepthChange.value}</span>
-                  <span className="text-gray-500">vs 前期間</span>
-                </div>
-              )}
-              {!kpiData.avgScrollDepthChange && (
-                <span className="text-gray-500">ページビューあたりの平均スクロール位置（0-100%）</span>
-              )}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-medium text-gray-600">総イベント数</span>
-              <BarChart3 className="w-5 h-5 text-purple-600" />
-            </div>
-            <div className="text-3xl font-bold mb-2">{kpiData.totalEvents.toLocaleString()}</div>
-            <div className="flex items-center gap-1 text-sm">
-              {kpiData.totalEventsChange && (
-                <div className={`flex items-center gap-1 ${kpiData.totalEventsChange.isPositive ? 'text-green-600' : 'text-red-600'}`}>
-                  {kpiData.totalEventsChange.isPositive ? (
-                    <TrendingUp className="w-4 h-4" />
-                  ) : (
-                    <TrendingDown className="w-4 h-4" />
-                  )}
-                  <span className="font-medium">{kpiData.totalEventsChange.value}</span>
-                  <span className="text-gray-500">vs 前期間</span>
-                </div>
-              )}
-              {!kpiData.totalEventsChange && (
-                <span className="text-gray-500">クリック・スクロール・ホバー</span>
-              )}
-            </div>
-          </div>
+          <KPICard title="ページビュー数" value={kpiData.pageViews} icon={Eye} iconColor="text-blue-600"
+            change={kpiData.pageViewsChange} description="アクセス数（ページビュー）" />
+          <KPICard title="セッション数" value={kpiData.uniqueSessions} icon={Users} iconColor="text-green-600"
+            change={kpiData.sessionsChange} description="ユニークセッション数" />
+          <KPICard title="総クリック数" value={kpiData.totalClicks} icon={MousePointerClick} iconColor="text-purple-600"
+            change={kpiData.clicksChange} description="全クリックイベントの合計" />
+          <KPICard title="クリック率" value={`${kpiData.clickRate}%`} icon={Zap} iconColor="text-yellow-600"
+            change={kpiData.clickRateChange} description="セッションあたりの平均クリック数" />
+          <KPICard title="平均滞在時間"
+            value={kpiData.avgTimeOnPage > 0 ? `${kpiData.avgTimeOnPage}分` : 'データなし'}
+            icon={Clock} iconColor="text-green-600"
+            change={kpiData.avgTimeOnPage > 0 ? kpiData.avgTimeOnPageChange : null}
+            description={kpiData.avgTimeOnPage > 0 ? 'セッションあたりの平均滞在時間' : 'セッションデータがありません'} />
+          <KPICard title="直帰率"
+            value={kpiData.bounceRate > 0 ? `${kpiData.bounceRate}%` : 'データなし'}
+            icon={TrendingDown} iconColor="text-red-600"
+            change={kpiData.bounceRate > 0 ? kpiData.bounceRateChange : null}
+            invertChangeColor={true}
+            description={kpiData.bounceRate > 0 ? '1ページビューのセッション割合' : 'セッションデータがありません'} />
+          <KPICard title="平均スクロール深度" value={`${kpiData.avgScrollDepth}%`}
+            icon={Activity} iconColor="text-green-600"
+            change={kpiData.avgScrollDepthChange} description="平均スクロール位置（0-100%）" />
+          <KPICard title="総イベント数" value={kpiData.totalEvents} icon={BarChart3} iconColor="text-purple-600"
+            change={kpiData.totalEventsChange} description="クリック・スクロール・ホバー" />
         </div>
 
         {/* データがない場合のメッセージ */}
