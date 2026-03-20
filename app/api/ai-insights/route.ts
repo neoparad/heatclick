@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { runAnalysis, isAIAvailable } from '@/lib/claude'
 import { executeAxis, executeAllAxes } from '@/lib/analysis-axes'
 import { getClickHouseClientAsync } from '@/lib/clickhouse'
+import { fetchGA4PersonaData, type GA4Config } from '@/lib/integrations/ga4'
 
 export const maxDuration = 120 // AI分析は時間がかかるため2分に設定
 
@@ -71,7 +72,7 @@ export async function POST(request: NextRequest) {
       }
 
       case 'persona_generation': {
-        // ペルソナ生成用データを収集
+        // ペルソナ生成用データを収集（ClickHouse + GA4並列）
         const [profileResult, intentResult, summaryResult] = await Promise.all([
           executeAxis(ch, 'persona_behavior_profile', { site_id }),
           executeAxis(ch, 'persona_query_intent', { site_id }),
@@ -83,10 +84,37 @@ export async function POST(request: NextRequest) {
         ])
 
         const summary = await summaryResult.json() as any[]
+
+        // GA4デモグラフィックデータの取得（設定されている場合のみ）
+        let ga4Data = null
+        const ga4ClientEmail = process.env.GA4_CLIENT_EMAIL || process.env.GSC_CLIENT_EMAIL
+        const ga4PrivateKey = process.env.GA4_PRIVATE_KEY || process.env.GSC_PRIVATE_KEY
+        const ga4PropertyId = process.env.GA4_PROPERTY_ID
+
+        if (ga4ClientEmail && ga4PrivateKey && ga4PropertyId) {
+          try {
+            const endDate = new Date().toISOString().split('T')[0]
+            const startDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+            ga4Data = await fetchGA4PersonaData(
+              { clientEmail: ga4ClientEmail, privateKey: ga4PrivateKey, propertyId: ga4PropertyId },
+              startDate, endDate
+            )
+          } catch (e: any) {
+            console.error('GA4 data fetch failed (continuing without demographics):', e?.message)
+          }
+        }
+
         analysisData = {
           site_summary: summary[0] || {},
           behavior_profiles: profileResult?.data || [],
           query_intent_by_page: intentResult?.data?.slice(0, 30) || [],
+          ga4_demographics: ga4Data?.demographics || null,
+          ga4_page_demographics: ga4Data?.pageDemographics?.slice(0, 30) || null,
+          ga4_interests: ga4Data?.interestSegments?.slice(0, 20) || null,
+          _ga4_available: !!ga4Data,
+          _ga4_note: ga4Data
+            ? 'GA4デモグラデータあり。行動ペルソナとGA4の年代×性別×デバイス別セッション時間・CVRを統計マッチングし、各ペルソナに推定デモグラを付与してください。'
+            : 'GA4未接続。デバイス・時間帯・行動パターンからデモグラを推定してください。',
         }
         break
       }
