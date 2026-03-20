@@ -1235,7 +1235,10 @@ analysisAxes.set('persona_behavior_profile', {
         countIf(event_type = 'dead_click') as dead_clicks,
 
         -- ページ閲覧
-        countIf(event_type IN ('pageview', 'page_view')) as page_views
+        countIf(event_type IN ('pageview', 'page_view')) as page_views,
+
+        -- CV（アフィリエイトリンククリック等）
+        max(conversion_type IS NOT NULL AND conversion_type != '') as converted
 
       FROM clickinsight.events
       WHERE site_id = {site_id:String}
@@ -1274,6 +1277,10 @@ analysisAxes.set('persona_behavior_profile', {
       avg(total_clicks) as avg_clicks,
       avg(page_views) as avg_page_views,
       avg(rage_clicks + dead_clicks) as avg_friction_events,
+
+      -- CV率（実データ）
+      countIf(converted = 1) as cv_count,
+      countIf(converted = 1) / greatest(count(), 1) * 100 as cvr,
 
       -- 時間帯傾向
       topK(3)(visit_hour) as typical_hours,
