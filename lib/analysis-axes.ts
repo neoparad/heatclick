@@ -1216,11 +1216,9 @@ analysisAxes.set('persona_behavior_profile', {
     WITH session_profile AS (
       SELECT
         session_id,
-        any(user_id) as user_id,
         multiIf(any(viewport_width) >= 1024, 'desktop', any(viewport_width) >= 768, 'tablet', 'mobile') as device_type,
-        any(utm_source) as utm_source,
-        any(utm_medium) as utm_medium,
         argMin(url, timestamp) as landing_page,
+        any(referrer) as referrer,
 
         -- 時間特徴
         dateDiff('second', min(timestamp), max(timestamp)) as duration_sec,
@@ -1230,19 +1228,6 @@ analysisAxes.set('persona_behavior_profile', {
         -- スクロール行動
         max(scroll_percentage) as max_scroll_depth,
         countIf(event_type = 'scroll') as scroll_events,
-        -- スクロール速度分類
-        avgIf(
-          abs(scroll_y - lagInFrame(scroll_y, 1) OVER (PARTITION BY session_id ORDER BY timestamp))
-            / greatest(dateDiff('millisecond',
-                lagInFrame(timestamp, 1) OVER (PARTITION BY session_id ORDER BY timestamp),
-                timestamp), 1) * 1000,
-          event_type = 'scroll'
-        ) as avg_scroll_speed,
-
-        -- 熟読行動
-        sumIf(read_duration, event_type = 'read_area') as total_read_ms,
-        countIf(event_type = 'read_area') as read_events,
-        avgIf(read_duration, event_type = 'read_area' AND read_duration > 0) as avg_read_duration_ms,
 
         -- クリック行動
         countIf(event_type = 'click') as total_clicks,
@@ -1250,46 +1235,30 @@ analysisAxes.set('persona_behavior_profile', {
         countIf(event_type = 'dead_click') as dead_clicks,
 
         -- ページ閲覧
-        countIf(event_type IN ('pageview', 'page_view')) as page_views,
-
-        -- CV
-        max(conversion_type IS NOT NULL) as converted,
-        max(conversion_value) as conversion_value,
-
-        -- 画像接触
-        countIf(event_type = 'image_visibility') as images_viewed,
-
-        -- 上下往復率（迷い度）
-        countIf(scroll_y < lagInFrame(scroll_y, 1) OVER (PARTITION BY session_id ORDER BY timestamp)
-                AND lagInFrame(scroll_y, 1) OVER (PARTITION BY session_id ORDER BY timestamp) > 0)
-          / greatest(countIf(event_type = 'scroll'), 1) * 100 as confusion_rate
+        countIf(event_type IN ('pageview', 'page_view')) as page_views
 
       FROM clickinsight.events
       WHERE site_id = {site_id:String}
       GROUP BY session_id
-      HAVING duration_sec >= 3 AND (total_clicks + scroll_events + read_events) >= 2
+      HAVING duration_sec >= 3 AND (total_clicks + scroll_events) >= 2
     )
     SELECT
       -- 行動タイプ分類
       multiIf(
-        converted = 1 AND duration_sec < 120 AND total_clicks <= 5,
-        'quick_converter',
-        converted = 1 AND total_read_ms > 30000,
-        'deep_reader_converter',
-        converted = 1,
-        'standard_converter',
-        max_scroll_depth > 80 AND total_read_ms > 20000 AND converted = 0,
-        'engaged_non_converter',
-        avg_scroll_speed > 500 AND max_scroll_depth > 60 AND total_read_ms < 5000,
-        'skimmer',
-        confusion_rate > 30,
-        'confused_navigator',
-        rage_clicks + dead_clicks >= 2,
-        'frustrated_user',
+        max_scroll_depth > 80 AND total_clicks >= 5,
+        'engaged_clicker',
+        max_scroll_depth > 80 AND total_clicks < 3,
+        'deep_scroller',
         max_scroll_depth < 25 AND duration_sec < 15,
         'bouncer',
-        total_read_ms > 30000 AND total_clicks < 3,
-        'passive_reader',
+        rage_clicks + dead_clicks >= 2,
+        'frustrated_user',
+        duration_sec > 180 AND total_clicks >= 3,
+        'careful_explorer',
+        duration_sec < 30 AND total_clicks <= 2,
+        'quick_glancer',
+        page_views >= 3,
+        'multi_page_visitor',
         'standard_visitor'
       ) as behavior_type,
 
@@ -1298,22 +1267,13 @@ analysisAxes.set('persona_behavior_profile', {
 
       -- デモグラ集約
       topK(1)(device_type) as primary_device,
-      topK(1)(utm_source) as primary_source,
-      topK(1)(utm_medium) as primary_medium,
 
       -- 行動統計
       avg(duration_sec) as avg_duration_sec,
       avg(max_scroll_depth) as avg_scroll_depth,
-      avg(total_read_ms) as avg_read_ms,
       avg(total_clicks) as avg_clicks,
       avg(page_views) as avg_page_views,
-      avg(confusion_rate) as avg_confusion_rate,
       avg(rage_clicks + dead_clicks) as avg_friction_events,
-      avg(images_viewed) as avg_images_viewed,
-
-      -- CV率
-      countIf(converted = 1) / greatest(count(), 1) * 100 as cvr,
-      avg(conversion_value) as avg_cv_value,
 
       -- 時間帯傾向
       topK(3)(visit_hour) as typical_hours,
