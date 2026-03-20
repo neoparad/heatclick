@@ -36,14 +36,27 @@
       }
 
       document.addEventListener('click', (e) => {
-        const el = e.target.closest('[data-track-visibility]') || e.target.closest('a.cta, button.cta, .cta a, .cta button, [class*="cta"], [id*="cta"]');
-        if (el && this.tracked.has(el)) this.tracked.get(el).clicked = true;
+        // クリックされた要素またはその親がトラッキング対象か確認
+        let el = e.target;
+        while (el && el !== document.body) {
+          if (this.tracked.has(el)) { this.tracked.get(el).clicked = true; break; }
+          el = el.parentElement;
+        }
       }, { passive: true });
     },
 
     observeElements() {
       const custom = document.querySelectorAll('[data-track-visibility]');
-      const ctas = document.querySelectorAll('a.cta, button.cta, .cta a, .cta button, [class*="cta"], [id*="cta"], [class*="banner"], [id*="banner"], [role="banner"]');
+      const ctas = document.querySelectorAll(
+        // 明示的なCTA/バナー
+        'a.cta, button.cta, .cta a, .cta button, [class*="cta"], [id*="cta"], [class*="banner"], [id*="banner"], [role="banner"]'
+        // 一般的なボタン・リンク
+        + ', button:not(nav button):not(header button), input[type="submit"], input[type="button"], [role="button"]'
+        // 購入・申込系のリンク（日本語・英語）
+        + ', a[href*="cart"], a[href*="buy"], a[href*="purchase"], a[href*="checkout"], a[href*="order"], a[href*="contact"], a[href*="signup"], a[href*="register"], a[href*="download"]'
+        // ボタン風CSSクラス
+        + ', [class*="btn"], [class*="button"], [class*="purchase"], [class*="submit"], [class*="signup"], [class*="download"]'
+      );
       const all = new Set([...custom, ...ctas]);
 
       for (const el of all) {

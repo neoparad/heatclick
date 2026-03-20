@@ -216,6 +216,46 @@
       }
     });
     loadExtensions();
+
+    // GA4 dataLayer フック: キーイベント（コンバージョン）を自動キャプチャ
+    const ga4KeyEvents = ['purchase','sign_up','generate_lead','begin_checkout','add_to_cart','add_payment_info','subscribe','contact','download','form_submit'];
+    if (window.dataLayer && Array.isArray(window.dataLayer)) {
+      // 既存のpushを上書きして監視
+      const origPush = window.dataLayer.push.bind(window.dataLayer);
+      window.dataLayer.push = function() {
+        for (let i = 0; i < arguments.length; i++) {
+          const item = arguments[i];
+          if (item && typeof item === 'object') {
+            const evName = item.event || item[0];
+            if (evName && ga4KeyEvents.includes(evName)) {
+              queueEvent({
+                event_type: 'conversion',
+                conversion_type: evName,
+                conversion_value: item.value || item.ecommerce?.purchase?.revenue || 0,
+                event_revenue: item.value || 0,
+              });
+            }
+          }
+        }
+        return origPush.apply(window.dataLayer, arguments);
+      };
+    }
+    // gtag() 呼び出しもフック
+    if (window.gtag) {
+      const origGtag = window.gtag;
+      window.gtag = function() {
+        if (arguments[0] === 'event' && ga4KeyEvents.includes(arguments[1])) {
+          const params = arguments[2] || {};
+          queueEvent({
+            event_type: 'conversion',
+            conversion_type: arguments[1],
+            conversion_value: params.value || 0,
+            event_revenue: params.value || 0,
+          });
+        }
+        return origGtag.apply(this, arguments);
+      };
+    }
   };
 
   // identify: link anonymous user to external member/customer ID
