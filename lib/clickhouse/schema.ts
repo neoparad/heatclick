@@ -24,6 +24,7 @@ export async function initializeDatabase(): Promise<void> {
         CREATE TABLE IF NOT EXISTS clickinsight.sites (
           id String, name String, url String, tracking_id String, status String,
           user_id Nullable(String), org_id Nullable(String),
+          ga4_property_id Nullable(String),
           created_at DateTime, updated_at DateTime, last_activity DateTime, page_views UInt64
         ) ENGINE = MergeTree() ORDER BY (id)
       `,
@@ -58,6 +59,11 @@ export async function initializeDatabase(): Promise<void> {
       await client.exec({ query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS ga_client_id Nullable(String)` })
       await client.exec({ query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS external_id Nullable(String)` })
     } catch { /* columns already exist */ }
+
+    // sites テーブルに ga4_property_id カラム追加（既存テーブル対応）
+    try {
+      await client.exec({ query: `ALTER TABLE clickinsight.sites ADD COLUMN IF NOT EXISTS ga4_property_id Nullable(String)` })
+    } catch { /* column already exists */ }
 
     // sessions
     await client.exec({
@@ -169,6 +175,32 @@ export async function initializeDatabase(): Promise<void> {
           site_id String, anonymous_id String, external_id String,
           metadata String DEFAULT '', created_at DateTime DEFAULT now()
         ) ENGINE = ReplacingMergeTree(created_at) ORDER BY (site_id, anonymous_id)
+      `,
+    })
+
+    // behavior_signals (emotion inference: text_copy, scroll_reversal, tab_return, browser_back, pinch_zoom, cta_hover)
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.behavior_signals (
+          id String, site_id String, session_id String, page_url String, event_type String,
+          -- text_copy
+          copied_text Nullable(String), copied_length UInt16 DEFAULT 0, copy_y UInt32 DEFAULT 0,
+          -- scroll_reversal
+          reversal_count UInt16 DEFAULT 0, final_scroll_y UInt32 DEFAULT 0,
+          -- tab_return
+          away_duration_ms UInt32 DEFAULT 0, tab_switch_count UInt16 DEFAULT 0, return_scroll_y UInt32 DEFAULT 0,
+          -- browser_back
+          from_url Nullable(String), scroll_y_at_back UInt32 DEFAULT 0, scroll_depth_at_back UInt8 DEFAULT 0,
+          -- pinch_zoom
+          zoom_scale Float32 DEFAULT 0, zoom_y UInt32 DEFAULT 0,
+          target_tag Nullable(String), target_src Nullable(String), target_alt Nullable(String),
+          pinch_zoom_count UInt16 DEFAULT 0,
+          -- cta_hover
+          hover_duration_ms UInt32 DEFAULT 0, hover_y UInt32 DEFAULT 0, hover_clicked UInt8 DEFAULT 0,
+          -- common
+          element_path Nullable(String), element_text Nullable(String),
+          device_type Nullable(String), created_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree() ORDER BY (site_id, page_url, event_type, created_at) PARTITION BY toYYYYMM(created_at)
       `,
     })
 

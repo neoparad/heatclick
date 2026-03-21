@@ -220,6 +220,53 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Prepare behavior_signals events (emotion inference signals)
+    const behaviorEvents: any[] = []
+    const behaviorEventTypes = ['text_copy', 'scroll_reversal', 'tab_return', 'browser_back', 'pinch_zoom', 'cta_hover']
+    for (const event of events) {
+      const eventType = event.event_type || event.eventType
+      if (behaviorEventTypes.includes(eventType)) {
+        behaviorEvents.push({
+          id: crypto.randomUUID(),
+          site_id: event.site_id || event.siteId || '',
+          session_id: event.session_id || event.sessionId || '',
+          page_url: event.url || event.page_url || '',
+          event_type: eventType,
+          // text_copy
+          copied_text: event.copied_text || null,
+          copied_length: event.copied_length || 0,
+          copy_y: event.copy_y || 0,
+          // scroll_reversal
+          reversal_count: event.reversal_count || 0,
+          final_scroll_y: event.final_scroll_y || 0,
+          // tab_return
+          away_duration_ms: event.away_duration_ms || 0,
+          tab_switch_count: event.tab_switch_count || 0,
+          return_scroll_y: event.return_scroll_y || 0,
+          // browser_back
+          from_url: event.from_url || null,
+          scroll_y_at_back: event.scroll_y_at_back || 0,
+          scroll_depth_at_back: event.scroll_depth_at_back || 0,
+          // pinch_zoom
+          zoom_scale: event.zoom_scale || 0,
+          zoom_y: event.zoom_y || 0,
+          target_tag: event.target_tag || null,
+          target_src: event.target_src || null,
+          target_alt: event.target_alt || null,
+          pinch_zoom_count: event.pinch_zoom_count || 0,
+          // cta_hover
+          hover_duration_ms: event.hover_duration_ms || 0,
+          hover_y: event.hover_y || 0,
+          hover_clicked: event.hover_clicked ? 1 : 0,
+          // common
+          element_path: event.element_path || null,
+          element_text: event.element_text || null,
+          device_type: event.device_type || null,
+          created_at: new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
+        })
+      }
+    }
+
     // Prepare user_mappings for identify events
     const identifyEvents: any[] = []
     for (const event of events) {
@@ -254,6 +301,9 @@ export async function POST(request: NextRequest) {
       if (elementVisibilityEvents.length > 0) {
         bufferPromises.push(pushEventBuffer('clickinsight.element_visibility', elementVisibilityEvents))
       }
+      if (behaviorEvents.length > 0) {
+        bufferPromises.push(pushEventBuffer('clickinsight.behavior_signals', behaviorEvents))
+      }
       if (identifyEvents.length > 0) {
         bufferPromises.push(pushEventBuffer('clickinsight.user_mappings', identifyEvents))
       }
@@ -286,6 +336,9 @@ export async function POST(request: NextRequest) {
         }
         if (elementVisibilityEvents.length > 0) {
           insertPromises.push(clickhouse.insert({ table: 'clickinsight.element_visibility', values: elementVisibilityEvents, format: 'JSONEachRow' }))
+        }
+        if (behaviorEvents.length > 0) {
+          insertPromises.push(clickhouse.insert({ table: 'clickinsight.behavior_signals', values: behaviorEvents, format: 'JSONEachRow' }))
         }
         if (identifyEvents.length > 0) {
           insertPromises.push(clickhouse.insert({ table: 'clickinsight.user_mappings', values: identifyEvents, format: 'JSONEachRow' }))
