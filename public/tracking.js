@@ -7,14 +7,22 @@
   'use strict';
 
   const getSiteId = () => {
+    // 1. data-site-id attribute on current script
     const cs = document.currentScript;
     if (cs) { const s = cs.getAttribute('data-site-id'); if (s) return s; }
+    // 2. data-site-id on any tracking.js script tag
     const all = document.querySelectorAll('script[src*="tracking.js"]');
     for (let i = all.length - 1; i >= 0; i--) {
       const s = all[i].getAttribute('data-site-id');
       if (s && !all[i].dataset.ciProcessed) { all[i].dataset.ciProcessed = '1'; return s; }
     }
+    // 3. Global variable (set before script load or via GTM)
     if (window.CLICKINSIGHT_SITE_ID) return window.CLICKINSIGHT_SITE_ID;
+    // 4. URL query parameter on script src (e.g. tracking.js?id=CIP_xxx)
+    for (let i = all.length - 1; i >= 0; i--) {
+      try { const u = new URL(all[i].src); const id = u.searchParams.get('id') || u.searchParams.get('site_id'); if (id) return id; } catch {}
+    }
+    // 5. Any element with data-site-id
     const any = document.querySelector('script[data-site-id]');
     return any ? any.getAttribute('data-site-id') : '';
   };
@@ -40,7 +48,7 @@
     extensions: (cs && cs.getAttribute('data-extensions')) || window.CLICKINSIGHT_EXTENSIONS || 'all',
   };
 
-  if (!config.siteId) { console.error('ClickInsight Pro: Site ID is required.'); return; }
+  if (!config.siteId) { console.error('ClickInsight Pro: Site ID is required. Add data-site-id attribute to the script tag or set window.CLICKINSIGHT_SITE_ID before loading.'); return; }
 
   // Sequence counter for event ordering within a session
   let _seqCounter = 0;
