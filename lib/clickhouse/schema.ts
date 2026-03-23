@@ -58,6 +58,9 @@ export async function initializeDatabase(): Promise<void> {
       await client.exec({ query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS read_duration Float32 DEFAULT 0` })
       await client.exec({ query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS ga_client_id Nullable(String)` })
       await client.exec({ query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS external_id Nullable(String)` })
+      // Tier 1: CSS selector + sequence_id
+      await client.exec({ query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS element_selector Nullable(String)` })
+      await client.exec({ query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS sequence_id UInt32 DEFAULT 0` })
     } catch { /* columns already exist */ }
 
     // sites テーブルに ga4_property_id カラム追加（既存テーブル対応）
@@ -201,6 +204,30 @@ export async function initializeDatabase(): Promise<void> {
           element_path Nullable(String), element_text Nullable(String),
           device_type Nullable(String), created_at DateTime DEFAULT now()
         ) ENGINE = MergeTree() ORDER BY (site_id, page_url, event_type, created_at) PARTITION BY toYYYYMM(created_at)
+      `,
+    })
+
+    // scroll_timeline (Tier 1: scroll position time series for reading pattern analysis)
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.scroll_timeline (
+          id String, site_id String, session_id String, page_url String,
+          timestamp_ms UInt64, scroll_y UInt32, viewport_height UInt16,
+          created_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree() ORDER BY (site_id, session_id, timestamp_ms) PARTITION BY toYYYYMM(created_at)
+      `,
+    })
+
+    // element_visibility_v2 (Tier 1: broad content element visibility with precise timing)
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.element_visibility_v2 (
+          id String, site_id String, session_id String, page_url String,
+          element_selector String, element_tag String DEFAULT '', element_text String DEFAULT '',
+          visible_start_ms UInt64 DEFAULT 0, visible_end_ms UInt64 DEFAULT 0,
+          visible_duration_ms UInt32 DEFAULT 0, viewport_percent Float32 DEFAULT 0,
+          created_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree() ORDER BY (site_id, session_id, element_selector) PARTITION BY toYYYYMM(created_at)
       `,
     })
 

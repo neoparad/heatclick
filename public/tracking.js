@@ -42,6 +42,33 @@
 
   if (!config.siteId) { console.error('ClickInsight Pro: Site ID is required.'); return; }
 
+  // Sequence counter for event ordering within a session
+  let _seqCounter = 0;
+
+  // Generate unique CSS selector for an element
+  const _cssSelector = (el) => {
+    if (!el || el === document.body || el === document.documentElement) return '';
+    try {
+      // ID shortcut
+      if (el.id) return '#' + CSS.escape(el.id);
+      const parts = [];
+      let cur = el;
+      while (cur && cur !== document.body && cur !== document.documentElement && parts.length < 5) {
+        let seg = cur.tagName.toLowerCase();
+        if (cur.id) { parts.unshift('#' + CSS.escape(cur.id) + '>' + seg.split('>').pop()); parts.unshift(''); break; }
+        // nth-child for disambiguation
+        const parent = cur.parentElement;
+        if (parent) {
+          const siblings = Array.from(parent.children).filter(c => c.tagName === cur.tagName);
+          if (siblings.length > 1) seg += ':nth-child(' + (Array.from(parent.children).indexOf(cur) + 1) + ')';
+        }
+        parts.unshift(seg);
+        cur = cur.parentElement;
+      }
+      return parts.join('>').replace(/^>/, '');
+    } catch { return _elPath(el); }
+  };
+
   // Minimal core utils (PII/cookie/URL handling in tracking-ext-utils.js)
   const _genId = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
     const r = (Math.random() * 16) | 0; return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
@@ -86,7 +113,7 @@
   const _throttle = (fn, d) => { let last = 0; return function(...a) { const n = Date.now(); if (n - last >= d) { last = n; return fn.apply(this, a); } }; };
 
   // Extensible utils — extensions can add sanitizePII, sanitizeUrl, getCookie, setCookie
-  const _utils = { getElementPath: _elPath, throttle: _throttle };
+  const _utils = { getElementPath: _elPath, getCssSelector: _cssSelector, throttle: _throttle };
 
   // GA4 client_id (for BigQuery demographic join)
   const _gaClientId = (document.cookie.match(/_ga=GA\d+\.\d+\.(\d+\.\d+)/)||[])[1] || '';
@@ -104,7 +131,8 @@
   const _q = []; let _bt = null;
 
   const queueEvent = (ev) => {
-    const d = { ...ev, id: _genId(), site_id: config.siteId, session_id: _getSession(), user_id: _getUserId(), external_id: _externalId || null, ga_client_id: _gaClientId, timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, device_type: _devType(), referrer_type: _refType(document.referrer), ..._utm };
+    _seqCounter++;
+    const d = { ...ev, id: _genId(), site_id: config.siteId, session_id: _getSession(), user_id: _getUserId(), external_id: _externalId || null, ga_client_id: _gaClientId, timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, device_type: _devType(), referrer_type: _refType(document.referrer), sequence_id: _seqCounter, ..._utm };
     if (!d.site_id || d.site_id.trim() === '') return;
     _q.push(d);
     if (_q.length >= config.batchSize) sendBatch(); else if (!_bt) _bt = setTimeout(sendBatch, config.batchInterval);
@@ -152,7 +180,7 @@
         element_tag_name: el.tagName.toLowerCase(), element_id: el.id||'', element_class_name: el.className||'',
         element_text: _utils.sanitizePII ? _utils.sanitizePII(rawText) : rawText,
         element_href: _utils.sanitizeUrl ? _utils.sanitizeUrl(rawHref) : rawHref,
-        element_path: _elPath(el), click_x: cx, click_y: cy,
+        element_path: _elPath(el), element_selector: _cssSelector(el), click_x: cx, click_y: cy,
         element_x: Math.round(rect.left), element_y: Math.round(rect.top + sy),
       });
     },
@@ -191,7 +219,7 @@
   const loadExtensions = () => {
     const base = scriptOrigin ? scriptOrigin + '/tracking-ext-' : '/tracking-ext-';
     // Utils extension loads first (provides PII/cookie/URL handling)
-    const names = ['utils', 'form', 'video', 'image', 'element', 'active-time'];
+    const names = ['utils', 'form', 'video', 'image', 'element', 'active-time', 'behavior', 'scroll-timeline'];
     for (const name of names) {
       if (name !== 'utils' && !shouldLoad(name)) continue;
       const s = document.createElement('script'); s.src = base + name + '.js'; s.async = true;

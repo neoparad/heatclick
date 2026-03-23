@@ -116,6 +116,8 @@ export async function POST(request: NextRequest) {
       device_type: event.device_type || null,
       ga_client_id: event.ga_client_id || null,
       external_id: event.external_id || null,
+      element_selector: event.element_selector || null,
+      sequence_id: event.sequence_id || 0,
     }))
 
     // Prepare image_visibility events
@@ -267,6 +269,49 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Prepare scroll_timeline events (scroll position time series)
+    const scrollTimelineEvents: any[] = []
+    for (const event of events) {
+      const eventType = event.event_type || event.eventType
+      if (eventType === 'scroll_timeline' && event.scroll_points) {
+        const points = Array.isArray(event.scroll_points) ? event.scroll_points : []
+        for (const point of points) {
+          scrollTimelineEvents.push({
+            id: crypto.randomUUID(),
+            site_id: event.site_id || event.siteId || '',
+            session_id: event.session_id || event.sessionId || '',
+            page_url: event.url || event.page_url || '',
+            timestamp_ms: point.timestamp_ms || 0,
+            scroll_y: point.scroll_y || 0,
+            viewport_height: event.viewport_height || 0,
+            created_at: new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
+          })
+        }
+      }
+    }
+
+    // Prepare element_visibility_v2 events (broad content element visibility)
+    const elementVisibilityV2Events: any[] = []
+    for (const event of events) {
+      const eventType = event.event_type || event.eventType
+      if (eventType === 'element_visibility_v2' && event.element_selector) {
+        elementVisibilityV2Events.push({
+          id: crypto.randomUUID(),
+          site_id: event.site_id || event.siteId || '',
+          session_id: event.session_id || event.sessionId || '',
+          page_url: event.url || event.page_url || '',
+          element_selector: event.element_selector || '',
+          element_tag: event.element_tag || '',
+          element_text: (event.element_text || '').substring(0, 100),
+          visible_start_ms: event.visible_start_ms || 0,
+          visible_end_ms: event.visible_end_ms || 0,
+          visible_duration_ms: event.visible_duration_ms || 0,
+          viewport_percent: event.viewport_percent || 0,
+          created_at: new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
+        })
+      }
+    }
+
     // Prepare user_mappings for identify events
     const identifyEvents: any[] = []
     for (const event of events) {
@@ -304,6 +349,12 @@ export async function POST(request: NextRequest) {
       if (behaviorEvents.length > 0) {
         bufferPromises.push(pushEventBuffer('clickinsight.behavior_signals', behaviorEvents))
       }
+      if (scrollTimelineEvents.length > 0) {
+        bufferPromises.push(pushEventBuffer('clickinsight.scroll_timeline', scrollTimelineEvents))
+      }
+      if (elementVisibilityV2Events.length > 0) {
+        bufferPromises.push(pushEventBuffer('clickinsight.element_visibility_v2', elementVisibilityV2Events))
+      }
       if (identifyEvents.length > 0) {
         bufferPromises.push(pushEventBuffer('clickinsight.user_mappings', identifyEvents))
       }
@@ -339,6 +390,12 @@ export async function POST(request: NextRequest) {
         }
         if (behaviorEvents.length > 0) {
           insertPromises.push(clickhouse.insert({ table: 'clickinsight.behavior_signals', values: behaviorEvents, format: 'JSONEachRow' }))
+        }
+        if (scrollTimelineEvents.length > 0) {
+          insertPromises.push(clickhouse.insert({ table: 'clickinsight.scroll_timeline', values: scrollTimelineEvents, format: 'JSONEachRow' }))
+        }
+        if (elementVisibilityV2Events.length > 0) {
+          insertPromises.push(clickhouse.insert({ table: 'clickinsight.element_visibility_v2', values: elementVisibilityV2Events, format: 'JSONEachRow' }))
         }
         if (identifyEvents.length > 0) {
           insertPromises.push(clickhouse.insert({ table: 'clickinsight.user_mappings', values: identifyEvents, format: 'JSONEachRow' }))
