@@ -16,6 +16,7 @@ const PUBLIC_API_PATHS = [
   '/api/auth/logout',  // ログアウト
   '/api/inngest',      // Inngestワーカー
   '/api/install',      // インストール確認
+  '/api/init-database', // DB初期化（INIT_SECRET認証で保護）
 ]
 
 // 認証不要なページパス
