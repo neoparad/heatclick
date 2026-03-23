@@ -227,7 +227,7 @@
   const loadExtensions = () => {
     const base = scriptOrigin ? scriptOrigin + '/tracking-ext-' : '/tracking-ext-';
     // Utils extension loads first (provides PII/cookie/URL handling)
-    const names = ['utils', 'form', 'video', 'image', 'element', 'active-time', 'behavior', 'scroll-timeline'];
+    const names = ['utils', 'form', 'video', 'image', 'element', 'active-time', 'behavior', 'scroll-timeline', 'spa', 'web-vitals'];
     for (const name of names) {
       if (name !== 'utils' && !shouldLoad(name)) continue;
       const s = document.createElement('script'); s.src = base + name + '.js'; s.async = true;

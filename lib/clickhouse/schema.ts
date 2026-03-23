@@ -61,6 +61,9 @@ export async function initializeDatabase(): Promise<void> {
       // Tier 1: CSS selector + sequence_id
       await client.exec({ query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS element_selector Nullable(String)` })
       await client.exec({ query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS sequence_id UInt32 DEFAULT 0` })
+      // Tier 2: SPA virtual_pageview fields
+      await client.exec({ query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS previous_url Nullable(String)` })
+      await client.exec({ query: `ALTER TABLE clickinsight.events ADD COLUMN IF NOT EXISTS navigation_trigger Nullable(String)` })
     } catch { /* columns already exist */ }
 
     // sites テーブルに ga4_property_id カラム追加（既存テーブル対応）
@@ -228,6 +231,21 @@ export async function initializeDatabase(): Promise<void> {
           visible_duration_ms UInt32 DEFAULT 0, viewport_percent Float32 DEFAULT 0,
           created_at DateTime DEFAULT now()
         ) ENGINE = MergeTree() ORDER BY (site_id, session_id, element_selector) PARTITION BY toYYYYMM(created_at)
+      `,
+    })
+
+    // web_vitals (Tier 2: Core Web Vitals + connection info per page load)
+    await client.exec({
+      query: `
+        CREATE TABLE IF NOT EXISTS clickinsight.web_vitals (
+          id String, site_id String, session_id String, page_url String,
+          lcp_ms UInt32 DEFAULT 0, lcp_element String DEFAULT '',
+          cls_score Float32 DEFAULT 0, inp_ms UInt32 DEFAULT 0,
+          ttfb_ms UInt32 DEFAULT 0, fcp_ms UInt32 DEFAULT 0,
+          connection_type String DEFAULT '', downlink_mbps Float32 DEFAULT 0, rtt_ms UInt32 DEFAULT 0,
+          device_type String DEFAULT '',
+          created_at DateTime DEFAULT now()
+        ) ENGINE = MergeTree() ORDER BY (site_id, session_id, page_url) PARTITION BY toYYYYMM(created_at)
       `,
     })
 

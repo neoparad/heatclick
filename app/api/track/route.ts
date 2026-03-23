@@ -118,6 +118,8 @@ export async function POST(request: NextRequest) {
       external_id: event.external_id || null,
       element_selector: event.element_selector || null,
       sequence_id: event.sequence_id || 0,
+      previous_url: event.previous_url || null,
+      navigation_trigger: event.navigation_trigger || null,
     }))
 
     // Prepare image_visibility events
@@ -312,6 +314,31 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Prepare web_vitals events (Core Web Vitals + connection info)
+    const webVitalsEvents: any[] = []
+    for (const event of events) {
+      const eventType = event.event_type || event.eventType
+      if (eventType === 'web_vitals') {
+        webVitalsEvents.push({
+          id: crypto.randomUUID(),
+          site_id: event.site_id || event.siteId || '',
+          session_id: event.session_id || event.sessionId || '',
+          page_url: event.url || event.page_url || '',
+          lcp_ms: event.lcp_ms || 0,
+          lcp_element: (event.lcp_element || '').substring(0, 200),
+          cls_score: event.cls_score || 0,
+          inp_ms: event.inp_ms || 0,
+          ttfb_ms: event.ttfb_ms || 0,
+          fcp_ms: event.fcp_ms || 0,
+          connection_type: event.connection_type || '',
+          downlink_mbps: event.downlink_mbps || 0,
+          rtt_ms: event.rtt_ms || 0,
+          device_type: event.device_type || '',
+          created_at: new Date().toISOString().replace('T', ' ').replace('Z', '').substring(0, 19),
+        })
+      }
+    }
+
     // Prepare user_mappings for identify events
     const identifyEvents: any[] = []
     for (const event of events) {
@@ -355,6 +382,9 @@ export async function POST(request: NextRequest) {
       if (elementVisibilityV2Events.length > 0) {
         bufferPromises.push(pushEventBuffer('clickinsight.element_visibility_v2', elementVisibilityV2Events))
       }
+      if (webVitalsEvents.length > 0) {
+        bufferPromises.push(pushEventBuffer('clickinsight.web_vitals', webVitalsEvents))
+      }
       if (identifyEvents.length > 0) {
         bufferPromises.push(pushEventBuffer('clickinsight.user_mappings', identifyEvents))
       }
@@ -396,6 +426,9 @@ export async function POST(request: NextRequest) {
         }
         if (elementVisibilityV2Events.length > 0) {
           insertPromises.push(clickhouse.insert({ table: 'clickinsight.element_visibility_v2', values: elementVisibilityV2Events, format: 'JSONEachRow' }))
+        }
+        if (webVitalsEvents.length > 0) {
+          insertPromises.push(clickhouse.insert({ table: 'clickinsight.web_vitals', values: webVitalsEvents, format: 'JSONEachRow' }))
         }
         if (identifyEvents.length > 0) {
           insertPromises.push(clickhouse.insert({ table: 'clickinsight.user_mappings', values: identifyEvents, format: 'JSONEachRow' }))
