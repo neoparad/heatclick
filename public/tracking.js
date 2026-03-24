@@ -42,7 +42,7 @@
   const config = {
     siteId: getSiteId(),
     debug: window.CLICKINSIGHT_DEBUG || false,
-    apiEndpoint: window.CLICKINSIGHT_API_URL || (scriptOrigin ? scriptOrigin + '/api/track' : '/api/track'),
+    apiEndpoint: window.CLICKINSIGHT_API_URL || 'https://ugokimap-event-ingest.linkth.workers.dev/api/track',
     requireConsent: window.CLICKINSIGHT_REQUIRE_CONSENT === true,
     batchSize: 10, batchInterval: 5000, sessionTimeout: 30 * 60 * 1000,
     extensions: (cs && cs.getAttribute('data-extensions')) || window.CLICKINSIGHT_EXTENSIONS || 'all',
@@ -152,7 +152,7 @@
     if (_bt) { clearTimeout(_bt); _bt = null; }
     if (evts.some(e => !e.site_id)) return;
     const data = JSON.stringify({ events: evts });
-    if (navigator.sendBeacon) { const b = new Blob([data], { type: 'application/json' }); if (!navigator.sendBeacon(config.apiEndpoint, b)) _fetch(data); } else _fetch(data);
+    if (navigator.sendBeacon) { const b = new Blob([data], { type: 'text/plain' }); if (!navigator.sendBeacon(config.apiEndpoint, b)) _fetch(data); } else _fetch(data);
     if (_q.length > 0) _bt = setTimeout(sendBatch, config.batchInterval);
   };
 
