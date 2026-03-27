@@ -57,7 +57,6 @@
 
         CI.track({
           event_type: 'text_copy',
-          copied_text: CI.utils.sanitizePII ? CI.utils.sanitizePII(text.substring(0, 200)) : text.substring(0, 200),
           copied_length: text.length,
           copy_y: el ? Math.round(el.getBoundingClientRect().top + sy) : 0,
           element_path: el ? CI.utils.getElementPath(el) : '',

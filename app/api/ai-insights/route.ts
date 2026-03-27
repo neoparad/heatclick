@@ -85,9 +85,28 @@ export async function POST(request: NextRequest) {
 
         const summary = await summaryResult.json() as any[]
 
-        // GA4デモグラフィックデータの取得（設定されている場合のみ）
+        // GA4デモグラフィックデータの取得（サイト別プロパティID → .envフォールバック）
         let ga4Data = null
-        const ga4PropertyId = process.env.GA4_PROPERTY_ID
+        let ga4PropertyId: string | null = null
+
+        // サイト別のGA4プロパティIDを取得
+        try {
+          const siteResult = await ch.query({
+            query: `SELECT ga4_property_id FROM clickinsight.sites WHERE id = {site_id:String}`,
+            query_params: { site_id },
+            format: 'JSONEachRow',
+          })
+          const siteRows = await siteResult.json() as any[]
+          if (siteRows[0]?.ga4_property_id) {
+            ga4PropertyId = siteRows[0].ga4_property_id
+          }
+        } catch { /* sites query failed, fall through to env */ }
+
+        // サイト別が未設定なら.envフォールバック
+        if (!ga4PropertyId) {
+          ga4PropertyId = process.env.GA4_PROPERTY_ID || null
+        }
+
         const ga4ServiceAccountKey = process.env.GA4_SERVICE_ACCOUNT_KEY
 
         // Base64エンコードされたサービスアカウントキーから認証情報を取得

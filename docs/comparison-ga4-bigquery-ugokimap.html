@@ -44,7 +44,7 @@
         <p class="text-sm text-gray-500">GA4 / BigQuery Export / Microsoft Clarity / A社 / UGOKI MAP</p>
       </div>
     </div>
-    <p class="text-xs text-gray-400">2026年3月 作成</p>
+    <p class="text-xs text-gray-400">2026年3月21日 更新</p>
   </div>
 
   <!-- Tab Navigation -->
@@ -103,7 +103,7 @@
         </div>
         <h3 class="font-bold text-sm">UGOKI MAP</h3>
       </div>
-      <p class="text-xs text-gray-600">収集レイヤーから独自設計。全ツールで取得不可能な粒度のデータを制限なしで保持。</p>
+      <p class="text-xs text-gray-600">ML行動分析搭載。ペルソナ自動分類・感情推論・CVR予測・施策提案を内蔵。全ツール中唯一のbehavior_signals収集。</p>
     </div>
   </div>
 
@@ -482,7 +482,7 @@
           <td class="text-center partial font-medium">BQ MCP経由<br><span class="text-xs text-gray-400">GA4データに限定</span></td>
           <td class="text-center no font-medium">不可</td>
           <td class="text-center no font-medium">不可</td>
-          <td class="text-center yes font-bold">32軸分析データ<br><span class="text-xs text-gray-400">MCP 8ツール経由</span></td>
+          <td class="text-center yes font-bold">40軸分析データ<br><span class="text-xs text-gray-400">MCP 8ツール + ML 8ツール</span></td>
         </tr>
         <tr class="border-b border-gray-50 highlight-row">
           <td class="py-2.5 px-4">AIによるUX詳細分析<br><span class="text-xs text-gray-400">（フォーム・画像・CTA等）</span></td>
@@ -507,6 +507,65 @@
           <td class="text-center no font-medium">不可</td>
           <td class="text-center no font-medium">不可</td>
           <td class="text-center yes font-bold">MCP経由で自動分析</td>
+        </tr>
+
+        <!-- ML / 行動分析エンジン -->
+        <tr class="border-b border-gray-100 bg-gray-50"><td colspan="6" class="py-2 px-4 font-bold text-gray-700 text-xs uppercase tracking-wider" style="background: linear-gradient(135deg, #fdf2f8 0%, #eff6ff 100%);">ML / 行動分析エンジン</td></tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">ペルソナ自動分類<br><span class="text-xs text-gray-400">（行動データからユーザータイプ自動分類）</span></td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center yes font-bold">K-Means + PCA<br><span class="text-xs text-gray-400">19特徴量自動クラスタリング</span></td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">感情推論<br><span class="text-xs text-gray-400">（ユーザーの心理状態を予測）</span></td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center yes font-bold">LLM×MLハイブリッド<br><span class="text-xs text-gray-400">11ラベル（price_anxiety等）</span></td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">CVR予測 + What-ifシミュレーション<br><span class="text-xs text-gray-400">（施策実行後のCVR変化を予測）</span></td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center yes font-bold">LightGBM 30特徴量<br><span class="text-xs text-gray-400">「CTA移動→+2.1%pt」</span></td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">施策インパクトランキング<br><span class="text-xs text-gray-400">（月間CV増加数の自動推定）</span></td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center yes font-bold">感情×ペルソナ→施策<br><span class="text-xs text-gray-400">推定 月+185 CV等</span></td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">スクロール生存分析<br><span class="text-xs text-gray-400">（どの位置でユーザーが脱落するか）</span></td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center yes font-bold">Kaplan-Meier<br><span class="text-xs text-gray-400">CV vs 非CV + danger zone</span></td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">セッション品質スコア</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center yes font-bold">0-100 (A-F)<br><span class="text-xs text-gray-400">13指標の重み付け集約</span></td>
+        </tr>
+        <tr class="border-b border-gray-50 highlight-row">
+          <td class="py-2.5 px-4">behavior_signals（独自行動シグナル）<br><span class="text-xs text-gray-400">（競合に真似できないデータの堀）</span></td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center no font-medium">なし</td>
+          <td class="text-center yes font-bold">6種収集<br><span class="text-xs text-gray-400">text_copy, scroll_reversal, tab_return, browser_back, cta_hover, pinch_zoom</span></td>
         </tr>
       </tbody>
     </table>
@@ -557,12 +616,12 @@
         </ul>
       </div>
       <div class="rounded-lg bg-green-50 border border-green-200 p-4 ring-1 ring-green-300">
-        <h3 class="font-bold text-sm mb-2 text-green-800">UGOKI MAP</h3>
+        <h3 class="font-bold text-sm mb-2 text-green-800">UGOKI MAP 2.0</h3>
         <ul class="text-xs text-green-700 space-y-1">
-          <li>- CV導線の完全な再現・分析</li>
-          <li>- UX詳細分析（フォーム・CTA・画像）</li>
-          <li>- 長期検討プロセスの追跡</li>
-          <li>- AI/MCP連携による自動分析</li>
+          <li>- MLペルソナ分類・感情推論・CVR予測</li>
+          <li>- 施策インパクトランキング（月+CV推定）</li>
+          <li>- behavior_signals 6種の独自データ</li>
+          <li>- 40軸分析 + AI/MCP 16ツール</li>
         </ul>
       </div>
     </div>
@@ -579,8 +638,10 @@
       <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>熟読エリア（Y座標×滞在時間）ヒートマップ</span></div>
       <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>動画の全操作詳細記録（シーク・音量含む）</span></div>
       <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>ページ遷移ステップ数の制限なし</span></div>
-      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>再訪問〜CV完了の全行動を1画面で表示</span></div>
-      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>MCP経由でAIが全データを直接分析</span></div>
+      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span><strong>MLペルソナ自動分類・感情推論・CVR予測</strong></span></div>
+      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span><strong>施策インパクトランキング（月間CV増加推定）</strong></span></div>
+      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span><strong>behavior_signals 6種（text_copy, scroll_reversal等）</strong></span></div>
+      <div class="flex items-start gap-2"><span class="text-green-500 mt-0.5">&#10003;</span><span>MCP 16ツール経由でAIが全データを直接分析</span></div>
     </div>
   </div>
 
@@ -1492,13 +1553,13 @@
       <div class="relative z-10">
         <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur rounded-full px-4 py-1.5 mb-4">
           <span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
-          <span class="text-xs text-purple-200 font-medium">Phase 2 — 32軸分析エンジン稼働</span>
+          <span class="text-xs text-purple-200 font-medium">Phase 2 — 40軸分析 + MLエンジン稼働</span>
         </div>
         <h2 class="text-3xl md:text-4xl font-extrabold text-white mb-4">AIユーザー分析</h2>
         <p class="text-lg text-purple-200 max-w-2xl mb-6">検索意図 × ピクセル単位の行動 × デモグラフィック。<br>3つのデータを統合し、AIが自動で<strong class="text-white">ペルソナ生成・UX診断・改善提案</strong>を行う。</p>
         <div class="flex flex-wrap gap-3">
           <div class="bg-white/10 backdrop-blur rounded-lg px-4 py-2">
-            <div class="text-2xl font-bold text-white">32</div>
+            <div class="text-2xl font-bold text-white">40</div>
             <div class="text-xs text-purple-300">分析軸</div>
           </div>
           <div class="bg-white/10 backdrop-blur rounded-lg px-4 py-2">
@@ -1899,7 +1960,7 @@
             <div class="bg-indigo-500 rounded-t-lg w-14" style="height:100px;"></div>
           </div>
           <div class="text-xs text-indigo-600 mt-2 font-medium">Phase 2 (現在)</div>
-          <div class="text-lg font-bold text-indigo-700">32軸</div>
+          <div class="text-lg font-bold text-indigo-700">40軸</div>
         </div>
         <div class="text-gray-300 text-2xl pb-8">→</div>
         <div class="text-center">
@@ -1907,10 +1968,155 @@
             <div class="bg-purple-400 rounded-t-lg w-14" style="height:140px;"></div>
           </div>
           <div class="text-xs text-purple-500 mt-2">拡張予定</div>
-          <div class="text-lg font-bold text-purple-600">44軸</div>
+          <div class="text-lg font-bold text-purple-600">50軸+</div>
         </div>
       </div>
-      <div class="text-center text-xs text-gray-500">+ ペルソナ自動生成 + GA4デモグラ統合 + MCPツール</div>
+      <div class="text-center text-xs text-gray-500">+ ペルソナ自動生成 + GA4デモグラ統合 + MCPツール + MLエンジン</div>
+    </div>
+
+    <!-- ML行動分析エンジン（NEW） -->
+    <div class="rounded-2xl border border-emerald-200 p-8 mb-10" style="background: linear-gradient(135deg, #ecfdf5 0%, #f0f9ff 50%, #fdf2f8 100%);">
+      <div class="flex items-center gap-3 mb-6">
+        <div class="w-10 h-10 bg-gradient-to-br from-emerald-500 to-blue-600 rounded-lg flex items-center justify-center shadow">
+          <span class="text-white font-bold text-lg">ML</span>
+        </div>
+        <div>
+          <h2 class="text-2xl font-extrabold text-gray-900">ML行動分析エンジン</h2>
+          <p class="text-sm text-gray-500">行動データ → ペルソナ → 感情 → 施策 → CVRシミュレーション</p>
+        </div>
+      </div>
+
+      <!-- パイプライン図 -->
+      <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
+        <h3 class="font-bold text-sm mb-4 text-gray-800">MLパイプライン全体像</h3>
+        <div class="flex items-center justify-between gap-2 mb-4">
+          <div class="text-center flex-1 bg-blue-50 rounded-lg p-3 border border-blue-200">
+            <div class="text-xs font-bold text-blue-800">Step 1</div>
+            <div class="text-xs text-blue-600 mt-1">特徴量抽出<br>19特徴量</div>
+          </div>
+          <div class="text-gray-300 text-lg">→</div>
+          <div class="text-center flex-1 bg-emerald-50 rounded-lg p-3 border border-emerald-200">
+            <div class="text-xs font-bold text-emerald-800">Step 2</div>
+            <div class="text-xs text-emerald-600 mt-1">ペルソナ分類<br>K-Means+PCA</div>
+          </div>
+          <div class="text-gray-300 text-lg">→</div>
+          <div class="text-center flex-1 bg-purple-50 rounded-lg p-3 border border-purple-200">
+            <div class="text-xs font-bold text-purple-800">Step 3</div>
+            <div class="text-xs text-purple-600 mt-1">感情推論<br>LLM×ML 11ラベル</div>
+          </div>
+          <div class="text-gray-300 text-lg">→</div>
+          <div class="text-center flex-1 bg-orange-50 rounded-lg p-3 border border-orange-200">
+            <div class="text-xs font-bold text-orange-800">Step 4</div>
+            <div class="text-xs text-orange-600 mt-1">施策提案<br>インパクトランキング</div>
+          </div>
+          <div class="text-gray-300 text-lg">→</div>
+          <div class="text-center flex-1 bg-pink-50 rounded-lg p-3 border border-pink-200">
+            <div class="text-xs font-bold text-pink-800">Step 5</div>
+            <div class="text-xs text-pink-600 mt-1">CVR予測<br>What-if simulation</div>
+          </div>
+        </div>
+        <p class="text-xs text-gray-500">ML原価: $0.35/サイト/月（粗利99%）。重い計算はSQL、推論はLightGBM/KMeans（CPUでμsec）、LLMはanomaly時のみ。</p>
+      </div>
+
+      <!-- 施策インパクトダッシュボード -->
+      <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
+        <h3 class="font-bold text-sm mb-4 text-gray-800">施策インパクトランキング — SaaSの顔</h3>
+        <div class="space-y-3">
+          <div class="flex items-start gap-3 p-3 bg-red-50 border border-red-200 rounded-lg">
+            <span class="text-red-600 font-bold text-sm mt-0.5">1</span>
+            <div class="flex-1">
+              <p class="text-xs font-bold text-gray-800">CTAをy=20696→y=12000に移動</p>
+              <p class="text-xs text-gray-500">推定CVR変化: <strong class="text-red-600">+2.1%pt</strong> → 月+185 CV</p>
+              <p class="text-xs text-gray-400">対象: 価格慎重型 (38%) | 根拠: 感情ピークy=12000, CTA到達率12%</p>
+            </div>
+          </div>
+          <div class="flex items-start gap-3 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+            <span class="text-amber-600 font-bold text-sm mt-0.5">2</span>
+            <div class="flex-1">
+              <p class="text-xs font-bold text-gray-800">価格直下にミニレビュー3件追加</p>
+              <p class="text-xs text-gray-500">推定CVR変化: <strong class="text-amber-600">+1.5%pt</strong> → 月+132 CV</p>
+              <p class="text-xs text-gray-400">対象: 信頼確認型 (22%) | 根拠: review_area_dwell 8.2秒（平均の3.1倍）</p>
+            </div>
+          </div>
+          <div class="flex items-start gap-3 p-3 bg-green-50 border border-green-200 rounded-lg">
+            <span class="text-green-600 font-bold text-sm mt-0.5">3</span>
+            <div class="flex-1">
+              <p class="text-xs font-bold text-gray-800">商品画像をクリッカブルに</p>
+              <p class="text-xs text-gray-500">推定CVR変化: <strong class="text-green-600">+0.8%pt</strong> → 月+70 CV</p>
+              <p class="text-xs text-gray-400">対象: 全ペルソナ | 根拠: dead_click 225回/月（画像上）</p>
+            </div>
+          </div>
+        </div>
+        <p class="text-xs text-gray-500 mt-4 italic">顧客は「MLモデルのAUC 0.85」に興味はない。「月+185 CV」に興味がある。</p>
+      </div>
+
+      <!-- behavior_signals -->
+      <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
+        <h3 class="font-bold text-sm mb-4 text-gray-800">behavior_signals — 競合に真似できないデータの堀</h3>
+        <div class="grid grid-cols-3 gap-3">
+          <div class="bg-blue-50 rounded-lg p-3 border border-blue-100">
+            <p class="text-xs font-bold text-blue-800">text_copy</p>
+            <p class="text-xs text-blue-600">テキストをコピー = 比較検討型</p>
+          </div>
+          <div class="bg-emerald-50 rounded-lg p-3 border border-emerald-100">
+            <p class="text-xs font-bold text-emerald-800">scroll_reversal</p>
+            <p class="text-xs text-emerald-600">読み直す = 慎重型</p>
+          </div>
+          <div class="bg-purple-50 rounded-lg p-3 border border-purple-100">
+            <p class="text-xs font-bold text-purple-800">tab_return</p>
+            <p class="text-xs text-purple-600">タブ切替 = 競合比較型</p>
+          </div>
+          <div class="bg-red-50 rounded-lg p-3 border border-red-100">
+            <p class="text-xs font-bold text-red-800">browser_back</p>
+            <p class="text-xs text-red-600">戻るボタン = 不満足型</p>
+          </div>
+          <div class="bg-amber-50 rounded-lg p-3 border border-amber-100">
+            <p class="text-xs font-bold text-amber-800">cta_hover_no_click</p>
+            <p class="text-xs text-amber-600">CTA上で迷う = 躊躇型</p>
+          </div>
+          <div class="bg-pink-50 rounded-lg p-3 border border-pink-100">
+            <p class="text-xs font-bold text-pink-800">pinch_zoom</p>
+            <p class="text-xs text-pink-600">画像拡大 = 視覚重視型</p>
+          </div>
+        </div>
+        <p class="text-xs text-gray-500 mt-3">GA4・Clarity・A社では取得不可能。これらがペルソナ分類・感情推論・CVR予測の精度を支える。</p>
+      </div>
+
+      <!-- 競合との差 -->
+      <div class="grid grid-cols-2 gap-4">
+        <div class="bg-white rounded-lg border border-gray-200 p-4">
+          <h4 class="font-bold text-xs text-gray-700 mb-3">他ツールの限界</h4>
+          <div class="space-y-2">
+            <div class="flex items-start gap-2">
+              <span class="text-red-500 text-xs font-bold">GA4</span>
+              <span class="text-xs text-gray-600">集計データのみ。個別行動分析不可。ML Audiencesは限定的。</span>
+            </div>
+            <div class="flex items-start gap-2">
+              <span class="text-red-500 text-xs font-bold">BQ</span>
+              <span class="text-xs text-gray-600">GA4の収集制限を継承。ML自前構築が必要（エンジニア3名+半年）。</span>
+            </div>
+            <div class="flex items-start gap-2">
+              <span class="text-red-500 text-xs font-bold">Clarity</span>
+              <span class="text-xs text-gray-600">録画・ヒートマップのみ。定量ML分析なし。施策提案なし。</span>
+            </div>
+            <div class="flex items-start gap-2">
+              <span class="text-red-500 text-xs font-bold">A社</span>
+              <span class="text-xs text-gray-600">ヒートマップ+基本レポート。行動シグナル収集なし。ML機能なし。</span>
+            </div>
+          </div>
+        </div>
+        <div class="bg-white rounded-lg border border-emerald-200 p-4">
+          <h4 class="font-bold text-xs text-emerald-700 mb-3">UGOKI MAP 2.0</h4>
+          <div class="space-y-2 text-xs text-gray-700">
+            <p>行動データ収集 → ML自動分析 → 施策提案 → CVR予測</p>
+            <p>全てが<strong>1つのプラットフォーム</strong>で完結。</p>
+            <p class="text-emerald-700 font-medium mt-2">データサイエンティスト不要。タグを設置するだけ。</p>
+          </div>
+          <div class="mt-3 p-2 bg-emerald-50 rounded text-xs text-emerald-700">
+            <strong>SaaSプラン:</strong> Starter ¥9,800 / Growth ¥29,800 / Enterprise ¥98,000
+          </div>
+        </div>
+      </div>
     </div>
 
   </div><!-- /tab-ai-analysis -->

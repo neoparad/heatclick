@@ -1,0 +1,23 @@
+name = "ugokimap-event-ingest"
+main = "src/worker.ts"
+compatibility_date = "2024-12-01"
+
+# Durable Objects for buffering (optional, Queues preferred if available)
+# For now, use in-memory batching + waitUntil for flush
+
+[vars]
+# Overridden by secrets in production
+# Dev: localhost via SSH tunnel (ssh -L 8123:127.0.0.1:8123)
+# Production: set CLICKHOUSE_URL via `wrangler secret put CLICKHOUSE_URL`
+# CLICKHOUSE_URL is set via `wrangler secret put CLICKHOUSE_URL` in production
+CLICKHOUSE_DB = "clickinsight"
+ALLOWED_ORIGINS = "*"
+# Maximum events to buffer before flushing
+BATCH_SIZE = "50"
+# Maximum ms to wait before flushing (via alarm / scheduled)
+FLUSH_INTERVAL_MS = "5000"
+
+# Dev: wrangler dev --local
+[dev]
+port = 8787
+local_protocol = "http"

@@ -265,14 +265,18 @@ export async function subscribeRealtimeData(
   }
 }
 
-// キャッシュのクリア
+// キャッシュのクリア（SCANで安全にキー走査）
 export async function clearCache(pattern: string): Promise<void> {
   try {
     const client = getRedisClient()
-    const keys = await client.keys(pattern)
-    if (keys.length > 0) {
-      await client.del(...keys)
-    }
+    let cursor = '0'
+    do {
+      const [nextCursor, keys] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 100)
+      cursor = nextCursor
+      if (keys.length > 0) {
+        await client.del(...keys)
+      }
+    } while (cursor !== '0')
   } catch (error) {
     console.error('Error clearing cache:', error)
   }

@@ -41,7 +41,7 @@ export async function GET(request: NextRequest) {
     const clickhouse = await getClickHouseClientAsync()
     const result = await clickhouse.query({
       query: `
-        SELECT id, name, url, tracking_id, status,
+        SELECT id, name, url, tracking_id, status, ga4_property_id,
                created_at, updated_at, last_activity, page_views
         FROM clickinsight.sites
         WHERE user_id = {user_id:String}
@@ -93,6 +93,7 @@ export async function POST(request: NextRequest) {
       status: 'active',
       user_id: auth.userId,
       org_id: null,
+      ga4_property_id: data.ga4_property_id || null,
       created_at: now,
       updated_at: now,
       last_activity: now,

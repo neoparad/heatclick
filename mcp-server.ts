@@ -299,11 +299,29 @@ async function handleTool(name: string, args: any): Promise<any> {
 
       const summaryData = await summaryResult.json() as Record<string, unknown>[]
 
-      // GA4 デモグラフィックデータの取得（設定されている場合のみ）
+      // GA4 デモグラフィックデータの取得（サイト別プロパティID → .envフォールバック）
       let ga4Data = null
       const ga4ClientEmail = process.env.GA4_CLIENT_EMAIL || process.env.GSC_CLIENT_EMAIL
       const ga4PrivateKey = process.env.GA4_PRIVATE_KEY || process.env.GSC_PRIVATE_KEY
-      const ga4PropertyId = process.env.GA4_PROPERTY_ID
+
+      // サイト別のGA4プロパティIDを取得
+      let ga4PropertyId: string | null = null
+      try {
+        const siteResult = await ch.query({
+          query: `SELECT ga4_property_id FROM clickinsight.sites WHERE id = {site_id:String}`,
+          query_params: { site_id: args.site_id },
+          format: 'JSONEachRow',
+        })
+        const siteRows = await siteResult.json() as any[]
+        if (siteRows[0]?.ga4_property_id) {
+          ga4PropertyId = siteRows[0].ga4_property_id
+        }
+      } catch { /* sites query failed, fall through to env */ }
+
+      // サイト別が未設定なら.envフォールバック
+      if (!ga4PropertyId) {
+        ga4PropertyId = process.env.GA4_PROPERTY_ID || null
+      }
 
       if (ga4ClientEmail && ga4PrivateKey && ga4PropertyId) {
         try {

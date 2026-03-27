@@ -13,7 +13,7 @@ function buildCorsHeaders(request: NextRequest): HeadersInit {
   const origin = request.headers.get('origin') || '*'
   return {
     'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET,PUT,DELETE,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,PUT,PATCH,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
     'Access-Control-Allow-Credentials': 'true',
     'Vary': 'Origin',
@@ -41,7 +41,7 @@ export async function GET(
 
     const result = await clickhouse.query({
       query: `
-        SELECT id, name, url, tracking_id, status,
+        SELECT id, name, url, tracking_id, status, ga4_property_id,
                created_at, updated_at, last_activity, page_views
         FROM clickinsight.sites
         WHERE id = {id:String}
@@ -128,6 +128,10 @@ export async function PUT(
       if (data.status !== undefined) {
         updates.push('status = {status:String}')
         queryParams.status = data.status
+      }
+      if (data.ga4_property_id !== undefined) {
+        updates.push('ga4_property_id = {ga4_property_id:Nullable(String)}')
+        queryParams.ga4_property_id = data.ga4_property_id || null
       }
 
       if (updates.length > 0) {

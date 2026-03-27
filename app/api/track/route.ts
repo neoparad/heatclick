@@ -236,8 +236,8 @@ export async function POST(request: NextRequest) {
           session_id: event.session_id || event.sessionId || '',
           page_url: event.url || event.page_url || '',
           event_type: eventType,
-          // text_copy
-          copied_text: event.copied_text || null,
+          // text_copy (copied_text removed for privacy — position/count only)
+          copied_text: null,
           copied_length: event.copied_length || 0,
           copy_y: event.copy_y || 0,
           // scroll_reversal
