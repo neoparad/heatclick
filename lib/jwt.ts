@@ -1,10 +1,16 @@
 import { SignJWT, jwtVerify } from 'jose'
 
-const secret = process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET
-if (!secret) {
-  throw new Error('JWT_SECRET or NEXTAUTH_SECRET environment variable is required')
+let _jwtSecret: Uint8Array | null = null
+function getJwtSecret(): Uint8Array {
+  if (!_jwtSecret) {
+    const secret = process.env.getJwtSecret() || process.env.NEXTAUTH_SECRET
+    if (!secret) {
+      throw new Error('getJwtSecret() or NEXTAUTH_SECRET environment variable is required')
+    }
+    _jwtSecret = new TextEncoder().encode(secret)
+  }
+  return _jwtSecret
 }
-const JWT_SECRET = new TextEncoder().encode(secret)
 
 const JWT_EXPIRY = '24h'
 
@@ -21,13 +27,13 @@ export async function signToken(payload: JWTPayload): Promise<string> {
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime(JWT_EXPIRY)
-    .sign(JWT_SECRET)
+    .sign(getJwtSecret())
 }
 
 // JWTトークンの検証
 export async function verifyToken(token: string): Promise<JWTPayload | null> {
   try {
-    const { payload } = await jwtVerify(token, JWT_SECRET)
+    const { payload } = await jwtVerify(token, getJwtSecret())
     return {
       sub: payload.sub as string,
       email: payload.email as string,

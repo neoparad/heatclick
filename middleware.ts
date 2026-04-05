@@ -1,11 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { jwtVerify } from 'jose'
 
-const secret = process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET
-if (!secret) {
-  throw new Error('JWT_SECRET or NEXTAUTH_SECRET environment variable is required')
+// Lazy-init: Vercel builds run this module at build time when env vars aren't set.
+// Defer the error to runtime so the build can succeed.
+let _jwtSecret: Uint8Array | null = null
+function getJwtSecret(): Uint8Array {
+  if (!_jwtSecret) {
+    const secret = process.env.getJwtSecret() || process.env.NEXTAUTH_SECRET
+    if (!secret) {
+      throw new Error('getJwtSecret() or NEXTAUTH_SECRET environment variable is required')
+    }
+    _jwtSecret = new TextEncoder().encode(secret)
+  }
+  return _jwtSecret
 }
-const JWT_SECRET = new TextEncoder().encode(secret)
 
 // 認証不要なパス（公開API）
 const PUBLIC_API_PATHS = [
@@ -23,6 +31,7 @@ const PUBLIC_API_PATHS = [
 const PUBLIC_PAGE_PATHS = [
   '/auth/login',
   '/auth/register',
+  '/heatmap',       // TODO: dev only — remove before production
   '/_next',
   '/favicon.ico',
 ]
@@ -74,7 +83,7 @@ export async function middleware(request: NextRequest) {
     }
 
     try {
-      const { payload } = await jwtVerify(token, JWT_SECRET)
+      const { payload } = await jwtVerify(token, getJwtSecret())
 
       // 認証情報をリクエストヘッダーに注入（下流のAPIハンドラで使用）
       const requestHeaders = new Headers(request.headers)
@@ -103,7 +112,7 @@ export async function middleware(request: NextRequest) {
   }
 
   try {
-    await jwtVerify(token, JWT_SECRET)
+    await jwtVerify(token, getJwtSecret())
     return NextResponse.next()
   } catch {
     const loginUrl = new URL('/auth/login', request.url)
