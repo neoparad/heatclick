@@ -106,14 +106,46 @@
     },
 
     // --- 4. Browser Back ---
+    // popstate alone misses: cross-origin back (most common), same-origin reload-back (no bfcache).
+    // Three detection methods for maximum coverage:
+    //   A. popstate — SPA in-document back/forward
+    //   B. pageshow + persisted — bfcache restoration (same-site back)
+    //   C. performance.navigation.type === 'back_forward' — non-bfcache back arrival
+    _browserBackFired: false,
+
     _initBrowserBack() {
-      window.addEventListener('popstate', () => {
-        CI.track({
-          event_type: 'browser_back',
-          from_url: window.location.href,
-          scroll_y_at_back: Math.round(window.scrollY || window.pageYOffset),
-          scroll_depth_at_back: this._getCurrentScrollDepth(),
-        });
+      var self = this;
+
+      // A. SPA popstate (existing — kept for SPA sites)
+      window.addEventListener('popstate', function() {
+        self._fireBrowserBack('popstate');
+      });
+
+      // B. bfcache restoration — user pressed back and page was restored from cache
+      window.addEventListener('pageshow', function(e) {
+        if (e.persisted) {
+          self._fireBrowserBack('bfcache');
+        }
+      });
+
+      // C. Page loaded via back/forward (non-bfcache — full reload triggered by back button)
+      try {
+        var navEntry = performance.getEntriesByType('navigation')[0];
+        if (navEntry && navEntry.type === 'back_forward') {
+          self._fireBrowserBack('navigation');
+        }
+      } catch (e) {}
+    },
+
+    _fireBrowserBack(trigger) {
+      if (this._browserBackFired) return; // deduplicate within same page lifecycle
+      this._browserBackFired = true;
+      CI.track({
+        event_type: 'browser_back',
+        from_url: document.referrer || window.location.href,
+        scroll_y_at_back: Math.round(window.scrollY || window.pageYOffset),
+        scroll_depth_at_back: this._getCurrentScrollDepth(),
+        back_trigger: trigger,
       });
     },
 
