@@ -1,7 +1,10 @@
 /**
  * ClickInsight Pro - Tracking Script (Core)
- * Version: 2.1.0
+ * Version: 2.2.0
  * Target: <5KB minified. Extensions add PII protection, forms, video, image, element tracking.
+ *
+ * v2.2.0: AXO (Agent Experience Optimization) — AIエージェント検知シグナルを全イベントに付与。
+ *         PM決定 2026-04-11 / strategy/12_agent_experience_optimization.md 準拠。
  */
 (function() {
   'use strict';
@@ -132,6 +135,33 @@
   const _devType = () => { const w = _vp().width; return w >= 1024 ? 'desktop' : w >= 768 ? 'tablet' : 'mobile'; };
   const _refType = (r) => { if (!r) return 'direct'; try { const h = new URL(r).hostname; return /google|bing|yahoo/i.test(h)?'organic':/facebook|instagram|twitter/i.test(h)?'social':'referral'; } catch { return 'direct'; } };
 
+  // ── AXO: AI Agent detection (AXO-001) ───────────────────────────────
+  // Client-side signals only. Runs once at load. Server-side detection
+  // (UA / IP range) is done downstream via SQL on user_agent column.
+  // See: docs/fusion/strategy/12_agent_experience_optimization.md
+  const _detectAgent = () => {
+    const signals = [];
+    const ua = navigator.userAgent || '';
+    // Known bot UA patterns (curated — extend as new agents appear)
+    const botRe = /(GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|anthropic-ai|PerplexityBot|Perplexity-User|Google-Extended|Googlebot|Bingbot|Bytespider|CCBot|Diffbot|Amazonbot|Applebot-Extended|YouBot|cohere-ai|Meta-ExternalAgent|FacebookBot|DuckAssistBot|Mistral-Bot)/i;
+    const m = ua.match(botRe);
+    let type = '';
+    if (m) { signals.push('ua:' + m[1]); type = m[1]; }
+    if (/HeadlessChrome|PhantomJS|Electron|Playwright|Puppeteer/i.test(ua)) signals.push('ua:headless');
+    // JS environment fingerprints
+    if (navigator.webdriver) signals.push('webdriver');
+    if (!navigator.languages || navigator.languages.length === 0) signals.push('no_langs');
+    if (navigator.plugins && navigator.plugins.length === 0) signals.push('no_plugins');
+    // Chrome-family without chrome.runtime (common on headless Chromium)
+    if (/Chrome\//.test(ua) && typeof window.chrome === 'undefined') signals.push('no_chrome_obj');
+    // Missing connection (many headless envs)
+    if (!('connection' in navigator) && /Chrome\//.test(ua)) signals.push('no_conn');
+    const is_agent = signals.length > 0 ? 1 : 0;
+    if (is_agent && !type) type = signals[0].split(':')[1] || 'unknown';
+    return { is_agent: is_agent, agent_type: type || '', agent_signals: signals.join(',') };
+  };
+  const _agent = _detectAgent();
+
   // External ID (member/customer ID set by site owner)
   let _externalId = localStorage.getItem('ci_external_id') || null;
 
@@ -140,7 +170,7 @@
 
   const queueEvent = (ev) => {
     _seqCounter++;
-    const d = { ...ev, id: _genId(), site_id: config.siteId, session_id: _getSession(), user_id: _getUserId(), external_id: _externalId || null, ga_client_id: _gaClientId, timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, device_type: _devType(), referrer_type: _refType(document.referrer), sequence_id: _seqCounter, ..._utm };
+    const d = { ...ev, id: _genId(), site_id: config.siteId, session_id: _getSession(), user_id: _getUserId(), external_id: _externalId || null, ga_client_id: _gaClientId, timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, device_type: _devType(), referrer_type: _refType(document.referrer), sequence_id: _seqCounter, is_agent: _agent.is_agent, agent_type: _agent.agent_type, agent_signals: _agent.agent_signals, ..._utm };
     if (!d.site_id || d.site_id.trim() === '') return;
     _q.push(d);
     if (_q.length >= config.batchSize) sendBatch(); else if (!_bt) _bt = setTimeout(sendBatch, config.batchInterval);

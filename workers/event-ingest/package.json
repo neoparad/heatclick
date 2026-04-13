@@ -8,6 +8,7 @@
     "test": "node test/test-worker.mjs"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260411.1",
     "wrangler": "^4.0.0"
   }
 }

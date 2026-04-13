@@ -52,6 +52,17 @@ const EVENTS_COLUMNS = [
   'search_query', 'device_type', 'ga_client_id', 'external_id',
   'element_selector', 'sequence_id',
   'previous_url', 'navigation_trigger',
+  // AXO (Agent Experience Optimization) — PM決定 2026-04-11
+  // ClickHouse側カラム未追加でも input_format_skip_unknown_fields=1 により安全。
+  // ALTER TABLE は ops/migrations/2026-04-11-add-agent-columns.sql を参照。
+  'is_agent', 'agent_type', 'agent_signals',
+  // AXO Task 4 — ①系 Headless 観察用 HTTPヘッダ (2026-04-12)
+  // Worker 側で request.headers から抽出。空文字は欠落シグナルとして保持。
+  // ALTER TABLE は scripts/2026-04-12-add-http-header-columns.sql を参照。
+  'http_user_agent_raw', 'http_accept', 'http_accept_language',
+  'http_accept_encoding', 'http_range', 'http_if_modified_since',
+  'http_sec_fetch_site', 'http_sec_fetch_mode', 'http_sec_fetch_dest',
+  'http_sec_fetch_user', 'http_referer',
 ] as const;
 
 const BEHAVIOR_COLUMNS = [
@@ -252,6 +263,89 @@ async function flushToClickHouse(
   await Promise.allSettled(promises);
 }
 
+// ── AXO Task 4: HTTP header extraction ──────────────────────────────
+
+/**
+ * Extract HTTP headers relevant for ①系 Headless agent observation.
+ *
+ * 欠落ヘッダは空文字のまま保持する — 欠落自体がシグナル
+ * （例: GPTBot は Sec-Fetch-* を送らない）。
+ *
+ * Referer は 1KB 超で truncate。個人情報が乗りうるため 5月 CFO/法務レビュー項目。
+ * (decisions.md 2026-04-11)
+ */
+function extractHttpHeaders(headers: Headers): Record<string, string> {
+  const REFERER_MAX = 1024;
+  const TRUNC_MARK = '...[truncated]';
+
+  const truncate = (raw: string | null, max: number): string => {
+    if (!raw) return '';
+    if (raw.length <= max) return raw;
+    return raw.slice(0, max - TRUNC_MARK.length) + TRUNC_MARK;
+  };
+
+  return {
+    http_user_agent_raw:    headers.get('user-agent') ?? '',
+    http_accept:            headers.get('accept') ?? '',
+    http_accept_language:   headers.get('accept-language') ?? '',
+    http_accept_encoding:   headers.get('accept-encoding') ?? '',
+    http_range:             headers.get('range') ?? '',
+    http_if_modified_since: headers.get('if-modified-since') ?? '',
+    http_sec_fetch_site:    headers.get('sec-fetch-site') ?? '',
+    http_sec_fetch_mode:    headers.get('sec-fetch-mode') ?? '',
+    http_sec_fetch_dest:    headers.get('sec-fetch-dest') ?? '',
+    http_sec_fetch_user:    headers.get('sec-fetch-user') ?? '',
+    http_referer:           truncate(headers.get('referer'), REFERER_MAX),
+  };
+}
+
+// ── AXO Task 4 追加: Server-side agent detection ────────────────────
+
+/**
+ * Server-side UA detection for ①系 Headless crawlers that don't execute JS.
+ *
+ * tracking.js _detectAgent() はクライアント側で動くため、JS 非実行の
+ * GPTBot / ClaudeBot / PerplexityBot 等は is_agent=0 のまま到着する。
+ * Worker 側で http_user_agent_raw をマッチし、クライアントが未検知の場合に
+ * is_agent / agent_type を設定する。
+ *
+ * 優先度: クライアント is_agent=1 > Worker サーバサイド検知。
+ * ②系 JS 実行エージェントは tracking.js のシグナル (webdriver/plugins 等) の
+ * 方が UA マッチより高精度なため。
+ */
+
+const AGENT_PATTERNS: ReadonlyArray<{ pattern: RegExp; name: string }> = [
+  { pattern: /GPTBot/i,              name: 'GPTBot' },
+  { pattern: /ChatGPT-User/i,       name: 'ChatGPT-User' },
+  { pattern: /ClaudeBot/i,          name: 'ClaudeBot' },
+  { pattern: /Claude-Web/i,         name: 'Claude-Web' },
+  { pattern: /PerplexityBot/i,      name: 'PerplexityBot' },
+  { pattern: /Google-Extended/i,    name: 'Google-Extended' },
+  { pattern: /Googlebot/i,          name: 'Googlebot' },
+  { pattern: /Bingbot/i,            name: 'Bingbot' },
+  { pattern: /Bytespider/i,         name: 'Bytespider' },
+  { pattern: /CCBot/i,              name: 'CCBot' },
+  { pattern: /Diffbot/i,            name: 'Diffbot' },
+  { pattern: /Amazonbot/i,          name: 'Amazonbot' },
+  { pattern: /Applebot-Extended/i,  name: 'Applebot-Extended' },
+  { pattern: /cohere-ai/i,          name: 'cohere-ai' },
+  { pattern: /Meta-ExternalAgent/i, name: 'Meta-ExternalAgent' },
+  { pattern: /HeadlessChrome/i,     name: 'HeadlessChrome' },
+  { pattern: /PhantomJS/i,          name: 'PhantomJS' },
+  { pattern: /Playwright/i,         name: 'Playwright' },
+  { pattern: /Puppeteer/i,          name: 'Puppeteer' },
+];
+
+function detectAgentFromUA(ua: string): { is_agent: number; agent_type: string } {
+  if (!ua) return { is_agent: 0, agent_type: '' };
+  for (const { pattern, name } of AGENT_PATTERNS) {
+    if (pattern.test(ua)) {
+      return { is_agent: 1, agent_type: name };
+    }
+  }
+  return { is_agent: 0, agent_type: '' };
+}
+
 // ── CORS helpers ────────────────────────────────────────────────────
 
 function corsHeaders(origin: string | null, env: Env): Record<string, string> {
@@ -322,6 +416,20 @@ export default {
         status: 400,
         headers: { ...cors, 'Content-Type': 'application/json' },
       });
+    }
+
+    // AXO Task 4: attach HTTPヘッダを全イベントに付与。
+    // routing先が events テーブル以外 (behavior/form/video 等) の場合は
+    // pickColumns が該当カラムを持たないため自動で落ちる。安全。
+    const httpHeaders = extractHttpHeaders(request.headers);
+    const serverAgent = detectAgentFromUA(httpHeaders.http_user_agent_raw);
+    for (const e of validEvents) {
+      Object.assign(e, httpHeaders);
+      // クライアント is_agent=1 を優先 (②系 JS 検知は UA マッチより高精度)
+      if (!e.is_agent || e.is_agent === 0 || e.is_agent === '0') {
+        e.is_agent = serverAgent.is_agent;
+        e.agent_type = serverAgent.agent_type;
+      }
     }
 
     // Respond immediately, flush in background
