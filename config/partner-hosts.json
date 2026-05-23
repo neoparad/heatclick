@@ -1,0 +1,10 @@
+{
+  "$schema": "./partner-hosts.schema.json",
+  "_comment": "顧客サイトの thumbnail / OGP 許可ホスト。追加は Infra PR + Director merge。`*` ワイルドカードは subdomain のみ可、`**` は禁止。",
+  "_audit_log": "decisions.md [→Infra] タグで顧客追加時に追記",
+  "_security": "本リスト変更は cross-cutting-concerns.md §1.3 + CODEOWNERS で Infra + Director 承認必須",
+  "hosts": [
+    "bihadashop.jp",
+    "wakegai.jp"
+  ]
+}

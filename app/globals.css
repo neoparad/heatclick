@@ -1,0 +1,126 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * UGOKI MAP Design System v1 — Design Tokens
+ *
+ * 唯一基準: linkscrawl/docs/fusion/strategy/17_design_system.md
+ * 親 SSOT §3.6 / §6.3 S0-02
+ *
+ * Brand gradient: --brand-1 (indigo blue) → --brand-2 (vivid purple)
+ * 1 アクセント原則: ヒーロー文字 / primary CTA / 主要 KPI 1 枚 / 主要 4 機能アイコンのみで使用
+ */
+
+@layer base {
+  :root {
+    /* Brand colors (v17) */
+    --brand-1: 226 100% 65%; /* #4F6BFF indigo blue */
+    --brand-2: 271 91% 65%;  /* #A855F7 vivid purple */
+
+    /* Surfaces */
+    --background: 0 0% 100%;
+    --foreground: 240 10% 4%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 4%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 4%;
+
+    /* Primary = brand-1 */
+    --primary: 226 100% 65%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Secondary = neutral */
+    --secondary: 240 5% 96%;
+    --secondary-foreground: 240 6% 10%;
+
+    /* Muted backgrounds */
+    --muted: 240 5% 96%;
+    --muted-foreground: 240 4% 46%;
+
+    /* Accent (subtle highlight) */
+    --accent: 240 5% 96%;
+    --accent-foreground: 240 6% 10%;
+
+    /* Status colors (semantic only) */
+    --success: 142 71% 45%;
+    --warning: 38 92% 50%;
+    --danger: 0 84% 60%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Borders + inputs */
+    --border: 240 6% 90%;
+    --input: 240 6% 90%;
+    --ring: 226 100% 65%;
+
+    /* Text hierarchy */
+    --text-1: 240 10% 4%;
+    --text-2: 240 4% 46%;
+    --text-3: 240 4% 64%;
+
+    /* Radius */
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 240 10% 4%;
+    --foreground: 0 0% 100%;
+
+    --card: 240 6% 10%;
+    --card-foreground: 0 0% 100%;
+
+    --popover: 240 6% 10%;
+    --popover-foreground: 0 0% 100%;
+
+    --primary: 226 100% 70%;
+    --primary-foreground: 240 10% 4%;
+
+    --secondary: 240 4% 16%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 240 4% 16%;
+    --muted-foreground: 240 4% 64%;
+
+    --accent: 240 4% 16%;
+    --accent-foreground: 0 0% 100%;
+
+    --success: 142 71% 50%;
+    --warning: 38 92% 55%;
+    --danger: 0 84% 65%;
+    --destructive: 0 84% 65%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 240 4% 16%;
+    --input: 240 4% 16%;
+    --ring: 226 100% 70%;
+
+    --text-1: 0 0% 100%;
+    --text-2: 240 4% 64%;
+    --text-3: 240 4% 46%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+}
+
+@layer utilities {
+  .brand-gradient {
+    background: linear-gradient(135deg, hsl(var(--brand-1)), hsl(var(--brand-2)));
+  }
+  .brand-gradient-text {
+    background: linear-gradient(135deg, hsl(var(--brand-1)), hsl(var(--brand-2)));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+}

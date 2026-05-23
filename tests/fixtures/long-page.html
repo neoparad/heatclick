@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>30000px Long Page Fixture — UGOKI MAP P-04 test</title>
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    .section { height: 2400px; padding: 24px; box-sizing: border-box; }
+    .section:nth-child(odd) { background: #f6f7fb; }
+    .section:nth-child(even) { background: #ffffff; }
+    .marker { position: absolute; right: 16px; font-family: monospace; font-size: 12px; color: #888; }
+  </style>
+</head>
+<body>
+  <!-- 13 sections × 2400px = 31,200px (>30,000) -->
+  <div class="section"><span class="marker">y=0</span><h1>Section 1</h1></div>
+  <div class="section"><span class="marker">y=2400</span><h1>Section 2</h1></div>
+  <div class="section"><span class="marker">y=4800</span><h1>Section 3</h1></div>
+  <div class="section"><span class="marker">y=7200</span><h1>Section 4</h1></div>
+  <div class="section"><span class="marker">y=9600</span><h1>Section 5</h1></div>
+  <div class="section"><span class="marker">y=12000</span><h1>Section 6</h1></div>
+  <div class="section"><span class="marker">y=14400</span><h1>Section 7</h1></div>
+  <div class="section"><span class="marker">y=16800</span><h1>Section 8</h1></div>
+  <div class="section"><span class="marker">y=19200</span><h1>Section 9</h1></div>
+  <div class="section"><span class="marker">y=21600</span><h1>Section 10</h1></div>
+  <div class="section"><span class="marker">y=24000</span><h1>Section 11</h1></div>
+  <div class="section"><span class="marker">y=26400</span><h1>Section 12</h1></div>
+  <div class="section"><span class="marker">y=28800</span><h1>Section 13 (ends 31200)</h1></div>
+</body>
+</html>
