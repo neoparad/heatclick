@@ -12,7 +12,7 @@
 
 import Link from 'next/link'
 import { useState } from 'react'
-import { ChevronRight, Copy, Edit3, Plus, RotateCw, Search, Trash2, X } from 'lucide-react'
+import { ChevronDown, ChevronRight, Copy, Edit3, Plus, RotateCw, Search, Trash2 } from 'lucide-react'
 
 import { PageMeta } from '@/components/layout/page-meta'
 import { Badge } from '@/components/ui/badge'
@@ -62,6 +62,8 @@ function variantSummary(variants: ReadonlyArray<Variant>): string {
 export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
   const [expanded, setExpanded] = useState<string | null>(scenarios[0]?.id ?? null)
   const [filter, setFilter] = useState<'all' | ScenarioStatus>('all')
+  // 続 M-6 §A: Phase 1 banner は collapsed default、click で展開
+  const [bannerOpen, setBannerOpen] = useState(false)
 
   const filtered = filter === 'all' ? scenarios : scenarios.filter((s) => s.status === filter)
 
@@ -76,47 +78,47 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
     <>
       <PageMeta title="ターゲティングバナー" eyebrow="M Agent · Scenarios" />
 
-      <div className="px-8 pt-6 pb-16 max-w-[1280px] mx-auto">
-        {/* Path banner (Phase 1 配信中) */}
-        <div className="grid grid-cols-[48px_1fr_auto] gap-3 items-center p-4 mb-5 rounded-lg border border-indigo-200 bg-gradient-to-br from-indigo-50 to-purple-50/50">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-500 text-white flex items-center justify-center shadow-md">
-            <RotateCw className="h-4.5 w-4.5" aria-hidden />
-          </div>
-          <div>
-            <h3 className="text-sm font-bold text-indigo-700 mb-0.5">
-              Phase 1 配信中 (1 シナリオ × A/B/C 3 variants)
-            </h3>
-            <p className="text-xs text-slate-700 leading-relaxed">
-              条件が真になった visitor に対し <b className="font-semibold">A/B/C のうち traffic split で決定された 1 variant</b> を実画面に表示。
-              同 visitor は常に同じ variant が当たる (visitor_id hash で決定論的)。impression / click / dismiss / conversion を計測。
-            </p>
-          </div>
-          <Button variant="outline" size="sm" disabled>
-            仕組み
-          </Button>
-        </div>
-
-        {/* Header */}
-        <div className="flex items-end gap-4 mb-5">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">ターゲティングバナー</h1>
-            <p className="text-xs text-slate-600 mt-1.5 max-w-2xl leading-relaxed">
-              行動データで条件発火する POP / バナー / インライン枠を管理。各シナリオで <b className="font-semibold">A/B/C 最大 3 バリアント</b>
-              を登録し traffic split で配信比率を制御。Phase 2 で GUI 作成解放、Phase 3 は AI 自動提案 (厳密設計後)。
-            </p>
-          </div>
+      <div className="px-8 pt-4 pb-16 max-w-[1280px] mx-auto">
+        {/* 続 M-6 §A: 圧縮 Phase 1 chip + actions (旧 banner + h1 + description + actions を 1 行に集約) */}
+        <div className="flex items-center gap-2 mb-3">
+          <button
+            type="button"
+            onClick={() => setBannerOpen((v) => !v)}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 text-[11.5px] font-semibold hover:bg-indigo-100 transition-colors"
+            aria-expanded={bannerOpen}
+          >
+            <RotateCw className="h-3 w-3" aria-hidden />
+            Phase 1 配信中 (1 シナリオ × A/B/C)
+            {bannerOpen ? (
+              <ChevronDown className="h-3 w-3" aria-hidden />
+            ) : (
+              <ChevronRight className="h-3 w-3" aria-hidden />
+            )}
+          </button>
           <div className="ml-auto flex gap-2 items-center">
             <Button variant="outline" size="sm" disabled>
-              <RotateCw className="mr-1.5 h-3.5 w-3.5" /> 更新
+              <RotateCw className="mr-1.5 h-3 w-3" /> 更新
             </Button>
-            <Button size="sm" disabled title="新規登録は Phase 2 で実装予定">
-              <Plus className="mr-1.5 h-3.5 w-3.5" /> 新規バナー
-            </Button>
+            <Link
+              href="/scenarios/new"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-gradient-to-br from-indigo-500 to-purple-500 text-white shadow-sm hover:brightness-110 transition"
+            >
+              <Plus className="h-3 w-3" /> 新規バナー
+            </Link>
           </div>
         </div>
 
-        {/* KPI strip */}
-        <div className="grid grid-cols-4 gap-3.5 mb-5">
+        {/* 続 M-6 §A: banner details (折りたたみ) */}
+        {bannerOpen ? (
+          <div className="mb-3 p-3 rounded-md border border-indigo-100 bg-indigo-50/40 text-xs text-slate-700 leading-relaxed">
+            条件が真になった visitor に対し <b className="font-semibold">A/B/C のうち traffic split で決定された 1 variant</b>
+            を実画面に表示。同 visitor は常に同じ variant が当たる (visitor_id hash で決定論的)。
+            impression / click / dismiss / conversion を計測。Phase 2 で GUI 作成解放、Phase 3 は AI 自動提案 (厳密設計後)。
+          </div>
+        ) : null}
+
+        {/* KPI strip (続 M-6 §A: padding 半減) */}
+        <div className="grid grid-cols-4 gap-2.5 mb-4">
           <KpiCard
             label="稼働シナリオ"
             badge="7日"
@@ -184,27 +186,32 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
             const m = getMetrics(s.id)
             return (
               <div key={s.id}>
-                <button
-                  type="button"
-                  onClick={() => setExpanded(isOpen ? null : s.id)}
-                  className="w-full grid grid-cols-[20px_1fr_104px_88px_88px_88px_88px] gap-2.5 px-4 py-3.5 border-b border-slate-100 items-center text-left hover:bg-slate-50 transition-colors"
-                  aria-expanded={isOpen}
-                >
-                  <span
-                    className={`text-slate-400 ${isOpen ? 'rotate-90 text-indigo-600' : ''} transition-transform`}
-                    aria-hidden
+                {/* 続 M-6 §B: 行は 2 分割 — ▼ toggle (button) + 行リンク (Link) */}
+                <div className="grid grid-cols-[20px_1fr_104px_88px_88px_88px_88px] gap-2.5 px-4 py-3 border-b border-slate-100 items-center hover:bg-slate-50 transition-colors">
+                  <button
+                    type="button"
+                    onClick={() => setExpanded(isOpen ? null : s.id)}
+                    className={`text-slate-400 ${isOpen ? 'rotate-90 text-indigo-600' : ''} transition-transform p-1 -m-1 rounded hover:bg-slate-100`}
+                    aria-expanded={isOpen}
+                    aria-label={isOpen ? 'バリアント詳細を閉じる' : 'バリアント詳細を開く'}
                   >
                     <ChevronRight className="h-3.5 w-3.5" />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="text-sm font-semibold text-slate-900 truncate">{s.name}</div>
+                  </button>
+                  <Link
+                    href={`/scenarios/${s.id}`}
+                    className="min-w-0 group"
+                    title="詳細編集を開く"
+                  >
+                    <div className="text-sm font-semibold text-slate-900 truncate group-hover:text-indigo-700 transition-colors">
+                      {s.name}
+                    </div>
                     <div className="flex gap-1.5 items-center flex-wrap text-[10.5px] text-slate-500 mt-0.5 font-mono">
                       <span className="px-1.5 py-0.5 bg-slate-100 rounded">{s.site_id}</span>
                       <span className="px-1.5 py-0.5 bg-purple-50 text-purple-700 font-semibold rounded">
                         {variantSummary(s.variants)}
                       </span>
                     </div>
-                  </div>
+                  </Link>
                   <Badge variant="outline" className={`${status.className} font-mono text-[10px] uppercase tracking-wider`}>
                     {status.label}
                   </Badge>
@@ -220,7 +227,7 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
                   <div className="text-right font-mono text-sm font-semibold">
                     {m.cvrPct !== null ? `${m.cvrPct}%` : '—'}
                   </div>
-                </button>
+                </div>
 
                 {isOpen ? <ExpandedPanel scenario={s} /> : null}
               </div>
@@ -262,20 +269,20 @@ interface KpiCardProps {
 
 function KpiCard({ label, badge, value, unit, note }: KpiCardProps) {
   return (
-    <div className="bg-white border border-slate-200 rounded-lg p-4">
-      <div className="flex items-center gap-1.5 mb-1.5">
-        <span className="font-mono text-[10.5px] font-medium text-slate-500 uppercase tracking-wider">{label}</span>
+    <div className="bg-white border border-slate-200 rounded-md px-3 py-2.5">
+      <div className="flex items-center gap-1.5 mb-0.5">
+        <span className="font-mono text-[10px] font-medium text-slate-500 uppercase tracking-wider">{label}</span>
         {badge ? (
-          <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 border border-indigo-200 font-semibold">
+          <span className="text-[9px] px-1 py-0 rounded bg-indigo-50 text-indigo-600 border border-indigo-200 font-semibold">
             {badge}
           </span>
         ) : null}
       </div>
-      <div className="font-mono text-2xl font-bold text-slate-900 tracking-tight">
+      <div className="font-mono text-xl font-bold text-slate-900 tracking-tight leading-none">
         {value}
-        {unit ? <span className="text-sm font-medium text-slate-500 ml-1">{unit}</span> : null}
+        {unit ? <span className="text-xs font-medium text-slate-500 ml-1">{unit}</span> : null}
       </div>
-      {note ? <div className="text-[11.5px] text-slate-500 mt-1">{note}</div> : null}
+      {note ? <div className="text-[10.5px] text-slate-500 mt-0.5">{note}</div> : null}
     </div>
   )
 }
@@ -378,5 +385,3 @@ function ExpandedPanel({ scenario }: { scenario: Scenario }) {
   )
 }
 
-// Unused but reserved for Phase 2 drawer close button
-void X
