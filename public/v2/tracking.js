@@ -12,6 +12,16 @@
  *         5. _detectStealth (webdriver パッチ対策二次シグナル、記録のみ)
  *         PM決定 2026-04-15 / strategy/12_agent_experience_optimization.md v0.2 準拠。
  *
+ * v2.4.0+sprint4-w1: Director 続 82 Sprint 4 W1 (bounce/organic/visitor 復活)
+ *         1. __ugk_vid first-party cookie (UUID v4、365日 TTL、SameSite=Lax、Secure)
+ *         2. is_first_visit flag (visitor_id cookie が新規発行された時 true)
+ *         3. session start ts + page_views_in_session counter (sessionStorage 永続化)
+ *         4. session_end event (visibilitychange hidden 30s タイマー / beforeunload で発火)
+ *            payload: session_duration_sec + page_views_in_session
+ *         5. event payload に visitor_id / is_first_visit / session_duration_sec /
+ *            page_views_in_session 列を追加 (ClickHouse events table の v2 列に対応)
+ *         参照: handoff/2026-05-25-infra-sprint4-w1-tracking-schema-v2.md §2.1
+ *
  * SaaS 流用 (B-1、decisions.md L275 続 14 / L162 続 15 §4.4 BR1): multi-tenant 化に伴い
  * data-tenant-id 必須化:
  *   <script src=".../tracking.js" data-site-id="..." data-tenant-id="linkth_internal" defer></script>
@@ -148,16 +158,65 @@
     const r = (Math.random() * 16) | 0; return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
   });
 
+  // Sprint 4 W1 (続 82): local cookie helpers (tracking-ext-utils.js 非依存)
+  //   __ugk_vid を最早期に評価するため、extension 読込前でも動作する組込 helper を保持。
+  const _localGetCookie = (name) => {
+    try {
+      const m = document.cookie.match(new RegExp(
+        '(?:^|; )' + name.replace(/([.$?*|{}()\[\]\\\/+^])/g, '\\$1') + '=([^;]*)'
+      ));
+      return m ? decodeURIComponent(m[1]) : '';
+    } catch { return ''; }
+  };
+  const _localSetCookie = (name, value, days) => {
+    try {
+      const d = new Date(Date.now() + days * 86400000);
+      const secure = (typeof location !== 'undefined' && location.protocol === 'https:') ? '; Secure' : '';
+      document.cookie = name + '=' + encodeURIComponent(value)
+        + '; expires=' + d.toUTCString() + '; path=/; SameSite=Lax' + secure;
+    } catch { /* ignore */ }
+  };
+
+  // Sprint 4 W1 (続 82): __ugk_vid first-party cookie + is_first_visit
+  //   先に_isFirstVisit を確定させてから queueEvent に注入できるよう init より前に評価。
+  let _isFirstVisit = false;
+  const _getVisitorId = () => {
+    let vid = _localGetCookie('__ugk_vid');
+    if (!vid) {
+      vid = _genId();
+      _localSetCookie('__ugk_vid', vid, 365);
+      _isFirstVisit = true;
+    }
+    return vid;
+  };
+  const _visitorId = _getVisitorId();
+
   const _getSession = () => {
     let sid = sessionStorage.getItem('ci_sid');
     const la = sessionStorage.getItem('ci_la');
     const now = Date.now();
     if (!sid || !la || now - parseInt(la) > config.sessionTimeout) {
-      sid = _genId(); sessionStorage.setItem('ci_sid', sid);
+      sid = _genId();
+      sessionStorage.setItem('ci_sid', sid);
+      // Sprint 4 W1 (続 82): 新規 session 開始時に start ts + page_views counter を reset
+      sessionStorage.setItem('ci_sst', String(now));
+      sessionStorage.setItem('ci_spv', '0');
+      _sessionEndSent = false;  // 新規 session に切替時は session_end 再発火可能に
     }
     sessionStorage.setItem('ci_la', now.toString());
     return sid;
   };
+
+  // Sprint 4 W1 (続 82): session-level helpers
+  const _getSessionStartTs = () => parseInt(sessionStorage.getItem('ci_sst') || '0', 10) || Date.now();
+  const _getPageViewsInSession = () => parseInt(sessionStorage.getItem('ci_spv') || '0', 10);
+  const _incrementPageViewsInSession = () => {
+    const next = _getPageViewsInSession() + 1;
+    sessionStorage.setItem('ci_spv', String(next));
+    return next;
+  };
+  let _sessionEndSent = false;
+  let _hiddenTimer = null;
 
   // userId: cookie if utils loaded, else localStorage fallback
   const _getUserId = () => {
@@ -280,7 +339,9 @@
 
   const queueEvent = (ev) => {
     _seqCounter++;
-    const d = { ...ev, id: _genId(), site_id: config.siteId, tenant_id: config.tenantId, session_id: _getSession(), user_id: _getUserId(), external_id: _externalId || null, ga_client_id: _gaClientId, timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, device_type: _devType(), referrer_type: _refType(document.referrer), sequence_id: _seqCounter, is_agent: _agent.is_agent, agent_type: _agent.agent_type, agent_signals: _agent.agent_signals, stealth_score: _stealth.stealth_score, stealth_signals: _stealth.stealth_signals, ..._utm };
+    // Sprint 4 W1 (続 82): visitor_id / is_first_visit を全 event に注入
+    //   session_end event は別途 session_duration_sec / page_views_in_session を含めて queueEvent 呼出。
+    const d = { ...ev, id: _genId(), site_id: config.siteId, tenant_id: config.tenantId, session_id: _getSession(), user_id: _getUserId(), visitor_id: _visitorId, is_first_visit: _isFirstVisit, external_id: _externalId || null, ga_client_id: _gaClientId, timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, device_type: _devType(), referrer_type: _refType(document.referrer), sequence_id: _seqCounter, is_agent: _agent.is_agent, agent_type: _agent.agent_type, agent_signals: _agent.agent_signals, stealth_score: _stealth.stealth_score, stealth_signals: _stealth.stealth_signals, ..._utm };
     if (!d.site_id || d.site_id.trim() === '') return;
     // B-1: tenant_id 拾い忘れ防御 — 起動時 check で抑止済だが二重ガード (続 14 R3)
     if (!d.tenant_id || d.tenant_id.trim() === '') return;
@@ -441,14 +502,41 @@
       scrollStopT = setTimeout(() => { if (pageVis) { readY = Math.round(sy + (window.innerHeight/2)); readStart = Date.now(); } }, 500);
     }, 200),
 
-    pageview: () => { queueEvent({ event_type: 'pageview', page_title: document.title }); },
+    pageview: () => {
+      // Sprint 4 W1 (続 82): session 内 page view 数を increment (session_end で集計)
+      _incrementPageViewsInSession();
+      queueEvent({ event_type: 'pageview', page_title: document.title });
+    },
 
     pageleave: () => {
       if (maxSD > 0) queueEvent({ event_type: 'scroll_depth', scroll_percentage: maxSD, is_final: true });
       if (readStart && readY !== null) { const d = Date.now()-readStart; if (d>=500) queueEvent({ event_type:'read_area', read_y:readY, read_duration:d }); }
       for (const ext of _exts) { if (ext.flush) ext.flush(); }
+      // Sprint 4 W1 (続 82): beforeunload で session_end 発火 (best-effort、sendBeacon)
+      _fireSessionEnd('beforeunload');
       sendBatch();
     },
+  };
+
+  // Sprint 4 W1 (続 82): session_end event 発火
+  //   呼出元: visibilitychange hidden 30s タイマー / beforeunload / 30 分 inactivity (新規 session 切替時は古い session 分は loss)
+  //   payload: session_duration_sec (start_ts からの実滞在秒) + page_views_in_session
+  //   is_bounce は ClickHouse 側 (sessions_hourly MV) で derive、tracking-js は送らない。
+  const _fireSessionEnd = (reason) => {
+    if (_sessionEndSent) return;
+    _sessionEndSent = true;
+    try {
+      const now = Date.now();
+      const startTs = _getSessionStartTs();
+      const durationSec = Math.max(0, Math.round((now - startTs) / 1000));
+      const pvCount = _getPageViewsInSession();
+      queueEvent({
+        event_type: 'session_end',
+        session_duration_sec: durationSec,
+        page_views_in_session: pvCount,
+        session_end_reason: String(reason || 'unknown').slice(0, 32),
+      });
+    } catch { /* ignore, session_end は best-effort */ }
   };
 
   // --- Extension System ---
@@ -640,6 +728,18 @@
         if (readStart && readY !== null) { const d=Date.now()-readStart; if(d>=500) queueEvent({event_type:'read_area',read_y:readY,read_duration:d}); readStart=null; readY=null; }
         if (scrollStopT) { clearTimeout(scrollStopT); scrollStopT=null; }
         sendBatch();
+        // Sprint 4 W1 (続 82): hidden 状態が 30s 続いたら session_end を fire (handoff §2.1)
+        //   beforeunload に届かないケース (SPA 内 hash 遷移後の close 等) を救う best-effort path。
+        if (_hiddenTimer) clearTimeout(_hiddenTimer);
+        _hiddenTimer = setTimeout(() => {
+          if (document.hidden) {
+            _fireSessionEnd('visibility_hidden_30s');
+            sendBatch();
+          }
+        }, 30000);
+      } else {
+        // visible に戻った時は pending timer を cancel (session 継続中)
+        if (_hiddenTimer) { clearTimeout(_hiddenTimer); _hiddenTimer = null; }
       }
     });
     loadExtensions();

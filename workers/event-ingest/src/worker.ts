@@ -76,6 +76,9 @@ const EVENTS_COLUMNS = [
   'http_accept_encoding', 'http_range', 'http_if_modified_since',
   'http_sec_fetch_site', 'http_sec_fetch_mode', 'http_sec_fetch_dest',
   'http_sec_fetch_user', 'http_referer',
+  // Sprint 4 W1 (続 82): tracking-js v2 列 (handoff/2026-05-25-infra-sprint4-w1-tracking-schema-v2.md §2.1)
+  // ClickHouse events table 側は 2026-06-01-sprint4-tracking-v2-columns.sql で ADD COLUMN IF NOT EXISTS 済
+  'visitor_id', 'is_first_visit', 'session_duration_sec', 'page_views_in_session',
 ] as const;
 
 const BEHAVIOR_COLUMNS = [
