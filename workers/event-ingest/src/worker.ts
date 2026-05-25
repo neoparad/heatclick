@@ -313,9 +313,12 @@ async function lookupTenantBySiteId(env: Env, site_id: string): Promise<string |
 
   const { baseUrl, authHeader } = parseClickHouseEnv(env.CLICKHOUSE_URL);
   // H-2: URL に credentials 一切乗せない。query / param のみ。
+  // 続 82-completed bug fix (2026-05-25): sites table の primary key column 名は `tracking_id` (続 39 schema)。
+  // Worker code が `site_id` 列で WHERE していたため全 lookup が UNKNOWN_IDENTIFIER で failure、
+  // resolveTenant 経路 (b) が常時 reject、Sprint 4 W1 Worker redeploy 後に全 ingest が drop していた。
   const queryUrl = `${baseUrl}/?database=${encodeURIComponent(env.CLICKHOUSE_DB)}`
     + `&query=${encodeURIComponent(
-        "SELECT tenant_id FROM sites WHERE site_id = {site_id:String} LIMIT 1 FORMAT JSONEachRow"
+        "SELECT tenant_id FROM sites WHERE tracking_id = {site_id:String} LIMIT 1 FORMAT JSONEachRow"
       )}`
     + `&param_site_id=${encodeURIComponent(site_id)}`;
 
