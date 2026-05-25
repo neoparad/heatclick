@@ -16,6 +16,7 @@
 
 'use client'
 
+import { usePathname } from 'next/navigation'
 import type { ReactNode } from 'react'
 import { BarChart3, Bot, LineChart, Search } from 'lucide-react'
 
@@ -62,15 +63,32 @@ const PILLARS: ReadonlyArray<Pillar> = [
 ]
 
 interface SidebarPillarProps {
-  /** active ピラー (Phase 1 = behavior 固定、Phase 2+ で URL 経路から判定) */
+  /** active ピラー — Phase 1 = behavior default、ただし pathname `/scenarios*` 等で自動上書きされる */
   active?: Pillar['id']
 }
 
+/**
+ * 続 83 §4 Day 2 (2026-05-25): pathname に応じて active pillar を自動判定。
+ * - `/scenarios*` → 'm-agent'
+ * - それ以外 → props.active (= AppShell 渡しの 'behavior')
+ *
+ * これにより (proof)/layout.tsx の `pillar="behavior"` 固定 prop を破壊せず、
+ * URL 経路だけで pillar の active 状態が同期する (Main Director 管轄 layout.tsx 不変)。
+ */
+function resolveActivePillar(pathname: string | null, fallback: Pillar['id']): Pillar['id'] {
+  if (!pathname) return fallback
+  if (pathname === '/scenarios' || pathname.startsWith('/scenarios/')) return 'm-agent'
+  return fallback
+}
+
 export function SidebarPillar({ active = 'behavior' }: SidebarPillarProps) {
+  const pathname = usePathname()
+  const resolvedActive = resolveActivePillar(pathname, active)
+
   return (
     <div className="ug-product-switcher" aria-label="プロダクト切替">
       {PILLARS.map((p) => {
-        const isActive = p.id === active
+        const isActive = p.id === resolvedActive
         const className = [
           'ug-product-link',
           isActive ? 'active' : '',
@@ -79,9 +97,9 @@ export function SidebarPillar({ active = 'behavior' }: SidebarPillarProps) {
           .filter(Boolean)
           .join(' ')
 
-        // 続 83 §4: m-agent は mockup index に link (Day 2 で /scenarios に切替)。
-        // 他 active product は href="#" + behavior は外部 link 不要 (active 自身を click しても何も起きない)。
-        const href = p.id === 'm-agent' ? '/mockups/' : '#'
+        // 続 83 §4 Day 2: m-agent の href を mockup index から /scenarios (React route) に切替。
+        // mockup HTML (public/mockups/) は内部 review 用に残置 = direct URL 入力でのみ到達可能。
+        const href = p.id === 'm-agent' ? '/scenarios' : '#'
         return (
           <a
             key={p.id}
