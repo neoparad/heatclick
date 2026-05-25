@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UGOKI MAP — ターゲティングバナー編集 (A/B/C + 画像/HTML)</title>
+<script>if (window.self !== window.top) document.documentElement.classList.add('embedded');</script>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/ugokimap.css">
+<style>
+  .ed-body { overflow-y: auto; padding: 20px 28px 60px; }
+  .ed-inner { max-width: 1360px; margin: 0 auto; }
+
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel); color: var(--text-1); font-size: 12px; font-weight: 500; cursor: pointer; transition: all .12s; }
+  .btn:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+  .btn.primary { background: var(--brand-grad-h); color: #fff; border-color: transparent; box-shadow: 0 2px 8px rgba(79,107,255,.2); }
+  .btn.primary:hover { filter: brightness(1.06); }
+  .btn.sm { padding: 5px 10px; font-size: 11.5px; }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--text-2); }
+  .btn.ghost:hover { background: var(--bg-hover); color: var(--text-1); }
+  .btn.outline { background: transparent; }
+  .btn.danger { color: var(--red); }
+  .btn.danger:hover { background: rgba(214,69,69,.08); border-color: rgba(214,69,69,.25); }
+  .btn svg { width: 13px; height: 13px; }
+
+  .ed-head { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: end; margin-bottom: 18px; }
+  .ed-head .eyebrow { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 500; margin-bottom: 6px; }
+  .ed-head h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.025em; display: flex; align-items: center; gap: 10px; }
+  .ed-head h1 .name-input { font-size: 22px; font-weight: 700; border: 0; background: transparent; padding: 2px 6px; border-radius: 4px; min-width: 540px; color: var(--text-1); }
+  .ed-head h1 .name-input:focus { outline: none; background: var(--bg-subtle); }
+  .ed-head h1 .name-input:hover { background: var(--bg-subtle); }
+  .ed-head .sub { font-size: 12px; color: var(--text-2); margin-top: 4px; display: flex; gap: 10px; align-items: center; }
+  .ed-head .sub .site { font-family: var(--mono); font-size: 11px; padding: 1px 6px; background: var(--bg-2); border-radius: 3px; }
+  .ed-head .actions { display: flex; gap: 8px; align-items: center; }
+
+  .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; font-family: var(--mono); font-size: 10px; font-weight: 600; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .status-pill.measure { background: var(--accent-bg); color: var(--brand-1); border: 1px solid rgba(79,107,255,.25); }
+  .status-pill.preview { background: rgba(242,201,76,.12); color: #b48512; border: 1px solid rgba(242,201,76,.4); }
+  .status-pill.live { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+  .status-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  .ev { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: 9.5px; font-weight: 600; padding: 1px 5px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .ev.planned { background: var(--bg-2); color: var(--text-3); border: 1px solid var(--border); }
+
+  /* Layout: 2-column editor */
+  .ed-grid { display: grid; grid-template-columns: 1.25fr 1fr; gap: 18px; }
+  @media (max-width: 1100px) { .ed-grid { grid-template-columns: 1fr; } }
+
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); box-shadow: var(--shadow-sm); overflow: hidden; margin-bottom: 14px; }
+  .panel-h { padding: 12px 16px; border-bottom: 1px solid var(--border-2); display: flex; align-items: center; gap: 10px; }
+  .panel-h h3 { font-size: 13px; font-weight: 600; flex: 1; }
+  .panel-h .mono { font-family: var(--mono); font-size: 10px; color: var(--text-3); }
+  .panel-b { padding: 16px; }
+
+  /* Input tabs (NL / Visual) */
+  .input-tabs { display: flex; gap: 0; padding: 0 16px; border-bottom: 1px solid var(--border-2); background: var(--bg-subtle); }
+  .input-tab { padding: 10px 16px; font-size: 12.5px; font-weight: 500; color: var(--text-2); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; display: inline-flex; align-items: center; gap: 6px; }
+  .input-tab:hover { color: var(--text-1); }
+  .input-tab.active { color: var(--text-1); border-bottom-color: var(--brand-1); font-weight: 600; background: var(--panel); }
+  .input-tab svg { width: 13px; height: 13px; }
+  .input-tab .beta { font-family: var(--mono); font-size: 9px; padding: 1px 4px; border-radius: 2px; background: rgba(168,85,247,.12); color: #8a4fc4; font-weight: 700; }
+
+  /* Visual builder */
+  .vb { padding: 14px 16px 16px; }
+  .vb-group { background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 10px 12px 12px; margin-bottom: 10px; }
+  .vb-group .gh { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .vb-group .gh-op { display: inline-flex; gap: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 5px; padding: 2px; }
+  .vb-group .gh-op button { padding: 3px 10px; font-family: var(--mono); font-size: 10.5px; font-weight: 600; border: 0; background: transparent; color: var(--text-3); border-radius: 3px; cursor: pointer; }
+  .vb-group .gh-op button.on { background: var(--brand-grad-h); color: #fff; box-shadow: 0 1px 3px rgba(79,107,255,.25); }
+  .vb-group .gh-label { font-size: 11.5px; color: var(--text-2); flex: 1; }
+
+  .vb-row { display: grid; grid-template-columns: 18px 1.1fr 110px 1fr 26px; gap: 6px; align-items: center; padding: 6px 0; }
+  .vb-row .drag { color: var(--text-3); cursor: grab; display: flex; justify-content: center; }
+  .vb-row .drag svg { width: 12px; height: 12px; }
+  .vb-row select, .vb-row input { width: 100%; padding: 6px 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); font-size: 12px; font-family: var(--font); }
+  .vb-row select:focus, .vb-row input:focus { outline: none; border-color: var(--brand-1); }
+  .vb-row .op-tag { font-family: var(--mono); font-size: 10.5px; color: var(--brand-1); background: var(--accent-bg); border: 1px solid rgba(79,107,255,.25); padding: 5px 9px; text-align: center; border-radius: 5px; font-weight: 600; }
+  .vb-row .del { background: transparent; border: 0; cursor: pointer; color: var(--text-3); padding: 4px; display: flex; justify-content: center; }
+  .vb-row .del:hover { color: var(--red); }
+  .vb-row .del svg { width: 14px; height: 14px; }
+  .vb-add { display: flex; gap: 8px; padding: 6px 0 0; }
+  .vb-add .btn { font-size: 11.5px; padding: 5px 10px; border-style: dashed; }
+  .vb-add .btn:hover { border-style: solid; border-color: var(--brand-1); color: var(--brand-1); }
+
+  /* AST preview */
+  .ast-preview { background: #0a0b0d; color: #e7e8ec; padding: 12px 14px; font-family: var(--mono); font-size: 11.5px; line-height: 1.6; overflow-x: auto; }
+  .ast-preview .key { color: #93c5fd; }
+  .ast-preview .str { color: #86efac; }
+  .ast-preview .num { color: #fbbf24; }
+  .ast-preview .bool { color: #f0abfc; }
+  .ast-preview .punc { color: #6b7280; }
+
+  /* Right column — variant editor */
+  /* A/B/C variant tabs */
+  .vt-tabs { display: flex; gap: 6px; padding: 10px 16px 0; background: var(--bg-subtle); border-bottom: 1px solid var(--border-2); align-items: end; }
+  .vt-tab { padding: 8px 14px; font-size: 12.5px; font-weight: 600; color: var(--text-2); cursor: pointer; border: 1px solid var(--border); border-bottom: 0; border-radius: 5px 5px 0 0; background: var(--panel); margin-bottom: -1px; display: flex; align-items: center; gap: 8px; transition: all .12s; }
+  .vt-tab:hover { background: var(--bg-hover); }
+  .vt-tab.active { border-color: var(--brand-1); background: var(--panel); color: var(--brand-1); }
+  .vt-tab .vt-badge { width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 10px; font-weight: 700; color: #fff; }
+  .vt-tab.a .vt-badge { background: var(--brand-1); }
+  .vt-tab.b .vt-badge { background: #8a4fc4; }
+  .vt-tab.c .vt-badge { background: var(--green); }
+  .vt-tab.add { background: transparent; border-style: dashed; color: var(--text-3); }
+  .vt-tab.add:hover { color: var(--brand-1); border-color: var(--brand-1); border-style: solid; }
+  .vt-tab .del { color: var(--text-3); margin-left: 4px; background: transparent; border: 0; padding: 0; display: flex; cursor: pointer; }
+  .vt-tab .del:hover { color: var(--red); }
+  .vt-tab .del svg { width: 11px; height: 11px; }
+  .vt-tabs .split-info { margin-left: auto; padding-bottom: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+
+  /* Variant content type switcher */
+  .vt-type-row { display: flex; gap: 8px; margin-bottom: 14px; padding: 4px; background: var(--bg-2); border-radius: 6px; }
+  .vt-type-row label { flex: 1; display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; border-radius: 4px; transition: all .12s; }
+  .vt-type-row label:hover { background: var(--bg-hover); }
+  .vt-type-row label.active { background: var(--panel); box-shadow: 0 1px 3px rgba(15,17,23,.08); border: 1px solid var(--brand-1); padding: 7px 11px; }
+  .vt-type-row label input { margin: 0; }
+  .vt-type-row label .ic { width: 28px; height: 28px; border-radius: 6px; background: var(--bg-subtle); display: flex; align-items: center; justify-content: center; color: var(--text-2); }
+  .vt-type-row label.active .ic { background: var(--brand-grad-h); color: #fff; }
+  .vt-type-row label .ic svg { width: 14px; height: 14px; }
+  .vt-type-row label .meta { display: flex; flex-direction: column; gap: 1px; }
+  .vt-type-row label .meta .name { font-size: 12.5px; font-weight: 600; color: var(--text-1); }
+  .vt-type-row label .meta .desc { font-size: 10.5px; color: var(--text-3); }
+
+  /* Image uploader */
+  .img-upload { border: 2px dashed var(--border); border-radius: var(--r-sm); padding: 24px; text-align: center; cursor: pointer; transition: all .12s; }
+  .img-upload:hover { border-color: var(--brand-1); background: var(--accent-bg); }
+  .img-upload .ic { width: 40px; height: 40px; margin: 0 auto 8px; border-radius: 10px; background: var(--bg-2); display: flex; align-items: center; justify-content: center; color: var(--text-2); }
+  .img-upload .ic svg { width: 18px; height: 18px; }
+  .img-upload .t { font-size: 13px; font-weight: 600; color: var(--text-1); }
+  .img-upload .s { font-size: 11px; color: var(--text-3); margin-top: 4px; }
+
+  .img-uploaded { background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+  .img-uploaded .img-frame { height: 180px; background: linear-gradient(135deg, #e0e7ff, #ede9fe); display: flex; align-items: center; justify-content: center; color: var(--text-3); font-family: var(--mono); font-size: 11px; position: relative; }
+  .img-uploaded .img-frame::after { content: 'banner_a_2026-05-25.png'; position: absolute; bottom: 8px; right: 10px; padding: 2px 6px; background: rgba(0,0,0,.5); color: #fff; border-radius: 3px; font-size: 10px; }
+  .img-uploaded .img-meta { padding: 10px 14px; display: flex; gap: 10px; align-items: center; font-size: 11.5px; color: var(--text-2); }
+  .img-uploaded .img-meta .size { font-family: var(--mono); color: var(--text-3); }
+  .img-uploaded .img-meta .actions { margin-left: auto; display: flex; gap: 6px; }
+
+  /* HTML editor */
+  .html-editor { background: #0a0b0d; color: #e7e8ec; border-radius: var(--r-sm); padding: 14px; font-family: var(--mono); font-size: 11.5px; line-height: 1.65; min-height: 180px; border: 1px solid var(--border); white-space: pre; overflow: auto; }
+  .html-editor .tag { color: #f9a8d4; }
+  .html-editor .attr { color: #fbbf24; }
+  .html-editor .str { color: #86efac; }
+  .html-warn { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: rgba(242,201,76,.10); border: 1px solid rgba(242,201,76,.4); border-radius: var(--r-sm); margin-top: 8px; font-size: 11.5px; color: #8a6a17; }
+  .html-warn svg { width: 14px; height: 14px; flex-shrink: 0; color: #b48512; }
+
+  .field-row { display: grid; grid-template-columns: 110px 1fr; gap: 10px; align-items: center; margin-top: 12px; }
+  .field-row .lbl { font-size: 11.5px; color: var(--text-2); font-weight: 500; }
+  .field-row input { width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); font-size: 12.5px; font-family: var(--font); }
+  .field-row input:focus { outline: none; border-color: var(--brand-1); }
+
+  /* A/B/C split slider visualization */
+  .split-section { background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 12px 14px; margin-top: 12px; }
+  .split-section h4 { font-size: 12px; font-weight: 600; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+  .split-section h4 svg { width: 14px; height: 14px; color: var(--text-3); }
+  .split-bar-total { display: flex; height: 24px; border-radius: 4px; overflow: hidden; border: 1px solid var(--border); }
+  .split-bar-total .seg { display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11px; color: #fff; font-weight: 700; }
+  .split-bar-total .seg.a { background: var(--brand-1); }
+  .split-bar-total .seg.b { background: #8a4fc4; }
+  .split-bar-total .seg.c { background: var(--green); }
+  .split-controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
+  .split-controls .ctrl { padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); display: flex; align-items: center; gap: 6px; }
+  .split-controls .ctrl .lbl { font-family: var(--mono); font-size: 10.5px; font-weight: 700; }
+  .split-controls .ctrl.a .lbl { color: var(--brand-1); }
+  .split-controls .ctrl.b .lbl { color: #8a4fc4; }
+  .split-controls .ctrl.c .lbl { color: var(--green); }
+  .split-controls .ctrl input { width: 50px; padding: 3px 6px; border: 1px solid var(--border-2); border-radius: 3px; font-family: var(--mono); font-size: 11.5px; text-align: right; }
+  .split-controls .ctrl .pct { font-size: 10.5px; color: var(--text-3); }
+
+  /* Live preview */
+  .preview-frame { background: #f5f7fb; border-radius: var(--r-sm); height: 280px; position: relative; overflow: hidden; border: 1px solid var(--border-2); }
+  .preview-frame::before { content: 'プレビュー (variant A 想定)'; position: absolute; top: 8px; left: 12px; font-family: var(--mono); font-size: 9.5px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; z-index: 2; }
+  .preview-image { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 280px; height: 180px; border-radius: 8px; background: linear-gradient(135deg, #e0e7ff, #ede9fe); display: flex; align-items: center; justify-content: center; box-shadow: 0 12px 30px rgba(15,17,23,.20); color: var(--text-3); font-family: var(--mono); font-size: 11px; cursor: pointer; }
+  .preview-disabled-overlay { position: absolute; inset: 0; background: rgba(255,255,255,.86); display: flex; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
+  .preview-disabled-overlay .msg { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 12px 16px; font-size: 12px; color: var(--text-1); display: flex; gap: 8px; align-items: center; max-width: 320px; text-align: left; line-height: 1.45; box-shadow: var(--shadow-sm); }
+  .preview-disabled-overlay .msg svg { width: 18px; height: 18px; color: var(--brand-1); flex-shrink: 0; }
+  .preview-disabled-overlay .msg b { color: var(--brand-1); font-weight: 600; }
+
+  /* Status section */
+  .status-section { background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 12px 14px; margin-top: 12px; }
+  .status-section h4 { font-size: 12px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+  .status-section h4 svg { width: 14px; height: 14px; color: var(--text-3); }
+  .status-options { display: flex; gap: 6px; flex-wrap: wrap; }
+  .status-options label { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border: 1px solid var(--border); background: var(--panel); border-radius: 5px; cursor: pointer; font-size: 11.5px; transition: all .12s; }
+  .status-options label:hover { border-color: var(--border-strong); }
+  .status-options label input { margin: 0; }
+  .status-options label.active.measure { background: var(--accent-bg); border-color: rgba(79,107,255,.4); color: var(--brand-1); font-weight: 600; }
+  .status-options label.locked { opacity: .5; cursor: not-allowed; }
+  .status-options label .lock-ic { color: var(--text-3); }
+  .status-options label .lock-ic svg { width: 11px; height: 11px; }
+  .status-help { font-size: 11px; color: var(--text-3); margin-top: 8px; line-height: 1.55; }
+  .status-help .mono { font-family: var(--mono); font-size: 10.5px; padding: 1px 5px; background: var(--bg-2); border-radius: 3px; }
+
+  .sec-h { font-family: var(--mono); font-size: 10px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; margin: 16px 0 8px; display: flex; align-items: center; gap: 8px; }
+  .sec-h::after { content: ''; flex: 1; height: 1px; background: var(--border-2); }
+</style>
+</head>
+<body>
+<div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#fef3c7;color:#92400e;border-bottom:1px solid #f59e0b;padding:8px 16px;text-align:center;font-family:system-ui,-apple-system,sans-serif;font-size:12px;font-weight:600;">
+  🎨 MOCKUP — このページはデザイン確認用の静的モックです。production 機能ではありません (M-Director、Sprint M-1 Phase 1)
+</div>
+<div class="app" id="app" style="padding-top:36px;">
+
+  <!-- ─── Sidebar ─── -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-mark">U</div>
+      <div class="sidebar-brand-text"><span class="pname">UGOKI MAP</span><span class="psub">m agent · v0.1</span></div>
+    </div>
+    <div class="site-switcher"><div class="s-dot">美</div><div class="s-meta"><b>bihadashop.jp</b><span>site_b1h4d4 · 7d</span></div><div class="chevron">⌄</div></div>
+
+    <div class="product-switcher" aria-label="ページ切り替え">
+      <a href="10_ai_chat.html" title="行動分析" data-product="behavior">
+        <span class="ps-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l4-4 4 4 5-6"/></svg></span>
+        <span class="ps-meta"><span class="ps-title">行動分析</span><span class="ps-sub">Behavior / CVR</span></span>
+      </a>
+      <a href="19_scenarios_list.html" class="active" title="M Agent" data-product="m-agent">
+        <span class="ps-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="9" width="16" height="11" rx="2"/><path d="M9 9V6a3 3 0 0 1 6 0v3"/><circle cx="9" cy="14" r="1"/><circle cx="15" cy="14" r="1"/></svg></span>
+        <span class="ps-meta"><span class="ps-title">M Agent</span><span class="ps-sub">Marketing AI</span></span>
+      </a>
+      <a href="#" class="coming-soon" title="AISEO (Phase 3 予定)" data-product="aiseo" aria-disabled="true">
+        <span class="ps-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/><path d="M8 11h6"/><path d="M11 8v6"/></svg></span>
+        <span class="ps-meta"><span class="ps-title">AISEO</span><span class="ps-sub">SEO / AIO</span></span>
+        <span class="coming-soon-badge">Coming soon</span>
+      </a>
+      <a href="#" class="coming-soon" title="カスタムBI" data-product="custom-bi" aria-disabled="true">
+        <span class="ps-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="12" width="4" height="8" rx="1"/><rect x="10" y="7" width="4" height="13" rx="1"/><rect x="17" y="4" width="4" height="16" rx="1"/></svg></span>
+        <span class="ps-meta"><span class="ps-title">カスタムBI</span><span class="ps-sub">Client reports</span></span>
+        <span class="coming-soon-badge">Coming soon</span>
+      </a>
+    </div>
+
+    <nav class="side-nav" style="padding-top: 8px;">
+      <a href="19_scenarios_list.html" class="active" data-nav="targeting-banner">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+        <span class="lbl">ターゲティングバナー</span>
+        <span class="count">1</span>
+      </a>
+    </nav>
+
+    <div class="side-flex"></div>
+
+    <div class="section-label"><span class="lbl">アカウント</span></div>
+    <nav class="side-nav">
+      <a href="15_install_settings.html" data-nav="install-settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">設定 / タグ設置</span></a>
+      <a href="16_login.html" data-nav="logout"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg><span class="lbl">ログアウト</span></a>
+    </nav>
+
+    <div class="footer-user"><div class="avatar-chip">H</div><div><div class="u-name">hiroki</div><div class="u-org">org_ugoki_internal</div></div><span class="kbd">⌘K</span></div>
+  </aside>
+
+  <!-- ─── Main ─── -->
+  <main class="ed-body">
+    <div class="ed-inner">
+
+      <div class="ed-head">
+        <div>
+          <div class="eyebrow">M AGENT · ターゲティングバナー · 編集</div>
+          <h1>
+            <input class="name-input" value="初回 + organic + 60s 滞在 + cart 未到達">
+          </h1>
+          <div class="sub">
+            <span class="site">bihadashop.jp</span>
+            <span class="status-pill live"><span class="dot"></span>live</span>
+            <span class="ev planned">planned</span>
+            <span>· 最終更新 2026-05-25 09:30 · A/B/C variants 3 件</span>
+          </div>
+        </div>
+        <div class="actions">
+          <a class="btn" href="19_scenarios_list.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>一覧へ</a>
+          <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/></svg>プレビュー</button>
+          <button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>保存</button>
+        </div>
+      </div>
+
+      <div class="ed-grid">
+
+        <!-- LEFT: condition builder -->
+        <div>
+          <div class="panel">
+            <div class="panel-h">
+              <h3>条件 (誰に発火するか)</h3>
+              <span class="mono">depth ≤ 5 / leaf ≤ 30</span>
+            </div>
+
+            <div class="input-tabs">
+              <div class="input-tab">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+                自然言語入力 <span class="beta">Phase 2</span>
+              </div>
+              <div class="input-tab active">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="15" y="3" width="6" height="6" rx="1"/><rect x="9" y="15" width="6" height="6" rx="1"/><path d="M6 9v2a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V9"/></svg>
+                Visual Builder
+              </div>
+            </div>
+
+            <div class="vb">
+              <div class="vb-group">
+                <div class="gh">
+                  <span class="gh-op">
+                    <button class="on">AND</button>
+                    <button>OR</button>
+                    <button>NOT</button>
+                  </span>
+                  <span class="gh-label">5 条件すべてを満たす</span>
+                </div>
+
+                <div class="vb-row">
+                  <span class="drag"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg></span>
+                  <select>
+                    <option>utm_medium (流入種別)</option>
+                    <option>session_duration_sec (滞在秒)</option>
+                    <option>page_views_in_session (PV)</option>
+                    <option>is_first_visit (初回?)</option>
+                    <option>url_path (URL パス)</option>
+                  </select>
+                  <span class="op-tag">EQ</span>
+                  <input value="organic">
+                  <button class="del"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+                </div>
+                <div class="vb-row">
+                  <span class="drag"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg></span>
+                  <select><option>session_duration_sec (滞在秒)</option></select>
+                  <span class="op-tag">GTE</span>
+                  <input value="60" type="number">
+                  <button class="del"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+                </div>
+                <div class="vb-row">
+                  <span class="drag"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg></span>
+                  <select><option>page_views_in_session (PV)</option></select>
+                  <span class="op-tag">GTE</span>
+                  <input value="3" type="number">
+                  <button class="del"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+                </div>
+                <div class="vb-row">
+                  <span class="drag"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg></span>
+                  <select><option>url_path (URL パス)</option></select>
+                  <span class="op-tag">NOT_VISITED</span>
+                  <input value="/cart">
+                  <button class="del"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+                </div>
+                <div class="vb-row">
+                  <span class="drag"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg></span>
+                  <select><option>is_first_visit (初回?)</option></select>
+                  <span class="op-tag">EQ</span>
+                  <input value="true">
+                  <button class="del"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+                </div>
+
+                <div class="vb-add">
+                  <button class="btn outline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>条件追加</button>
+                  <button class="btn outline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>グループ追加</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="ast-preview">
+<span class="punc">{</span> <span class="key">"op"</span><span class="punc">:</span> <span class="str">"AND"</span><span class="punc">,</span> <span class="key">"children"</span><span class="punc">:</span> <span class="punc">[</span>
+  <span class="punc">{</span> <span class="key">"op"</span><span class="punc">:</span><span class="str">"EQ"</span><span class="punc">,</span>  <span class="key">"field"</span><span class="punc">:</span><span class="str">"utm_medium"</span><span class="punc">,</span>           <span class="key">"value"</span><span class="punc">:</span><span class="str">"organic"</span> <span class="punc">},</span>
+  <span class="punc">{</span> <span class="key">"op"</span><span class="punc">:</span><span class="str">"GTE"</span><span class="punc">,</span> <span class="key">"field"</span><span class="punc">:</span><span class="str">"session_duration_sec"</span><span class="punc">,</span> <span class="key">"value"</span><span class="punc">:</span><span class="num">60</span> <span class="punc">},</span>
+  <span class="punc">{</span> <span class="key">"op"</span><span class="punc">:</span><span class="str">"GTE"</span><span class="punc">,</span> <span class="key">"field"</span><span class="punc">:</span><span class="str">"page_views_in_session"</span><span class="punc">,</span><span class="key">"value"</span><span class="punc">:</span><span class="num">3</span> <span class="punc">},</span>
+  <span class="punc">{</span> <span class="key">"op"</span><span class="punc">:</span><span class="str">"NOT_VISITED"</span><span class="punc">,</span> <span class="key">"field"</span><span class="punc">:</span><span class="str">"url_path"</span><span class="punc">,</span> <span class="key">"value"</span><span class="punc">:</span><span class="str">"/cart"</span> <span class="punc">},</span>
+  <span class="punc">{</span> <span class="key">"op"</span><span class="punc">:</span><span class="str">"EQ"</span><span class="punc">,</span>  <span class="key">"field"</span><span class="punc">:</span><span class="str">"is_first_visit"</span><span class="punc">,</span>       <span class="key">"value"</span><span class="punc">:</span><span class="bool">true</span> <span class="punc">}</span>
+<span class="punc">]</span> <span class="punc">}</span>
+            </div>
+          </div>
+
+          <div class="sec-h">対象想定 (過去 7 日シミュレーション)</div>
+          <div class="panel">
+            <div class="panel-b" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; padding: 14px 16px;">
+              <div><div style="font-family:var(--mono);font-size:10px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.08em;">対象 visitor</div><div style="font-family:var(--mono);font-size:18px;font-weight:700;margin-top:4px;">612</div></div>
+              <div><div style="font-family:var(--mono);font-size:10px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.08em;">match 件数</div><div style="font-family:var(--mono);font-size:18px;font-weight:700;margin-top:4px;">847</div></div>
+              <div><div style="font-family:var(--mono);font-size:10px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.08em;">推定 CVR</div><div style="font-family:var(--mono);font-size:18px;font-weight:700;margin-top:4px;color:var(--green);">4.3%</div></div>
+              <div><div style="font-family:var(--mono);font-size:10px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.08em;">サイト平均</div><div style="font-family:var(--mono);font-size:18px;font-weight:700;margin-top:4px;color:var(--text-3);">2.1%</div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT: variant editor (A/B/C tabs + image/HTML) -->
+        <div>
+          <div class="panel">
+            <div class="panel-h">
+              <h3>バリアント (A/B/C 最大 3 つ)</h3>
+              <span class="mono">画像 or HTML、汎用フィールドなし</span>
+            </div>
+
+            <div class="vt-tabs">
+              <div class="vt-tab a active">
+                <span class="vt-badge">A</span>
+                <span>variant A</span>
+                <button class="del" title="削除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+              </div>
+              <div class="vt-tab b">
+                <span class="vt-badge">B</span>
+                <span>variant B</span>
+                <button class="del" title="削除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+              </div>
+              <div class="vt-tab c">
+                <span class="vt-badge">C</span>
+                <span>variant C</span>
+                <button class="del" title="削除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+              </div>
+              <div class="vt-tab add" title="最大 3 個まで">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+                追加
+              </div>
+              <div class="split-info">3 / 3 variants</div>
+            </div>
+
+            <div class="panel-b">
+              <div class="vt-type-row">
+                <label class="active">
+                  <input type="radio" name="vtype" checked>
+                  <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg></span>
+                  <span class="meta"><span class="name">画像</span><span class="desc">Cloudflare R2 にアップロード、サイト側で表示</span></span>
+                </label>
+                <label>
+                  <input type="radio" name="vtype">
+                  <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></span>
+                  <span class="meta"><span class="name">HTML</span><span class="desc">インライン HTML 直接記述、DOMPurify で sanitize</span></span>
+                </label>
+              </div>
+
+              <!-- Image variant (active) -->
+              <div class="img-uploaded">
+                <div class="img-frame">画像プレビュー (480×320)</div>
+                <div class="img-meta">
+                  <span>banner_a_2026-05-25.png</span>
+                  <span class="size">· 142 KB · 480×320</span>
+                  <span class="actions">
+                    <button class="btn sm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>差し替え</button>
+                    <button class="btn sm danger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg></button>
+                  </span>
+                </div>
+              </div>
+
+              <!-- HTML variant (hidden in mock, design SSOT) -->
+              <div style="display:none;">
+                <div class="html-editor"><span class="tag">&lt;div</span> <span class="attr">class</span>=<span class="str">"promo-banner"</span><span class="tag">&gt;</span>
+  <span class="tag">&lt;h3&gt;</span>初回 10% OFF<span class="tag">&lt;/h3&gt;</span>
+  <span class="tag">&lt;p&gt;</span>コード: <span class="tag">&lt;b&gt;</span>FIRST10<span class="tag">&lt;/b&gt;</span><span class="tag">&lt;/p&gt;</span>
+  <span class="tag">&lt;a</span> <span class="attr">href</span>=<span class="str">"/products?promo=FIRST10"</span><span class="tag">&gt;</span>クーポンを使う<span class="tag">&lt;/a&gt;</span>
+<span class="tag">&lt;/div&gt;</span></div>
+                <div class="html-warn">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><circle cx="12" cy="12" r="10"/></svg>
+                  &lt;script&gt; / onclick / javascript: は DOMPurify で除去されます。サイトの class 名・CSS とコード一致を確認してください。
+                </div>
+              </div>
+
+              <div class="field-row">
+                <div class="lbl">CTA URL</div>
+                <input value="/products?promo=FIRST10">
+              </div>
+              <div class="field-row">
+                <div class="lbl">表示位置</div>
+                <select style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--panel);font-size:12.5px;font-family:var(--font);">
+                  <option>画面中央 (POP)</option>
+                  <option>右下</option>
+                  <option>左下</option>
+                  <option>上中央 (バナー)</option>
+                  <option>下中央 (バナー)</option>
+                  <option>インライン (コンテンツ内)</option>
+                </select>
+              </div>
+
+              <div class="split-section">
+                <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18"/></svg>traffic split (A/B/C 配信比率)</h4>
+                <div class="split-bar-total">
+                  <div class="seg a" style="width:34%">34%</div>
+                  <div class="seg b" style="width:33%">33%</div>
+                  <div class="seg c" style="width:33%">33%</div>
+                </div>
+                <div class="split-controls">
+                  <div class="ctrl a"><span class="lbl">A</span> <input value="34" type="number" min="0" max="100"> <span class="pct">%</span></div>
+                  <div class="ctrl b"><span class="lbl">B</span> <input value="33" type="number" min="0" max="100"> <span class="pct">%</span></div>
+                  <div class="ctrl c"><span class="lbl">C</span> <input value="33" type="number" min="0" max="100"> <span class="pct">%</span></div>
+                </div>
+                <div class="status-help" style="margin-top: 8px;">
+                  visitor_id の hash で 決定論的に振り分け (同 visitor は常に同じ variant が当たる、ページ遷移してもブレない)。<br>
+                  各 variant の impression / click / dismiss / conversion を計測し、勝者を観測。Phase 3 で AI 自動勝者振り分けに昇格予定。
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec-h">プレビュー (variant A)</div>
+          <div class="panel">
+            <div class="panel-b" style="padding: 14px;">
+              <div class="preview-frame">
+                <div class="preview-image">画像 (480×320)<br>banner_a_2026-05-25.png</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="status-section">
+            <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>配信ステータス</h4>
+            <div class="status-options">
+              <label><input type="radio" name="status"> draft (作成中)</label>
+              <label><input type="radio" name="status"> measure_only (計測のみ)</label>
+              <label><input type="radio" name="status"> <span class="status-pill preview"><span class="dot"></span>preview (dogfood のみ)</span></label>
+              <label class="active measure"><input type="radio" name="status" checked> <span class="status-pill live"><span class="dot"></span>live (本番配信中)</span></label>
+              <label><input type="radio" name="status"> paused (一時停止)</label>
+            </div>
+            <div class="status-help">
+              <b>draft</b> = 作成途中、配信なし / <b>measure_only</b> = 条件 match のみ計測、表示なし / <b>preview</b> = dogfood ロールのみ表示 / <b>live</b> = 全 visitor に配信中 / <b>paused</b> = 一時停止<br>
+              注: 親 SSOT <span class="mono">§1.7.1</span> (variant execution = VWO 委譲) は Owner 判断で改訂予定。
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+</div>
+</body>
+</html>
