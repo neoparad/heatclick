@@ -547,7 +547,21 @@
   const shouldLoad = (name) => { if (config.extensions==='all') return true; if (config.extensions==='none') return false; return config.extensions.split(',').map(s=>s.trim()).includes(name); };
 
   const loadExtensions = () => {
-    const base = scriptOrigin ? scriptOrigin + '/tracking-ext-' : '/tracking-ext-';
+    // 続 82-completed bug fix (2026-05-25): scriptOrigin (origin only) だと /v2/ 等のサブディレクトリ
+    // 配置時に extension URL が `/tracking-ext-*.js` (root) になり 404 → Chrome ORB で全 extension block。
+    // 修正: script の directory (origin + path up to last '/') を base にする。
+    // 例: scriptSrc = "https://host/v2/tracking.js?id=X" → extBase = "https://host/v2/tracking-ext-"
+    let extBase = '/tracking-ext-';
+    if (cs && cs.src) {
+      try {
+        const u = new URL(cs.src);
+        const dir = u.pathname.replace(/[^/]+$/, '');
+        extBase = u.origin + dir + 'tracking-ext-';
+      } catch {}
+    } else if (scriptOrigin) {
+      extBase = scriptOrigin + '/tracking-ext-';
+    }
+    const base = extBase;
     // Utils extension loads first (provides PII/cookie/URL handling)
     const names = ['utils', 'form', 'video', 'image', 'element', 'active-time', 'behavior', 'scroll-timeline', 'spa', 'web-vitals'];
     for (const name of names) {
