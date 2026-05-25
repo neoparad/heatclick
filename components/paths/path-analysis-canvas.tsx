@@ -35,7 +35,6 @@ import {
   Edit3,
   Eye,
   HelpCircle,
-  Info,
   ListChecks,
   Play,
   ShoppingCart,
@@ -259,20 +258,9 @@ function CanvasArea({ data, tab }: { data: PathAnalysisData; tab: TabId }) {
   )
 }
 
-function DummyBanner() {
-  return (
-    <div
-      role="note"
-      className="mx-5 mb-2 flex items-start gap-2 rounded-md border border-[color:var(--ug-yellow)]/30 bg-[color:var(--ug-yellow)]/10 px-3 py-2 text-[11.5px] text-[color:var(--ug-text)]"
-    >
-      <Info className="mt-0.5 h-4 w-4 flex-shrink-0 text-[color:var(--ug-yellow)]" aria-hidden />
-      <span>
-        Phase 1 dogfood — 全ノードの数値は dummy。Sprint 4 で events MV (Infra 続 67 D-1)
-        由来の <strong>observed_approx</strong> に置換予定 (D-07)。
-      </span>
-    </div>
-  )
-}
+// 続 83 §② Owner feedback: DummyBanner function は撤去 (Info import は同ファイル内 BranchRow tooltip で再利用)。
+// Phase 1 dummy 注釈は workflow header badge + node 数値で D-07 整合済。
+// Sprint 4 で実 data 切替時に observed_approx badge を node 単位で付与する設計 (本 file 変更不要)。
 
 function BranchToggles({ data }: { data: PathAnalysisData }) {
   return (
