@@ -842,15 +842,19 @@ function jsonResponse(
   cors: Record<string, string>,
   nonce: string,
 ): Response {
-  // CSP nonce を Content-Security-Policy header に乗せる
-  // 顧客サイトの policy は customer-side、本 worker response 自体は API なので
-  // Frontend (tracking.js) が `<style nonce="...">` / `<script nonce="...">` 描画時に再利用する
+  // Phase 2A は nonce 単独配信 (続 97 §2 案 B、CSP enforcement は Phase 2B 移管):
+  // - response body decision.nonce + response header X-Banner-Nonce で per-request UUID を返す
+  // - Worker 自身は `Content-Security-Policy` header を発行しない (続 104 dispatch-15 §B5 #2 整合)
+  // - 顧客サイト側で CSP を強制している環境では nonce-source ('nonce-...') と一致するため
+  //   ブラウザ側 enforcement が成立 (forward-compatible、Phase 2B `dispatch-13` で worker 側 enforcement 追加予定)
+  // - Frontend (tracking.js v2.4.0+) は body or header から nonce 読み取り、`<style nonce="...">`
+  //   / `<script nonce="...">` 描画時に attach する
   const headers: Record<string, string> = {
     ...cors,
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store, max-age=0',
     'X-Content-Type-Options': 'nosniff',
-    'X-Banner-Nonce': nonce, // 重複だが Frontend が header 経由で読みたい場合のため
+    'X-Banner-Nonce': nonce, // body decision.nonce と同値、Frontend が header 経由で読む場合のため
   };
   return new Response(JSON.stringify(body), { status, headers });
 }

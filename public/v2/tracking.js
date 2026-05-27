@@ -22,6 +22,15 @@
  *            page_views_in_session 列を追加 (ClickHouse events table の v2 列に対応)
  *         参照: handoff/2026-05-25-infra-sprint4-w1-tracking-schema-v2.md §2.1
  *
+ * Banner Engine 連動 (Phase 2A、続 104 dispatch-14 §F1):
+ *         data-site-id (tracking_id 形式 CIP_* または UUID v4) を持つ訪問者から、
+ *         Banner Runtime Worker (https://ugokimap-banner-runtime.linkth.workers.dev/v1/decision)
+ *         に `?site_id=<tracking_id or UUID>&tenant_id=<...>&cid=<GA cid>` で問合せ可能。
+ *         Worker は両形式を受入 (続 103 dispatch-14 §B6)、response.decision.nonce +
+ *         X-Banner-Nonce header (byte-level 同値、続 97 §2) を取得し banner DOM 注入時に
+ *         <script nonce="..."> / <style nonce="..."> 属性を attach する。
+ *         CSP enforcement は Phase 2B 移管 (顧客サイト CSP 強制環境のみ enforcement 成立、続 97 §2 案 B)。
+ *
  * SaaS 流用 (B-1、decisions.md L275 続 14 / L162 続 15 §4.4 BR1): multi-tenant 化に伴い
  * data-tenant-id 必須化:
  *   <script src=".../tracking.js" data-site-id="..." data-tenant-id="linkth_internal" defer></script>
