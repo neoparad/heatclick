@@ -15,13 +15,13 @@ compatibility_date = "2024-12-01"
 
 [[kv_namespaces]]
 binding = "RULE_BUNDLES_KV"
-id = "REPLACE_WITH_RULE_BUNDLES_KV_ID"
-preview_id = "REPLACE_WITH_RULE_BUNDLES_KV_PREVIEW_ID"
+id = "e956e76f604b4e6d803cbaf80d86fc75"
+preview_id = "05b491cb09264be19fc9363876a8c60e"
 
 [[kv_namespaces]]
 binding = "MEMBER_ATTRIBUTES_KV"
-id = "REPLACE_WITH_MEMBER_ATTRIBUTES_KV_ID"
-preview_id = "REPLACE_WITH_MEMBER_ATTRIBUTES_KV_PREVIEW_ID"
+id = "24894863086a4040a0ebaf9111d7a35e"
+preview_id = "b8d75689bdf8486ab4e25421be5ba87e"
 
 [vars]
 ALLOWED_ORIGINS = "*"
