@@ -24,7 +24,7 @@
  * 重要制約 (PRD §1.3 / §2):
  *   - ClickHouse 直接 read 禁止 (C3)
  *   - cross-tenant 配信絶対禁止 (D-4)
- *   - banner_config.sensitive_category_excluded=true の LLM 由来 banner は skip (C7)
+ *   - banner_config.sensitive_category_excluded === false (未 review) かつ evidence_level === 'inferred' の banner は skip (C7、続 90 SSOT)
  *   - P95 latency ≤ 100ms (KV read 2 回で完結する設計)
  *   - gzip ≤ 20KB / main thread ≤ 50ms / CLS 0 (PRD §2 F3)
  *
@@ -356,8 +356,14 @@ function passesHoldout(cid: string, banner_id: string, cap: number | null | unde
 }
 
 function shouldSkipSensitive(banner: BannerConfig): boolean {
-  // PRD §2 F1 step 11 / C7: sensitive_category_excluded=true AND evidence_level=inferred → skip
-  if (banner.sensitive_category_excluded === true && banner.evidence_level === 'inferred') return true;
+  // canonical SSOT (続 90 確定):
+  //   schemas/banner_config.schema.json description + privacy-csp-perf-gate §1.3
+  //   excluded === false (未 review 既定値) AND evidence_level === 'inferred' → skip
+  //   excluded === true (Marketer manual review 済) → 配信可 (inferred でも)
+  // schema default: false を尊重、undefined も未 review と同等に扱う (??false で正規化)
+  // PRD §2 F1 step 11 + C7 は続 90 + dispatch-07 で本 SSOT に整合化 patch 済
+  const excluded = banner.sensitive_category_excluded ?? false;
+  if (excluded === false && banner.evidence_level === 'inferred') return true;
   return false;
 }
 
@@ -374,16 +380,26 @@ function shouldSkipSensitive(banner: BannerConfig): boolean {
 
 interface ConsentDecision {
   allowed: boolean;
-  reason?: 'personalization_not_opted_in' | 'ads_not_opted_in';
+  reason?: 'personalization_not_opted_in' | 'ads_not_opted_in' | 'consent_flags_missing';
 }
 
 function evaluateConsent(
   bundle: RuleBundle,
   member: MemberAttribute | null,
 ): ConsentDecision {
-  const bundleFlags = bundle.consent_flags ?? { analytics: true, personalization: true, ads: true };
-  const memberFlags = member?.consent;
+  // CRITICAL fail-closed (続 95 A-C1 / 続 96 dispatch-11 §1):
+  //   bundle.consent_flags undefined / partial → deny with consent_flags_missing.
+  //   旧実装は default allow に倒れ legacy/malformed bundle で consent gate bypass の hole。
+  const bundleFlags = bundle.consent_flags;
+  if (
+    !bundleFlags ||
+    typeof bundleFlags.personalization !== 'boolean' ||
+    typeof bundleFlags.ads !== 'boolean'
+  ) {
+    return { allowed: false, reason: 'consent_flags_missing' };
+  }
 
+  const memberFlags = member?.consent;
   const personalization = bundleFlags.personalization && (memberFlags?.personalization ?? true);
   const ads = bundleFlags.ads && (memberFlags?.ads ?? true);
 
@@ -485,6 +501,10 @@ function anonymizeIp(ip: string | null): string {
   return '';
 }
 
+// 続 96 dispatch-11 §5: audit naming 統一 (`banner.*` prefix)。
+//   `banner.deletion_processed` は declare-only で emit point なし → 削除。
+//   publish job 側 (`kv.member_tombstone` / `kv.tenant_purge`) は `banner.*` に rename (audit.py + cli.py)。
+//   `banner.sensitive_category_blocked` を §3 で新規 emit (shouldSkipSensitive 経由)。
 type AuditAction =
   | 'banner.serve'
   | 'banner.no_match'
@@ -492,7 +512,9 @@ type AuditAction =
   | 'banner.fallback'
   | 'banner.error'
   | 'banner.cross_tenant_blocked'
-  | 'banner.deletion_processed';
+  | 'banner.sensitive_category_blocked'
+  | 'banner.member_tombstone'
+  | 'banner.tenant_purge';
 
 interface AuditRow {
   tenant_id: string;
@@ -727,7 +749,24 @@ async function handleDecision(
 
   for (const banner of banners) {
     if (banner.status !== 'active') continue;
-    if (shouldSkipSensitive(banner)) continue;
+    if (shouldSkipSensitive(banner)) {
+      // 続 96 dispatch-11 §3 (C-W1): silent skip ではなく audit emit、production 観測可能化。
+      // payload: banner_id + evidence_level + sensitive_category_excluded (??false 正規化前)。
+      execCtx.waitUntil(
+        emitAuditEvent(env, request, {
+          tenant_id,
+          action: 'banner.sensitive_category_blocked',
+          resource: banner.banner_id,
+          audit_correlation_id,
+          reason: 'inferred_blocked',
+          detail: JSON.stringify({
+            evidence_level: banner.evidence_level,
+            sensitive_category_excluded: banner.sensitive_category_excluded ?? false,
+          }),
+        }),
+      );
+      continue;
+    }
     if (!audienceMatches(banner, memberFlags)) continue;
     // holdout (match_rate_cap)
     const cap = banner.audience_targeting.match_rate_cap ?? null;
