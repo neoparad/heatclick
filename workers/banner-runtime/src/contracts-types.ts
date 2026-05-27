@@ -19,6 +19,13 @@ export interface RuleBundle {
   version: string;
   tenant_id: string;
   site_id: string;
+  /**
+   * dispatch-14 / 続 103 (Phase 2A.1 B6): Owner 配布の tracking_id alias (CIP_*).
+   * tracking.js v2.4.0+ が `?site_id=<tracking_id>` で送出するため、worker は
+   * site_id verify を bundle.site_id (UUID v4) または bundle.tracking_id どちらかの一致で OK 判定。
+   * Optional、wakegai 等の legacy tracking_id 経路サポート用。
+   */
+  tracking_id?: string;
   published_at: string;
   consent_flags?: ConsentTriple;
   performance_budget: {

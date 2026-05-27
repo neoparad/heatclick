@@ -694,13 +694,23 @@ describe('§10 fetch handler — baseline (B)', () => {
     assert.equal((body as { error: string }).error, 'site_id required');
   });
 
-  test('B3 site_id non-UUID → 400', async () => {
+  test('B3 site_id non-UUID and non-tracking_id → 400 (続 103 B6 整合)', async () => {
     const env = buildIntegEnv();
     const { status, body } = await callDecisionInteg(env, {
       cid: CID, site_id: 'not-a-uuid', tenant_id: TENANT,
     });
     assert.equal(status, 400);
-    assert.equal((body as { error: string }).error, 'site_id must be UUID');
+    assert.equal((body as { error: string }).error, 'site_id must be UUID v4 or tracking_id (CIP_*)');
+  });
+
+  test('B3b tracking_id 形式 (CIP_*) → 受入 (続 103 B6、fallback path = KV 不在で fallback)', async () => {
+    const env = buildIntegEnv();
+    const { status, body } = await callDecisionInteg(env, {
+      cid: CID, site_id: 'CIP_QWaPiks5krukJ6NM', tenant_id: TENANT,
+    });
+    // KV bundle が CIP_ key 配下に投入されていない integ test 環境では fallback、ただし 400 ではないこと
+    assert.equal(status, 200);
+    assert.equal((body as { status: string }).status, 'fallback');
   });
 
   test('B4 tenant_id missing → 400', async () => {

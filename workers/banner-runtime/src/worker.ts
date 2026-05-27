@@ -260,12 +260,16 @@ async function readRuleBundleFromKv(
       detail: `bundle.tenant_id=${bundle.tenant_id} != request tenant_id=${tenant_id}`,
     };
   }
-  if (bundle.site_id !== site_id) {
-    // site_id mismatch も同様に拒否 (KV key と bundle 内 site_id 不一致 = data corruption)
+  // dispatch-14 / 続 103 (B6): site_id 検証は bundle.site_id (UUID v4 正規) または
+  // bundle.tracking_id (Owner 配布 CIP_* 形式 alias、tracking.js v2.4.0 が送出) のどちらか一致で OK。
+  // どちらも不一致なら data corruption (KV key prefix と bundle metadata が乖離) として block。
+  const matchesSiteId = bundle.site_id === site_id;
+  const matchesTrackingId = bundle.tracking_id !== undefined && bundle.tracking_id === site_id;
+  if (!matchesSiteId && !matchesTrackingId) {
     return {
       ok: false,
       reason: 'tenant_mismatch',
-      detail: `bundle.site_id=${bundle.site_id} != request site_id=${site_id}`,
+      detail: `bundle.site_id=${bundle.site_id} (tracking_id=${bundle.tracking_id ?? 'unset'}) != request site_id=${site_id}`,
     };
   }
 
@@ -646,9 +650,17 @@ async function handleDecision(
       { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } },
     );
   }
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(site_id)) {
+  // dispatch-14 / 続 103 (Phase 2A.1 B6): site_id は 2 形式を受入:
+  // (a) UUID v4 形式 (clickinsight.sites.id、SaaS dashboard 経由の正規 ID)
+  // (b) Owner 配布の tracking_id 形式 (`CIP_<base62>` 例: CIP_QWaPiks5krukJ6NM、tracking.js v2.4.0 が送出)
+  // KV key prefix は site_id をそのまま使うため、publish job 側で
+  // bundle を tracking_id key 配下 (rules/{tenant}/{tracking_id}/...) で投入すれば両経路で配信可能
+  // (続 39 §2 + 続 101 §5 B6 + dispatch-14 案 B 整合)
+  const SITE_ID_UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const SITE_ID_TRACKING = /^CIP_[A-Za-z0-9]{6,32}$/;
+  if (!SITE_ID_UUID_V4.test(site_id) && !SITE_ID_TRACKING.test(site_id)) {
     return new Response(
-      JSON.stringify({ error: 'site_id must be UUID' }),
+      JSON.stringify({ error: 'site_id must be UUID v4 or tracking_id (CIP_*)' }),
       { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } },
     );
   }
