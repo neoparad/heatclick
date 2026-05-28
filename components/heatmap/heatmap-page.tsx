@@ -1,25 +1,41 @@
 /**
  * HeatmapPage — P-04 のクライアントトップレベル
  *
- * 親 SSOT Part V §5.5.1 P-04
+ * 親 SSOT Part V §5.5.1 P-04 / mockup `mockups/01_heatmap_canvas.html`
+ * Dispatch: 2026-05-29 frontend mockup parity rebuild
  *
- * 構成:
- *  - 左サイドコントロール: layer toggle / page url select / date range (Sprint 2 で本格化)
- *  - 中央: HeatmapCanvas (tile pagination)
- *  - 右下: HotspotDetail (slide-in)
+ * 構成 (mockup parity):
+ *   1. 上段: PageSelector + EvidenceBadge
+ *   2. SegmentChip 群: PC+SP / PC / SP, 直近 7/14/30 日 (集計フィルタ、page-level)
+ *   3. PageStatsBar (URL + PV/sessions/CTR/滞留)
+ *   4. HeatmapCanvas: mockup の `.hm-controls` + `.hm-main` (canvas + side) 全部を内包
+ *   5. HotspotDetail (slide-in、legacy)
+ *
+ * 旧 deck.gl / nivo / three.js は本 dispatch で全廃。LayerToggle / HotspotRankingsPanel
+ * / emotion-chip-skeleton も HeatmapCanvas 内に統合 (mockup parity)。
+ *
+ * `useHeatmapTiles` は本コンポーネントが own、HeatmapCanvas に props で渡す。
  */
 
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
+import dynamic from 'next/dynamic'
 import { ChevronDown } from 'lucide-react'
 
-import { Card, CardContent } from '@/components/ui/card'
+import { SegmentChip } from '@/components/ui/segment-chip'
 import { EvidenceBadge } from '@/components/dashboard/evidence-badge'
+import { useHeatmapTiles } from '@/hooks/use-heatmap-tiles'
 import type { HeatmapLayer, HeatmapPoint, HeatmapTile } from '@/lib/api/heatmap'
-import { HeatmapCanvas } from './heatmap-canvas'
+
 import { HotspotDetail } from './hotspot-detail'
-import { LayerToggle } from './layer-toggle'
+import { PageStatsBar } from './page-stats-bar'
+
+/** HeatmapCanvas を chunk 分離 (mockup overlays 群を含むため bundle 数十 KB) */
+const HeatmapCanvas = dynamic(
+  () => import('./heatmap-canvas').then((m) => ({ default: m.HeatmapCanvas })),
+  { ssr: false, loading: () => <HeatmapCanvasFallback /> },
+)
 
 interface HeatmapPageProps {
   siteId: string
@@ -27,42 +43,177 @@ interface HeatmapPageProps {
   pageOptions: Array<{ url: string; label: string }>
 }
 
+type DeviceFilter = 'all' | 'desktop' | 'mobile'
+type PeriodDays = 7 | 14 | 30
+
+function isoDate(d: Date): string {
+  return d.toISOString().slice(0, 10)
+}
+
+function periodToRange(days: PeriodDays): { start: string; end: string } {
+  const end = new Date()
+  const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000)
+  return { start: isoDate(start), end: isoDate(end) }
+}
+
 export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPageProps) {
-  const [layer, setLayer] = useState<HeatmapLayer>('click')
+  // legacy 互換のため初期 layer を保持 (HeatmapCanvas 内で multi-layer 化)
+  const [layer] = useState<HeatmapLayer>('click')
   const [pageUrl, setPageUrl] = useState(initialPageUrl)
+  const [deviceFilter, setDeviceFilter] = useState<DeviceFilter>('all')
+  const [periodDays, setPeriodDays] = useState<PeriodDays>(7)
   const [selected, setSelected] = useState<{ point: HeatmapPoint; tile: HeatmapTile } | null>(null)
 
+  const dateRange = useMemo(() => periodToRange(periodDays), [periodDays])
+
+  const heatmapQuery = useMemo(
+    () => ({
+      site_id: siteId,
+      page_url: pageUrl,
+      layer,
+      device_type: deviceFilter === 'all' ? undefined : (deviceFilter as 'desktop' | 'mobile'),
+      start_date: dateRange.start,
+      end_date: dateRange.end,
+    }),
+    [siteId, pageUrl, layer, deviceFilter, dateRange.start, dateRange.end],
+  )
+
+  const { tiles, loading, hasMore, pageHeightEstimate, meta, error, loadMore } =
+    useHeatmapTiles(heatmapQuery)
+
   return (
-    <div className="relative space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-background px-4 py-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <PageSelector value={pageUrl} options={pageOptions} onChange={setPageUrl} />
-          <LayerToggle value={layer} onChange={setLayer} />
+    <div className="relative space-y-3">
+      {/*
+        段 1 (1.5 段化): PAGE select + DEVICE chips + PERIOD chips + Observed バッジ
+        を 1 列に詰めて canvas 縦領域を拡大 (2026-05-29 dispatch Approach B)。
+        段 2 (LAYER + EMOTION) は HeatmapCanvas 内 ControlsBar に残置 (chip 12 個
+        詰めるとSP で窮屈なため)。
+        mockup `.hm-controls` (`display:flex; gap:10px; flex-wrap:wrap;`) 踏襲。
+      */}
+      <div
+        className="hm-controls flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-[var(--ug-border)] bg-white px-4 py-2.5"
+        data-testid="heatmap-page-filter-bar"
+      >
+        <PageSelector value={pageUrl} options={pageOptions} onChange={setPageUrl} />
+
+        <span className="hidden h-4 w-px bg-[var(--ug-border)] md:block" aria-hidden />
+
+        <div role="radiogroup" aria-label="デバイス絞り込み" className="flex items-center gap-1.5">
+          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
+            Device
+          </span>
+          <SegmentChip
+            asRadio
+            active={deviceFilter === 'all'}
+            onClick={() => setDeviceFilter('all')}
+            data-testid="segment-chip-device-all"
+          >
+            PC + SP
+          </SegmentChip>
+          <SegmentChip
+            asRadio
+            active={deviceFilter === 'desktop'}
+            onClick={() => setDeviceFilter('desktop')}
+            data-testid="segment-chip-device-desktop"
+          >
+            PC
+          </SegmentChip>
+          <SegmentChip
+            asRadio
+            active={deviceFilter === 'mobile'}
+            onClick={() => setDeviceFilter('mobile')}
+            data-testid="segment-chip-device-mobile"
+          >
+            SP
+          </SegmentChip>
         </div>
-        <EvidenceBadge
-          evidence={{
-            level: layer === 'emotion' || layer === 'friction' ? 'inferred' : 'observed',
-            confidence: layer === 'emotion' ? 0.65 : layer === 'friction' ? 0.72 : 1,
-            references: [],
-          }}
-        />
+
+        <span className="hidden h-4 w-px bg-[var(--ug-border)] md:block" aria-hidden />
+
+        <div role="radiogroup" aria-label="期間絞り込み" className="flex items-center gap-1.5">
+          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
+            Period
+          </span>
+          <SegmentChip
+            asRadio
+            active={periodDays === 7}
+            onClick={() => setPeriodDays(7)}
+            data-testid="segment-chip-period-7"
+          >
+            直近 7 日
+          </SegmentChip>
+          <SegmentChip
+            asRadio
+            active={periodDays === 14}
+            onClick={() => setPeriodDays(14)}
+            data-testid="segment-chip-period-14"
+          >
+            直近 14 日
+          </SegmentChip>
+          <SegmentChip
+            asRadio
+            active={periodDays === 30}
+            onClick={() => setPeriodDays(30)}
+            data-testid="segment-chip-period-30"
+          >
+            直近 30 日
+          </SegmentChip>
+        </div>
+
+        <div className="ml-auto">
+          <EvidenceBadge
+            evidence={{
+              level: 'observed',
+              confidence: 1,
+              references: [],
+            }}
+            compact
+          />
+        </div>
       </div>
 
-      <Card>
-        <CardContent className="p-0">
-          <HeatmapCanvas
-            query={{ site_id: siteId, page_url: pageUrl, layer }}
-            onHotspotSelect={(point, tile) => setSelected({ point, tile })}
-          />
-        </CardContent>
-      </Card>
+      {/* 2. PageStatsBar (URL + PV/sessions/CTR/滞留) — controls bar とは別行で維持 */}
+      <PageStatsBar
+        siteId={siteId}
+        pageUrl={pageUrl}
+        dateRange={dateRange}
+        deviceType={deviceFilter}
+      />
 
+      {/* 3. HeatmapCanvas (内部 ControlsBar に LAYER + EMOTION = 段 2、その下に canvas + side) */}
+      <HeatmapCanvas
+        layer={layer}
+        pageUrl={pageUrl}
+        tiles={tiles}
+        loading={loading}
+        hasMore={hasMore}
+        pageHeightEstimate={pageHeightEstimate}
+        meta={meta}
+        error={error}
+        loadMore={loadMore}
+        onHotspotSelect={(point, tile) => setSelected({ point, tile })}
+      />
+
+      {/* 4. HotspotDetail (slide-in) */}
       <HotspotDetail
         point={selected?.point ?? null}
         tile={selected?.tile ?? null}
         pageUrl={pageUrl}
         onClose={() => setSelected(null)}
       />
+    </div>
+  )
+}
+
+function HeatmapCanvasFallback() {
+  return (
+    <div
+      className="flex h-[600px] w-full items-center justify-center rounded-md border border-[var(--ug-border)] bg-white text-xs text-[var(--ug-text-3)]"
+      role="status"
+      aria-live="polite"
+      data-testid="heatmap-canvas-fallback"
+    >
+      ヒートマップを準備中…
     </div>
   )
 }
@@ -77,13 +228,15 @@ function PageSelector({
   onChange: (next: string) => void
 }) {
   return (
-    <label className="relative inline-flex items-center gap-2 text-xs text-text-2">
-      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-text-3">Page</span>
+    <label className="relative inline-flex items-center gap-2 text-xs text-[var(--ug-text-2)]">
+      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
+        Page
+      </span>
       <span className="relative">
         <select
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className="appearance-none rounded-md border border-border bg-background px-3 py-1.5 pr-8 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="appearance-none rounded-md border border-[var(--ug-border)] bg-white px-3 py-1.5 pr-8 text-xs text-[var(--ug-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ug-brand-1)]"
           aria-label="ヒートマップ表示対象ページ"
         >
           {options.map((opt) => (
@@ -93,7 +246,7 @@ function PageSelector({
           ))}
         </select>
         <ChevronDown
-          className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-3"
+          className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ug-text-3)]"
           aria-hidden
         />
       </span>

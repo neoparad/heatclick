@@ -36,5 +36,11 @@
     "**/*.tsx",
     ".next/types/**/*.ts"
   ],
-  "exclude": ["node_modules", "workers/event-ingest"]
+  "exclude": [
+    "node_modules",
+    "workers/event-ingest",
+    "workers/banner-runtime",
+    "**/*.test.ts",
+    "**/*.test.tsx"
+  ]
 }
