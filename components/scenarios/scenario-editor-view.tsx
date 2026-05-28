@@ -1,19 +1,26 @@
 'use client'
 
 /**
- * ScenarioEditorView — シナリオ編集 UI (M-Director Day 2、2026-05-25)
+ * ScenarioEditorView — シナリオ編集 UI (M-Director Stage 2、続 M-9 / 2026-05-28)
  *
  * mockup `linkscrawl/docs/fusion/mockups/20_scenarios_editor.html` 踏襲。
- * Phase 1 read-only skeleton: 条件 / variant A/B/C / traffic split / status を表示。
- * Save は disabled (CRUD は Phase 2)。
  *
- * 注意: Phase 1 では Visual Builder の入力は全て disabled (form 値変更不可)。
- * Phase 2 で react-hook-form + Zod validation を導入して on-change 永続化。
+ * Stage 2 (続 M-9) で変更:
+ *   - useScenarioEditor hook で local edit state を管理
+ *   - 編集可能: name / description / status / variant.cta_url / variant.position / variant.traffic_split
+ *   - 編集不可 (Stage 4 で edit 化): condition_ast、variant の image_url / html / image_alt
+ *   - 保存ボタン enable + PUT /api/scenarios/[id] + sonner toast
+ *   - dirty 状態に応じて Reset ボタン表示
+ *
+ * 注意:
+ *   - Phase 2 では visual builder (Stage 4) と画像 upload (Stage 3) は未配備
+ *   - AST と variant 画像は read-only display のまま
+ *   - Reset = local state を original に戻す (server-side rollback ではない)
  */
 
 import Link from 'next/link'
 import { useState } from 'react'
-import { ArrowLeft, Check, Code2, Eye, ImageIcon, Plus, Save, Trash2 } from 'lucide-react'
+import { ArrowLeft, Check, Code2, Eye, ImageIcon, Plus, RotateCcw, Save } from 'lucide-react'
 
 import { PageMeta } from '@/components/layout/page-meta'
 import { Badge } from '@/components/ui/badge'
@@ -21,15 +28,21 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { canonicalizeAst } from '@/lib/scenarios/evaluator'
 import type { ConditionNode, Scenario, Variant } from '@/lib/scenarios/types'
-import { isLeaf } from '@/lib/scenarios/types'
+import { SCENARIO_STATUSES, VARIANT_POSITIONS } from '@/lib/scenarios/types'
+
+import { ConditionVisualBuilder } from './condition-visual-builder'
+import { useScenarioEditor } from './use-scenario-editor'
+import { VariantImageUpload } from './variant-image-upload'
 
 interface ScenarioEditorViewProps {
   scenario: Scenario
 }
 
 export function ScenarioEditorView({ scenario }: ScenarioEditorViewProps) {
-  const [activeVariantId, setActiveVariantId] = useState<string>(scenario.variants[0]?.id ?? 'A')
-  const activeVariant = scenario.variants.find((v) => v.id === activeVariantId) ?? scenario.variants[0]
+  const editor = useScenarioEditor({ scenario })
+  const [activeVariantId, setActiveVariantId] = useState<string>(editor.draft.variants[0]?.id ?? 'A')
+  const activeVariant =
+    editor.draft.variants.find((v) => v.id === activeVariantId) ?? editor.draft.variants[0]
 
   return (
     <>
@@ -44,20 +57,25 @@ export function ScenarioEditorView({ scenario }: ScenarioEditorViewProps) {
             </div>
             <h1 className="text-[22px] font-bold tracking-tight flex items-center gap-2.5">
               <Input
-                value={scenario.name}
-                disabled
-                className="text-[22px] font-bold border-0 px-2 py-0.5 min-w-[540px] bg-transparent disabled:opacity-100 disabled:cursor-default"
+                value={editor.draft.name}
+                onChange={(e) => editor.setName(e.target.value)}
+                placeholder="シナリオ名"
+                aria-label="シナリオ名"
+                className="text-[22px] font-bold border-0 px-2 py-0.5 min-w-[540px] bg-transparent focus-visible:bg-slate-50 hover:bg-slate-50"
               />
             </h1>
             <div className="text-xs text-slate-500 mt-1 flex gap-2.5 items-center">
               <span className="font-mono text-[11px] px-1.5 py-0.5 bg-slate-100 rounded">
                 {scenario.site_id}
               </span>
-              <StatusPill status={scenario.status} />
+              <StatusPill status={editor.draft.status} />
               <Badge variant="outline" className="font-mono text-[9.5px] uppercase tracking-wider">
                 {scenario.evidence_level}
               </Badge>
-              <span>· 最終更新 {new Date(scenario.updated_at).toISOString().slice(0, 16).replace('T', ' ')} · A/B/C variants {scenario.variants.length} 件</span>
+              <span>
+                · 最終更新 {new Date(scenario.updated_at).toISOString().slice(0, 16).replace('T', ' ')} ·
+                A/B/C variants {editor.draft.variants.length} 件
+              </span>
             </div>
           </div>
           <div className="flex gap-2 items-center">
@@ -67,38 +85,72 @@ export function ScenarioEditorView({ scenario }: ScenarioEditorViewProps) {
             >
               <ArrowLeft className="h-3 w-3" /> 一覧へ
             </Link>
-            <Button variant="outline" size="sm" disabled>
+            <Button variant="outline" size="sm" disabled title="Stage 4 (visual builder) で実装">
               <Eye className="mr-1.5 h-3 w-3" /> プレビュー
             </Button>
-            <Button size="sm" disabled title="Phase 2 で実装">
-              <Save className="mr-1.5 h-3 w-3" /> 保存
+            {editor.isDirty ? (
+              <Button variant="outline" size="sm" onClick={editor.reset} disabled={editor.isSaving}>
+                <RotateCcw className="mr-1.5 h-3 w-3" /> 戻す
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              onClick={() => void editor.save()}
+              disabled={!editor.isDirty || editor.isSaving}
+              title={editor.isDirty ? '変更を保存' : '変更なし'}
+            >
+              <Save className="mr-1.5 h-3 w-3" />
+              {editor.isSaving ? '保存中...' : '保存'}
             </Button>
           </div>
         </div>
 
+        {/* error display */}
+        {editor.error ? (
+          <div className="mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-md text-[12.5px] text-red-700">
+            <span className="font-semibold">保存エラー:</span> {editor.error}
+          </div>
+        ) : null}
+
+        {/* description */}
+        <div className="mb-4">
+          <label className="font-mono text-[10px] text-slate-400 uppercase tracking-wider font-semibold block mb-1.5">
+            description
+          </label>
+          <textarea
+            value={editor.draft.description}
+            onChange={(e) => editor.setDescription(e.target.value)}
+            placeholder="このシナリオの目的・対象訪問者・期待効果を一行で。後で M-Director 自動分析が参照します。"
+            className="w-full min-h-[60px] px-3 py-2 border border-slate-200 rounded-md text-[12.5px] bg-white focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 resize-y"
+          />
+        </div>
+
         {/* 2-col grid */}
         <div className="grid grid-cols-[1.25fr_1fr] gap-4.5">
-          {/* LEFT: condition builder */}
+          {/* LEFT: condition builder (read-only until Stage 4) */}
           <div>
             <Panel
               title="条件 (誰に発火するか)"
-              meta="depth ≤ 5 / leaf ≤ 30"
+              meta="depth ≤ 5 / leaf ≤ 30 · AND/OR + 平坦 leaf 編集可"
             >
               <div className="px-4 py-3.5 bg-slate-50 border-b border-slate-100">
-                <ConditionVisualBuilder ast={scenario.condition_ast} />
+                <ConditionVisualBuilder
+                  ast={editor.draft.condition_ast}
+                  onChange={editor.setConditionAst}
+                />
               </div>
               <div className="bg-slate-900 text-slate-100 px-4 py-3 font-mono text-[11.5px] leading-relaxed overflow-x-auto whitespace-pre">
-                {formatAstForDisplay(scenario.condition_ast)}
+                {formatAstForDisplay(editor.draft.condition_ast)}
               </div>
             </Panel>
 
             {/* Simulation */}
-            <SectionHeader>対象想定 (過去 7 日シミュレーション)</SectionHeader>
+            <SectionHeader>対象想定 (過去 7 日シミュレーション、Stage 7 で実データ化)</SectionHeader>
             <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm grid grid-cols-4 gap-3.5">
-              <SimStat label="対象 visitor" value="612" />
-              <SimStat label="match 件数" value="847" />
-              <SimStat label="推定 CVR" value="4.3%" valueClassName="text-emerald-600" />
-              <SimStat label="サイト平均" value="2.1%" valueClassName="text-slate-400" />
+              <SimStat label="対象 visitor" value="—" />
+              <SimStat label="match 件数" value="—" />
+              <SimStat label="推定 CVR" value="—" valueClassName="text-slate-400" />
+              <SimStat label="サイト平均" value="—" valueClassName="text-slate-400" />
             </div>
           </div>
 
@@ -107,7 +159,7 @@ export function ScenarioEditorView({ scenario }: ScenarioEditorViewProps) {
             <Panel title="バリアント (A/B/C 最大 3 つ)" meta="画像 or HTML、汎用フィールドなし">
               {/* A/B/C tabs */}
               <div className="flex gap-1.5 px-4 pt-2.5 border-b border-slate-100 bg-slate-50 items-end">
-                {scenario.variants.map((v) => {
+                {editor.draft.variants.map((v) => {
                   const isActive = activeVariantId === v.id
                   const color = v.id === 'A' ? 'indigo' : v.id === 'B' ? 'purple' : 'emerald'
                   return (
@@ -132,33 +184,68 @@ export function ScenarioEditorView({ scenario }: ScenarioEditorViewProps) {
                     </button>
                   )
                 })}
-                {scenario.variants.length < 3 ? (
+                {editor.draft.variants.length < 3 ? (
                   <button
                     type="button"
                     disabled
-                    title="Phase 2 で実装"
+                    title="Stage 4 (visual builder) で実装"
                     className="px-3.5 py-2 text-xs font-semibold border-2 border-dashed border-slate-300 rounded-t-md text-slate-400 -mb-[1px] flex items-center gap-1"
                   >
                     <Plus className="h-3 w-3" /> 追加
                   </button>
                 ) : null}
                 <div className="ml-auto font-mono text-[10.5px] text-slate-400 pb-2">
-                  {scenario.variants.length} / 3 variants
+                  {editor.draft.variants.length} / 3 variants
                 </div>
               </div>
 
               <div className="px-4 py-4">
-                {activeVariant ? <VariantEditor variant={activeVariant} /> : null}
+                {activeVariant ? (
+                  <VariantEditor
+                    variant={activeVariant}
+                    scenarioId={scenario.id}
+                    tenantId={scenario.tenant_id}
+                    onChange={(patch) => editor.updateVariant(activeVariant.id, patch)}
+                  />
+                ) : null}
               </div>
             </Panel>
 
             {/* Traffic split */}
-            <SectionHeader>traffic split (A/B/C 配信比率)</SectionHeader>
+            <SectionHeader>traffic split (A/B/C 配信比率、合計 100 必須)</SectionHeader>
             <div className="bg-slate-50 border border-slate-200 rounded-lg p-3.5">
-              <SplitBar variants={scenario.variants} />
+              <SplitBar variants={editor.draft.variants} />
+              <div className="grid grid-cols-3 gap-2 mt-2">
+                {editor.draft.variants.map((v) => {
+                  const color =
+                    v.id === 'A' ? 'text-indigo-600' : v.id === 'B' ? 'text-purple-600' : 'text-emerald-600'
+                  return (
+                    <div
+                      key={v.id}
+                      className="px-2 py-1.5 border border-slate-200 rounded bg-white flex items-center gap-1.5"
+                    >
+                      <span className={`font-mono text-[10.5px] font-bold ${color}`}>{v.id}</span>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={String(v.traffic_split)}
+                        onChange={(e) => {
+                          const n = Number.parseInt(e.target.value, 10)
+                          if (!Number.isFinite(n)) return
+                          editor.updateVariant(v.id, { traffic_split: Math.max(0, Math.min(100, n)) })
+                        }}
+                        className="w-12 h-6 text-right text-[11.5px] font-mono p-1"
+                        aria-label={`variant ${v.id} traffic_split`}
+                      />
+                      <span className="text-[10.5px] text-slate-400">%</span>
+                    </div>
+                  )
+                })}
+              </div>
               <div className="text-[11px] text-slate-500 mt-2 leading-relaxed">
-                visitor_id の hash で決定論的に振り分け (同 visitor は常に同じ variant が当たる、ページ遷移してもブレない)。
-                各 variant の impression / click / dismiss / conversion を計測し、勝者を観測。Phase 3 で AI 自動勝者振り分けに昇格予定。
+                visitor_id の hash で決定論的に振り分け (同 visitor は常に同じ variant が当たる)。
+                各 variant の impression / click / dismiss / conversion を計測。Phase 3 で AI 自動勝者振り分けに昇格予定。
               </div>
             </div>
 
@@ -168,22 +255,28 @@ export function ScenarioEditorView({ scenario }: ScenarioEditorViewProps) {
                 <Check className="h-3.5 w-3.5 text-slate-400" /> 配信ステータス
               </div>
               <div className="flex gap-1.5 flex-wrap">
-                {(['draft', 'measure_only', 'preview', 'live', 'paused'] as const).map((s) => (
+                {SCENARIO_STATUSES.filter((s) => s !== 'archived').map((s) => (
                   <label
                     key={s}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 border rounded text-[11.5px] cursor-default ${
-                      scenario.status === s
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 border rounded text-[11.5px] cursor-pointer ${
+                      editor.draft.status === s
                         ? 'bg-indigo-50 border-indigo-300 text-indigo-700 font-semibold'
-                        : 'bg-white border-slate-200 text-slate-500'
+                        : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'
                     }`}
                   >
-                    <input type="radio" name="status" checked={scenario.status === s} readOnly className="m-0" />
+                    <input
+                      type="radio"
+                      name="status"
+                      checked={editor.draft.status === s}
+                      onChange={() => editor.setStatus(s)}
+                      className="m-0"
+                    />
                     {s}
                   </label>
                 ))}
               </div>
               <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
-                Phase 1 は read-only。Phase 2 で変更 + 保存可能化予定。
+                live = 配信開始、preview = 内部のみ、measure_only = 計測のみで配信しない、paused = 停止、draft = 未完成。
               </p>
             </div>
           </div>
@@ -254,72 +347,10 @@ function SimStat({
 
 // ───────────────────────────────────────────────────────────────────────────
 
-function ConditionVisualBuilder({ ast }: { ast: ConditionNode }) {
-  if (!isLeaf(ast) && ast.op === 'AND') {
-    return (
-      <div className="bg-white border border-slate-200 rounded-md p-3">
-        <div className="flex items-center gap-2 mb-2">
-          <span className="inline-flex bg-slate-50 border border-slate-200 rounded p-0.5">
-            <span className="px-2.5 py-0.5 font-mono text-[10.5px] font-bold bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded">
-              AND
-            </span>
-            <span className="px-2.5 py-0.5 font-mono text-[10.5px] font-semibold text-slate-400 cursor-not-allowed">OR</span>
-            <span className="px-2.5 py-0.5 font-mono text-[10.5px] font-semibold text-slate-400 cursor-not-allowed">NOT</span>
-          </span>
-          <span className="text-[11.5px] text-slate-500 flex-1">
-            {ast.children.length} 条件すべてを満たす
-          </span>
-        </div>
-
-        <div className="space-y-1.5">
-          {ast.children.map((c, i) =>
-            isLeaf(c) ? (
-              <div
-                key={i}
-                className="grid grid-cols-[1.1fr_104px_1fr_24px] gap-1.5 items-center"
-              >
-                <Input value={c.field} disabled className="h-8 text-xs font-mono disabled:opacity-100" />
-                <Badge
-                  variant="outline"
-                  className="justify-center font-mono text-[10.5px] text-indigo-700 bg-indigo-50 border-indigo-200 h-8 px-2 font-semibold"
-                >
-                  {c.op}
-                </Badge>
-                <Input value={String(c.value)} disabled className="h-8 text-xs disabled:opacity-100" />
-                <button
-                  type="button"
-                  disabled
-                  className="text-slate-300 p-1 cursor-not-allowed"
-                  title="Phase 2 で実装"
-                  aria-label="削除"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            ) : (
-              <div key={i} className="text-[11px] text-slate-400 pl-2 italic">
-                (nested {c.op} group — Phase 2 で render)
-              </div>
-            ),
-          )}
-        </div>
-
-        <div className="flex gap-2 pt-2.5 mt-2.5 border-t border-slate-100">
-          <Button variant="outline" size="sm" disabled className="border-dashed">
-            <Plus className="mr-1 h-3 w-3" /> 条件追加
-          </Button>
-          <Button variant="outline" size="sm" disabled className="border-dashed">
-            <Plus className="mr-1 h-3 w-3" /> グループ追加
-          </Button>
-        </div>
-      </div>
-    )
-  }
-  return <div className="text-xs text-slate-500">条件式が読み込めません</div>
-}
+// ConditionVisualBuilder は components/scenarios/condition-visual-builder.tsx で
+// editable 版に置換 (Stage 4、続 M-11)。旧 read-only 内部関数は本ファイルから削除済。
 
 function formatAstForDisplay(ast: ConditionNode): string {
-  // canonicalizeAst を pretty 化
   try {
     return JSON.stringify(JSON.parse(canonicalizeAst(ast)), null, 2)
   } catch {
@@ -329,13 +360,20 @@ function formatAstForDisplay(ast: ConditionNode): string {
 
 // ───────────────────────────────────────────────────────────────────────────
 
-function VariantEditor({ variant }: { variant: Variant }) {
+interface VariantEditorProps {
+  variant: Variant
+  scenarioId: string
+  tenantId: string
+  onChange: (patch: Partial<Variant>) => void
+}
+
+function VariantEditor({ variant, scenarioId, tenantId, onChange }: VariantEditorProps) {
   return (
     <div>
-      {/* content_type radio */}
+      {/* content_type radio (Stage 3 で switch 可能化) */}
       <div className="flex gap-2 p-1 bg-slate-100 rounded-md mb-3.5">
         <label
-          className={`flex-1 flex items-center gap-2 px-3 py-2 rounded cursor-default ${
+          className={`flex-1 flex items-center gap-2 px-3 py-2 rounded cursor-not-allowed ${
             variant.content_type === 'image' ? 'bg-white border border-indigo-300 shadow-sm' : ''
           }`}
         >
@@ -351,11 +389,11 @@ function VariantEditor({ variant }: { variant: Variant }) {
           </div>
           <div className="text-xs">
             <div className="font-semibold">画像</div>
-            <div className="text-[10.5px] text-slate-400">Cloudflare R2</div>
+            <div className="text-[10.5px] text-slate-400">Cloudflare R2 (Stage 3)</div>
           </div>
         </label>
         <label
-          className={`flex-1 flex items-center gap-2 px-3 py-2 rounded cursor-default ${
+          className={`flex-1 flex items-center gap-2 px-3 py-2 rounded cursor-not-allowed ${
             variant.content_type === 'html' ? 'bg-white border border-indigo-300 shadow-sm' : ''
           }`}
         >
@@ -371,12 +409,12 @@ function VariantEditor({ variant }: { variant: Variant }) {
           </div>
           <div className="text-xs">
             <div className="font-semibold">HTML</div>
-            <div className="text-[10.5px] text-slate-400">インライン</div>
+            <div className="text-[10.5px] text-slate-400">インライン (Stage 4)</div>
           </div>
         </label>
       </div>
 
-      {/* Content preview */}
+      {/* Content preview (Stage 3-4 で edit 化) */}
       {variant.content_type === 'image' ? (
         <div className="bg-slate-50 border border-slate-200 rounded overflow-hidden">
           <div className="h-44 bg-gradient-to-br from-indigo-100 to-purple-100 flex items-center justify-center text-xs text-slate-400 font-mono relative">
@@ -387,7 +425,14 @@ function VariantEditor({ variant }: { variant: Variant }) {
           </div>
           <div className="px-3.5 py-2.5 text-[11.5px] text-slate-600 flex gap-2 items-center">
             <span className="truncate flex-1">{variant.image_alt}</span>
-            <Button variant="outline" size="sm" disabled>差し替え</Button>
+            {variant.content_type === 'image' ? (
+              <VariantImageUpload
+                scenarioId={scenarioId}
+                tenantId={tenantId}
+                currentUrl={variant.image_url}
+                onUploaded={({ publicUrl }) => onChange({ image_url: publicUrl } as Partial<Variant>)}
+              />
+            ) : null}
           </div>
         </div>
       ) : (
@@ -398,10 +443,26 @@ function VariantEditor({ variant }: { variant: Variant }) {
 
       <div className="grid grid-cols-[110px_1fr] gap-2.5 items-center mt-3">
         <span className="text-[11.5px] text-slate-500 font-medium">CTA URL</span>
-        <Input value={variant.cta_url ?? ''} disabled className="h-9 text-xs disabled:opacity-100" />
+        <Input
+          type="url"
+          value={variant.cta_url ?? ''}
+          onChange={(e) => onChange({ cta_url: e.target.value || undefined } as Partial<Variant>)}
+          placeholder="https://bihadashop.jp/products?promo=..."
+          className="h-9 text-xs"
+        />
 
         <span className="text-[11.5px] text-slate-500 font-medium">表示位置</span>
-        <Input value={variant.position} disabled className="h-9 text-xs disabled:opacity-100" />
+        <select
+          value={variant.position}
+          onChange={(e) => onChange({ position: e.target.value as Variant['position'] } as Partial<Variant>)}
+          className="h-9 text-xs px-3 border border-slate-200 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400"
+        >
+          {VARIANT_POSITIONS.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
       </div>
     </div>
   )
@@ -410,6 +471,7 @@ function VariantEditor({ variant }: { variant: Variant }) {
 // ───────────────────────────────────────────────────────────────────────────
 
 function SplitBar({ variants }: { variants: ReadonlyArray<Variant> }) {
+  const total = variants.reduce((s, v) => s + v.traffic_split, 0)
   return (
     <>
       <div className="flex h-6 rounded overflow-hidden border border-slate-200">
@@ -419,25 +481,19 @@ function SplitBar({ variants }: { variants: ReadonlyArray<Variant> }) {
             <div
               key={v.id}
               className={`${color} flex items-center justify-center font-mono text-[11px] text-white font-bold`}
-              style={{ width: `${v.traffic_split}%` }}
+              style={{ width: `${total > 0 ? (v.traffic_split / total) * 100 : 0}%` }}
+              title={`variant ${v.id}: ${v.traffic_split}%`}
             >
               {v.traffic_split}%
             </div>
           )
         })}
       </div>
-      <div className="grid grid-cols-3 gap-2 mt-2">
-        {variants.map((v) => {
-          const color = v.id === 'A' ? 'text-indigo-600' : v.id === 'B' ? 'text-purple-600' : 'text-emerald-600'
-          return (
-            <div key={v.id} className="px-2 py-1.5 border border-slate-200 rounded bg-white flex items-center gap-1.5">
-              <span className={`font-mono text-[10.5px] font-bold ${color}`}>{v.id}</span>
-              <Input value={String(v.traffic_split)} disabled className="w-12 h-6 text-right text-[11.5px] font-mono p-1 disabled:opacity-100" />
-              <span className="text-[10.5px] text-slate-400">%</span>
-            </div>
-          )
-        })}
-      </div>
+      {total !== 100 ? (
+        <div className="text-[11px] text-amber-600 mt-1 font-medium">
+          ⚠️ 合計 {total}% (100% にしないと保存できません)
+        </div>
+      ) : null}
     </>
   )
 }
