@@ -31,6 +31,7 @@ import type { ConditionNode, Scenario, Variant } from '@/lib/scenarios/types'
 import { SCENARIO_STATUSES, VARIANT_POSITIONS } from '@/lib/scenarios/types'
 
 import { ConditionVisualBuilder } from './condition-visual-builder'
+import { ScenarioStatsPanel } from './scenario-stats-panel'
 import { useScenarioEditor } from './use-scenario-editor'
 import { VariantImageUpload } from './variant-image-upload'
 
@@ -144,14 +145,13 @@ export function ScenarioEditorView({ scenario }: ScenarioEditorViewProps) {
               </div>
             </Panel>
 
-            {/* Simulation */}
-            <SectionHeader>対象想定 (過去 7 日シミュレーション、Stage 7 で実データ化)</SectionHeader>
-            <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm grid grid-cols-4 gap-3.5">
-              <SimStat label="対象 visitor" value="—" />
-              <SimStat label="match 件数" value="—" />
-              <SimStat label="推定 CVR" value="—" valueClassName="text-slate-400" />
-              <SimStat label="サイト平均" value="—" valueClassName="text-slate-400" />
-            </div>
+            {/* Stats (Stage 7、続 M-12) — scenario_match テーブルから集計 */}
+            <SectionHeader>計測 (impression / click / CVR、過去 24h / 7d / 30d)</SectionHeader>
+            <ScenarioStatsPanel
+              scenarioId={scenario.id}
+              tenantId={scenario.tenant_id}
+              siteId={scenario.site_id}
+            />
           </div>
 
           {/* RIGHT: variant editor */}
@@ -328,22 +328,7 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
   )
 }
 
-function SimStat({
-  label,
-  value,
-  valueClassName = '',
-}: {
-  label: string
-  value: string
-  valueClassName?: string
-}) {
-  return (
-    <div>
-      <div className="font-mono text-[10px] text-slate-400 uppercase tracking-wider">{label}</div>
-      <div className={`font-mono text-lg font-bold mt-1 ${valueClassName}`}>{value}</div>
-    </div>
-  )
-}
+// SimStat 削除済 (Stage 7、続 M-12): ScenarioStatsPanel に置換。
 
 // ───────────────────────────────────────────────────────────────────────────
 
