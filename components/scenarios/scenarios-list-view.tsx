@@ -78,7 +78,7 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
     <>
       <PageMeta title="ターゲティングバナー" eyebrow="M Agent · Scenarios" />
 
-      <div className="px-8 pt-4 pb-16 max-w-[1280px] mx-auto">
+      <div className="px-8 pt-4 pb-16">
         {/* 続 M-6 §A: 圧縮 Phase 1 chip + actions (旧 banner + h1 + description + actions を 1 行に集約) */}
         <div className="flex items-center gap-2 mb-3">
           <button

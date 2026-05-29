@@ -28,7 +28,7 @@ export function ScenarioNewSkeleton() {
     <>
       <PageMeta title="新規バナー" eyebrow="M Agent · Scenarios" />
 
-      <div className="px-8 pt-4 pb-16 max-w-[1280px] mx-auto">
+      <div className="px-8 pt-4 pb-16">
         {/* Header (続 M-6 §A 同方針で 1 行に圧縮) */}
         <div className="flex items-center gap-2 mb-3">
           <Link

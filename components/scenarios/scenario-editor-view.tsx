@@ -49,7 +49,7 @@ export function ScenarioEditorView({ scenario }: ScenarioEditorViewProps) {
     <>
       <PageMeta title="ターゲティングバナー" eyebrow="M Agent · Editor" />
 
-      <div className="px-7 pt-5 pb-16 max-w-[1360px] mx-auto">
+      <div className="px-7 pt-5 pb-16">
         {/* Header */}
         <div className="grid grid-cols-[1fr_auto] gap-4 items-end mb-5">
           <div>
