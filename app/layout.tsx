@@ -51,7 +51,18 @@ export default function RootLayout({
 }) {
   return (
     <html lang="ja" suppressHydrationWarning>
+      {/*
+        続 117 white-screen 続報 (2026-05-30 実機検証):
+        本番 deploy dpl_9ZpZFBGDLyzfiB7i1UbUZ5DP9xmz を clean browser (拡張なし) で開くと
+        sign-in は完全描画・React #418/#423 ゼロ。同一 deploy で Owner 実ブラウザのみ白画面 +
+        hydration error → 原因は「DOM を書き換えるブラウザ拡張」(Grammarly / パスワード管理 /
+        ダークモード系等) が <body> に属性注入し SSR HTML と client が不一致になるため。
+        React 公式 #418 の原因列挙にも "browser extension that modified the HTML" が明記。
+        <body> の suppressHydrationWarning で拡張由来の属性差分を hydration mismatch 扱いしない
+        (= 白画面化を防ぐ防御層)。<html> 側 suppression は 1 階層しか及ばないため <body> にも明示。
+      */}
       <body
+        suppressHydrationWarning
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         {children}
