@@ -1,5 +1,8 @@
 import type { Metadata } from 'next'
 import { Inter, JetBrains_Mono } from 'next/font/google'
+
+import { resolveAppUrl } from '@/lib/app-url'
+
 import './globals.css'
 
 // Sprint 0 scaffold drift fix (Frontend P-03 着工時、next/font/google が Geist を
@@ -22,7 +25,11 @@ export const metadata: Metadata = {
   title: 'UGOKI MAP — Behavior × SEO × AIO Platform',
   description:
     'ページ内行動とページ構造を突合し、なぜ離脱したかと何を直すべきかを根拠付きで出す UX 改善 AI。AIO/LLMO レポート同梱。',
-  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? 'https://ugokimap.com'),
+  // 続 117 white-screen root-fix: 旧実装は `NEXT_PUBLIC_APP_URL ?? fallback` だったが、
+  // `??` は空文字 ("") を弾かないため env が "" のとき `new URL("")` が throw し全ページが
+  // metadata 生成で crash (= 白画面 / build 失敗) していた。resolveAppUrl() は空文字・未設定・
+  // Vercel・localhost を一元解決し、必ず有効な URL 文字列を返す。
+  metadataBase: new URL(resolveAppUrl()),
   openGraph: {
     title: 'UGOKI MAP',
     description: 'Behavior × SEO × AIO Platform',

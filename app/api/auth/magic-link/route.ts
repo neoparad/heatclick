@@ -22,6 +22,7 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
 import { redis } from '@/lib/redis'
+import { resolveRequestOrigin } from '@/lib/app-url'
 import { sendMagicLinkEmail } from '@/lib/resend'
 import {
   signMagicLinkToken,
@@ -39,8 +40,6 @@ const requestSchema = z.object({
     .regex(/^\/[^/].*$/, 'redirect must be a local path starting with /')
     .optional(),
 })
-
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
 
 // H-1 fix (Reviewer T1 dual 続 10): mailbomb 攻撃対策のため email 単位だけでなく
 // IP 単位 + global 単位の rate limit を追加。enumeration 防止は維持しつつ
@@ -159,8 +158,15 @@ export async function POST(request: Request) {
     // Redis 不可なら nonce check 飛ばし fail-open (Sprint 1 の dogfood 規模では許容)
   }
 
-  // Build verify URL
-  const verifyUrl = new URL('/api/auth/verify', APP_URL)
+  // Build verify URL.
+  // 続 117 root-fix (本番 login bug の本丸):
+  //   旧実装は固定 `NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'` でリンク生成していた。
+  //   ユーザーが ugokimap-saas.vercel.app を見ていてもリンクは ugokimap.com を指し、
+  //   別 host でログイン成立 → Cookie は host 単位なので閲覧中の host には付かず、
+  //   ページ遷移のたびに sign-in へ蹴られていた。
+  //   resolveRequestOrigin() は今アクセス中の host (allowlist 検証済) でリンクを組み立て、
+  //   ログイン host と閲覧 host を一致させる。allowlist 外なら canonical にフォールバック。
+  const verifyUrl = new URL('/api/auth/verify', resolveRequestOrigin(request))
   verifyUrl.searchParams.set('token', token)
 
   // 送信 — user 存在チェックは Sprint 1 では行わず、全 email に送信 (dogfood 招待制で母数小)
