@@ -22,23 +22,60 @@ export interface DogfoodUser {
   role: 'owner' | 'admin' | 'member' | 'viewer'
 }
 
+const VALID_PLANS: ReadonlyArray<Plan> = ['free', 'starter', 'growth', 'agency', 'enterprise']
+const VALID_ROLES: ReadonlyArray<DogfoodUser['role']> = ['owner', 'admin', 'member', 'viewer']
+
+function coercePlan(value: unknown): Plan {
+  // env の不正値で誤って上位 plan を与えない。既定は最小権限の 'free'。
+  return typeof value === 'string' && (VALID_PLANS as ReadonlyArray<string>).includes(value)
+    ? (value as Plan)
+    : 'free'
+}
+
+function coerceRole(value: unknown): DogfoodUser['role'] {
+  // env の不正・未指定で誤って owner を与えない。既定は最小権限の 'viewer'。
+  return typeof value === 'string' && (VALID_ROLES as ReadonlyArray<string>).includes(value)
+    ? (value as DogfoodUser['role'])
+    : 'viewer'
+}
+
+/**
+ * 続 72 (B-2 fix): 実 ClickHouse sites table の tracking_id (CIP_xxxx) と整合。
+ *
+ * 旧 (続 14 配備〜続 71): tenant_id='tnt_linkth' + site_ids=['site_linkth_main',
+ *   'site_bihada_demo'] = scaffold 時の placeholder。実 ClickHouse には
+ *   存在しない site_id のため canAccessSite() が全て false 判定 → AIチャット
+ *   `[TENANT_FORBIDDEN] site not in tenant` で動作不能 (Owner 2026-05-23 22:50 報告)。
+ *
+ * 新: 続 39 で確定済の Phase 1 dogfood 5 sites (CIP_xxxx) + tenant_id='linkth_internal'
+ *   (Owner 全 sites を内部 dogfood として運用、続 25 §4952 参照)
+ */
+const LINKTH_INTERNAL_TENANT = 'linkth_internal'
+const LINKTH_INTERNAL_SITE_IDS: ReadonlyArray<string> = [
+  'CIP_EcwUTHEZdIOAUqum', // bihadashop.jp (続 56 heatmap 既定)
+  'CIP_xginf3nVacnkn62o',
+  'CIP_6r2WofQDSKrOwxmM',
+  'CIP_8eN7xgfBtDAnzE26',
+  'CIP_QWaPiks5krukJ6NM',
+]
+
 const SEED: DogfoodUser[] = [
   {
     id: 'usr_owner_001',
     email: 'hiroki@linkth.com',
     name: 'Hiroki Yamamoto',
-    tenant_id: 'tnt_linkth',
+    tenant_id: LINKTH_INTERNAL_TENANT,
     plan: 'enterprise',
-    site_ids: ['site_linkth_main', 'site_bihada_demo'],
+    site_ids: [...LINKTH_INTERNAL_SITE_IDS],
     role: 'owner',
   },
   {
     id: 'usr_owner_002',
     email: 'hiroki101313@gmail.com',
     name: 'Hiroki',
-    tenant_id: 'tnt_linkth',
+    tenant_id: LINKTH_INTERNAL_TENANT,
     plan: 'enterprise',
-    site_ids: ['site_linkth_main', 'site_bihada_demo'],
+    site_ids: [...LINKTH_INTERNAL_SITE_IDS],
     role: 'owner',
   },
 ]
@@ -69,9 +106,9 @@ function loadEnvUsers(): DogfoodUser[] {
           email: u.email,
           name: typeof u.name === 'string' ? u.name : u.email.split('@')[0],
           tenant_id: u.tenant_id,
-          plan: (typeof u.plan === 'string' ? u.plan : 'starter') as Plan,
+          plan: coercePlan(u.plan),
           site_ids: Array.isArray(u.site_ids) ? u.site_ids.filter((s: unknown) => typeof s === 'string') : [],
-          role: (['owner', 'admin', 'member', 'viewer'].includes(u.role) ? u.role : 'owner') as DogfoodUser['role'],
+          role: coerceRole(u.role),
         }
       })
       .filter((u): u is DogfoodUser => u !== null)
@@ -84,7 +121,13 @@ let _cache: Map<string, DogfoodUser> | null = null
 function getMap(): Map<string, DogfoodUser> {
   if (!_cache) {
     _cache = new Map()
-    for (const u of [...SEED, ...loadEnvUsers()]) {
+    // env を先に入れ、SEED を後勝ちにする。env (DOGFOOD_USERS) が seed 済みの
+    // owner identity (tenant_id/role/plan) を上書きして乗っ取るのを防ぐ
+    // (review 続 119 HIGH: env は deploy 権限者しか変えられないが多層防御)。
+    for (const u of loadEnvUsers()) {
+      _cache.set(u.email.toLowerCase(), u)
+    }
+    for (const u of SEED) {
       _cache.set(u.email.toLowerCase(), u)
     }
   }
