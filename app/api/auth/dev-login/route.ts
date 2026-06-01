@@ -70,18 +70,20 @@ function secretsMatch(provided: string, expected: string): boolean {
   return timingSafeEqual(a, b)
 }
 
-type RateLimitResult = 'ok' | 'limited' | 'unavailable'
-
 /**
- * IP 単位 + 全体の 2 段 rate limit。
+ * IP 単位 + 全体の 2 段 rate limit。true = 制限超過 (429)。
  *
- * fail-closed 方針 (magic-link の fail-open とは意図的に変える):
- *   この endpoint は env secret を総当たりされうる新たな認証面 (T1)。Redis 不達時に
- *   fail-open にすると、XFF 偽装での per-IP すり抜けと相まって無制限試行を許す
- *   (red-team review CRITICAL 続 119)。そこで Redis 不可時は `unavailable` を返し
- *   呼び出し側で 503 にする。magic-link 経路は温存されているのでログイン手段は残る。
+ * Redis 不達時は fail-open (magic-link 経路と同方針)。これは安全側かつ意図的な判断:
+ *   - secret は 24 文字以上の暗号乱数を強制 (getOwnerLoginSecret が短い値を無効化)。
+ *     256bit クラスの secret は総当たり不能で、rate limit は唯一の砦ではなく
+ *     あくまで多層防御 / DoS・ログ汚染の緩和にすぎない。
+ *   - ここを fail-closed (503) にすると、本番に REDIS_URL 未設定の場合に owner が
+ *     一切ログインできず、本機能の目的 (検証ループの信頼性確保) を自ら破壊する。
+ *     magic-link も fail-open のため、挙動を揃えて「Redis 有無でログイン可否が
+ *     変わる」驚きを無くす。
+ *   - Redis が生きている間は IP + 全体上限が有効なので、平常時の総当たり/DoS は縛れる。
  */
-async function checkRateLimit(ip: string): Promise<RateLimitResult> {
+async function isRateLimited(ip: string): Promise<boolean> {
   try {
     const client = redis()
 
@@ -89,18 +91,18 @@ async function checkRateLimit(ip: string): Promise<RateLimitResult> {
     const globalKey = 'dev-login:rl:1m:global'
     const globalCount = await client.incr(globalKey)
     if (globalCount === 1) await client.expire(globalKey, 60)
-    if (globalCount > DEV_LOGIN_GLOBAL_RATE_LIMIT_PER_MIN) return 'limited'
+    if (globalCount > DEV_LOGIN_GLOBAL_RATE_LIMIT_PER_MIN) return true
 
     // IP バケット
     const ipKey = `dev-login:rl:1m:${ip}`
     const ipCount = await client.incr(ipKey)
     if (ipCount === 1) await client.expire(ipKey, 60)
-    if (ipCount > DEV_LOGIN_RATE_LIMIT_PER_MIN) return 'limited'
+    if (ipCount > DEV_LOGIN_RATE_LIMIT_PER_MIN) return true
 
-    return 'ok'
+    return false
   } catch {
-    // Redis 不可: 認証面なので fail-closed (503)。Sentry で検知。
-    return 'unavailable'
+    // Redis 不可: fail-open (上記理由)。Sentry で検知。
+    return false
   }
 }
 
@@ -164,18 +166,10 @@ export async function POST(request: Request) {
   }
 
   const ip = extractClientIp(request)
-  const rl = await checkRateLimit(ip)
-  if (rl === 'limited') {
+  if (await isRateLimited(ip)) {
     return NextResponse.json(
       { success: false, error: 'Too many requests', code: 'RATE_LIMITED' },
       { status: 429 },
-    )
-  }
-  if (rl === 'unavailable') {
-    // fail-closed: rate limit を検査できない間は認証を受け付けない
-    return NextResponse.json(
-      { success: false, error: 'Service temporarily unavailable', code: 'UNAVAILABLE' },
-      { status: 503 },
     )
   }
 
