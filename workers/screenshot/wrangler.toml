@@ -1,0 +1,34 @@
+name = "ugokimap-screenshot"
+main = "src/worker.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# UGOKI MAP heatmap screenshot Worker — Puppeteer / Browser Rendering binding
+#
+# Purpose: POST /screenshot  →  full-page JPEG with autoScroll for lazy-loaded images.
+# Replaces the Cloudflare Browser Rendering REST API which cannot wait for lazy-load.
+#
+# Deploy steps (Owner):
+#   1. wrangler login
+#   2. wrangler secret put SCREENSHOT_WORKER_TOKEN   (same random string as Vercel env)
+#   3. wrangler deploy
+#   4. In Vercel: add SCREENSHOT_WORKER_URL = https://ugokimap-screenshot.<account>.workers.dev
+#                      SCREENSHOT_WORKER_TOKEN = <same secret>
+#
+# Browser Rendering binding (requires "Browser Rendering" plan or Workers Paid plan with
+# browser rendering enabled in the Cloudflare dashboard):
+[browser]
+binding = "MYBROWSER"
+
+[vars]
+WORKER_NAME = "ugokimap-screenshot"
+
+# Secrets (wrangler secret put で投入):
+#   wrangler secret put SCREENSHOT_WORKER_TOKEN   # Bearer token shared with Next.js app
+
+[dev]
+port = 8789
+local_protocol = "http"
+
+[observability]
+enabled = true

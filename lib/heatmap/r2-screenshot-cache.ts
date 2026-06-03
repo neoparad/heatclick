@@ -52,7 +52,9 @@ const KEY_PREFIX = 'heatmap-screenshots'
 //   旧 v3 (CF だが lazy 画像が空) を全 cache miss にして再撮影させる。
 // 続120: lazy script 強化 (noscript / data-lazy-src / class 除去 / scroll event) で撮影内容が
 //   変わったため v5。旧 v4 (lazy 画像が依然空) を全 cache miss にして再撮影させる。
-const CAPTURE_VERSION = 'v5'
+// fix/login-bounce-whitescreen-117: Puppeteer Worker (autoScroll + waitForNetworkIdle) 移行で v6。
+//   旧 v5 (CF REST で lazy 画像が依然空になりうる) を全 cache miss にして再撮影させる。
+const CAPTURE_VERSION = 'v6'
 
 /** TTL (capturedAt 比較) */
 const FRESH_TTL_MS = 24 * 60 * 60 * 1000 // 24h: これ以内なら即返す

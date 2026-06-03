@@ -476,6 +476,179 @@ export interface CapturedImageBytes {
   contentType: string
 }
 
+// ── Screenshot Worker (Puppeteer, PRIMARY provider) ───────────────────────────
+
+/**
+ * Puppeteer Worker へのリクエスト設定。
+ * `SCREENSHOT_WORKER_URL` + `SCREENSHOT_WORKER_TOKEN` 両方 set 時のみ有効。
+ */
+export interface ScreenshotWorkerConfig {
+  workerUrl: string
+  workerToken: string
+}
+
+/**
+ * env から Screenshot Worker 設定を解決する。両方揃っていなければ null。
+ */
+export function getScreenshotWorkerConfig(): ScreenshotWorkerConfig | null {
+  const workerUrl = process.env.SCREENSHOT_WORKER_URL
+  const workerToken = process.env.SCREENSHOT_WORKER_TOKEN
+  if (!workerUrl || workerUrl.length === 0) return null
+  if (!workerToken || workerToken.length === 0) return null
+  return { workerUrl, workerToken }
+}
+
+/**
+ * Puppeteer Screenshot Worker を呼んで bytes + dimension を返す。
+ *
+ * Worker は `POST /screenshot` で JPEG bytes を返す (Content-Type: image/jpeg)。
+ * dimension は bytes から `readImageDimensions` で抽出する (Worker が JSON meta を返さない
+ * ため、CF Browser Rendering 経路と同じ方法で読む)。
+ *
+ * SSRF guard は呼び元 (route handler) で通すこと。本関数は guarded 済 URL を前提とする。
+ */
+export async function fetchFromScreenshotWorker(input: {
+  pageUrl: string
+  device: HeatmapDevice
+  config: ScreenshotWorkerConfig
+  fetchImpl?: typeof fetch
+}): Promise<{ bytes: Uint8Array; contentType: string; naturalWidth: number; naturalHeight: number }> {
+  const width = CAPTURE_WIDTH_FOR_DEVICE[input.device]
+  const endpoint = `${input.config.workerUrl.replace(/\/$/, '')}/screenshot`
+  const body = JSON.stringify({
+    url: input.pageUrl,
+    width,
+    // deviceScaleFactor は overlay 座標整合のため 1 固定 (上 CLOUDFLARE_DEVICE_SCALE_FACTOR 参照)
+    deviceScaleFactor: CLOUDFLARE_DEVICE_SCALE_FACTOR,
+  })
+
+  const ctrl = new AbortController()
+  const timeout = setTimeout(() => ctrl.abort(), 60_000)
+  let res: Response
+  try {
+    const f = input.fetchImpl ?? fetch
+    res = await f(endpoint, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${input.config.workerToken}`,
+        'content-type': 'application/json',
+        accept: 'image/jpeg, application/json',
+      },
+      body,
+      signal: ctrl.signal,
+    })
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new ScreenshotProviderError('PROVIDER_TIMEOUT', 'screenshot worker timeout (>60s)')
+    }
+    throw new ScreenshotProviderError(
+      'PROVIDER_ERROR',
+      err instanceof Error ? err.message : 'screenshot worker network error',
+    )
+  } finally {
+    clearTimeout(timeout)
+  }
+
+  if (res.status === 429) {
+    throw new ScreenshotProviderError('PROVIDER_RATE_LIMITED', 'screenshot worker rate limit', 429)
+  }
+  if (!res.ok) {
+    const detail = await extractWorkerError(res)
+    throw new ScreenshotProviderError(
+      'PROVIDER_ERROR',
+      `screenshot worker HTTP ${res.status}${detail ? `: ${detail}` : ''}`,
+      res.status,
+    )
+  }
+
+  const rawType = (res.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
+  if (rawType.startsWith('application/json')) {
+    let detail = ''
+    try {
+      const json: unknown = await res.json()
+      if (typeof json === 'object' && json !== null) {
+        const j = json as { error?: unknown }
+        if (typeof j.error === 'string') detail = j.error
+      }
+    } catch {
+      // ignore parse error
+    }
+    throw new ScreenshotProviderError(
+      'PROVIDER_ERROR',
+      `screenshot worker returned JSON, not an image${detail ? `: ${detail}` : ''}`,
+    )
+  }
+
+  const buf = await res.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  if (bytes.length === 0) {
+    throw new ScreenshotProviderError('PROVIDER_ERROR', 'screenshot worker returned empty image')
+  }
+  const contentType = ALLOWED_IMAGE_CONTENT_TYPES.includes(rawType) ? rawType : 'image/jpeg'
+
+  const dims = readImageDimensions(bytes)
+  const naturalWidth = sanitizeDimension(dims?.width, width)
+  const naturalHeight = sanitizeDimension(dims?.height, width * 2)
+  return { bytes, contentType, naturalWidth, naturalHeight }
+}
+
+/** Worker error response から error field を best-effort で取り出す。 */
+async function extractWorkerError(res: Response): Promise<string | null> {
+  const type = (res.headers.get('content-type') ?? '').toLowerCase()
+  if (!type.includes('application/json')) return null
+  try {
+    const json: unknown = await res.json()
+    if (typeof json === 'object' && json !== null) {
+      const j = json as { error?: unknown }
+      return typeof j.error === 'string' ? j.error : null
+    }
+  } catch {
+    // ignore
+  }
+  return null
+}
+
+/**
+ * Screenshot Worker で capture し、bytes + meta を返す (R2 PUT 用)。
+ *
+ * imageUrl は degrade 経路 (R2 未設定) で `<img>` が即使えるよう data: URL を埋め込む。
+ * R2 cache 層は PUT 後に signed GET URL へ差し替える。
+ */
+export async function captureViaScreenshotWorker(input: {
+  tenantId: string
+  siteId: string
+  pageUrl: string
+  device: HeatmapDevice
+  config: ScreenshotWorkerConfig
+  cacheKey?: string
+  capturedAt?: string
+  fetchImpl?: typeof fetch
+}): Promise<ScreenshotCaptureResult> {
+  const cacheKey = input.cacheKey ?? buildCacheKey(input)
+  const fetched = await fetchFromScreenshotWorker({
+    pageUrl: input.pageUrl,
+    device: input.device,
+    config: input.config,
+    fetchImpl: input.fetchImpl,
+  })
+  const image: CapturedImageBytes = { bytes: fetched.bytes, contentType: fetched.contentType }
+  const dataUrl = toDataUrl(fetched.bytes, fetched.contentType)
+  const capture = buildUnderlayCapture(
+    input,
+    {
+      imageUrl: dataUrl,
+      naturalWidth: fetched.naturalWidth,
+      naturalHeight: fetched.naturalHeight,
+    },
+    cacheKey,
+    'cloudflare',
+    input.capturedAt,
+  )
+  return { capture, image }
+}
+
+// ── ScreenshotCaptureResult ────────────────────────────────────────────────────
+
 /** screenshot capture の結果 (meta + 画像 bytes)。provider 非依存。 */
 export interface ScreenshotCaptureResult {
   /**
@@ -742,8 +915,14 @@ function toDataUrl(bytes: Uint8Array, contentType: string): string {
 
 /**
  * provider を選択して capture する統合エントリ。
- *   - Cloudflare env (CLOUDFLARE_API_TOKEN + account id) が揃っていれば Browser Rendering を使う。
- *   - 揃っていなければ Microlink へ fallback (後方互換、CF 未設定環境で何も壊さない)。
+ *
+ * 優先順位:
+ *   1. Screenshot Worker (SCREENSHOT_WORKER_URL + SCREENSHOT_WORKER_TOKEN 両方 set)
+ *      → Puppeteer + autoScroll で lazy-load 画像を確実に取得。
+ *   2. Cloudflare Browser Rendering REST (CLOUDFLARE_API_TOKEN + account id 両方 set)
+ *      → 準確実だが addScriptTag 注入後の追加 wait が無いため lazy 漏れあり。
+ *   3. Microlink (fallback、上記いずれも未設定時)
+ *      → 後方互換。CF 未設定環境で何も壊さない。
  *
  * R2 cache 層 (lib/heatmap/r2-screenshot-cache.ts) はこの関数を呼ぶ。
  */
@@ -757,12 +936,26 @@ export async function captureScreenshot(input: {
   fetchImpl?: typeof fetch
   /** test 用 CF config override (未指定なら env から解決) */
   cloudflareConfig?: CloudflareBRConfig | null
+  /** test 用 Worker config override (未指定なら env から解決) */
+  screenshotWorkerConfig?: ScreenshotWorkerConfig | null
 }): Promise<ScreenshotCaptureResult> {
+  // 1. Screenshot Worker (PRIMARY — Puppeteer + autoScroll)
+  const sw =
+    input.screenshotWorkerConfig !== undefined
+      ? input.screenshotWorkerConfig
+      : getScreenshotWorkerConfig()
+  if (sw) {
+    return captureViaScreenshotWorker({ ...input, config: sw })
+  }
+
+  // 2. Cloudflare Browser Rendering REST
   const cf =
     input.cloudflareConfig !== undefined ? input.cloudflareConfig : getCloudflareBRConfig()
   if (cf) {
     return captureViaCloudflareBR({ ...input, config: cf })
   }
+
+  // 3. Microlink fallback
   return captureViaMicrolink(input)
 }
 

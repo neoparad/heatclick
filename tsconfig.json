@@ -40,6 +40,7 @@
     "node_modules",
     "workers/event-ingest",
     "workers/banner-runtime",
+    "workers/screenshot",
     "**/*.test.ts",
     "**/*.test.tsx"
   ]
