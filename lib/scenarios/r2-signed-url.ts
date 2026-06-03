@@ -147,6 +147,113 @@ export async function signR2PutUrl(input: SignedPutUrlInput): Promise<SignedPutU
   }
 }
 
+export interface SignedGetUrlInput {
+  /** object key (e.g. `heatmap-screenshots/v1/{tenant}/.../v2.jpg`) */
+  key: string
+  /** TTL override (default 300s) */
+  ttlSec?: number
+  /** test 用 deterministic clock */
+  now?: Date
+  /** test 用 R2 config override (default = env) */
+  config?: R2Config
+}
+
+export interface SignedGetUrlResult {
+  /** GET 用の signed URL (短命)。private bucket からの直接 read 用。 */
+  downloadUrl: string
+  /** R2 internal key (audit 用) */
+  storageKey: string
+  /** signed at timestamp ISO */
+  signedAt: string
+  /** expires at timestamp ISO */
+  expiresAt: string
+}
+
+/**
+ * R2 への presigned GET URL を発行する。
+ *
+ * private bucket (公開不可) に置いた tenant data を、短命 signed URL で `<img>` から
+ * 直接 read させるために使う。署名対象は PUT と同じ SigV4 query-string 方式で、method を
+ * GET に変えるだけ (payload なしなので `UNSIGNED-PAYLOAD`)。
+ */
+export async function signR2GetUrl(input: SignedGetUrlInput): Promise<SignedGetUrlResult> {
+  const cfg = input.config ?? getR2ConfigFromEnv()
+  const ttl = input.ttlSec ?? SIGNED_URL_TTL_SEC
+  if (ttl < 60 || ttl > 7 * 24 * 3600) {
+    throw new R2ConfigError(`invalid ttl: ${ttl} (must be 60..604800)`)
+  }
+  const now = input.now ?? new Date()
+  const expiresAt = new Date(now.getTime() + ttl * 1000)
+
+  const host = `${cfg.accountId}.r2.cloudflarestorage.com`
+  const objectPath = `/${cfg.bucket}/${encodeR2Key(input.key)}`
+  const downloadUrl = await signSigV4QueryUrl({
+    cfg,
+    method: 'GET',
+    host,
+    objectPath,
+    ttl,
+    now,
+  })
+
+  return {
+    downloadUrl,
+    storageKey: `${cfg.bucket}/${input.key}`,
+    signedAt: now.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+  }
+}
+
+/**
+ * SigV4 query-string presigning の共通ロジック (PUT / GET 共有)。
+ * canonical query を組み立て、signing key chain を導出して signed URL を返す。
+ */
+async function signSigV4QueryUrl(input: {
+  cfg: R2Config
+  method: 'GET' | 'PUT'
+  host: string
+  objectPath: string
+  ttl: number
+  now: Date
+}): Promise<string> {
+  const { cfg, method, host, objectPath, ttl, now } = input
+  const amzDate = formatAmzDate(now)
+  const dateStamp = amzDate.slice(0, 8)
+  const credentialScope = `${dateStamp}/${R2_REGION}/${R2_SERVICE}/aws4_request`
+  const algorithm = 'AWS4-HMAC-SHA256'
+
+  const params = new URLSearchParams()
+  params.set('X-Amz-Algorithm', algorithm)
+  params.set('X-Amz-Credential', `${cfg.accessKeyId}/${credentialScope}`)
+  params.set('X-Amz-Date', amzDate)
+  params.set('X-Amz-Expires', String(ttl))
+  params.set('X-Amz-SignedHeaders', 'host')
+
+  const canonicalQueryString = sortQueryParams(params)
+  const canonicalHeaders = `host:${host}\n`
+  const canonicalRequest = [
+    method,
+    objectPath,
+    canonicalQueryString,
+    canonicalHeaders,
+    'host',
+    'UNSIGNED-PAYLOAD',
+  ].join('\n')
+
+  const canonicalRequestHash = await sha256Hex(canonicalRequest)
+  const stringToSign = [algorithm, amzDate, credentialScope, canonicalRequestHash].join('\n')
+
+  const kDate = await hmacSha256(`AWS4${cfg.secretAccessKey}`, dateStamp)
+  const kRegion = await hmacSha256(kDate, R2_REGION)
+  const kService = await hmacSha256(kRegion, R2_SERVICE)
+  const kSigning = await hmacSha256(kService, 'aws4_request')
+
+  const signature = bytesToHex(await hmacSha256(kSigning, stringToSign))
+  params.set('X-Amz-Signature', signature)
+
+  return `https://${host}${objectPath}?${params.toString()}`
+}
+
 // ── crypto helpers (Web Crypto only) ───────────────────────────────────────
 
 async function sha256Hex(input: string): Promise<string> {
