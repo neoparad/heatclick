@@ -350,12 +350,14 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
     const system = await getSystemPromptWithSummary(ctx.tenant_id, input.siteId)
     const collector: FreeformToolCollector = { calls: [] }
     const tools = buildFreeformTools({ ctx, requestSiteId: input.siteId, collector })
+    const nowJst = formatJstNow()
 
     const generated = await generateText({
       model,
       system: `${system}
 
 # freeform 分析モード (重要)
+- 現在日時は ${nowJst} (Asia/Tokyo)。「今日」「昨日」「今週」「先週」「過去7日」等の相対日付は必ずこの現在日時を基準に計算すること。学習データ由来の日付を絶対に使わないこと。
 - 数値を述べる前に必ず analytics tool を呼び出すこと。tool 結果なしに数値を断定してはならない。
 - siteId / tenantId は server-side で固定済。tool input に含めないこと (含めても無視される)。
 - analytics_overview を最初に呼んで queryId を得てから analytics_contributors / analytics_drilldown / analytics_verify を使う。
@@ -496,6 +498,27 @@ function safeGatewayErrorHint(err: unknown): string {
     return `${name}${status !== undefined ? ` HTTP ${status}` : ''}${code ? ` [${code}]` : ''}`
   }
   return 'unknown'
+}
+
+/**
+ * Asia/Tokyo の現在日時を 'YYYY-MM-DD HH:mm' で返す。freeform の system prompt に注入し、
+ * LLM が「今日/昨日/先週」等の相対日付を学習データではなく実時刻基準で計算できるようにする。
+ */
+function formatJstNow(): string {
+  const d = new Date()
+  const ymd = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d)
+  const hm = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Tokyo',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(d)
+  return `${ymd} ${hm}`
 }
 
 interface BuildFreeformEvidenceParams {
