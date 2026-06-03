@@ -458,8 +458,15 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
         ? (err as { code: string }).code
         : 'FREEFORM_LLM_ERROR'
     const stub = await runFreeformStub(params)
+    // 続120 一時診断: gateway 失敗の原因を切り分けるため、secret を含まない短い hint
+    //   (error name + HTTP status + code) を reply 末尾に出す。原因特定後に撤去する。
+    const hint = safeGatewayErrorHint(err)
+    const replyWithHint: ChatReply = {
+      ...stub.reply,
+      reply: `${stub.reply.reply}\n\n[diag] gateway: ${hint}`,
+    }
     return {
-      reply: stub.reply,
+      reply: replyWithHint,
       audit: {
         ...stub.audit,
         intentCategory: 'freeform',
@@ -468,6 +475,27 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
       },
     }
   }
+}
+
+/**
+ * 続120 一時診断: gateway error から secret を含まない短い hint を抽出。
+ * error name + HTTP status (401/403=APIキー不正の可能性大) + coded category のみ。
+ * raw message は含めない (URL/キー断片の漏洩防止)。原因特定後に撤去する。
+ */
+function safeGatewayErrorHint(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const e = err as { name?: unknown; statusCode?: unknown; status?: unknown; code?: unknown }
+    const name = typeof e.name === 'string' ? e.name : 'Error'
+    const status =
+      typeof e.statusCode === 'number'
+        ? e.statusCode
+        : typeof e.status === 'number'
+          ? e.status
+          : undefined
+    const code = typeof e.code === 'string' ? e.code : undefined
+    return `${name}${status !== undefined ? ` HTTP ${status}` : ''}${code ? ` [${code}]` : ''}`
+  }
+  return 'unknown'
 }
 
 interface BuildFreeformEvidenceParams {
