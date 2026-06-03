@@ -560,12 +560,18 @@ async function runFreeformStub(params: RunFreeformParams): Promise<OrchestratorO
   // W2-A: LLM call せず planned-only stub を返す (D-07 整合、断定数値なし)
   // W2-B: ここに Haiku classifier + Sonnet generateText() を結線
   const trimmed = input.message.trim().slice(0, 200)
+  // 続120: 旧文言「Sprint 3 W2-B で提供予定」は freeform 実装済の現在では誤解を招く。
+  //   stub に落ちる理由を providerMode で出し分け、正直に表示する。
+  const reason =
+    providerMode === 'ai-gateway'
+      ? 'AI 自由分析を一時的に利用できませんでした（モデル接続、または本番環境変数 AI_GATEWAY_API_KEY の設定をご確認ください）。'
+      : 'AI 自由分析はこの環境では現在無効です（LLM 接続が未設定）。'
   const replyText = [
-    `[FREEFORM-STUB] ご質問「${trimmed}」を受け付けました。`,
-    'テンプレートに該当しないため、自由分析モードで処理する必要があります。',
-    'Sprint 3 W2-B (続 70+) で Haiku/Sonnet 経由の freeform 分析を提供予定。',
+    `ご質問「${trimmed}」を受け付けました。`,
+    reason,
+    'テンプレート定型の質問（例: 直近7日のCVR / 人気ページTop5）であればそのままお答えできます。',
     '',
-    '※ Evidence Level: planned (実 LLM 呼出前の固定 stub、断定数値なし)。',
+    '※ Evidence Level: planned（実データに基づく回答ではありません）。',
   ].join('\n')
 
   const evidence: EvidenceRef[] = [
