@@ -92,6 +92,8 @@ function baseHooks(
     // tests は lock を deterministic に: 既定は常に取得成功
     acquireLock: async () => true,
     releaseLock: async () => undefined,
+    // Cloudflare は無効化 (null) し、この suite は Microlink fallback 経路を検証する。
+    cloudflareConfig: null,
     ...overrides,
   }
 }
@@ -104,13 +106,14 @@ const INPUT = {
 }
 
 describe('buildR2Keys (key schema + tenant isolation)', () => {
-  it('uses heatmap-screenshots/v1/{tenant}/{site}/{device}/{urlHash}/v1 + .jpg/.json', () => {
+  it('uses heatmap-screenshots/v3/{tenant}/{site}/{device}/{urlHash}/v3 + .jpg/.json', () => {
+    // CAPTURE_VERSION bump (v2 → v3, Cloudflare Browser Rendering 移行) で key prefix が v3 になる。
     const keys = buildR2Keys(INPUT)
     expect(keys.imageKey).toMatch(
-      /^heatmap-screenshots\/v1\/tenant-A\/site-1\/pc\/[0-9a-f]{32}\/v1\.jpg$/,
+      /^heatmap-screenshots\/v3\/tenant-A\/site-1\/pc\/[0-9a-f]{32}\/v3\.jpg$/,
     )
     expect(keys.metaKey).toMatch(
-      /^heatmap-screenshots\/v1\/tenant-A\/site-1\/pc\/[0-9a-f]{32}\/v1\.json$/,
+      /^heatmap-screenshots\/v3\/tenant-A\/site-1\/pc\/[0-9a-f]{32}\/v3\.json$/,
     )
   })
 
@@ -147,6 +150,7 @@ describe('getHeatmapUnderlayWithR2Cache (tier selection + TTL/SWR)', () => {
     const fetchImpl = makeFakeFetch(store, counters)
     const res = await getHeatmapUnderlayWithR2Cache(INPUT, {
       fetchImpl,
+      cloudflareConfig: null, // Microlink fallback 経路を検証
       // r2Config 省略 + env 無し → degrade
     })
     expect(res.tier).toBe('degraded')

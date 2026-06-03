@@ -21,9 +21,34 @@
 import { createHash } from 'node:crypto'
 import { isIP } from 'node:net'
 
-import type { HeatmapDevice, HeatmapUnderlayCapture } from '@/lib/heatmap/types'
+import { readImageDimensions } from '@/lib/heatmap/image-dimensions'
+import type {
+  HeatmapDevice,
+  HeatmapUnderlayCapture,
+  ScreenshotProvider,
+} from '@/lib/heatmap/types'
 
 const MICROLINK_ENDPOINT = 'https://api.microlink.io'
+
+const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4'
+
+/**
+ * Cloudflare Browser Rendering の deviceScaleFactor (DPR)。
+ *
+ * **1 に固定する理由 (overlay 座標整合)**:
+ *   既存 Microlink 経路は naturalWidth ≒ viewportWidth (DPR=1 相当) を返す。座標系
+ *   (stage-layout.ts) は `pageCssHeight = naturalHeight * referenceWidth / naturalWidth`、
+ *   `displayScale = actualOuterWidth / referenceWidth` で計算し、referenceWidth は
+ *   viewportWidth (= CAPTURE_WIDTH_FOR_DEVICE) に等しい。
+ *   DPR=1 にすると naturalWidth = viewportWidth * 1 = referenceWidth となり、Microlink 経路と
+ *   `naturalWidth/referenceWidth` が完全一致するため overlay が同一 displayScale で整列する。
+ *   (DPR を 2 にしても上式は CSS px を正しく復元するが、Microlink fallback と挙動を揃え、
+ *    画像 size も抑えるため 1 を選択。)
+ */
+const CLOUDFLARE_DEVICE_SCALE_FACTOR = 1
+
+/** Cloudflare gotoOptions.timeout (page load 待ち上限)。fullPage の lazy load も待つ。 */
+const CLOUDFLARE_GOTO_TIMEOUT_MS = 30_000
 
 /**
  * Microlink CDN host allowlist. provider 応答が任意の URL を返した場合の image src
@@ -430,12 +455,20 @@ export interface CapturedImageBytes {
   contentType: string
 }
 
-/** Microlink で capture した結果 (meta + 取得した画像 bytes)。 */
-export interface MicrolinkCaptureResult {
-  /** imageUrl は Microlink CDN URL (L2 R2 が無い degrade 経路でそのまま使える) */
+/** screenshot capture の結果 (meta + 画像 bytes)。provider 非依存。 */
+export interface ScreenshotCaptureResult {
+  /**
+   * imageUrl は degrade 経路 (R2 未設定) で `<img>` が使える URL。
+   *   - microlink: CDN URL
+   *   - cloudflare: data: URL (bytes を inline、外部依存なし)
+   * R2 cache 層は PUT 後にこれを短命 signed GET URL へ差し替える。
+   */
   capture: HeatmapUnderlayCapture
   image: CapturedImageBytes
 }
+
+/** @deprecated 後方互換 alias。新規コードは {@link ScreenshotCaptureResult} を使う。 */
+export type MicrolinkCaptureResult = ScreenshotCaptureResult
 
 /**
  * Microlink を呼んで screenshot meta を得たうえで、CDN 画像 bytes も取得して返す。
@@ -454,12 +487,259 @@ export async function captureViaMicrolink(input: {
   /** capturedAt 注入 (TTL/SWR の deterministic test 用)。未指定なら wall-clock。 */
   capturedAt?: string
   fetchImpl?: typeof fetch
-}): Promise<MicrolinkCaptureResult> {
+}): Promise<ScreenshotCaptureResult> {
   const cacheKey = input.cacheKey ?? buildCacheKey(input)
   const fetched = await runMicrolinkFetch(input.pageUrl, input.device, input.fetchImpl)
   const image = await fetchCdnImageBytes(fetched.imageUrl, input.fetchImpl)
-  const capture = buildUnderlayCapture(input, fetched, cacheKey, input.capturedAt)
+  const capture = buildUnderlayCapture(input, fetched, cacheKey, 'microlink', input.capturedAt)
   return { capture, image }
+}
+
+// ── Cloudflare Browser Rendering (PRIMARY provider) ────────────────────────────
+
+/** Cloudflare Browser Rendering の env 設定 (account id + API token)。 */
+export interface CloudflareBRConfig {
+  accountId: string
+  apiToken: string
+}
+
+/**
+ * env から Cloudflare Browser Rendering 設定を解決する。両方揃っていなければ null
+ * (= Microlink fallback)。accountId は専用 `CLOUDFLARE_ACCOUNT_ID` を優先し、無ければ
+ * 既存 `R2_ACCOUNT_ID` を流用する (同一 Cloudflare account のため安全)。
+ */
+export function getCloudflareBRConfig(): CloudflareBRConfig | null {
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.R2_ACCOUNT_ID
+  if (!apiToken || apiToken.length === 0) return null
+  if (!accountId || accountId.length === 0) return null
+  return { accountId, apiToken }
+}
+
+/**
+ * Cloudflare Browser Rendering REST API で screenshot (binary JPEG) を取得し、bytes から
+ * 実 px dimension を抽出して返す。
+ *
+ * Endpoint:
+ *   POST /accounts/{accountId}/browser-rendering/screenshot
+ *   Authorization: Bearer {apiToken}
+ *
+ * Request body (JSON):
+ *   - url               : 対象ページ (SSRF guard 済前提)
+ *   - viewport          : { width = CSS px 基準幅, height, deviceScaleFactor }
+ *   - screenshotOptions : { fullPage: true, type: 'jpeg', quality }
+ *   - gotoOptions       : { waitUntil: 'networkidle0', timeout }
+ *
+ * Response: **binary image bytes** (image/jpeg)。JSON ではない。
+ *   200 以外 (CF は失敗時 JSON を返す) は ScreenshotProviderError に変換する。
+ */
+export async function fetchFromCloudflareBR(input: {
+  pageUrl: string
+  device: HeatmapDevice
+  config: CloudflareBRConfig
+  fetchImpl?: typeof fetch
+}): Promise<{ bytes: Uint8Array; contentType: string; naturalWidth: number; naturalHeight: number }> {
+  const width = CAPTURE_WIDTH_FOR_DEVICE[input.device]
+  const body = buildCloudflareBRRequestBody({ pageUrl: input.pageUrl, device: input.device })
+  const endpoint = `${CLOUDFLARE_API_BASE}/accounts/${encodeURIComponent(
+    input.config.accountId,
+  )}/browser-rendering/screenshot`
+
+  const ctrl = new AbortController()
+  const timeout = setTimeout(() => ctrl.abort(), 30_000)
+  let res: Response
+  try {
+    const f = input.fetchImpl ?? fetch
+    res = await f(endpoint, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${input.config.apiToken}`,
+        'content-type': 'application/json',
+        // 失敗時に CF が JSON error を返せるよう accept は両方許容する。
+        accept: 'image/jpeg, application/json',
+      },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    })
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new ScreenshotProviderError('PROVIDER_TIMEOUT', 'cloudflare BR timeout (>30s)')
+    }
+    throw new ScreenshotProviderError(
+      'PROVIDER_ERROR',
+      err instanceof Error ? err.message : 'cloudflare BR network error',
+    )
+  } finally {
+    clearTimeout(timeout)
+  }
+
+  if (res.status === 429) {
+    throw new ScreenshotProviderError('PROVIDER_RATE_LIMITED', 'cloudflare BR rate limit', 429)
+  }
+  if (!res.ok) {
+    // CF は失敗時 JSON {success:false, errors:[...]} を返す。message を抽出する。
+    const detail = await extractCloudflareError(res)
+    throw new ScreenshotProviderError(
+      'PROVIDER_ERROR',
+      `cloudflare BR HTTP ${res.status}${detail ? `: ${detail}` : ''}`,
+      res.status,
+    )
+  }
+
+  const rawType = (res.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
+  if (rawType.startsWith('application/json')) {
+    // 200 でも JSON が返るケース (CF が error を 200 で返す等) を防御的に拒否する。
+    const detail = await extractCloudflareErrorFromJson(await res.json().catch(() => null))
+    throw new ScreenshotProviderError(
+      'PROVIDER_ERROR',
+      `cloudflare BR returned JSON, not an image${detail ? `: ${detail}` : ''}`,
+    )
+  }
+
+  const buf = await res.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  if (bytes.length === 0) {
+    throw new ScreenshotProviderError('PROVIDER_ERROR', 'cloudflare BR returned empty image')
+  }
+  const contentType = ALLOWED_IMAGE_CONTENT_TYPES.includes(rawType)
+    ? rawType
+    : `image/${SCREENSHOT_FORMAT === 'jpeg' ? 'jpeg' : SCREENSHOT_FORMAT}`
+
+  // bytes から dimension を抽出 (CF は JSON で size を返さない)。判別不能なら fallback。
+  const dims = readImageDimensions(bytes)
+  const naturalWidth = sanitizeDimension(dims?.width, width)
+  const naturalHeight = sanitizeDimension(dims?.height, width * 2)
+  return { bytes, contentType, naturalWidth, naturalHeight }
+}
+
+/**
+ * Cloudflare Browser Rendering の request body を組み立てる (pure、test 可能)。
+ * viewport.width は device の CSS 基準幅 (= referenceWidth)、deviceScaleFactor は overlay
+ * 整合のため 1 固定 (上 CLOUDFLARE_DEVICE_SCALE_FACTOR の注釈参照)。
+ */
+export function buildCloudflareBRRequestBody(input: {
+  pageUrl: string
+  device: HeatmapDevice
+}): {
+  url: string
+  viewport: { width: number; height: number; deviceScaleFactor: number }
+  screenshotOptions: { fullPage: true; type: 'jpeg'; quality: number }
+  gotoOptions: { waitUntil: 'networkidle0'; timeout: number }
+} {
+  const width = CAPTURE_WIDTH_FOR_DEVICE[input.device]
+  return {
+    url: input.pageUrl,
+    viewport: {
+      width,
+      // 初期 viewport 高。fullPage:true なので最終画像高はページ全高で決まる (この値は初期描画用)。
+      height: Math.round(width * 1.5),
+      deviceScaleFactor: CLOUDFLARE_DEVICE_SCALE_FACTOR,
+    },
+    screenshotOptions: {
+      fullPage: true,
+      // quality は jpeg のみ有効。既存 perf 設定 (q75) を踏襲し size を抑える。
+      type: 'jpeg',
+      quality: SCREENSHOT_QUALITY,
+    },
+    gotoOptions: {
+      // networkidle0: 全 network が落ち着くまで待ち、fullPage 自動 scroll で lazy 下部も撮る。
+      waitUntil: 'networkidle0',
+      timeout: CLOUDFLARE_GOTO_TIMEOUT_MS,
+    },
+  }
+}
+
+/** CF 失敗 response (JSON) から errors[].message を best-effort で取り出す。 */
+async function extractCloudflareError(res: Response): Promise<string | null> {
+  const type = (res.headers.get('content-type') ?? '').toLowerCase()
+  if (!type.includes('application/json')) return null
+  const json = await res.json().catch(() => null)
+  return extractCloudflareErrorFromJson(json)
+}
+
+function extractCloudflareErrorFromJson(json: unknown): string | null {
+  if (typeof json !== 'object' || json === null) return null
+  const errors = (json as { errors?: unknown }).errors
+  if (!Array.isArray(errors) || errors.length === 0) return null
+  const first = errors[0]
+  if (typeof first === 'object' && first !== null && 'message' in first) {
+    const msg = (first as { message?: unknown }).message
+    return typeof msg === 'string' ? msg : null
+  }
+  return null
+}
+
+/**
+ * Cloudflare Browser Rendering で capture し、bytes + meta を返す (R2 PUT 用)。
+ *
+ * imageUrl は degrade 経路 (R2 未設定) で `<img>` が即使えるよう data: URL を埋め込む
+ * (CF の画像は外部 CDN URL を持たないため)。R2 cache 層は PUT 後に signed GET URL へ差し替える。
+ *
+ * SSRF guard は呼び元 (route handler) で必ず通すこと。本関数は guarded 済 URL を前提とする。
+ */
+export async function captureViaCloudflareBR(input: {
+  tenantId: string
+  siteId: string
+  pageUrl: string
+  device: HeatmapDevice
+  config: CloudflareBRConfig
+  cacheKey?: string
+  capturedAt?: string
+  fetchImpl?: typeof fetch
+}): Promise<ScreenshotCaptureResult> {
+  const cacheKey = input.cacheKey ?? buildCacheKey(input)
+  const fetched = await fetchFromCloudflareBR({
+    pageUrl: input.pageUrl,
+    device: input.device,
+    config: input.config,
+    fetchImpl: input.fetchImpl,
+  })
+  const image: CapturedImageBytes = { bytes: fetched.bytes, contentType: fetched.contentType }
+  const dataUrl = toDataUrl(fetched.bytes, fetched.contentType)
+  const capture = buildUnderlayCapture(
+    input,
+    {
+      imageUrl: dataUrl,
+      naturalWidth: fetched.naturalWidth,
+      naturalHeight: fetched.naturalHeight,
+    },
+    cacheKey,
+    'cloudflare',
+    input.capturedAt,
+  )
+  return { capture, image }
+}
+
+/** bytes を base64 data: URL に変換する (degrade 経路の `<img src>` 用)。 */
+function toDataUrl(bytes: Uint8Array, contentType: string): string {
+  const base64 = Buffer.from(bytes).toString('base64')
+  return `data:${contentType};base64,${base64}`
+}
+
+/**
+ * provider を選択して capture する統合エントリ。
+ *   - Cloudflare env (CLOUDFLARE_API_TOKEN + account id) が揃っていれば Browser Rendering を使う。
+ *   - 揃っていなければ Microlink へ fallback (後方互換、CF 未設定環境で何も壊さない)。
+ *
+ * R2 cache 層 (lib/heatmap/r2-screenshot-cache.ts) はこの関数を呼ぶ。
+ */
+export async function captureScreenshot(input: {
+  tenantId: string
+  siteId: string
+  pageUrl: string
+  device: HeatmapDevice
+  cacheKey?: string
+  capturedAt?: string
+  fetchImpl?: typeof fetch
+  /** test 用 CF config override (未指定なら env から解決) */
+  cloudflareConfig?: CloudflareBRConfig | null
+}): Promise<ScreenshotCaptureResult> {
+  const cf =
+    input.cloudflareConfig !== undefined ? input.cloudflareConfig : getCloudflareBRConfig()
+  if (cf) {
+    return captureViaCloudflareBR({ ...input, config: cf })
+  }
+  return captureViaMicrolink(input)
 }
 
 /**
@@ -475,7 +755,7 @@ async function captureMetaViaMicrolink(input: {
   fetchImpl?: typeof fetch
 }): Promise<HeatmapUnderlayCapture> {
   const fetched = await runMicrolinkFetch(input.pageUrl, input.device, input.fetchImpl)
-  return buildUnderlayCapture(input, fetched, input.cacheKey)
+  return buildUnderlayCapture(input, fetched, input.cacheKey, 'microlink')
 }
 
 async function runMicrolinkFetch(
@@ -496,6 +776,7 @@ function buildUnderlayCapture(
   input: { pageUrl: string; device: HeatmapDevice },
   fetched: { imageUrl: string; naturalWidth: number; naturalHeight: number },
   cacheKey: string,
+  provider: ScreenshotProvider,
   capturedAt?: string,
 ): HeatmapUnderlayCapture {
   return {
@@ -508,7 +789,7 @@ function buildUnderlayCapture(
     device: input.device,
     capturedAt: capturedAt ?? new Date().toISOString(),
     cacheKey,
-    provider: 'microlink',
+    provider,
     cached: false,
   }
 }

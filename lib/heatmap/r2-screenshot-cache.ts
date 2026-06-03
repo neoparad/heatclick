@@ -24,13 +24,18 @@ import { createHash } from 'node:crypto'
 
 import {
   CAPTURE_WIDTH_FOR_DEVICE,
-  captureViaMicrolink,
+  captureScreenshot,
   getMemoryCachedUnderlay,
   setMemoryCachedUnderlay,
   buildCacheKey,
   type CapturedImageBytes,
+  type CloudflareBRConfig,
 } from '@/lib/heatmap/screenshot-provider'
-import type { HeatmapDevice, HeatmapUnderlayCapture } from '@/lib/heatmap/types'
+import type {
+  HeatmapDevice,
+  HeatmapUnderlayCapture,
+  ScreenshotProvider,
+} from '@/lib/heatmap/types'
 import { redis } from '@/lib/redis'
 import {
   R2ConfigError,
@@ -43,8 +48,9 @@ import {
 /** R2 key prefix + 内容バージョン (capture pipeline 変更時に bump して cache 全体を無効化) */
 const KEY_PREFIX = 'heatmap-screenshots'
 // 続 119 (B): waitUntil 'networkidle2' 化で撮影内容が変わったため v2 に bump。
-// 旧 v1 (上部だけの短いスクショ) を全て cache miss にして再撮影させる。
-const CAPTURE_VERSION = 'v2'
+// Cloudflare Browser Rendering 移行 (primary provider 交代 + capture pipeline 変更) で v3 に bump。
+//   旧 v2 (Microlink、free tier で full-page 下部が切れる) を全 cache miss にして再撮影させる。
+const CAPTURE_VERSION = 'v3'
 
 /** TTL (capturedAt 比較) */
 const FRESH_TTL_MS = 24 * 60 * 60 * 1000 // 24h: これ以内なら即返す
@@ -76,7 +82,8 @@ export interface R2ScreenshotMetadata {
   naturalHeight: number
   /** ISO timestamp (TTL/SWR 判定の基準) */
   capturedAt: string
-  provider: 'microlink'
+  /** capture を撮った provider (cloudflare = Browser Rendering、microlink = fallback) */
+  provider: ScreenshotProvider
   captureVersion: string
   /** R2 object content-type (.jpg / .png / .webp) */
   imageContentType: string
@@ -104,6 +111,13 @@ export interface R2CacheHooks {
   r2Config?: R2Config
   /** fetch 差し替え (test 用) */
   fetchImpl?: typeof fetch
+  /**
+   * Cloudflare Browser Rendering config override (test 用)。
+   *   - undefined: env から解決 (本番)
+   *   - null     : CF を無効化し Microlink fallback を強制 (test 用)
+   *   - object   : 指定 config で CF を使う
+   */
+  cloudflareConfig?: CloudflareBRConfig | null
 }
 
 /**
@@ -133,7 +147,7 @@ export async function getHeatmapUnderlayWithR2Cache(
   // R2 未設定なら L2 を skip して degrade (L1-only capture)
   const r2 = resolveR2Config(hooks.r2Config)
   if (!r2) {
-    const capture = await captureAndCacheL1Only(input, cacheKey, hooks.fetchImpl)
+    const capture = await captureAndCacheL1Only(input, cacheKey, hooks)
     return { capture, tier: 'degraded' }
   }
 
@@ -164,9 +178,14 @@ export async function getHeatmapUnderlayWithR2Cache(
 async function captureAndCacheL1Only(
   input: { tenantId: string; siteId: string; pageUrl: string; device: HeatmapDevice },
   cacheKey: string,
-  fetchImpl?: typeof fetch,
+  hooks: R2CacheHooks,
 ): Promise<HeatmapUnderlayCapture> {
-  const { capture } = await captureViaMicrolink({ ...input, cacheKey, fetchImpl })
+  const { capture } = await captureScreenshot({
+    ...input,
+    cacheKey,
+    fetchImpl: hooks.fetchImpl,
+    cloudflareConfig: hooks.cloudflareConfig,
+  })
   setMemoryCachedUnderlay(cacheKey, capture)
   return capture
 }
@@ -182,11 +201,12 @@ async function captureStoreAndCacheL1(
   hooks: R2CacheHooks,
   now: () => number,
 ): Promise<HeatmapUnderlayCapture> {
-  const { capture, image } = await captureViaMicrolink({
+  const { capture, image } = await captureScreenshot({
     ...input,
     cacheKey,
     capturedAt: new Date(now()).toISOString(),
     fetchImpl: hooks.fetchImpl,
+    cloudflareConfig: hooks.cloudflareConfig,
   })
   // R2 write/sign が失敗しても screenshot 自体は返す (perf 改修で可用性を落とさない)。
   // その場合は capture の CDN imageUrl をそのまま使い、L1 にだけ hydrate する。
@@ -220,11 +240,12 @@ function scheduleRevalidate(
     const got = await acquire(lockKey, LOCK_TTL_SEC)
     if (!got) return // 別リクエストが再取得中
     try {
-      const { capture, image } = await captureViaMicrolink({
+      const { capture, image } = await captureScreenshot({
         ...input,
         cacheKey,
         capturedAt: new Date(now()).toISOString(),
         fetchImpl: hooks.fetchImpl,
+        cloudflareConfig: hooks.cloudflareConfig,
       })
       await storeInR2(input, capture, image, r2, hooks.fetchImpl)
       const served = await toR2ServedCapture(input, capture, r2)
@@ -282,7 +303,7 @@ async function readFromR2(
     device: metadata.device,
     capturedAt: metadata.capturedAt,
     cacheKey: buildCacheKey(input),
-    provider: 'microlink',
+    provider: metadata.provider,
     cached: true,
   }
   return { capture, metadata }
@@ -324,7 +345,7 @@ async function storeInR2(
     naturalWidth: capture.naturalWidth,
     naturalHeight: capture.naturalHeight,
     capturedAt: capture.capturedAt,
-    provider: 'microlink',
+    provider: capture.provider,
     captureVersion: CAPTURE_VERSION,
     imageContentType: image.contentType,
   }
@@ -430,7 +451,8 @@ function parseMetadata(raw: unknown): R2ScreenshotMetadata {
     naturalWidth,
     naturalHeight,
     capturedAt,
-    provider: 'microlink',
+    // 不明 / legacy 値は microlink 扱い (旧 cache の後方互換、v3 bump で実質再撮影される)。
+    provider: o.provider === 'cloudflare' ? 'cloudflare' : 'microlink',
     captureVersion: typeof o.captureVersion === 'string' ? o.captureVersion : '',
     imageContentType: typeof o.imageContentType === 'string' ? o.imageContentType : 'image/jpeg',
   }

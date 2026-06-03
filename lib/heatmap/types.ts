@@ -117,3 +117,60 @@ export interface HeatmapViewModel {
   hotspotCards: HotspotCard[]
   signalCards: SignalCard[]
 }
+
+/**
+ * Phase 2 (screenshot underlay) で追加:
+ * 実 page の screenshot meta 一式。`/api/heatmap/screenshot` の data 部。
+ *
+ * `naturalHeight` がそのまま `.hm-page` 高に直結する (y 圧縮廃止)。
+ */
+export type HeatmapDevice = 'pc' | 'sp' | 'tab'
+
+export interface HeatmapUnderlayCapture {
+  pageUrl: string
+  /** screenshot 画像の (CDN) URL */
+  imageUrl: string
+  /** capture viewport 幅 = CSS px 基準幅 (pc=1280, sp=390, tab=820)。DPR 非依存。 */
+  viewportWidth: number
+  /** capture viewport 高 (full page なら page 全高、provider が返した値) */
+  viewportHeight: number
+  /** image 実 px 幅 (= viewportWidth と一致する想定) */
+  naturalWidth: number
+  /** image 実 px 高 (full page、`.hm-page` の minHeight に直結) */
+  naturalHeight: number
+  device: HeatmapDevice
+  /** ISO timestamp (cache-bust 用) */
+  capturedAt: string
+  /** server 計算 cache key (debug 用、UI で評価しない) */
+  cacheKey: string
+  /** capture を撮った provider (cloudflare = Browser Rendering、microlink = fallback) */
+  provider: ScreenshotProvider
+  cached: boolean
+}
+
+/**
+ * screenshot capture provider 種別。
+ *   - 'cloudflare': Cloudflare Browser Rendering REST API (PRIMARY、full page 確実取得)
+ *   - 'microlink' : Microlink screenshot API (fallback、CF env 未設定時)
+ */
+export type ScreenshotProvider = 'cloudflare' | 'microlink'
+
+/**
+ * 座標変換 context: click_x / click_y を screenshot の **CSS px 座標空間** に整列するための値群。
+ *
+ *   - sourceWidth:    ClickHouse 正規化済 click_x の基準幅 (固定 1280)。`click_x/1280` = 水平比率。
+ *   - referenceWidth: screenshot を CSS px で表示する基準幅 (= capture.viewportWidth)。
+ *                     **DPR 非依存** — Microlink の naturalWidth は DPR で水増しされるため使わない。
+ *                     x = `click_x/sourceWidth * referenceWidth` で CSS px に整列する。
+ *   - pageHeight:     screenshot の CSS px 全高 (= naturalHeight * referenceWidth / naturalWidth)。
+ *                     click_y (document 絶対 CSS px) と同じ空間。outlier guard と img 高の基準。
+ *
+ * 注: ここで計算した blob/tag 座標は **capture CSS px 空間** (referenceWidth × pageHeight)。
+ *     実画面では `displayScale = actualOuterWidth / referenceWidth` を overlay 側で掛けて縮小する
+ *     (`<img width:100%>` の縮小率と一致するため座標がずれない)。y は圧縮しない。
+ */
+export interface HeatmapCoordinateContext {
+  sourceWidth: number
+  referenceWidth: number
+  pageHeight: number
+}
