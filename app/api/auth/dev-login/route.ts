@@ -174,7 +174,9 @@ export async function POST(request: Request) {
   }
 
   const email = parsed.data.email.toLowerCase().trim()
-  const secretOk = secretsMatch(parsed.data.secret, ownerSecret)
+  // 貼り付け時に紛れ込む前後の空白/改行での不一致を防ぐ。期待値 (getOwnerLoginSecret) も
+  // trim 済なので対称。secret は hex 乱数想定のため前後 trim は安全 (内部空白は両側で保持)。
+  const secretOk = secretsMatch(parsed.data.secret.trim(), ownerSecret)
   const user = lookupDogfoodUser(email)
 
   // secret 不一致 と 未招待 email を区別しない (enumeration 防止)。
