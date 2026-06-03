@@ -1,15 +1,19 @@
 /**
- * GET /api/heatmap — Sprint 1 dummy stub (Infrastructure Engineer S1-04 で本実装に置換)
+ * GET /api/heatmap — tile pagination cursor 規約 + dummy/real query 切替
  *
  * 親 SSOT §3.6.5 / Infra heatmap-pagination.md §2 / §3
  *
- * Sprint 1 用途:
- *   - Frontend P-04 のローカル / Preview deploy で UI が動作するための最小実装
- *   - tile pagination (cursor) 規約だけ守って、データは決定論的ダミー
- *   - tenant_id 検証等の認可は本実装で Infra が strict 化
+ * 続 82 Sprint 4 W1 Phase 2 (Frontend, Infra 続 82 配備完了 unblock):
+ *   - default: 実 ClickHouse query (`fetchRealHeatmapPoints`)
+ *   - ClickHouse 接続不可 / column 不在 / timeout 時は dummy LCG に自動 fallback
+ *   - 緊急 rollback: env `HEATMAP_DUMMY_ONLY='1'` で常時 dummy mode
+ *   - meta.data_source ('clickhouse_events' | 'dummy_lcg') を UI 側が banner 表示判定に使用
+ *   - cursor / HMAC 契約は不変、Frontend hook / UI は無変更
  *
- * 本実装は Infra `heatmap-pagination.md` §3-4 (ClickHouse query + middleware 認可) に
- * 沿って Sprint 1 W2 で置換される予定。
+ * Failure modes (production verification は GTM 上流解消後、続 82 Infra §6 root cause):
+ *   - GTM が v1 tracking.js を fire していると events 行は流入するが tenant_id='__legacy__'
+ *     で来るため、本 query (tenant_id binding 必須) は空 row を返す → UI は empty state 表示
+ *   - 空 row は **dummy fallback しない** (本物の「データなし」表示が必要)、error 時のみ fallback
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto'
@@ -19,16 +23,14 @@ import { z } from 'zod'
 
 import { headers } from 'next/headers'
 
+import { getClickHouseClient } from '@/lib/clickhouse'
+
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 /**
  * B-4 fix (Reviewer T1 dual 続 10):
  * cursor query_hash は **HMAC-SHA256 with server secret (env HEATMAP_CURSOR_SECRET)** で署名する。
- * 旧実装の決定論的ハッシュは攻撃者が再現可能で、y_start 改ざんによる任意範囲 fetch / DoS の
- * 余地があった。Infra S1-04 本実装でも同じ契約 (HMAC + server secret) を採用する。
- *
- * env が未設定の場合は起動時に throw — silent fail でセキュリティ降格を起こさない。
  */
 function getCursorSecret(): string {
   const v = process.env.HEATMAP_CURSOR_SECRET
@@ -43,7 +45,7 @@ function getCursorSecret(): string {
 const querySchema = z.object({
   site_id: z.string().min(1).max(128),
   page_url: z.string().url().max(2000),
-  heatmap_type: z.enum(['click', 'scroll', 'read']).default('click'),
+  heatmap_type: z.enum(['click', 'scroll', 'read', 'exit']).default('click'),
   device_type: z.enum(['desktop', 'mobile', 'tablet', 'unknown']).optional(),
   start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   end_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -51,7 +53,10 @@ const querySchema = z.object({
   cursor: z.string().max(2000).optional(),
 })
 
-const PAGE_HEIGHT_ESTIMATE = 30_000
+// 続120: 旧 30_000 は縦長記事で深部クリックを取りこぼしていた (click_y は UInt16 で
+// max 65535、実測 max ~50k)。UInt16 上限に合わせ 66_000 まで tile を辿れるよう拡張し、
+// 30000px より下の click/scroll/read が捨てられないようにする。
+const PAGE_HEIGHT_ESTIMATE = 66_000
 
 interface CursorPayload {
   y_start: number
@@ -68,10 +73,8 @@ function buildQueryHash(params: {
   start_date?: string
   end_date?: string
 }): string {
-  // B-4: HMAC-SHA256 with server secret。改ざんは secret なしには再生成不能。
   const raw = `${params.site_id}|${params.page_url}|${params.heatmap_type}|${params.device_type ?? ''}|${params.start_date ?? ''}|${params.end_date ?? ''}|${params.tile_size}`
   const hmac = createHmac('sha256', getCursorSecret()).update(raw).digest('hex')
-  // 先頭 32 hex char (128bit) で衝突確率は無視可能、cursor 文字数も適度に抑制
   return hmac.slice(0, 32)
 }
 
@@ -107,6 +110,14 @@ function decodeCursor(raw: string): CursorPayload | null {
 function tenantHasSite(headerSiteIds: string | null, siteId: string): boolean {
   if (!headerSiteIds) return false
   return headerSiteIds.split(',').map((s) => s.trim()).includes(siteId)
+}
+
+/**
+ * 続 82 Phase 2: 実 query が default。緊急 rollback (Hetzner CH 障害 / 全 query 崩壊時)
+ * のためだけに `HEATMAP_DUMMY_ONLY=1` で常時 dummy mode に強制切替可能。
+ */
+function isDummyOnly(): boolean {
+  return process.env.HEATMAP_DUMMY_ONLY === '1'
 }
 
 export async function GET(request: Request) {
@@ -166,7 +177,6 @@ export async function GET(request: Request) {
         { status: 400 },
       )
     }
-    // 定数時間比較で query_hash 一致を検証 (timing attack 防御、B-4)
     if (!constantTimeEqual(cur.query_hash, queryHash)) {
       return NextResponse.json(
         { success: false, error: { code: 'CURSOR_INVALID', message: 'query condition changed' } },
@@ -185,8 +195,37 @@ export async function GET(request: Request) {
   const tileEnd = Math.min(yStart + params.tile_size, PAGE_HEIGHT_ESTIMATE + params.tile_size)
   const isLast = tileEnd >= PAGE_HEIGHT_ESTIMATE
 
-  // 決定論的ダミー hotspot 生成 (LCG)
-  const points = generateDummyPoints(params.site_id, params.page_url, yStart, tileEnd, params.heatmap_type)
+  // 続 82 Phase 2: default = 実 ClickHouse query。失敗時のみ dummy fallback。
+  // 緊急 rollback は HEATMAP_DUMMY_ONLY=1 で常時 dummy mode。
+  let points: Array<{ x: number; y: number; count: number; sessions: number }>
+  let dataSource: 'dummy_lcg' | 'clickhouse_events'
+
+  if (isDummyOnly()) {
+    points = generateDummyPoints(params.site_id, params.page_url, yStart, tileEnd, params.heatmap_type)
+    dataSource = 'dummy_lcg'
+  } else {
+    try {
+      points = await fetchRealHeatmapPoints({
+        tenantId,
+        siteId: params.site_id,
+        pageUrl: params.page_url,
+        heatmapType: params.heatmap_type,
+        deviceType: params.device_type,
+        yStart,
+        yEnd: tileEnd,
+        startDate: params.start_date,
+        endDate: params.end_date,
+      })
+      dataSource = 'clickhouse_events'
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown'
+      console.error(
+        `[heatmap] real query failed query_hash=${queryHash.slice(0, 8)}, fallback to dummy: ${message}`,
+      )
+      points = generateDummyPoints(params.site_id, params.page_url, yStart, tileEnd, params.heatmap_type)
+      dataSource = 'dummy_lcg'
+    }
+  }
 
   const tile = {
     y_start: yStart,
@@ -215,8 +254,199 @@ export async function GET(request: Request) {
       cached: false,
       cache_ttl_sec: 7200,
       query_hash: queryHash,
+      data_source: dataSource,
+      heatmap_type: params.heatmap_type,
     },
   })
+}
+
+/**
+ * ClickHouse `clickinsight.events` から heatmap_type に応じた集約を返す。
+ *
+ * layer → event_type → coordinate 列のマッピング:
+ *   click  → event_type='click'      → x = normalize(click_x), y = click_y
+ *   read   → event_type='read_area'  → x = 0 (full-width band), y = read_y
+ *   scroll → event_type='scroll'     → x = 0, y = scroll_y (reach curve)
+ *   exit   → event_type='scroll' (per-session max) → x = 0, y = 離脱深度 (続120 fix: session_end は scroll_y を持たない)
+ *
+ * scroll / exit は到達率曲線として view-model 側で解釈するため、
+ * count = そのバンドに到達した (または終了した) セッション数を返す。
+ *
+ * tile 単位の y_start..y_end range で絞り込む (scroll/exit は depth 範囲)。
+ * is_agent = 0 (bot 除外) は全 query で必須。
+ */
+async function fetchRealHeatmapPoints(input: {
+  tenantId: string
+  siteId: string
+  pageUrl: string
+  heatmapType: 'click' | 'scroll' | 'read' | 'exit'
+  deviceType?: 'desktop' | 'mobile' | 'tablet' | 'unknown'
+  yStart: number
+  yEnd: number
+  startDate?: string
+  endDate?: string
+}): Promise<Array<{ x: number; y: number; count: number; sessions: number }>> {
+  const client = getClickHouseClient('analytics_reader')
+
+  const deviceFilter = input.deviceType ? `AND device_type = {device_type:String}` : ''
+  const dateStart = input.startDate ?? '1970-01-01'
+  const dateEnd = input.endDate ?? '2099-12-31'
+
+  const queryParams: Record<string, string> = {
+    tenant_id: input.tenantId,
+    site_id: input.siteId,
+    page_url: input.pageUrl,
+    y_start: String(input.yStart),
+    y_end: String(input.yEnd),
+    start: dateStart,
+    end: dateEnd,
+  }
+  if (deviceFilter && input.deviceType) {
+    queryParams.device_type = input.deviceType
+  }
+
+  let sql: string
+
+  if (input.heatmapType === 'click') {
+    // ── CLICK ────────────────────────────────────────────────────────────
+    // click_x を 1280 基準に正規化、[0,1280] に clamp。
+    // click_y = document 絶対 CSS px (UInt32 で wrap を避ける)。
+    // viewport_width <= 0 の malformed row は生 click_x をそのまま使う (worst-case)。
+    sql = `
+      SELECT
+        toUInt16(least(1280, greatest(0, if(viewport_width > 0, click_x * 1280 / viewport_width, click_x)))) AS x,
+        toUInt32(click_y) AS y,
+        count() AS count,
+        uniqExact(session_id) AS sessions
+      FROM clickinsight.events
+      WHERE tenant_id = {tenant_id:String}
+        AND site_id = {site_id:String}
+        AND url = {page_url:String}
+        AND event_type = 'click'
+        AND is_agent = 0
+        AND click_y >= {y_start:UInt32}
+        AND click_y < {y_end:UInt32}
+        AND timestamp >= toDateTime({start:String})
+        AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+        ${deviceFilter}
+      GROUP BY x, y
+      HAVING count >= 1
+      ORDER BY count DESC
+      LIMIT 500
+    `
+  } else if (input.heatmapType === 'read') {
+    // ── READ (熟読 / attention) ──────────────────────────────────────────
+    // read_area events の read_y を 200px bin に丸めて密度集計。
+    // x = 0 (full-width band、view-model が幅全体に帯として描画)。
+    // read_y は document 絶対 CSS px (UInt32 にキャスト)。
+    sql = `
+      SELECT
+        0 AS x,
+        toUInt32(intDiv(read_y, 200) * 200) AS y,
+        count() AS count,
+        uniqExact(session_id) AS sessions
+      FROM clickinsight.events
+      WHERE tenant_id = {tenant_id:String}
+        AND site_id = {site_id:String}
+        AND url = {page_url:String}
+        AND event_type = 'read_area'
+        AND is_agent = 0
+        AND read_y >= {y_start:UInt32}
+        AND read_y < {y_end:UInt32}
+        AND timestamp >= toDateTime({start:String})
+        AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+        ${deviceFilter}
+      GROUP BY y
+      HAVING count >= 1
+      ORDER BY y ASC
+      LIMIT 500
+    `
+  } else if (input.heatmapType === 'scroll') {
+    // ── SCROLL (スクロール到達率) ────────────────────────────────────────
+    // scroll events: session ごとの max(scroll_y) を求め、各 200px band に
+    // 「その深度まで到達した」セッション数を集計する (reach curve)。
+    // count = そのバンドへ到達したセッション数 (y 座標以上に到達した session 数)。
+    // 実装: per-session max_scroll を先に集計し、band ごとにカウントする。
+    // tile y_start..y_end はスクロール深度の窓 (scroll_y フィルタ)。
+    sql = `
+      WITH per_session AS (
+        SELECT
+          session_id,
+          max(scroll_y) AS max_scroll_y
+        FROM clickinsight.events
+        WHERE tenant_id = {tenant_id:String}
+          AND site_id = {site_id:String}
+          AND url = {page_url:String}
+          AND event_type = 'scroll'
+          AND is_agent = 0
+          AND timestamp >= toDateTime({start:String})
+          AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+          ${deviceFilter}
+        GROUP BY session_id
+      )
+      SELECT
+        0 AS x,
+        toUInt32(intDiv(max_scroll_y, 200) * 200) AS y,
+        count() AS count,
+        count() AS sessions
+      FROM per_session
+      WHERE max_scroll_y >= {y_start:UInt32}
+        AND max_scroll_y < {y_end:UInt32}
+      GROUP BY y
+      HAVING count >= 1
+      ORDER BY y ASC
+      LIMIT 500
+    `
+  } else {
+    // ── EXIT (終了 / 離脱) ────────────────────────────────────────────────
+    // 続120 fix: 本番検証で session_end events は scroll_y を一切持たない (全行 0) ことが
+    // 判明した。そのため「離脱深度 = そのセッションが到達した最深部 (max scroll_y)」と定義し、
+    // scroll events の per-session max(scroll_y) を 200px band に集計する (scroll 層と同じ
+    // proven データ源)。各 band の count = その深度で離脱した (それ以上進まなかった) セッション数。
+    // view-model は scroll(到達率=累積) とは別に、本 band 単位の dropoff として描画する。
+    sql = `
+      WITH per_session AS (
+        SELECT
+          session_id,
+          max(scroll_y) AS max_scroll_y
+        FROM clickinsight.events
+        WHERE tenant_id = {tenant_id:String}
+          AND site_id = {site_id:String}
+          AND url = {page_url:String}
+          AND event_type = 'scroll'
+          AND is_agent = 0
+          AND timestamp >= toDateTime({start:String})
+          AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+          ${deviceFilter}
+        GROUP BY session_id
+      )
+      SELECT
+        0 AS x,
+        toUInt32(intDiv(max_scroll_y, 200) * 200) AS y,
+        count() AS count,
+        count() AS sessions
+      FROM per_session
+      WHERE max_scroll_y >= {y_start:UInt32}
+        AND max_scroll_y < {y_end:UInt32}
+      GROUP BY y
+      HAVING count >= 1
+      ORDER BY y ASC
+      LIMIT 500
+    `
+  }
+
+  const rs = await client.query({
+    query: sql,
+    query_params: queryParams,
+    format: 'JSONEachRow',
+  })
+  const rows = (await rs.json()) as Array<{
+    x: number
+    y: number
+    count: number
+    sessions: number
+  }>
+  return rows
 }
 
 function generateDummyPoints(

@@ -81,6 +81,10 @@ export const MOCKUP_VIEW_MODEL: HeatmapViewModel = {
     { top: 640, height: 200, sectionLabel: '関連商品', exitPct: '1.6%', level: 'ok' },
   ],
 
+  // Fixture では read / scroll は空 (mockup parity は click + emotion + signal が主役)
+  readBands: [],
+  scrollReachBands: [],
+
   emotionSummary: {
     hes: 36,
     eng: 24,

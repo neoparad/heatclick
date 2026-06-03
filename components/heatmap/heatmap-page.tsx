@@ -26,10 +26,10 @@ import { ChevronDown } from 'lucide-react'
 import { SegmentChip } from '@/components/ui/segment-chip'
 import { EvidenceBadge } from '@/components/dashboard/evidence-badge'
 import { useHeatmapTiles } from '@/hooks/use-heatmap-tiles'
+import { pageStatsToLabels, usePageStats } from '@/hooks/use-page-stats'
 import type { HeatmapLayer, HeatmapPoint, HeatmapTile } from '@/lib/api/heatmap'
 
 import { HotspotDetail } from './hotspot-detail'
-import { PageStatsBar } from './page-stats-bar'
 
 /** HeatmapCanvas を chunk 分離 (mockup overlays 群を含むため bundle 数十 KB) */
 const HeatmapCanvas = dynamic(
@@ -57,8 +57,9 @@ function periodToRange(days: PeriodDays): { start: string; end: string } {
 }
 
 export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPageProps) {
-  // legacy 互換のため初期 layer を保持 (HeatmapCanvas 内で multi-layer 化)
-  const [layer] = useState<HeatmapLayer>('click')
+  // activeLayer はデータ取得レイヤー (単一選択、ラジオ)。
+  // 変更時に heatmapQuery が変わり useHeatmapTiles が再 fetch する。
+  const [layer, setLayer] = useState<HeatmapLayer>('click')
   const [pageUrl, setPageUrl] = useState(initialPageUrl)
   const [deviceFilter, setDeviceFilter] = useState<DeviceFilter>('all')
   const [periodDays, setPeriodDays] = useState<PeriodDays>(7)
@@ -74,12 +75,26 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
       device_type: deviceFilter === 'all' ? undefined : (deviceFilter as 'desktop' | 'mobile'),
       start_date: dateRange.start,
       end_date: dateRange.end,
+      // 続 117 v2: tile_size = 1 tile がカバーする縦 y-px 窓 (800-6000, 既定 2400)。最大の 6000 に
+      // して 1 tile で広い縦範囲を返してもらい、eager prefetch の round-trip 回数を最小化する
+      // (screenshot underlay は normal flow 全高表示で sentinel が viewport に入らないため、
+      //  tile を細切れにすると最初の数枚しか描画されなかった = bug #5)。
+      tile_size: 6000,
     }),
     [siteId, pageUrl, layer, deviceFilter, dateRange.start, dateRange.end],
   )
 
   const { tiles, loading, hasMore, pageHeightEstimate, meta, error, loadMore } =
     useHeatmapTiles(heatmapQuery)
+
+  // 段 2 PageStatsBar 撤去に伴い canvas-top に集約するため、page-stats は hook で持つ
+  const pageStats = usePageStats({
+    siteId,
+    pageUrl,
+    dateRange,
+    deviceType: deviceFilter,
+  })
+  const statsLabels = pageStatsToLabels(pageStats)
 
   return (
     <div className="relative space-y-3">
@@ -172,17 +187,18 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
         </div>
       </div>
 
-      {/* 2. PageStatsBar (URL + PV/sessions/CTR/滞留) — controls bar とは別行で維持 */}
-      <PageStatsBar
-        siteId={siteId}
-        pageUrl={pageUrl}
-        dateRange={dateRange}
-        deviceType={deviceFilter}
-      />
+      {/*
+        2026-05-29 (続 115) Phase 2 / B 改修:
+          旧段 2 `PageStatsBar` (URL + PV/sessions/CTR/貼擯路) を撤去。
+          canvas-top (HeatmapToolbar) の URL bar + stat 領域に値を集約表示する。
+          fetch 仕様は不変 (usePageStats hook で抽出)。
+      */}
 
       {/* 3. HeatmapCanvas (内部 ControlsBar に LAYER + EMOTION = 段 2、その下に canvas + side) */}
       <HeatmapCanvas
         layer={layer}
+        onLayerChange={setLayer}
+        siteId={siteId}
         pageUrl={pageUrl}
         tiles={tiles}
         loading={loading}
@@ -191,6 +207,9 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
         meta={meta}
         error={error}
         loadMore={loadMore}
+        pvLabel={statsLabels.pvLabel}
+        ctrLabel={statsLabels.ctrLabel}
+        scrollLabel={statsLabels.scrollLabel}
         onHotspotSelect={(point, tile) => setSelected({ point, tile })}
       />
 

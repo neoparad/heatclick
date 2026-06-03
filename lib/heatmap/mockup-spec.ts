@@ -23,13 +23,37 @@ export const PAGE_WIDTH = 720
 export const MOCK_PAGE_HEIGHT = 860
 
 /** Layer メタ — controls bar + fullscreen floating bar 用 */
-export const LAYERS: ReadonlyArray<{ key: LayerKey; label: string; defaultActive: boolean }> = [
+export const LAYERS: ReadonlyArray<{
+  key: LayerKey
+  label: string
+  defaultActive: boolean
+  /**
+   * disabled: true → 「データ未収集」ツールチップを表示し、クリック無効。
+   * move (マウス移動) と emo (感情) は未収集 / ML 未実装。
+   * §1.7 Anti-Features / D-07 規則: データがない機能は disabled 表示必須。
+   */
+  disabled?: boolean
+  disabledTooltip?: string
+}> = [
   { key: 'click', label: 'クリック', defaultActive: true },
   { key: 'end', label: '終了', defaultActive: false },
   { key: 'attention', label: '熟読', defaultActive: false },
+  { key: 'scroll', label: 'スクロール', defaultActive: false },
   { key: 'exit', label: '離脱', defaultActive: false },
-  { key: 'move', label: 'マウス', defaultActive: false },
-  { key: 'emo', label: '感情', defaultActive: true },
+  {
+    key: 'move',
+    label: 'マウス',
+    defaultActive: false,
+    disabled: true,
+    disabledTooltip: 'データ未収集',
+  },
+  {
+    key: 'emo',
+    label: '感情',
+    defaultActive: false,
+    disabled: true,
+    disabledTooltip: 'ML未実装',
+  },
 ]
 
 /** Emotion sub-filter chips (mockup `.emo-filter`) */

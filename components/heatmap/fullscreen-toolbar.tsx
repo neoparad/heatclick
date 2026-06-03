@@ -21,10 +21,17 @@ interface FullscreenToolbarProps {
   onExit: () => void
 }
 
-/** mockup parity: fullscreen でも 6 layer 同時 ON 可能 (Codex review HIGH/MEDIUM fix) */
-const FS_LAYERS: ReadonlyArray<{ key: LayerKey; label: string }> = LAYERS.map((l) => ({
+/** fullscreen layer list: disabled 情報も保持して greyed 表示に使う */
+const FS_LAYERS: ReadonlyArray<{
+  key: LayerKey
+  label: string
+  disabled?: boolean
+  disabledTooltip?: string
+}> = LAYERS.map((l) => ({
   key: l.key,
   label: l.label,
+  disabled: l.disabled,
+  disabledTooltip: l.disabledTooltip,
 }))
 
 export function FullscreenToolbar({
@@ -54,22 +61,28 @@ export function FullscreenToolbar({
       >
         {FS_LAYERS.map((l) => {
           const active = layers.has(l.key)
+          const isDisabled = l.disabled === true
           return (
             <button
               key={l.key}
               type="button"
               data-testid={`fs-layer-${l.key}`}
-              onClick={() => onToggleLayer(l.key)}
+              onClick={() => !isDisabled && onToggleLayer(l.key)}
               aria-pressed={active}
+              aria-disabled={isDisabled}
+              disabled={isDisabled}
+              title={isDisabled ? l.disabledTooltip : undefined}
               className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11.5px] font-medium transition"
               style={
-                active
-                  ? {
-                      background: 'linear-gradient(135deg, #4F6BFF, #A855F7)',
-                      color: '#fff',
-                      boxShadow: '0 1px 3px rgba(0,0,0,.3)',
-                    }
-                  : { background: 'transparent', color: 'rgba(255,255,255,.65)' }
+                isDisabled
+                  ? { background: 'transparent', color: 'rgba(255,255,255,.25)', cursor: 'not-allowed' }
+                  : active
+                    ? {
+                        background: 'linear-gradient(135deg, #4F6BFF, #A855F7)',
+                        color: '#fff',
+                        boxShadow: '0 1px 3px rgba(0,0,0,.3)',
+                      }
+                    : { background: 'transparent', color: 'rgba(255,255,255,.65)' }
               }
             >
               <span>{l.label}</span>

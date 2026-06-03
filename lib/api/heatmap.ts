@@ -4,7 +4,45 @@
  * 親 SSOT §3.6.5 / Part V §5.5.1 P-04 / Infra heatmap-pagination.md §2.2 / §2.3
  */
 
-export type HeatmapLayer = 'click' | 'move' | 'emotion' | 'friction'
+/**
+ * Data layers:
+ *   click      — クリック密集 (実 ClickHouse query)
+ *   read       — 熟読 / attention (read_area events, real query)
+ *   scroll     — スクロール到達率 (scroll events reach curve, real query)
+ *   exit       — 終了 / 離脱 (session_end events dropoff, real query)
+ *   move       — マウス移動 (未収集 — UI で disabled/greyed)
+ *   emotion    — 感情推論 (ML 未実装 — UI で disabled/greyed)
+ *   friction   — フリクション (旧名称 → exit に統合、型互換のため残存)
+ */
+export type HeatmapLayer = 'click' | 'read' | 'scroll' | 'exit' | 'move' | 'emotion' | 'friction'
+
+/**
+ * API が受け付ける heatmap_type 値。layer → heatmap_type のマッピングは
+ * layerToHeatmapType() で一元管理する。
+ */
+export type HeatmapApiType = 'click' | 'scroll' | 'read' | 'exit'
+
+/**
+ * layer 識別子 → API の heatmap_type パラメータへの正規変換。
+ * 未収集 / 未実装レイヤー (move / emotion / friction) は click にフォールバック。
+ */
+export function layerToHeatmapType(layer: HeatmapLayer): HeatmapApiType {
+  switch (layer) {
+    case 'click':
+      return 'click'
+    case 'read':
+      return 'read'
+    case 'scroll':
+      return 'scroll'
+    case 'exit':
+      return 'exit'
+    case 'move':
+    case 'emotion':
+    case 'friction':
+      // 未収集 / 未実装 — click にフォールバック (UI で disabled にすべきだが念のため)
+      return 'click'
+  }
+}
 
 export interface HeatmapQuery {
   site_id: string
@@ -36,6 +74,20 @@ export interface HeatmapTileMeta {
   cached: boolean
   cache_ttl_sec: number
   query_hash: string
+  /**
+   * 続 82 Sprint 4 W1: dummy / real query 切替判定。
+   *   - 'dummy_lcg' : Sprint 1 deterministic LCG dummy points (Infra 続 82 deploy 前)
+   *   - 'clickhouse_events' : 実 ClickHouse `clickinsight.events` 集約 (Infra 続 82 完了後)
+   * UI 側はこの値で Sprint 1 banner / Sprint 4 W1 banner を切替表示する。
+   * 未定義 (旧 deploy) の場合は 'dummy_lcg' 互換扱い。
+   */
+  data_source?: 'dummy_lcg' | 'clickhouse_events'
+  /**
+   * 取得した heatmap_type (click | read | scroll | exit)。
+   * view-model builder がレイヤーごとに正しい描画モードを選択するために使う。
+   * 未定義 (旧 deploy) は 'click' 互換扱い。
+   */
+  heatmap_type?: HeatmapApiType
 }
 
 export interface HeatmapTileSuccess {
@@ -74,10 +126,9 @@ export async function fetchHeatmapTile(
   params.set('site_id', query.site_id)
   params.set('page_url', query.page_url)
   params.set('layer', query.layer)
-  // heatmap_type は API 仕様 §2.2: click / scroll / read。layer=click は heatmap_type=click。
-  // emotion / friction / move は Sprint 1 では click を tile pagination で返し、UI 側の
-  // shading で別表現する (Infra spec §2.2 注記: scroll/read は Phase 2 後ろ倒し)。
-  params.set('heatmap_type', query.layer === 'click' ? 'click' : 'click')
+  // heatmap_type: layer ごとに正しい event_type + 座標列を使う query を server が選択する。
+  // layerToHeatmapType() で一元管理 (move/emotion/friction は click にフォールバック)。
+  params.set('heatmap_type', layerToHeatmapType(query.layer))
   if (query.start_date) params.set('start_date', query.start_date)
   if (query.end_date) params.set('end_date', query.end_date)
   if (query.device_type) params.set('device_type', query.device_type)

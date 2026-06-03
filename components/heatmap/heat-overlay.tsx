@@ -32,6 +32,8 @@ import type {
   HeatTag,
   HeatmapViewModel,
   LayerKey,
+  ReadBand,
+  ScrollReachBand,
 } from '@/lib/heatmap/types'
 
 interface HeatOverlayProps {
@@ -42,6 +44,12 @@ interface HeatOverlayProps {
   onTagClick?: (tagId: string) => void
   /** parent でフォーカス scroll に使うため、tag に attach する ref map */
   tagRefs?: RefObject<Map<string, HTMLButtonElement | null>>
+  /**
+   * 続 117 v2: vm の座標は capture CSS px 空間 (referenceWidth × pageHeight)。
+   * `<img width:100%>` の縮小率 (= actualOuterWidth / referenceWidth) を各要素に掛けて
+   * 画像とピクセル一致させる。Phase 1 fallback / fixture は 1 (mockup 720 空間そのまま)。
+   */
+  displayScale?: number
 }
 
 export function HeatOverlay({
@@ -51,6 +59,7 @@ export function HeatOverlay({
   highlightedTagId,
   onTagClick,
   tagRefs,
+  displayScale = 1,
 }: HeatOverlayProps) {
   const visibleBlobs = useMemo(
     () => vm.blobs.filter((b) => blobVisible(b, layers, activeEmotions)),
@@ -77,7 +86,7 @@ export function HeatOverlay({
                 : `emo-${b.emotion ?? 'hes'}`) +
             ' pointer-events-auto absolute rounded-full'
           }
-          style={blobStyle(b)}
+          style={blobStyle(b, displayScale)}
           aria-hidden
         />
       ))}
@@ -90,6 +99,7 @@ export function HeatOverlay({
               highlighted={highlightedTagId === t.id}
               onClick={onTagClick}
               refMap={tagRefs}
+              displayScale={displayScale}
             />
           ))
         : null}
@@ -101,8 +111,8 @@ export function HeatOverlay({
               key={`end-${i}`}
               className={`end-band ${band.tier} absolute left-0 right-0 flex items-center px-[14px] py-1 font-mono text-[11px] font-bold text-white`}
               style={{
-                top: band.top,
-                height: band.height,
+                top: band.top * displayScale,
+                height: band.height * displayScale,
                 background: END_BAND_BG[band.tier],
                 mixBlendMode: 'multiply',
                 textShadow: '0 1px 2px rgba(0,0,0,.25)',
@@ -127,8 +137,8 @@ export function HeatOverlay({
               key={`exit-${i}`}
               className={`exit-row lvl-${row.level} absolute left-0 right-0 flex items-center px-[14px] py-1 font-mono text-[11px] font-bold text-white`}
               style={{
-                top: row.top,
-                height: row.height,
+                top: row.top * displayScale,
+                height: row.height * displayScale,
                 background: EXIT_ROW_BG[row.level],
                 mixBlendMode: 'multiply',
                 textShadow: '0 1px 2px rgba(0,0,0,.3)',
@@ -143,6 +153,114 @@ export function HeatOverlay({
           ))}
         </div>
       ) : null}
+
+      {layers.has('attention') && vm.readBands.length > 0 ? (
+        <ReadBandOverlay
+          bands={vm.readBands}
+          displayScale={displayScale}
+        />
+      ) : null}
+
+      {layers.has('scroll') && vm.scrollReachBands.length > 0 ? (
+        <ScrollReachOverlay
+          bands={vm.scrollReachBands}
+          displayScale={displayScale}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * 熟読 (read / attention) バンドオーバーレイ。
+ * 全幅の帯を intensity に応じた warm-to-cool gradient で描画。
+ * intensity = count / maxCount (0..1)。強い帯ほど赤寄り・不透明。
+ */
+function ReadBandOverlay({
+  bands,
+  displayScale,
+}: {
+  bands: ReadBand[]
+  displayScale: number
+}) {
+  return (
+    <div
+      className="read-band-overlay pointer-events-none absolute inset-0"
+      data-testid="read-band-overlay"
+    >
+      {bands.map((band, i) => {
+        // intensity → warm color: low=yellow-green, high=red
+        const r = Math.round(50 + band.intensity * 165)
+        const g = Math.round(161 - band.intensity * 130)
+        const b = Math.round(80 - band.intensity * 70)
+        const alpha = 0.18 + band.intensity * 0.42
+        return (
+          <div
+            key={`read-${i}`}
+            className="read-band absolute left-0 right-0 flex items-center justify-end px-[10px] font-mono text-[10px] font-semibold"
+            style={{
+              top: band.top * displayScale,
+              height: Math.max(2, band.height * displayScale),
+              background: `rgba(${r},${g},${b},${alpha.toFixed(2)})`,
+              mixBlendMode: 'multiply',
+              borderBottom: band.intensity > 0.5 ? '1px solid rgba(214,69,69,.25)' : 'none',
+              color: 'rgba(100,20,20,.8)',
+            }}
+            data-testid={`read-band-${i}`}
+            aria-hidden
+          >
+            {band.intensity > 0.3 ? (
+              <span style={{ textShadow: '0 1px 1px rgba(255,255,255,.7)' }}>
+                {band.sessions.toLocaleString()} sessions
+              </span>
+            ) : null}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * スクロール到達率 (scroll reach) バンドオーバーレイ。
+ * 各深度の reach% を左端の縦グラデーション帯 + ラベルで表現する。
+ * reach が高い (多くのセッションが到達) ほど濃い青系。
+ */
+function ScrollReachOverlay({
+  bands,
+  displayScale,
+}: {
+  bands: ScrollReachBand[]
+  displayScale: number
+}) {
+  return (
+    <div
+      className="scroll-reach-overlay pointer-events-none absolute inset-0"
+      data-testid="scroll-reach-overlay"
+    >
+      {bands.map((band, i) => {
+        const alpha = 0.12 + band.reach * 0.38
+        return (
+          <div
+            key={`scroll-reach-${i}`}
+            className="scroll-reach-band absolute left-0 right-0 flex items-center px-[10px] font-mono text-[10.5px] font-bold"
+            style={{
+              top: band.top * displayScale,
+              height: Math.max(2, band.height * displayScale),
+              background: `rgba(47,134,224,${alpha.toFixed(2)})`,
+              mixBlendMode: 'multiply',
+              borderBottom: '1px solid rgba(47,134,224,.15)',
+              color: 'rgba(10,40,90,.85)',
+            }}
+            data-testid={`scroll-reach-band-${i}`}
+            aria-hidden
+          >
+            <span style={{ textShadow: '0 1px 1px rgba(255,255,255,.7)' }}>
+              {band.reachLabel}
+            </span>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -162,14 +280,16 @@ function blobVisible(
   return false
 }
 
-function blobStyle(b: HeatBlob): CSSProperties {
+function blobStyle(b: HeatBlob, displayScale: number): CSSProperties {
+  // blur も scale して、縮小時に blob が過度にボケない / 拡大時に固くならないよう追従させる。
+  const blur = Math.max(3, Math.round(8 * displayScale))
   return {
-    left: b.x,
-    top: b.y,
-    width: b.width,
-    height: b.height,
+    left: b.x * displayScale,
+    top: b.y * displayScale,
+    width: b.width * displayScale,
+    height: b.height * displayScale,
     background: blobGradient({ mode: b.mode, severity: b.severity, emotion: b.emotion }),
-    filter: 'blur(8px)',
+    filter: `blur(${blur}px)`,
     mixBlendMode: 'multiply',
     cursor: 'pointer',
   }
@@ -180,11 +300,13 @@ function TagPill({
   highlighted,
   onClick,
   refMap,
+  displayScale,
 }: {
   tag: HeatTag
   highlighted: boolean
   onClick?: (id: string) => void
   refMap?: RefObject<Map<string, HTMLButtonElement | null>>
+  displayScale: number
 }) {
   const numBg =
     tag.intent === 'warn'
@@ -207,8 +329,10 @@ function TagPill({
         'pointer-events-auto absolute inline-flex items-center whitespace-nowrap rounded-full border bg-white px-2 py-[3px] font-mono text-[10.5px] font-semibold transition-transform'
       }
       style={{
-        left: tag.x,
-        top: tag.y,
+        // 座標は capture CSS px → displayScale で img と整列。pill 自体のサイズ / font は固定
+        // (label は読みやすさ優先で縮小しない、anchor だけ移動)。
+        left: tag.x * displayScale,
+        top: tag.y * displayScale,
         borderColor: 'var(--ug-border, #e7e8ec)',
         color: 'var(--ug-text, #0a0b0d)',
         boxShadow:

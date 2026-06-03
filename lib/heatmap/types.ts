@@ -11,7 +11,7 @@
  * - 単位: px (整数推奨、CSS で left:Npx として絶対配置)
  */
 
-export type LayerKey = 'click' | 'end' | 'attention' | 'exit' | 'move' | 'emo'
+export type LayerKey = 'click' | 'end' | 'attention' | 'scroll' | 'exit' | 'move' | 'emo'
 
 export type EmotionKey = 'frust' | 'hes' | 'cmp' | 'eng' | 'conf' | 'anx'
 
@@ -107,12 +107,48 @@ export interface SignalCard {
   uniqueBadge?: boolean
 }
 
+/**
+ * 熟読レイヤー (read / attention): read_area events を read_y で bin 集計した帯。
+ * x はなし (full-width 強度帯)。top/height は capture CSS px 空間。
+ */
+export interface ReadBand {
+  /** band 上端 CSS px (read_y の bin 下限) */
+  top: number
+  /** band 高さ (= bin サイズ) */
+  height: number
+  /** セッション数 */
+  sessions: number
+  /** イベント数 (intensity weight 用) */
+  count: number
+  /** 最大 count に対する比率 [0,1] */
+  intensity: number
+}
+
+/**
+ * スクロール到達率レイヤー (scroll): 各深度 band に到達したセッション割合 [0,1]。
+ * 縦グラデーション帯 + % ラベルで表現する。
+ */
+export interface ScrollReachBand {
+  /** band 上端 CSS px */
+  top: number
+  /** band 高さ */
+  height: number
+  /** 到達率 [0,1] */
+  reach: number
+  /** 表示ラベル (例: "78%") */
+  reachLabel: string
+}
+
 export interface HeatmapViewModel {
   blobs: HeatBlob[]
   tags: HeatTag[]
   signals: SignalMarker[]
   endBands: EndBand[]
   exitRows: ExitRow[]
+  /** 熟読レイヤー (read_area events 集計、read layer ON 時に HeatOverlay が描画) */
+  readBands: ReadBand[]
+  /** スクロール到達率レイヤー (scroll events 集計、scroll layer ON 時に HeatOverlay が描画) */
+  scrollReachBands: ScrollReachBand[]
   emotionSummary: EmotionDistribution
   hotspotCards: HotspotCard[]
   signalCards: SignalCard[]

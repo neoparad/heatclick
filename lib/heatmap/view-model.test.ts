@@ -2,17 +2,29 @@
  * Unit tests: buildHeatmapViewModel
  *
  * 親 SSOT §3.6.5 / Part V §5.5.1 P-04
- * Dispatch: 2026-05-29 frontend mockup parity rebuild §4 Step 12
+ * Dispatch: 2026-05-29 frontend heatmap real-data rendering Phase 1
+ *   (handoff: `2026-05-29-frontend-heatmap-real-data-rendering.md`)
+ *
+ * Phase 1 期待挙動:
+ *   - dummy_lcg / meta=null → MOCKUP_VIEW_MODEL (mockup parity)
+ *   - clickhouse_events で 1 点以上 → real cluster (mockup の emotion / attention /
+ *     signal / endBand / exitRow / hotspotCard / signalCard は drop)
+ *   - clickhouse_events で 0 点 → empty view-model (fixture には戻らない)
+ *   - forceFixture=true → 常に MOCKUP_VIEW_MODEL
  */
 
 import type { HeatmapTile, HeatmapTileMeta } from '@/lib/api/heatmap'
 import { MOCKUP_VIEW_MODEL } from '@/lib/fixtures/heatmap-mockup'
+import { MOCK_PAGE_HEIGHT, PAGE_WIDTH } from '@/lib/heatmap/mockup-spec'
 import { buildHeatmapViewModel } from './view-model'
 
-function metaWith(source: 'dummy_lcg' | 'clickhouse_events'): HeatmapTileMeta {
+function metaWith(
+  source: 'dummy_lcg' | 'clickhouse_events',
+  pageHeight = 30_000,
+): HeatmapTileMeta {
   return {
     tile_size: 2400,
-    page_height_estimate: 30_000,
+    page_height_estimate: pageHeight,
     cached: false,
     cache_ttl_sec: 0,
     query_hash: 'test',
@@ -25,93 +37,372 @@ function tileWith(points: HeatmapTile['points']): HeatmapTile {
 }
 
 describe('buildHeatmapViewModel', () => {
-  it('returns mockup fixture when meta is null (initial render)', () => {
-    const vm = buildHeatmapViewModel({ tiles: [], meta: null })
-    expect(vm).toBe(MOCKUP_VIEW_MODEL)
-  })
-
-  it('returns mockup fixture when data_source = dummy_lcg', () => {
-    const vm = buildHeatmapViewModel({
-      tiles: [tileWith([{ x: 100, y: 200, count: 9999, sessions: 1 }])],
-      meta: metaWith('dummy_lcg'),
+  describe('dummy / fixture modes', () => {
+    it('returns mockup fixture when meta is null (initial render)', () => {
+      const vm = buildHeatmapViewModel({ tiles: [], meta: null })
+      expect(vm).toBe(MOCKUP_VIEW_MODEL)
     })
-    expect(vm).toBe(MOCKUP_VIEW_MODEL)
-  })
 
-  it('returns mockup fixture when real data has too few points (< 8)', () => {
-    const vm = buildHeatmapViewModel({
-      tiles: [
-        tileWith([
-          { x: 100, y: 200, count: 5, sessions: 3 },
-          { x: 200, y: 300, count: 6, sessions: 3 },
-        ]),
-      ],
-      meta: metaWith('clickhouse_events'),
+    it('returns mockup fixture when data_source = dummy_lcg', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([{ x: 100, y: 200, count: 9999, sessions: 1 }])],
+        meta: metaWith('dummy_lcg'),
+      })
+      expect(vm).toBe(MOCKUP_VIEW_MODEL)
     })
-    expect(vm).toBe(MOCKUP_VIEW_MODEL)
-  })
 
-  it('uses real blobs/tags when clickhouse data is dense, but keeps mockup signals/endBands/exitRows', () => {
-    const tiles: HeatmapTile[] = [
-      tileWith(
-        Array.from({ length: 12 }, (_, i) => ({
-          x: 100 + i * 80,
-          y: 50 + i * 40,
-          count: 50 + i,
-          sessions: 20 + i,
-        })),
-      ),
-    ]
-    const vm = buildHeatmapViewModel({ tiles, meta: metaWith('clickhouse_events') })
-    expect(vm).not.toBe(MOCKUP_VIEW_MODEL)
-    // signals / endBands / exitRows / emotionSummary / hotspotCards / signalCards は fixture と同じ
-    expect(vm.signals).toBe(MOCKUP_VIEW_MODEL.signals)
-    expect(vm.endBands).toBe(MOCKUP_VIEW_MODEL.endBands)
-    expect(vm.exitRows).toBe(MOCKUP_VIEW_MODEL.exitRows)
-    expect(vm.emotionSummary).toBe(MOCKUP_VIEW_MODEL.emotionSummary)
-    expect(vm.hotspotCards).toBe(MOCKUP_VIEW_MODEL.hotspotCards)
-    expect(vm.signalCards).toBe(MOCKUP_VIEW_MODEL.signalCards)
-    // tags は 5 件 (top-5)
-    expect(vm.tags.length).toBe(5)
-    // blobs に click mode が含まれ、emotion / attention は mockup のもの (12 件 mockup minus 5 click = 7) が継承
-    const clickBlobs = vm.blobs.filter((b) => b.mode === 'click')
-    expect(clickBlobs.length).toBe(5)
-    const inheritedAttention = vm.blobs.filter((b) => b.mode === 'attention')
-    expect(inheritedAttention.length).toBeGreaterThan(0)
-  })
-
-  it('forceFixture overrides real data to fixture', () => {
-    const tiles: HeatmapTile[] = [
-      tileWith(
-        Array.from({ length: 12 }, (_, i) => ({
-          x: 100 + i * 80,
-          y: 50 + i * 40,
-          count: 50 + i,
-          sessions: 20 + i,
-        })),
-      ),
-    ]
-    const vm = buildHeatmapViewModel({
-      tiles,
-      meta: metaWith('clickhouse_events'),
-      forceFixture: true,
+    it('returns mockup fixture when data_source is undefined (legacy meta — Codex review HIGH regression)', () => {
+      // legacy deploy / 旧 client が meta.data_source を返さないケース。
+      // HeatmapCanvas は undefined を dummy 扱いで banner 表示する (lib/api/heatmap.ts コメント参照)。
+      // view-model も undefined を real 扱いせず fixture parity に倒す。
+      const legacyMeta: HeatmapTileMeta = {
+        tile_size: 2400,
+        page_height_estimate: 30_000,
+        cached: false,
+        cache_ttl_sec: 0,
+        query_hash: 'test',
+      }
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([{ x: 100, y: 200, count: 9999, sessions: 1 }])],
+        meta: legacyMeta,
+      })
+      expect(vm).toBe(MOCKUP_VIEW_MODEL)
     })
-    expect(vm).toBe(MOCKUP_VIEW_MODEL)
+
+    it('forceFixture overrides real data to fixture', () => {
+      const tiles: HeatmapTile[] = [
+        tileWith(
+          Array.from({ length: 12 }, (_, i) => ({
+            x: 100 + i * 80,
+            y: 50 + i * 40,
+            count: 50 + i,
+            sessions: 20 + i,
+          })),
+        ),
+      ]
+      const vm = buildHeatmapViewModel({
+        tiles,
+        meta: metaWith('clickhouse_events'),
+        forceFixture: true,
+      })
+      expect(vm).toBe(MOCKUP_VIEW_MODEL)
+    })
   })
 
-  it('tags are sorted by descending rank starting at 1', () => {
-    const tiles: HeatmapTile[] = [
-      tileWith(
-        Array.from({ length: 12 }, (_, i) => ({
-          x: 100 + i * 80,
-          y: 50 + i * 40,
-          count: 50 + i,
-          sessions: 20 + i,
-        })),
-      ),
-    ]
-    const vm = buildHeatmapViewModel({ tiles, meta: metaWith('clickhouse_events') })
-    const ranks = vm.tags.map((t) => t.rank)
-    expect(ranks).toEqual([1, 2, 3, 4, 5])
+  describe('real mode (clickhouse_events)', () => {
+    it('returns empty view-model (not fixture) when no points are present', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([])],
+        meta: metaWith('clickhouse_events'),
+      })
+      expect(vm).not.toBe(MOCKUP_VIEW_MODEL)
+      expect(vm.blobs).toEqual([])
+      expect(vm.tags).toEqual([])
+      expect(vm.signals).toEqual([])
+      expect(vm.endBands).toEqual([])
+      expect(vm.exitRows).toEqual([])
+      expect(vm.readBands).toEqual([])
+      expect(vm.scrollReachBands).toEqual([])
+      expect(vm.hotspotCards).toEqual([])
+      expect(vm.signalCards).toEqual([])
+      expect(vm.emotionSummary).toEqual({
+        hes: 0,
+        eng: 0,
+        cmp: 0,
+        frust: 0,
+        anx: 0,
+        conf: 0,
+      })
+    })
+
+    it('uses real clusters even with sparse data (1-5 clicks) — no fixture fallback (RED → GREEN)', () => {
+      // TIRTIR-style sparse minimal fixture: 3 distinct clicks
+      const vm = buildHeatmapViewModel({
+        tiles: [
+          tileWith([
+            { x: 283, y: 2049, count: 5, sessions: 3 },
+            { x: 540, y: 8200, count: 4, sessions: 2 },
+            { x: 120, y: 15_500, count: 2, sessions: 1 },
+          ]),
+        ],
+        meta: metaWith('clickhouse_events'),
+      })
+      expect(vm).not.toBe(MOCKUP_VIEW_MODEL)
+      // real cluster は 1-3 (label は MAX_HOTSPOTS=6 枠)、必ず 1 つ以上
+      expect(vm.tags.length).toBeGreaterThanOrEqual(1)
+      expect(vm.tags.length).toBeLessThanOrEqual(6)
+      // tag label には `クリック密集 #` が含まれ、`hotspot-` 文字列は一切出ない (DoD)
+      for (const t of vm.tags) {
+        expect(t.label).toMatch(/^クリック密集 #\d+$/)
+        expect(t.label).not.toMatch(/hotspot/)
+      }
+      // hotspotCards も real 由来、selector が「DOM selector 未取得」
+      for (const card of vm.hotspotCards) {
+        expect(card.id).toMatch(/^real-hs-/)
+        expect(card.selector).toBe('DOM selector 未取得')
+        expect(card.emotionPercents).toEqual([])
+      }
+    })
+
+    it('drops mockup emotion/attention/signal/endBand/exitRow when real data present (DoD)', () => {
+      const tiles: HeatmapTile[] = [
+        tileWith(
+          Array.from({ length: 248 }, (_, i) => ({
+            x: 100 + (i % 11) * 100,
+            y: 1500 + (i % 30) * 1200,
+            count: 1 + (i % 8),
+            sessions: 1 + (i % 5),
+          })),
+        ),
+      ]
+      const vm = buildHeatmapViewModel({ tiles, meta: metaWith('clickhouse_events') })
+      // mockup の演出を一切混ぜない
+      const attentionBlobs = vm.blobs.filter((b) => b.mode === 'attention')
+      const emotionBlobs = vm.blobs.filter((b) => b.mode === 'emotion')
+      expect(attentionBlobs).toEqual([])
+      expect(emotionBlobs).toEqual([])
+      expect(vm.signals).toEqual([])
+      expect(vm.endBands).toEqual([])
+      expect(vm.exitRows).toEqual([])
+      expect(vm.signalCards).toEqual([])
+      // emotionSummary は 0 distribution
+      expect(vm.emotionSummary.hes).toBe(0)
+      expect(vm.emotionSummary.eng).toBe(0)
+      // click blob は density field (cluster 数、MAX_DENSITY_BLOBS=60 上限)
+      const clickBlobs = vm.blobs.filter((b) => b.mode === 'click')
+      expect(clickBlobs.length).toBeGreaterThanOrEqual(1)
+      expect(clickBlobs.length).toBeLessThanOrEqual(60)
+      // label tag は MAX_HOTSPOTS=6 上限、blob より少ない
+      expect(vm.tags.length).toBeLessThanOrEqual(6)
+      expect(vm.tags.length).toBeLessThanOrEqual(clickBlobs.length)
+      // tags rank は 1 始まりの連番
+      expect(vm.tags.map((t) => t.rank)).toEqual(
+        Array.from({ length: vm.tags.length }, (_, i) => i + 1),
+      )
+    })
+  })
+
+  describe('coordinate scaling (golden — handoff §4 Step 12)', () => {
+    // x scale: x / SOURCE_WIDTH(1280) * PAGE_WIDTH(720)
+    //   283 → (283/1280)*720 = 159.19 → 159px (tag 中心は -28 offset で 131)
+    // y scale: y / page_height_estimate(30000) * MOCK_PAGE_HEIGHT(860)
+    //   2049 → (2049/30000)*860 = 58.74 → 59px (tag 中心は -28 offset で 31)
+    it('x=283 maps to ~159px (tag x = 159 - 28 = 131)', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([{ x: 283, y: 2049, count: 10, sessions: 5 }])],
+        meta: metaWith('clickhouse_events'),
+      })
+      expect(vm.tags.length).toBe(1)
+      const t = vm.tags[0]
+      // 159 - 28 = 131, ±2px golden tolerance
+      expect(t.x).toBeGreaterThanOrEqual(129)
+      expect(t.x).toBeLessThanOrEqual(133)
+    })
+
+    it('y=2049 maps to ~59px (tag y = 59 - 28 = 31)', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([{ x: 283, y: 2049, count: 10, sessions: 5 }])],
+        meta: metaWith('clickhouse_events'),
+      })
+      const t = vm.tags[0]
+      expect(t.y).toBeGreaterThanOrEqual(29)
+      expect(t.y).toBeLessThanOrEqual(33)
+    })
+
+    it('PAGE_WIDTH/MOCK_PAGE_HEIGHT constants are stable (regression guard)', () => {
+      expect(PAGE_WIDTH).toBe(720)
+      expect(MOCK_PAGE_HEIGHT).toBe(860)
+    })
+  })
+
+  describe('click layer — readBands/scrollReachBands are empty (no cross-contamination)', () => {
+    it('click mode returns empty readBands and scrollReachBands', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([{ x: 200, y: 1000, count: 5, sessions: 3 }])],
+        meta: metaWith('clickhouse_events'),
+      })
+      expect(vm.readBands).toEqual([])
+      expect(vm.scrollReachBands).toEqual([])
+    })
+  })
+
+  // ── Layer → heatmap_type mapping (plumbing correctness) ────────────────
+  describe('layer→heatmap_type mapping', () => {
+    it('read layer (heatmap_type=read) returns readBands, not blobs', () => {
+      const readMeta = {
+        ...metaWith('clickhouse_events'),
+        heatmap_type: 'read' as const,
+      }
+      // read_area events: x=0, y=read_y (200px bin)
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([
+          { x: 0, y: 200, count: 50, sessions: 30 },
+          { x: 0, y: 400, count: 20, sessions: 15 },
+          { x: 0, y: 600, count: 80, sessions: 60 },
+        ])],
+        meta: readMeta,
+      })
+      expect(vm.blobs).toEqual([])
+      expect(vm.tags).toEqual([])
+      expect(vm.readBands.length).toBeGreaterThanOrEqual(1)
+      expect(vm.scrollReachBands).toEqual([])
+      expect(vm.exitRows).toEqual([])
+      // intensity should be normalized [0,1]
+      for (const b of vm.readBands) {
+        expect(b.intensity).toBeGreaterThanOrEqual(0)
+        expect(b.intensity).toBeLessThanOrEqual(1)
+        expect(b.sessions).toBeGreaterThan(0)
+        expect(b.count).toBeGreaterThan(0)
+      }
+    })
+
+    it('scroll layer (heatmap_type=scroll) returns scrollReachBands, not blobs', () => {
+      const scrollMeta = {
+        ...metaWith('clickhouse_events'),
+        heatmap_type: 'scroll' as const,
+      }
+      // scroll reach: per-session max_scroll bins
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([
+          { x: 0, y: 0,    count: 100, sessions: 100 },
+          { x: 0, y: 200,  count: 90,  sessions: 90 },
+          { x: 0, y: 1000, count: 40,  sessions: 40 },
+        ])],
+        meta: scrollMeta,
+      })
+      expect(vm.blobs).toEqual([])
+      expect(vm.tags).toEqual([])
+      expect(vm.readBands).toEqual([])
+      expect(vm.scrollReachBands.length).toBeGreaterThanOrEqual(1)
+      expect(vm.exitRows).toEqual([])
+      // reach should be [0,1]
+      for (const b of vm.scrollReachBands) {
+        expect(b.reach).toBeGreaterThan(0)
+        expect(b.reach).toBeLessThanOrEqual(1)
+        expect(typeof b.reachLabel).toBe('string')
+        expect(b.reachLabel).toMatch(/\d+%/)
+      }
+    })
+
+    it('exit layer (heatmap_type=exit) returns exitRows, not blobs', () => {
+      const exitMeta = {
+        ...metaWith('clickhouse_events'),
+        heatmap_type: 'exit' as const,
+      }
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([
+          { x: 0, y: 200,  count: 10, sessions: 10 },
+          { x: 0, y: 1000, count: 30, sessions: 30 },
+          { x: 0, y: 3000, count: 5,  sessions: 5  },
+        ])],
+        meta: exitMeta,
+      })
+      expect(vm.blobs).toEqual([])
+      expect(vm.tags).toEqual([])
+      expect(vm.readBands).toEqual([])
+      expect(vm.scrollReachBands).toEqual([])
+      expect(vm.exitRows.length).toBeGreaterThanOrEqual(1)
+      for (const row of vm.exitRows) {
+        expect(row.exitPct).toMatch(/\d+%/)
+        expect(['hi', 'mid', 'lo', 'ok']).toContain(row.level)
+      }
+    })
+
+    it('read layer returns empty view-model when tiles have no points', () => {
+      const readMeta = { ...metaWith('clickhouse_events'), heatmap_type: 'read' as const }
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([])],
+        meta: readMeta,
+      })
+      expect(vm.readBands).toEqual([])
+      expect(vm.blobs).toEqual([])
+    })
+
+    it('scroll layer: reach is proportional — shallow band has higher reach than deep band', () => {
+      const scrollMeta = { ...metaWith('clickhouse_events'), heatmap_type: 'scroll' as const }
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([
+          { x: 0, y: 0,    count: 100, sessions: 100 },
+          { x: 0, y: 2000, count: 20,  sessions: 20  },
+        ])],
+        meta: scrollMeta,
+      })
+      const sorted = [...vm.scrollReachBands].sort((a, b) => a.top - b.top)
+      if (sorted.length >= 2) {
+        // shallower band should have >= reach than deeper band
+        expect(sorted[0].reach).toBeGreaterThanOrEqual(sorted[sorted.length - 1].reach)
+      }
+    })
+  })
+
+  // ── Phase 2 (screenshot underlay) ─────────────────────────────────────
+  describe('coordinateContext (Phase 2 screenshot underlay, y 圧縮廃止)', () => {
+    it('maps x with referenceWidth/sourceWidth and uses raw y (no MOCK_PAGE_HEIGHT compression)', () => {
+      // SP: referenceWidth=390、y は click_y そのまま (圧縮なし)
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([{ x: 640, y: 1500, count: 10, sessions: 5 }])],
+        meta: metaWith('clickhouse_events'),
+        coordinateContext: {
+          sourceWidth: 1280,
+          referenceWidth: 390,
+          pageHeight: 8000,
+        },
+      })
+      expect(vm.tags.length).toBe(1)
+      const t = vm.tags[0]
+      // x = 640/1280 * 390 = 195、tag offset -28 → 167
+      expect(t.x).toBeGreaterThanOrEqual(165)
+      expect(t.x).toBeLessThanOrEqual(170)
+      // y = 1500 (圧縮なし、Phase 1 では 1500/30000 * 860 = 43 だった)、tag offset -28 → 1472
+      expect(t.y).toBeGreaterThanOrEqual(1470)
+      expect(t.y).toBeLessThanOrEqual(1474)
+    })
+
+    it('filters points beyond pageHeight*1.05 outlier guard', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: [
+          tileWith([
+            { x: 100, y: 100, count: 5, sessions: 3 },
+            { x: 200, y: 1_000_000, count: 99, sessions: 50 }, // huge outlier
+          ]),
+        ],
+        meta: metaWith('clickhouse_events'),
+        coordinateContext: {
+          sourceWidth: 1280,
+          referenceWidth: 720,
+          pageHeight: 5000,
+        },
+      })
+      // outlier 1 件捨てられ (5000*1.05=5250 超)、cluster 1 件のみ
+      expect(vm.tags.length).toBe(1)
+    })
+
+    it('PC capture (referenceWidth=1280) → x 等倍', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([{ x: 1280, y: 200, count: 10, sessions: 5 }])],
+        meta: metaWith('clickhouse_events'),
+        coordinateContext: {
+          sourceWidth: 1280,
+          referenceWidth: 1280,
+          pageHeight: 4000,
+        },
+      })
+      const t = vm.tags[0]
+      // x = 1280/1280 * 1280 = 1280、tag offset -28 → 1252
+      expect(t.x).toBeGreaterThanOrEqual(1250)
+      expect(t.x).toBeLessThanOrEqual(1254)
+    })
+
+    it('Phase 1 path (no coordinateContext) still uses MOCK_PAGE_HEIGHT compression', () => {
+      // Phase 1 backward compat: context 未指定なら旧 scale で動く
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([{ x: 283, y: 2049, count: 10, sessions: 5 }])],
+        meta: metaWith('clickhouse_events'),
+      })
+      const t = vm.tags[0]
+      // y = 2049/30000 * 860 = 58.7、tag offset -28 → 31
+      expect(t.y).toBeGreaterThanOrEqual(29)
+      expect(t.y).toBeLessThanOrEqual(33)
+    })
   })
 })

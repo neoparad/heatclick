@@ -17,8 +17,30 @@ import {
 } from './mockup-spec'
 
 describe('mockup-spec', () => {
-  it('exposes 6 layer keys matching the mockup', () => {
-    expect(LAYERS.map((l) => l.key)).toEqual(['click', 'end', 'attention', 'exit', 'move', 'emo'])
+  it('exposes 7 layer keys including new scroll layer', () => {
+    expect(LAYERS.map((l) => l.key)).toEqual([
+      'click',
+      'end',
+      'attention',
+      'scroll',
+      'exit',
+      'move',
+      'emo',
+    ])
+  })
+
+  it('marks move and emo layers as disabled (データ未収集 / ML未実装)', () => {
+    const disabledKeys = LAYERS.filter((l) => l.disabled).map((l) => l.key)
+    expect(disabledKeys).toContain('move')
+    expect(disabledKeys).toContain('emo')
+  })
+
+  it('data layers (click/end/attention/scroll/exit) are not disabled', () => {
+    const dataKeys = ['click', 'end', 'attention', 'scroll', 'exit']
+    for (const key of dataKeys) {
+      const layer = LAYERS.find((l) => l.key === key)
+      expect(layer?.disabled).toBeFalsy()
+    }
   })
 
   it('exposes 6 emotion keys matching the mockup', () => {

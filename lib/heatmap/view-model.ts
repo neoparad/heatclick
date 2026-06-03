@@ -2,38 +2,77 @@
  * tiles → HeatmapViewModel mapper
  *
  * 親 SSOT §3.6.5 / Part V §5.5.1 P-04
- * Dispatch: 2026-05-29 frontend mockup parity rebuild §4 Step 9 / §5
+ * Dispatch:
+ *   - Phase 1 (2026-05-29 frontend heatmap real-data rendering): mock 演出 drop
+ *   - Phase 2 (2026-05-29 frontend heatmap screenshot underlay): screenshot 座標空間採用
+ *     (handoff: `2026-05-29-frontend-heatmap-screenshot-underlay.md`)
  *
- * 設計方針:
- *   - Phase 1 では真の field (signal / endBand / exitRow / emotion / hotspotCards / signalCards)
- *     は実 data 側に存在しない → mockup parity fixture を **常に fallback** で返す。
- *   - blobs / tags は tile.points が存在する場合に限り near-cluster で再構築 (上位 5)。
- *     ただし current pipeline の data quality を加味し、cluster が 5 つに満たない場合は
- *     不足分を fixture で補完して mockup parity を維持。
- *   - 座標変換: tile.points は SOURCE_WIDTH=1280, page Y ∈ [0, ~30000] の系。
- *     `.hm-page` は固定 720px、高さは PAGE_WIDTH 比例。両軸 720/1280 で xy scale して入れる。
- *   - 実 data 駆動の blob / tag に切替える場合でも tile が空の時は完全 fixture mode を返す
- *     (Owner デモで「点が 1 個も無い」になるのを避ける)。
+ * Phase 2 設計方針:
+ *   - dummy_lcg / 未定義 meta → mockup parity fixture (Phase 1 と同じ)
+ *   - clickhouse_events で実 click が 1 点でも → real cluster を採用
+ *   - **新規**: BuildOptions.coordinateContext が与えられた場合、
+ *     x = click_x * captureWidth/sourceWidth、y = click_y (圧縮なし)
+ *     coordinateContext 未指定の場合 (screenshot 取得前 / 失敗 fallback) は
+ *     Phase 1 の y 圧縮 scale (y/pageY * MOCK_PAGE_HEIGHT) を維持。
+ *   - real mode の tag label は `クリック密集 #N` (`hotspot-*` 文言は UI に出ない)
+ *   - real hotspotCards は selector="DOM selector 未取得" / emotion 未推論 の暫定 card。
+ *     emotion 推論 (rule-based / classifier) は Phase 3 Sprint 5+ で別途。
+ *   - 実 data 0 点の場合は empty state を返却 (mockup parity fallback はしない)。
  *
- * 本 mapper は pure function、副作用なし。test しやすくユニットテスト対象にしやすい。
+ * 本 mapper は pure function、副作用なし。
  */
 
 import type { HeatmapTile, HeatmapTileMeta } from '@/lib/api/heatmap'
 import { MOCKUP_VIEW_MODEL } from '@/lib/fixtures/heatmap-mockup'
 import { MOCK_PAGE_HEIGHT, PAGE_WIDTH } from '@/lib/heatmap/mockup-spec'
-import type { HeatBlob, HeatTag, HeatmapViewModel, HotspotIntent } from '@/lib/heatmap/types'
+import type {
+  EmotionDistribution,
+  HeatBlob,
+  HeatTag,
+  HeatmapCoordinateContext,
+  HeatmapViewModel,
+  HotspotCard,
+  ReadBand,
+  ScrollReachBand,
+} from '@/lib/heatmap/types'
 
 const SOURCE_WIDTH = 1280
 const MOCKUP_CANVAS_Y_RANGE = 720
+
+/** cluster grid (capture CSS px)。小さいほど密、大きいほど粗。 */
+const CLUSTER_GRID = 48
+/** density 用 blob の最大個数 (DOM blob を重ねて連続的な heat field を作る)。 */
+const MAX_DENSITY_BLOBS = 60
+/** label / card 化する hotspot 上位数 (clutter を避けるため blob より少なく)。 */
+const MAX_HOTSPOTS = 6
+/** Phase 2: pageHeight*1.05 を超える y は outlier (provider バグ / 計測ノイズ) として捨てる。 */
+const PAGE_HEIGHT_OUTLIER_SLACK = 1.05
+/** Phase 1 fallback: MOCK_PAGE_HEIGHT*4 を超える y は捨てる。 */
+const MOCK_Y_OUTLIER_FACTOR = 4
+
+const EMPTY_EMOTION_SUMMARY: EmotionDistribution = {
+  hes: 0,
+  eng: 0,
+  cmp: 0,
+  frust: 0,
+  anx: 0,
+  conf: 0,
+}
 
 interface BuildOptions {
   tiles: HeatmapTile[]
   meta: HeatmapTileMeta | null
   /**
-   * Phase 1 では強制 fixture 同等 (false にしても tag は補完される)。
-   * 将来 cluster heuristic が成熟したら true で純 fixture を外す。
+   * Phase 1 でも debugging / Storybook で fixture を強制したい場合に使う。
+   * production では未使用。
    */
   forceFixture?: boolean
+  /**
+   * Phase 2: 実 screenshot 座標空間 (`captureWidth` × `captureHeight`) で
+   *   blob / tag / hotspot を配置する場合に指定。
+   * 未指定なら Phase 1 互換の y 圧縮 scale (mockup canvas) で配置する。
+   */
+  coordinateContext?: HeatmapCoordinateContext
 }
 
 interface RawPoint {
@@ -44,17 +83,37 @@ interface RawPoint {
 }
 
 /**
- * tiles を結合して flat point 配列を返す。
- * tile.y_start が大き過ぎる (= visible page 範囲外) の点は捨てる。
- * Y 座標は `.hm-page` 系 (0 - MOCK_PAGE_HEIGHT) に scale する。
+ * tiles を結合して flat point 配列 (capture CSS px 空間) を返す。
+ *   - coordinateContext あり (Phase 2): x = click_x/sourceWidth * referenceWidth、y = click_y そのまま
+ *   - coordinateContext なし (Phase 1 fallback): x = click_x/SOURCE_WIDTH * PAGE_WIDTH、
+ *     y = click_y/pageY * MOCK_PAGE_HEIGHT (mockup canvas 圧縮)
+ *
+ * 異常値ガード: y が pageHeight*1.05 (Phase 2) または mockup canvas 4 倍 (Phase 1) を
+ *   超えるものは捨てる (provider バグ / 計測ノイズ防御)。
  */
-function flattenAndScale(tiles: HeatmapTile[], pageY: number): RawPoint[] {
+function flattenAndScale(
+  tiles: HeatmapTile[],
+  pageY: number,
+  ctx?: HeatmapCoordinateContext,
+): RawPoint[] {
   const out: RawPoint[] = []
+  const yLimit = ctx
+    ? ctx.pageHeight * PAGE_HEIGHT_OUTLIER_SLACK
+    : MOCK_PAGE_HEIGHT * MOCK_Y_OUTLIER_FACTOR
   for (const tile of tiles) {
     for (const p of tile.points) {
-      const yScaled = pageY > 0 ? (p.y / pageY) * MOCK_PAGE_HEIGHT : p.y
-      if (yScaled < 0 || yScaled > MOCK_PAGE_HEIGHT * 4) continue
-      const xScaled = (p.x / SOURCE_WIDTH) * PAGE_WIDTH
+      let xScaled: number
+      let yScaled: number
+      if (ctx) {
+        const srcW = ctx.sourceWidth > 0 ? ctx.sourceWidth : SOURCE_WIDTH
+        const refW = ctx.referenceWidth > 0 ? ctx.referenceWidth : srcW
+        xScaled = (p.x / srcW) * refW
+        yScaled = p.y // y 圧縮なし、capture CSS px 空間 = click_y (document 絶対) そのまま
+      } else {
+        xScaled = (p.x / SOURCE_WIDTH) * PAGE_WIDTH
+        yScaled = pageY > 0 ? (p.y / pageY) * MOCK_PAGE_HEIGHT : p.y
+      }
+      if (yScaled < 0 || yScaled > yLimit) continue
       out.push({ x: xScaled, y: yScaled, count: p.count, sessions: p.sessions })
     }
   }
@@ -62,11 +121,13 @@ function flattenAndScale(tiles: HeatmapTile[], pageY: number): RawPoint[] {
 }
 
 /**
- * 単純な grid-bucket クラスタリング: 64px グリッドで集約し、合計 count 上位を hotspot とする。
+ * grid-bucket クラスタリング: `CLUSTER_GRID` px グリッドで count 加重平均し、合計 count 上位を返す。
+ *   - count 加重で中心を求める (clicks が多い側に寄る、単純平均より hotspot 中心が正確)
+ *   - 1〜topN の任意件数を返す (fixture fallback はしない、実測 cluster をそのまま返す)
  */
 function clusterTop(points: RawPoint[], topN: number): RawPoint[] {
   if (points.length === 0) return []
-  const grid = 64
+  const grid = CLUSTER_GRID
   const buckets = new Map<string, RawPoint>()
   for (const p of points) {
     const gx = Math.round(p.x / grid) * grid
@@ -74,11 +135,12 @@ function clusterTop(points: RawPoint[], topN: number): RawPoint[] {
     const key = `${gx}|${gy}`
     const cur = buckets.get(key)
     if (cur) {
-      // immutable: 既存 bucket を新オブジェクトで置換 (Codex review LOW fix)
+      // immutable: 既存 bucket を count 加重平均で置換 (中心が click 密集側に寄る)
+      const total = cur.count + p.count
       buckets.set(key, {
-        x: (cur.x + p.x) / 2,
-        y: (cur.y + p.y) / 2,
-        count: cur.count + p.count,
+        x: total > 0 ? (cur.x * cur.count + p.x * p.count) / total : (cur.x + p.x) / 2,
+        y: total > 0 ? (cur.y * cur.count + p.y * p.count) / total : (cur.y + p.y) / 2,
+        count: total,
         sessions: cur.sessions + p.sessions,
       })
     } else {
@@ -89,64 +151,333 @@ function clusterTop(points: RawPoint[], topN: number): RawPoint[] {
 }
 
 /**
- * 実 data 由来の click blob を mockup parity 風に作る (Phase 1 では fixture が主、これは補助)。
+ * real click density blob 群。
+ *   - 直径は count/maxCount に応じて 72〜240px (capture CSS px、sqrt で視覚的に均す)
+ *   - cluster 中心に配置 (x/y は中心 - 直径/2)
+ *   - severity: count が max の 50% 以上で 'strong' (色を濃く)
+ *   - mix-blend-mode:multiply の blur blob を重ねて連続的な heat field を表現する
+ *     (overlay 側で displayScale を掛けて img と同率縮小)
  */
-function buildClickBlobs(top: RawPoint[]): HeatBlob[] {
-  return top.map((p, i) => ({
-    id: `real-click-${i}`,
-    mode: 'click',
-    severity: i === 0 ? 'strong' : 'normal',
-    x: Math.max(0, Math.round(p.x - 65)),
-    y: Math.max(0, Math.round(p.y - 50)),
-    width: 130,
-    height: 100,
-  }))
-}
-
-function buildTags(top: RawPoint[]): HeatTag[] {
-  return top.map((p, i) => {
-    const intent: HotspotIntent = i === 0 ? 'warn' : i === 1 ? 'win' : 'neutral'
+function buildRealClickBlobs(clusters: RawPoint[], maxCount: number): HeatBlob[] {
+  const safeMax = maxCount > 0 ? maxCount : 1
+  return clusters.map((p, i) => {
+    const ratio = Math.min(1, p.count / safeMax)
+    const diameter = Math.round(Math.max(72, Math.min(240, 72 + Math.sqrt(ratio) * 168)))
     return {
-      id: `real-tag-${i}`,
-      rank: i + 1,
-      label: `hotspot-${i + 1}`,
-      count: p.count,
-      x: Math.max(0, Math.round(p.x - 28)),
-      y: Math.max(0, Math.round(p.y - 28)),
-      intent,
+      id: `real-click-${i + 1}`,
+      mode: 'click',
+      severity: ratio >= 0.5 ? 'strong' : 'normal',
+      x: Math.max(0, Math.round(p.x - diameter / 2)),
+      y: Math.max(0, Math.round(p.y - diameter / 2)),
+      width: diameter,
+      height: diameter,
     }
   })
 }
 
-export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
-  const isDummy = opts.meta?.data_source === 'dummy_lcg' || opts.meta == null
-  const pageY = opts.meta?.page_height_estimate ?? MOCKUP_CANVAS_Y_RANGE
+/**
+ * real tag pill。label は emotion / semantic を未推論で「クリック密集 #N」。
+ * `hotspot-*` 文言は real mode UI に一切出さない (DoD)。
+ */
+function buildRealTags(top: RawPoint[]): HeatTag[] {
+  return top.map((p, i) => ({
+    id: `real-tag-${i + 1}`,
+    rank: i + 1,
+    label: `クリック密集 #${i + 1}`,
+    count: p.count,
+    x: Math.max(0, Math.round(p.x - 28)),
+    y: Math.max(0, Math.round(p.y - 28)),
+    intent: 'neutral',
+  }))
+}
 
-  // Phase 1: data 由来 hotspot は **mockup parity fixture を常に override しない**。
-  // tile が「明らかに real」(clickhouse_events) で十分な点数を持つ場合のみ補強する。
-  const flat = flattenAndScale(opts.tiles, pageY)
-
-  if (opts.forceFixture || isDummy || flat.length < 8) {
-    return MOCKUP_VIEW_MODEL
-  }
-
-  const top = clusterTop(flat, 5)
-  if (top.length < 5) {
-    return MOCKUP_VIEW_MODEL
-  }
-
-  // 実 data hotspot を採用するが、emotion / signal / endBand / exitRow / emotionSummary /
-  // hotspotCards / signalCards は実 data 側に存在しないため mockup fixture を継承。
-  const realBlobs = buildClickBlobs(top)
-  const realTags = buildTags(top)
-
-  return {
-    ...MOCKUP_VIEW_MODEL,
-    blobs: [
-      ...realBlobs,
-      // mockup の emotion / attention blob は表現として残す (real click の上に重ね)
-      ...MOCKUP_VIEW_MODEL.blobs.filter((b) => b.mode !== 'click'),
+/**
+ * real hotspot 暫定 card。
+ *   - selector: 「DOM selector 未取得」(Phase 2 の element_class_name 集約で本物に差替)
+ *   - emotion: 未推論 (emotionPercents=[]、emotionLabel='cmp' は表示無害な neutral)
+ *   - stats: 実測 click 数 / unique session のみ
+ */
+function buildRealHotspotCards(top: RawPoint[]): HotspotCard[] {
+  return top.map((p, i) => ({
+    id: `real-hs-${i + 1}`,
+    rank: i + 1,
+    intent: 'neutral',
+    name: `クリック密集 #${i + 1}`,
+    selector: 'DOM selector 未取得',
+    emotionLabel: 'cmp',
+    emotionPercents: [],
+    stats: [
+      { label: 'クリック', value: p.count.toLocaleString() },
+      { label: 'セッション', value: p.sessions.toLocaleString() },
     ],
-    tags: realTags,
+  }))
+}
+
+/**
+ * 実 data 0 点 (clickhouse_events だが行なし) 用 empty view-model。
+ * mockup fixture には *戻さない* — UI 側で「データなし」表示にする。
+ */
+function emptyViewModel(): HeatmapViewModel {
+  return {
+    blobs: [],
+    tags: [],
+    signals: [],
+    endBands: [],
+    exitRows: [],
+    readBands: [],
+    scrollReachBands: [],
+    emotionSummary: EMPTY_EMOTION_SUMMARY,
+    hotspotCards: [],
+    signalCards: [],
+  }
+}
+
+// ── READ (熟読 / attention) layer builders ────────────────────────────────
+
+/**
+ * read_area tile points (y = read_y の 200px bin、x = 0) から ReadBand 配列を生成する。
+ * coordinateContext あり: y はそのまま (capture CSS px 空間)。
+ * coordinateContext なし (Phase 1 fallback): y を MOCK_PAGE_HEIGHT に圧縮。
+ */
+function buildReadBands(
+  tiles: HeatmapTile[],
+  pageY: number,
+  ctx?: HeatmapCoordinateContext,
+): ReadBand[] {
+  if (tiles.length === 0) return []
+
+  // bin サイズ: read_y は 200px bin に丸め済み (route の SQL intDiv(..., 200)*200)。
+  const BIN_HEIGHT = 200
+
+  // flat 集計: y bin → {count, sessions}
+  const bins = new Map<number, { count: number; sessions: number }>()
+  for (const tile of tiles) {
+    for (const p of tile.points) {
+      // y スケーリング (coordinateContext あり → そのまま, なし → Phase 1 圧縮)
+      let yScaled: number
+      if (ctx) {
+        yScaled = p.y // capture CSS px そのまま
+      } else {
+        yScaled = pageY > 0 ? (p.y / pageY) * MOCK_PAGE_HEIGHT : p.y
+        // bin サイズも圧縮後の空間に合わせて再整列
+        yScaled = Math.round(yScaled / (BIN_HEIGHT * MOCK_PAGE_HEIGHT / (pageY || MOCK_PAGE_HEIGHT))) *
+          (BIN_HEIGHT * MOCK_PAGE_HEIGHT / (pageY || MOCK_PAGE_HEIGHT))
+      }
+      if (yScaled < 0) continue
+      const key = Math.round(yScaled)
+      const cur = bins.get(key)
+      if (cur) {
+        bins.set(key, { count: cur.count + p.count, sessions: cur.sessions + p.sessions })
+      } else {
+        bins.set(key, { count: p.count, sessions: p.sessions })
+      }
+    }
+  }
+
+  if (bins.size === 0) return []
+
+  const maxCount = Math.max(...Array.from(bins.values()).map((v) => v.count))
+  const safeMax = maxCount > 0 ? maxCount : 1
+
+  // bin サイズ: coordinateContext あり → 200px, なし → 圧縮後のスケール
+  const displayBinHeight = ctx
+    ? BIN_HEIGHT
+    : (BIN_HEIGHT * MOCK_PAGE_HEIGHT) / (pageY || MOCK_PAGE_HEIGHT)
+
+  return Array.from(bins.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([top, { count, sessions }]) => ({
+      top,
+      height: Math.max(4, Math.round(displayBinHeight)),
+      sessions,
+      count,
+      intensity: count / safeMax,
+    }))
+}
+
+// ── SCROLL (スクロール到達率) layer builders ───────────────────────────────
+
+/**
+ * scroll tile points (y = max_scroll_y の 200px bin、count = そのバンドへ到達したセッション数)
+ * から ScrollReachBand 配列を生成する。
+ *
+ * reach(D) = sessions_reaching_depth_D / total_sessions_on_page。
+ * total_sessions はタイル全体の count 合計から推定 (最浅バンドが最大 = 100%)。
+ */
+function buildScrollReachBands(
+  tiles: HeatmapTile[],
+  pageY: number,
+  ctx?: HeatmapCoordinateContext,
+): ScrollReachBand[] {
+  if (tiles.length === 0) return []
+
+  const BIN_HEIGHT = 200
+
+  // y bin → セッション数
+  const bins = new Map<number, number>()
+  for (const tile of tiles) {
+    for (const p of tile.points) {
+      let yScaled: number
+      if (ctx) {
+        yScaled = p.y
+      } else {
+        yScaled = pageY > 0 ? (p.y / pageY) * MOCK_PAGE_HEIGHT : p.y
+      }
+      if (yScaled < 0) continue
+      const key = Math.round(yScaled)
+      bins.set(key, (bins.get(key) ?? 0) + p.count)
+    }
+  }
+
+  if (bins.size === 0) return []
+
+  // 最大セッション数 (= 最浅バンドが "100%" の基準)
+  const totalSessions = Math.max(...Array.from(bins.values()))
+
+  const displayBinHeight = ctx
+    ? BIN_HEIGHT
+    : (BIN_HEIGHT * MOCK_PAGE_HEIGHT) / (pageY || MOCK_PAGE_HEIGHT)
+
+  return Array.from(bins.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([top, sessions]) => {
+      const reach = totalSessions > 0 ? sessions / totalSessions : 0
+      return {
+        top,
+        height: Math.max(4, Math.round(displayBinHeight)),
+        reach,
+        reachLabel: `${Math.round(reach * 100)}%`,
+      }
+    })
+}
+
+// ── EXIT (終了 / 離脱) layer builders ─────────────────────────────────────
+
+/**
+ * session_end tile points (y = scroll_y の 200px bin) から ExitRow 配列を生成する。
+ * dropoff % = そのバンドで終了したセッション数 / 全終了セッション数。
+ * level は dropoff 率で 4 段階。
+ */
+function buildExitRows(
+  tiles: HeatmapTile[],
+  pageY: number,
+  ctx?: HeatmapCoordinateContext,
+): import('@/lib/heatmap/types').ExitRow[] {
+  if (tiles.length === 0) return []
+
+  const BIN_HEIGHT = 200
+
+  // y bin → セッション数 (dropoff count)
+  const bins = new Map<number, number>()
+  let totalSessions = 0
+  for (const tile of tiles) {
+    for (const p of tile.points) {
+      let yScaled: number
+      if (ctx) {
+        yScaled = p.y
+      } else {
+        yScaled = pageY > 0 ? (p.y / pageY) * MOCK_PAGE_HEIGHT : p.y
+      }
+      if (yScaled < 0) continue
+      const key = Math.round(yScaled)
+      bins.set(key, (bins.get(key) ?? 0) + p.sessions)
+      totalSessions += p.sessions
+    }
+  }
+
+  if (bins.size === 0 || totalSessions === 0) return []
+
+  const displayBinHeight = ctx
+    ? BIN_HEIGHT
+    : (BIN_HEIGHT * MOCK_PAGE_HEIGHT) / (pageY || MOCK_PAGE_HEIGHT)
+
+  return Array.from(bins.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([top, sessions]) => {
+      const pct = sessions / totalSessions
+      const level: import('@/lib/heatmap/types').ExitRow['level'] =
+        pct >= 0.3 ? 'hi' : pct >= 0.15 ? 'mid' : pct >= 0.05 ? 'lo' : 'ok'
+      const depthLabel = `${Math.round(top)}px〜`
+      return {
+        top,
+        height: Math.max(4, Math.round(displayBinHeight)),
+        sectionLabel: depthLabel,
+        exitPct: `${Math.round(pct * 100)}%`,
+        level,
+      }
+    })
+}
+
+export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
+  // 「real」とみなすのは meta.data_source が明示的に 'clickhouse_events' の時のみ。
+  // 未定義 (legacy deploy) や 'dummy_lcg' は fixture parity に倒す。
+  // (lib/api/heatmap.ts HeatmapTileMeta コメント + heatmap-canvas.tsx isDummySource 判定と整合、
+  //  Codex T2 review HIGH fix: undefined を real 扱いしない)
+  const isReal = opts.meta?.data_source === 'clickhouse_events'
+  const pageY = opts.meta?.page_height_estimate ?? MOCKUP_CANVAS_Y_RANGE
+  // heatmap_type: undefined の場合は 'click' 互換 (legacy deploy)
+  const heatmapType = opts.meta?.heatmap_type ?? 'click'
+
+  // dummy mode / legacy meta / 初回 render / 明示 force → mockup parity fixture
+  if (opts.forceFixture || !isReal) {
+    return MOCKUP_VIEW_MODEL
+  }
+
+  // ── read (熟読 / attention) ─────────────────────────────────────────────
+  if (heatmapType === 'read') {
+    const readBands = buildReadBands(opts.tiles, pageY, opts.coordinateContext)
+    if (readBands.length === 0) return emptyViewModel()
+    return {
+      ...emptyViewModel(),
+      readBands,
+    }
+  }
+
+  // ── scroll (スクロール到達率) ────────────────────────────────────────────
+  if (heatmapType === 'scroll') {
+    const scrollReachBands = buildScrollReachBands(opts.tiles, pageY, opts.coordinateContext)
+    if (scrollReachBands.length === 0) return emptyViewModel()
+    return {
+      ...emptyViewModel(),
+      scrollReachBands,
+    }
+  }
+
+  // ── exit (終了 / 離脱) ──────────────────────────────────────────────────
+  if (heatmapType === 'exit') {
+    const exitRows = buildExitRows(opts.tiles, pageY, opts.coordinateContext)
+    if (exitRows.length === 0) return emptyViewModel()
+    return {
+      ...emptyViewModel(),
+      exitRows,
+    }
+  }
+
+  // ── click (デフォルト) ──────────────────────────────────────────────────
+  // real mode (clickhouse_events)
+  const flat = flattenAndScale(opts.tiles, pageY, opts.coordinateContext)
+  const hasRealClickData = flat.length >= 1
+  if (!hasRealClickData) {
+    // 実 data 0 点 — empty state (dummy fixture には戻さない、DoD)
+    return emptyViewModel()
+  }
+
+  // density field: 上位 MAX_DENSITY_BLOBS cluster を blob 化 (連続的な heat 表現)。
+  const clusters = clusterTop(flat, MAX_DENSITY_BLOBS)
+  const maxCount = clusters.length > 0 ? clusters[0].count : 1
+  // label / card: 上位 MAX_HOTSPOTS のみ (clutter 回避、clusters は count 降順なので先頭を流用)。
+  const hotspots = clusters.slice(0, MAX_HOTSPOTS)
+  // mockup emotion / attention / signal / endBand / exitRow / signalCard は混ぜない。
+  return {
+    blobs: buildRealClickBlobs(clusters, maxCount),
+    tags: buildRealTags(hotspots),
+    signals: [],
+    endBands: [],
+    exitRows: [],
+    readBands: [],
+    scrollReachBands: [],
+    emotionSummary: EMPTY_EMOTION_SUMMARY,
+    hotspotCards: buildRealHotspotCards(hotspots),
+    signalCards: [],
   }
 }

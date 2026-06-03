@@ -50,7 +50,9 @@ const KEY_PREFIX = 'heatmap-screenshots'
 // 続 119 (B): waitUntil 'networkidle2' 化で v2、Cloudflare Browser Rendering 移行で v3。
 // 続 119 (B-2): lazy-load 画像対策 (addScriptTag で eager 化+scroll) で撮影内容が変わったため v4。
 //   旧 v3 (CF だが lazy 画像が空) を全 cache miss にして再撮影させる。
-const CAPTURE_VERSION = 'v4'
+// 続120: lazy script 強化 (noscript / data-lazy-src / class 除去 / scroll event) で撮影内容が
+//   変わったため v5。旧 v4 (lazy 画像が依然空) を全 cache miss にして再撮影させる。
+const CAPTURE_VERSION = 'v5'
 
 /** TTL (capturedAt 比較) */
 const FRESH_TTL_MS = 24 * 60 * 60 * 1000 // 24h: これ以内なら即返す

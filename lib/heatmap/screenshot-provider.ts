@@ -60,10 +60,16 @@ const CLOUDFLARE_GOTO_TIMEOUT_MS = 30_000
  */
 const CLOUDFLARE_LAZY_LOAD_SCRIPT =
   "document.querySelectorAll('img').forEach(function(i){i.loading='eager';" +
-  'if(i.dataset.src)i.src=i.dataset.src;if(i.dataset.srcset)i.srcset=i.dataset.srcset;});' +
+  'var d=i.dataset||{};var s=d.src||d.lazySrc||d.original||d.lazy;' +
+  'var ss=d.srcset||d.lazySrcset;if(s)i.src=s;if(ss)i.srcset=ss;' +
+  "i.className=(i.className||'').replace(/lazyload[a-z]*|b-lazy|lozad|lazysizes/g,'');});" +
+  "document.querySelectorAll('noscript').forEach(function(n){try{var h=n.textContent||'';" +
+  'if(/<img/i.test(h)){var dv=document.createElement("div");dv.innerHTML=h;' +
+  'var im=dv.querySelector("img");if(im&&n.parentNode)n.parentNode.insertBefore(im,n);}}catch(e){}});' +
   "document.querySelectorAll('[data-bg],[data-background]').forEach(function(e){" +
   "var b=e.dataset.bg||e.dataset.background;if(b)e.style.backgroundImage='url('+b+')';});" +
-  'window.scrollTo(0,document.body.scrollHeight);window.scrollTo(0,0);'
+  "window.scrollTo(0,document.body.scrollHeight);window.dispatchEvent(new Event('scroll'));" +
+  'window.scrollTo(0,0);'
 
 /**
  * Microlink CDN host allowlist. provider 応答が任意の URL を返した場合の image src
@@ -277,7 +283,7 @@ export function buildCacheKey(input: {
 }): string {
   const width = CAPTURE_WIDTH_FOR_DEVICE[input.device]
   // 続 116: format / quality を cache key に含める (perf 改修で値変更時に cache miss を起こす)
-  const raw = `${input.tenantId}|${input.siteId}|${input.pageUrl}|${input.device}|${width}|fullPage-ni2-lz|${SCREENSHOT_FORMAT}|q${SCREENSHOT_QUALITY}`
+  const raw = `${input.tenantId}|${input.siteId}|${input.pageUrl}|${input.device}|${width}|fullPage-ni2-lz2|${SCREENSHOT_FORMAT}|q${SCREENSHOT_QUALITY}`
   return createHash('sha256').update(raw).digest('hex').slice(0, 32)
 }
 

@@ -63,8 +63,16 @@ import { RealPageScreenshotUnderlay } from './real-page-screenshot-underlay'
 import { SignalOverlay } from './signal-overlay'
 
 export interface HeatmapCanvasProps {
-  /** legacy: HeatmapPage が選んだ初期 layer。複数 layer 同時 ON に拡張済 */
+  /**
+   * 現在アクティブなデータ取得レイヤー (HeatmapPage が own、onLayerChange で更新)。
+   * ControlsBar は単一選択ラジオ — 変更時に heatmap_type が変わり再 fetch が走る。
+   */
   layer: HeatmapLayer
+  /**
+   * ユーザーがレイヤーを切替えたときのコールバック (HeatmapPage の setState)。
+   * 未指定 (legacy 呼び出し) は no-op。
+   */
+  onLayerChange?: (next: HeatmapLayer) => void
   siteId: string
   pageUrl: string
   tiles: HeatmapTile[]
@@ -88,17 +96,34 @@ export interface HeatmapCanvasProps {
 /** view-model に渡す sourceWidth: ClickHouse 正規化済 click_x の最大幅 */
 const SOURCE_WIDTH = 1280
 
-/** legacy HeatmapLayer → mockup LayerKey 変換 */
-function mapLegacyLayer(l: HeatmapLayer): LayerKey {
-  if (l === 'click') return 'click'
-  if (l === 'move') return 'move'
-  if (l === 'emotion') return 'emo'
-  return 'exit' // friction → exit (mockup に friction が無いため最も近い意味の exit に)
+/** HeatmapLayer (API / data) → LayerKey (UI / overlay) 変換 */
+function heatmapLayerToKey(l: HeatmapLayer): LayerKey {
+  switch (l) {
+    case 'click': return 'click'
+    case 'read': return 'attention'
+    case 'scroll': return 'scroll'
+    case 'exit': return 'exit'
+    case 'move': return 'move'
+    case 'emotion': return 'emo'
+    case 'friction': return 'exit'
+  }
+}
+
+/** LayerKey (UI) → HeatmapLayer (data / API) 逆変換。data layer 以外は null。 */
+function layerKeyToHeatmapLayer(k: LayerKey): HeatmapLayer | null {
+  switch (k) {
+    case 'click': return 'click'
+    case 'attention': return 'read'
+    case 'scroll': return 'scroll'
+    case 'exit': return 'exit'
+    // end / move / emo はデータ取得変換なし (move/emo は disabled)
+    default: return null
+  }
 }
 
 function initialActiveLayers(initial: HeatmapLayer): Set<LayerKey> {
-  // mockup default: click + emo。HeatmapPage の指定 layer も加える。
-  return new Set<LayerKey>(['click', 'emo', mapLegacyLayer(initial)])
+  // アクティブ layer は initial の data layer のみ (mockup multi-select 廃止)。
+  return new Set<LayerKey>([heatmapLayerToKey(initial)])
 }
 
 function initialActiveEmotions(): Set<EmotionKey> {
@@ -124,6 +149,7 @@ function formatCapturedAt(iso: string): string {
 
 export function HeatmapCanvas({
   layer,
+  onLayerChange,
   siteId,
   pageUrl,
   tiles,
@@ -143,6 +169,13 @@ export function HeatmapCanvas({
   // のため canvas 高さ計算には使わない。Phase 2 (実 screenshot underlay) で復活予定。
   void _pageHeightEstimate
   const [activeLayers, setActiveLayers] = useState<Set<LayerKey>>(() => initialActiveLayers(layer))
+
+  // layer prop が外部 (HeatmapPage) から変わったときに activeLayers を同期する。
+  // (HeatmapPage が setLayer した場合: e.g. 初回 URL 切替 / 将来の URL param 復元)
+  useEffect(() => {
+    setActiveLayers(new Set<LayerKey>([heatmapLayerToKey(layer)]))
+  }, [layer])
+
   const [activeEmotions, setActiveEmotions] = useState<Set<EmotionKey>>(() =>
     initialActiveEmotions(),
   )
@@ -300,24 +333,32 @@ export function HeatmapCanvas({
     }
   }, [fullscreen])
 
-  // layer toggle (mockup: 複数選択可)
-  const toggleLayer = useCallback((k: LayerKey) => {
-    setActiveLayers((prev) => {
-      const next = new Set(prev)
-      if (next.has(k)) next.delete(k)
-      else next.add(k)
-      return next
-    })
-  }, [])
+  // layer toggle: data layers (click/attention/scroll/exit) は単一選択ラジオ。
+  // 選択時に onLayerChange を呼んで heatmap_type を切替 → re-fetch が走る。
+  // activeLayers の Set は overlay の表示制御にも使う (data layer は排他 + end/emo は別途)。
+  const toggleLayer = useCallback(
+    (k: LayerKey) => {
+      const dataLayer = layerKeyToHeatmapLayer(k)
+      if (dataLayer !== null) {
+        // data layer: 単一選択ラジオ (すでに選択済みの場合はそのまま)
+        setActiveLayers(new Set<LayerKey>([k]))
+        onLayerChange?.(dataLayer)
+      } else {
+        // 非 data layer (end 等): 従来の multi-select toggle
+        setActiveLayers((prev) => {
+          const next = new Set(prev)
+          if (next.has(k)) next.delete(k)
+          else next.add(k)
+          return next
+        })
+      }
+    },
+    [onLayerChange],
+  )
 
-  const toggleEmotion = useCallback((k: EmotionKey) => {
-    setActiveEmotions((prev) => {
-      const next = new Set(prev)
-      if (next.has(k)) next.delete(k)
-      else next.add(k)
-      return next
-    })
-  }, [])
+  // Emotion は ML 未実装につきレイヤーが disabled。activeEmotions は fixture (mockup) モードで
+  // emotion blob の表示フィルタに使う。切替 UI は無効化したため setter は内部保留。
+  void setActiveEmotions
 
   const toggleSignal = useCallback((k: SignalKey) => {
     setActiveSignals((prev) => {
@@ -389,13 +430,11 @@ export function HeatmapCanvas({
       role="region"
       aria-label={`${pageUrl} のヒートマップ`}
     >
-      {/* ===== Controls bar (.hm-controls): layer toggles + emotion chips ===== */}
+      {/* ===== Controls bar (.hm-controls): layer toggles (single-select radio) ===== */}
       {controlsVisible && !fullscreen ? (
         <ControlsBar
           activeLayers={activeLayers}
           onToggleLayer={toggleLayer}
-          activeEmotions={activeEmotions}
-          onToggleEmotion={toggleEmotion}
         />
       ) : null}
 
@@ -635,15 +674,10 @@ export function HeatmapCanvas({
 function ControlsBar({
   activeLayers,
   onToggleLayer,
-  activeEmotions,
-  onToggleEmotion,
 }: {
   activeLayers: ReadonlySet<LayerKey>
   onToggleLayer: (k: LayerKey) => void
-  activeEmotions: ReadonlySet<EmotionKey>
-  onToggleEmotion: (k: EmotionKey) => void
 }) {
-  const emoLayerOn = activeLayers.has('emo')
   return (
     <div
       data-testid="heatmap-controls-bar"
@@ -653,66 +687,39 @@ function ControlsBar({
         layer
       </span>
       <div
-        role="group"
+        role="radiogroup"
         aria-label="ヒートマップ レイヤー"
         className="inline-flex overflow-hidden rounded-md border border-[var(--ug-border)] bg-white"
       >
         {LAYERS.map((l) => {
           const active = activeLayers.has(l.key)
+          const isDisabled = l.disabled === true
           return (
             <button
               key={l.key}
               type="button"
               data-testid={`layer-toggle-${l.key}`}
-              aria-pressed={active}
-              onClick={() => onToggleLayer(l.key)}
+              role="radio"
+              aria-checked={active}
+              aria-disabled={isDisabled}
+              disabled={isDisabled}
+              title={isDisabled ? l.disabledTooltip : undefined}
+              onClick={() => !isDisabled && onToggleLayer(l.key)}
               className={
                 'inline-flex items-center border-r border-[var(--ug-border)] px-3 py-1.5 text-[12px] transition last:border-r-0 ' +
-                (active
-                  ? 'bg-[var(--ug-accent-bg,rgba(79,107,255,.09))] font-semibold text-[var(--ug-brand-1)]'
-                  : 'text-[var(--ug-text-2)] hover:bg-[var(--ug-bg-subtle)] hover:text-[var(--ug-text-1)]')
+                (isDisabled
+                  ? 'cursor-not-allowed opacity-40 text-[var(--ug-text-3)]'
+                  : active
+                    ? 'bg-[var(--ug-accent-bg,rgba(79,107,255,.09))] font-semibold text-[var(--ug-brand-1)]'
+                    : 'text-[var(--ug-text-2)] hover:bg-[var(--ug-bg-subtle)] hover:text-[var(--ug-text-1)]')
               }
             >
               {l.label}
-            </button>
-          )
-        })}
-      </div>
-
-      <span className="mx-1 h-4 w-px bg-[var(--ug-border)]" aria-hidden />
-
-      <span className="mr-1 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
-        emotion
-      </span>
-      <div
-        role="group"
-        aria-label="感情フィルタ"
-        data-testid="emotion-chip-group"
-        className={'inline-flex flex-wrap items-center gap-1 ' + (emoLayerOn ? '' : 'opacity-60')}
-      >
-        {EMOTIONS.map((e) => {
-          const active = activeEmotions.has(e.key)
-          return (
-            <button
-              key={e.key}
-              type="button"
-              data-testid={`emo-chip-${e.key}`}
-              aria-pressed={active}
-              onClick={() => onToggleEmotion(e.key)}
-              disabled={!emoLayerOn}
-              className={
-                'inline-flex items-center gap-1.5 rounded-full border px-2 py-1 font-mono text-[11px] font-medium transition ' +
-                (active
-                  ? 'border-[var(--ug-border-strong)] bg-[var(--ug-bg-2,#f4f5f7)] text-[var(--ug-text)]'
-                  : 'border-[var(--ug-border)] bg-white text-[var(--ug-text-2)] opacity-60 hover:opacity-90')
-              }
-            >
-              <i
-                aria-hidden
-                className="inline-block h-1.5 w-1.5 shrink-0 rounded-full"
-                style={{ background: e.color }}
-              />
-              {e.label}
+              {isDisabled ? (
+                <span className="ml-1 text-[9px] opacity-70">
+                  {l.disabledTooltip}
+                </span>
+              ) : null}
             </button>
           )
         })}
