@@ -237,7 +237,7 @@ export function buildCacheKey(input: {
 }): string {
   const width = CAPTURE_WIDTH_FOR_DEVICE[input.device]
   // 続 116: format / quality を cache key に含める (perf 改修で値変更時に cache miss を起こす)
-  const raw = `${input.tenantId}|${input.siteId}|${input.pageUrl}|${input.device}|${width}|fullPage|${SCREENSHOT_FORMAT}|q${SCREENSHOT_QUALITY}`
+  const raw = `${input.tenantId}|${input.siteId}|${input.pageUrl}|${input.device}|${width}|fullPage-ni2|${SCREENSHOT_FORMAT}|q${SCREENSHOT_QUALITY}`
   return createHash('sha256').update(raw).digest('hex').slice(0, 32)
 }
 
@@ -320,7 +320,10 @@ async function fetchFromMicrolink(input: {
     // 続 116 perf: jpeg + quality=75 で size 5-10x 削減 (WP underlay 用途で視認性十分)
     'screenshot.type': SCREENSHOT_FORMAT,
     'screenshot.quality': String(SCREENSHOT_QUALITY),
-    waitUntil: 'load',
+    // 続 119 (B) スクショ切れ修正: 'load' は遅延読み込み(lazy)前に発火し、長い記事ページの
+    //   下部が撮れず上部だけの短いスクショになる。'networkidle2' でネットワークが概ね落ち着く
+    //   まで待ち、fullPage の自動スクロールで下部の lazy コンテンツも読み込ませてから撮影する。
+    waitUntil: 'networkidle2',
   })
   const endpoint = `${MICROLINK_ENDPOINT}/?${params.toString()}`
   const headers: Record<string, string> = { accept: 'application/json' }

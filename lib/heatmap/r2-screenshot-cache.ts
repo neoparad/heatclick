@@ -42,7 +42,9 @@ import {
 
 /** R2 key prefix + 内容バージョン (capture pipeline 変更時に bump して cache 全体を無効化) */
 const KEY_PREFIX = 'heatmap-screenshots'
-const CAPTURE_VERSION = 'v1'
+// 続 119 (B): waitUntil 'networkidle2' 化で撮影内容が変わったため v2 に bump。
+// 旧 v1 (上部だけの短いスクショ) を全て cache miss にして再撮影させる。
+const CAPTURE_VERSION = 'v2'
 
 /** TTL (capturedAt 比較) */
 const FRESH_TTL_MS = 24 * 60 * 60 * 1000 // 24h: これ以内なら即返す
