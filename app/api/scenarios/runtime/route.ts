@@ -49,6 +49,26 @@ import {
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
+/**
+ * 続120 (Stage2 配信): CORS。本ルートは customer サイト (別オリジン) で動く
+ * public/scenario-runtime.js から cross-origin fetch される。payload は PII を含まない
+ * public な live バナー config のみ、client は credentials:'omit' のため wildcard origin が
+ * 安全 (cookie/認証情報の露出なし)。これが無いとブラウザの CORS で fetch がブロックされ配信不能。
+ */
+const CORS_HEADERS: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  Vary: 'Origin',
+}
+
+export function OPTIONS(): NextResponse {
+  return new NextResponse(null, {
+    status: 204,
+    headers: { ...CORS_HEADERS, 'Cache-Control': 'no-store' },
+  })
+}
+
 const QuerySchema = z.object({
   tenant_id: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/),
   site_id: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/),
@@ -70,7 +90,10 @@ export async function GET(request: Request): Promise<NextResponse> {
   })
 
   if (!parsed.success) {
-    return NextResponse.json({ error: 'invalid_query' }, { status: 400 })
+    return NextResponse.json(
+      { error: 'invalid_query' },
+      { status: 400, headers: { ...CORS_HEADERS } },
+    )
   }
 
   const { tenant_id, site_id } = parsed.data
@@ -79,7 +102,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   if (isScenarioDeliveryGloballyDisabled()) {
     return NextResponse.json(
       { error: 'no_scenarios' },
-      { status: 404, headers: { 'Cache-Control': 'no-store' } },
+      { status: 404, headers: { 'Cache-Control': 'no-store', ...CORS_HEADERS } },
     )
   }
 
@@ -107,7 +130,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     // 404 (not 403) to avoid leaking tenant existence.
     return NextResponse.json(
       { error: 'no_scenarios' },
-      { status: 404, headers: { 'Cache-Control': 'no-store' } },
+      { status: 404, headers: { 'Cache-Control': 'no-store', ...CORS_HEADERS } },
     )
   }
 
@@ -138,6 +161,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     headers: {
       'Cache-Control': 'no-store',
       'X-M-Director-Phase': '2',
+      ...CORS_HEADERS,
     },
   })
 }

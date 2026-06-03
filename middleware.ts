@@ -19,7 +19,7 @@
 
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
-import { jwtVerify } from 'jose'
+import { jwtVerify, SignJWT } from 'jose'
 
 const TOKEN_COOKIE_NAME = 'ugokimap_saas_token'
 
@@ -33,6 +33,56 @@ function getJwtSecret(): Uint8Array {
     _jwtSecret = new TextEncoder().encode(secret)
   }
   return _jwtSecret
+}
+
+// ── Rolling session refresh + bounce reason 可視化 (続 118、2026-05-30) ──
+//
+// 背景: dogfood で「操作していたら突然 sign-in に飛ばされる」が数日間 未解決ループ。
+// 根本原因の最有力候補は token 期限切れ (旧 4h token) + deploy/再ログインの隙間 +
+// 「なぜ飛ばされたか」が一切見えないこと。lib/jwt.ts で既定を 30d に延長済 (続 118)。
+// 本 middleware では 2 段で再発を断つ:
+//   A. Rolling refresh: 有効 token の残存期間が閾値 (25d) を切ったら、ページ遷移の
+//      ついでに 30d の新 cookie を再発行 → アクティブユーザーは実質ずっとログイン維持。
+//   B. Reason 可視化: bounce 時に ?reason=no_token|session_expired|invalid_token を付与
+//      → sign-in ページで理由を表示。「謎の bounce」を 1 テストで切り分け可能化
+//        (invalid_token 再発 = secret 不整合 / session_expired = 再ログインで解消確認)。
+
+/** セッション有効期限 (秒)。lib/jwt.ts SESSION_MAX_AGE_SECONDS / verify route cookie と一致。 */
+const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60 // 30d
+/** 残存期間がこの秒数を切ったら rolling refresh する閾値 (25d)。30d 発行 → 5d 使用で更新。 */
+const SESSION_REFRESH_THRESHOLD_SECONDS = 25 * 24 * 60 * 60 // 25d
+
+export type BounceReason = 'no_token' | 'session_expired' | 'invalid_token'
+
+/**
+ * jwtVerify が投げた error から bounce 理由を判定 (pure、unit test 対象)。
+ * jose は期限切れで `code === 'ERR_JWT_EXPIRED'` を投げる。それ以外 (署名不一致・
+ * malformed 等) は invalid_token に集約。
+ */
+export function bounceReasonFromError(err: unknown): BounceReason {
+  if (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === 'ERR_JWT_EXPIRED'
+  ) {
+    return 'session_expired'
+  }
+  return 'invalid_token'
+}
+
+/**
+ * token の残存期間が閾値を切っているか判定 (pure、unit test 対象)。
+ * exp/now は秒。既に期限切れ (remaining <= 0) なら refresh しない (verify が先に throw する想定だが防御)。
+ */
+export function shouldRefreshSession(
+  expSec: number | undefined,
+  nowSec: number,
+  thresholdSec: number = SESSION_REFRESH_THRESHOLD_SECONDS,
+): boolean {
+  if (typeof expSec !== 'number' || !Number.isFinite(expSec)) return false
+  const remaining = expSec - nowSec
+  return remaining > 0 && remaining < thresholdSec
 }
 
 // ── classify(): 5 region 分類 (S1-09 中核、pure function、unit test 対象) ─
@@ -60,12 +110,19 @@ function isStatic(pathname: string): boolean {
  * Cloudflare Workers / Stripe webhook / Inngest 等の Public API
  * (JWT 不要、独自の認証メカニズム — Worker は site_id/tenant_id pair lookup、
  *  Stripe は signature 検証等)
+ *
+ * /api/scenarios/runtime は匿名 visitor (customer site 埋め込みスクリプト) が
+ * JWT を持たない状態でアクセスする公開エンドポイント。
+ * route 自身が site_id/tenant_id query を Zod validate し、`live` status のみを
+ * 返す (preview/draft/cross-tenant は gate 済み、REQ-SEC-006 no-store + kill-switch)。
+ * 他の /api/scenarios/* (list / CRUD / stats) は api-tenant に留まり JWT 必須。
  */
 const API_PUBLIC_PATHS: ReadonlyArray<string> = [
   '/api/track',
   '/api/health',
   '/api/inngest',
   '/api/billing/webhook',
+  '/api/scenarios/runtime',
 ]
 
 /**
@@ -111,20 +168,13 @@ export function classify(pathname: string): MiddlewareRegion {
 // ── Route group access control (tenant-protected 内で) ───────────────
 
 const AGENCY_PREFIX = '/agency'
-const PROOF_ROUTES: ReadonlyArray<string> = [
-  '/dashboard',
-  '/heatmap',
-  '/personas',
-  '/cv-journey',
-  '/performance',
-  '/insights',
-  '/pages',
-]
 const AGENCY_PLANS: ReadonlySet<string> = new Set(['agency', 'enterprise'])
-
-function isProofRoute(pathname: string): boolean {
-  return PROOF_ROUTES.some((p) => pathname === p || pathname.startsWith(p + '/'))
-}
+// 続 72 (B-1 fix): PROOF_ROUTES / isProofRoute は agency → proof 強制 redirect で
+// のみ使用されていたが、Owner 動作テスト (2026-05-23 22:50) で agency owner が
+// /heatmap・/chat 等の (proof) ページに到達不能と判明したため削除。
+// 続 66 §3 IA SSOT: agency plan は agency dashboard + 全 proof ページにアクセス可能。
+// (proof) ページ側で agency-only 機能制限が必要になった場合は API route レベル
+// または個別 page で行う (middleware redirect ではなく)。
 
 // ── Audit emit (fire-and-forget、Phase 5 で waitUntil 化) ────────────
 
@@ -152,13 +202,65 @@ interface AuditEvent {
  * Phase 5 (Sprint 5 着工時想定):
  *   - `@vercel/functions` の `waitUntil` 経由で guaranteed delivery
  *   - 失敗時 retry (Vercel 内部 queue)
+ *
+ * 続 76 Task B (Owner 2026-05-24 09:34 JST Vercel logs 「[middleware audit] INSERT non-ok」多数):
+ *   - `AUDIT_DISABLED=1` env で全 emit を停止 (Owner 緊急回避用 kill switch)
+ *   - 同一エラーは 60s に 1 回だけ console.error (log spam 抑制)
+ *   - 後者のエラーは内部カウンタに集約、N 件目で「continuing to fail」summary を出す
+ *
+ *   想定 root cause (本続 76 §3 §4 で Infra dispatch 検討):
+ *     (a) production ClickHouse に `audit_events` table 未配備
+ *         (`migrations/2026-05-17-sprint0-tenant-isolation.sql` の Step 3 が production に未適用)
+ *     (b) `CLICKHOUSE_URL` の credentials が `audit_events` に INSERT 権限を持たない
+ *         (audit_events INSERT には専用 user/role が必要、default user では permission denied)
+ *     (c) schema mismatch (続 26 以降の middleware の row shape が table schema から ズレた)
+ *
+ *   本続 76 では Frontend 側ではコード変更で根本解決できないため、kill switch + 観測性向上のみ。
+ *   実 schema 修正 / table 再配備は Infra dispatch (Director 続 77 起票候補)。
  */
+
+/** 続 76 Task B: 同一エラーを抑制する throttled logger (60s 窓、N 件目で summary) */
+interface AuditErrorThrottle {
+  /** 直近 60s 内の同一エラー件数 */
+  count: number
+  /** 直近 console.error を出した時刻 */
+  lastEmittedAt: number
+}
+const _auditErrorThrottle = new Map<string, AuditErrorThrottle>()
+const AUDIT_ERROR_WINDOW_MS = 60_000
+
+function shouldEmitAuditError(key: string): boolean {
+  const now = Date.now()
+  const entry = _auditErrorThrottle.get(key)
+  if (!entry || now - entry.lastEmittedAt > AUDIT_ERROR_WINDOW_MS) {
+    _auditErrorThrottle.set(key, { count: 1, lastEmittedAt: now })
+    return true
+  }
+  entry.count += 1
+  // 100 件溜まったら summary 1 行出して reset
+  if (entry.count >= 100) {
+    console.error(
+      `[middleware audit] suppressed ${entry.count} duplicate errors for key="${key}" in ${AUDIT_ERROR_WINDOW_MS / 1000}s, resetting throttle`,
+    )
+    _auditErrorThrottle.set(key, { count: 1, lastEmittedAt: now })
+    return false
+  }
+  return false
+}
+
 function fireAuditAsync(event: AuditEvent): void {
+  // 続 76 Task B: 緊急 kill switch (Owner が Vercel env で AUDIT_DISABLED=1 投入時に全 emit 停止)
+  // root cause (audit_events 不在 or 権限不足) の Infra 修正が完了するまでの一時回避。
+  if (process.env.AUDIT_DISABLED === '1') {
+    return
+  }
   const chUrl = process.env.CLICKHOUSE_URL || ''
   const chDb = process.env.CLICKHOUSE_DB || 'clickinsight'
   if (!chUrl) {
     // Sprint 0 deploy 経路で env 未投入の場合の保護、log のみ
-    console.warn(`[middleware audit] CLICKHOUSE_URL unset, skip emit: ${event.action} ${event.resource}`)
+    if (shouldEmitAuditError('unset_url')) {
+      console.warn(`[middleware audit] CLICKHOUSE_URL unset, skip emit (suppressing further for 60s)`)
+    }
     return
   }
 
@@ -216,17 +318,27 @@ function fireAuditAsync(event: AuditEvent): void {
         // response body は CH server error context、credentials 含まない (Basic Auth header 渡し済)
         const respText = await resp.text().catch(() => '')
         const truncated = respText.slice(0, 256)
-        console.error(
-          `[middleware audit] INSERT non-ok: ${event.action} ${event.resource} ` +
-            `status=${resp.status} statusText=${resp.statusText} body_head="${truncated}"`,
-        )
+        // 続 76 Task B: 同一 status + body head を 60s に 1 回だけ console.error (log spam 抑制)
+        const key = `non_ok:${resp.status}:${truncated.slice(0, 64)}`
+        if (shouldEmitAuditError(key)) {
+          console.error(
+            `[middleware audit] INSERT non-ok: ${event.action} ${event.resource} ` +
+              `status=${resp.status} statusText=${resp.statusText} body_head="${truncated}" ` +
+              `(throttled; suppressing further 同一 errors for 60s; AUDIT_DISABLED=1 で全停止可)`,
+          )
+        }
       }
     })
     .catch((e: unknown) => {
       const msg = e instanceof Error ? e.message : 'unknown'
-      console.error(
-        `[middleware audit] INSERT network error: ${event.action} ${event.resource} (${msg})`,
-      )
+      // 続 76 Task B: network error は通常 timeout / DNS / TLS、メッセージ先頭で同種判定して throttle
+      const key = `network:${msg.slice(0, 64)}`
+      if (shouldEmitAuditError(key)) {
+        console.error(
+          `[middleware audit] INSERT network error: ${event.action} ${event.resource} (${msg}) ` +
+            `(throttled; suppressing further 同一 errors for 60s; AUDIT_DISABLED=1 で全停止可)`,
+        )
+      }
     })
 }
 
@@ -303,9 +415,11 @@ function extractToken(request: NextRequest): string | null {
   return null
 }
 
-function redirectToSignIn(request: NextRequest): NextResponse {
+function redirectToSignIn(request: NextRequest, reason: BounceReason): NextResponse {
   const signInUrl = new URL('/auth/sign-in', request.url)
   signInUrl.searchParams.set('redirect', request.nextUrl.pathname)
+  // 続 118: bounce 理由を sign-in ページに渡して可視化 (謎 bounce の切り分け用)
+  signInUrl.searchParams.set('reason', reason)
   return NextResponse.redirect(signInUrl)
 }
 
@@ -391,13 +505,15 @@ export async function middleware(request: NextRequest) {
         response_status: 0, // pass-through、downstream で実 status
       })
       return NextResponse.next({ request: { headers: requestHeaders } })
-    } catch {
+    } catch (err: unknown) {
+      const reason = bounceReasonFromError(err)
       fireAuditAsync({
         ...baseAudit,
         action: 'auth.api.invalid_token',
         tenant_id: '__unknown__',
         user_id: '',
         response_status: 401,
+        metadata: { reason },
       })
       return NextResponse.json(
         { success: false, error: 'Invalid or expired token', code: 'TOKEN_EXPIRED' },
@@ -415,7 +531,7 @@ export async function middleware(request: NextRequest) {
       user_id: '',
       response_status: 302,
     })
-    return redirectToSignIn(request)
+    return redirectToSignIn(request, 'no_token')
   }
 
   try {
@@ -425,6 +541,16 @@ export async function middleware(request: NextRequest) {
     const plan = (payload.plan as string) ?? 'free'
     const isAgencyUser = AGENCY_PLANS.has(plan)
 
+    // 続 72 (B-1 fix): agency / enterprise plan user は `/agency/*` に加えて
+    // `(proof)` route group (dashboard / heatmap / personas / chat 等) にも
+    // 直接アクセス可能とする (続 66 §3 IA SSOT)。
+    //
+    // 旧 (続 24): isProofRoute && isAgencyUser → `/agency/dashboard` へ強制 redirect
+    //   → owner 動作テスト (2026-05-23 22:50) で `/heatmap` / `/chat` が
+    //     永久 redirect 化 (agency plan owner が proof ページに到達不能)
+    // 新: agency plan でも proof route を許容、redirect なし
+    //   - 非 agency が `/agency/*` にアクセス → `/dashboard` redirect は維持
+    //     (agency-only 機能の保護、tenant isolation とは独立)
     if (pathname.startsWith(AGENCY_PREFIX) && !isAgencyUser) {
       fireAuditAsync({
         ...baseAudit,
@@ -435,16 +561,6 @@ export async function middleware(request: NextRequest) {
       })
       return NextResponse.redirect(new URL('/dashboard', request.url))
     }
-    if (isProofRoute(pathname) && isAgencyUser) {
-      fireAuditAsync({
-        ...baseAudit,
-        action: 'auth.page.redirect_agency',
-        tenant_id,
-        user_id,
-        response_status: 302,
-      })
-      return NextResponse.redirect(new URL('/agency/dashboard', request.url))
-    }
 
     fireAuditAsync({
       ...baseAudit,
@@ -453,16 +569,49 @@ export async function middleware(request: NextRequest) {
       user_id,
       response_status: 0,
     })
-    return NextResponse.next()
-  } catch {
+
+    // ── 続 118 Fix A: Rolling session refresh ──
+    // 残存期間が閾値 (25d) を切ったら、このページ遷移のついでに 30d 新 cookie を再発行。
+    // アクティブユーザーは触り続ける限りログイン維持され、突然 sign-in に飛ばされない。
+    // 失敗 (再署名エラー等) は致命的でないため握りつぶして通常 next() を返す (既存 token は有効)。
+    const res = NextResponse.next()
+    const nowSec = Math.floor(Date.now() / 1000)
+    if (shouldRefreshSession(payload.exp, nowSec)) {
+      try {
+        // exp/iat/nbf は再発行で setIssuedAt / setExpirationTime が付け直すため除去。
+        // strict (noUnusedLocals) 回避のため destructure-omit ではなく spread + delete。
+        const claims: Record<string, unknown> = { ...payload }
+        delete claims.iat
+        delete claims.exp
+        delete claims.nbf
+        const refreshed = await new SignJWT(claims)
+          .setProtectedHeader({ alg: 'HS256' })
+          .setIssuedAt()
+          .setExpirationTime(`${SESSION_MAX_AGE_SECONDS}s`)
+          .sign(getJwtSecret())
+        res.cookies.set(TOKEN_COOKIE_NAME, refreshed, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'lax',
+          path: '/',
+          maxAge: SESSION_MAX_AGE_SECONDS,
+        })
+      } catch {
+        // refresh 失敗は非致命的 (既存 token はまだ有効)、そのまま通す
+      }
+    }
+    return res
+  } catch (err: unknown) {
+    const reason = bounceReasonFromError(err)
     fireAuditAsync({
       ...baseAudit,
       action: 'auth.page.invalid_token',
       tenant_id: '__unknown__',
       user_id: '',
       response_status: 302,
+      metadata: { reason },
     })
-    return redirectToSignIn(request)
+    return redirectToSignIn(request, reason)
   }
 }
 
