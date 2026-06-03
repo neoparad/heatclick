@@ -31,6 +31,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { HeatmapLayer, HeatmapPoint, HeatmapTile, HeatmapTileMeta } from '@/lib/api/heatmap'
+import { fetchHeatmapUnderlay } from '@/lib/api/heatmap-screenshot'
+import { isRealEmptyHeatmap } from '@/lib/heatmap/display-state'
+import { computeDisplayScale, computePageCssHeight } from '@/lib/heatmap/stage-layout'
 import { buildHeatmapViewModel } from '@/lib/heatmap/view-model'
 import {
   DEVICES,
@@ -42,6 +45,9 @@ import {
 import type {
   DeviceKind,
   EmotionKey,
+  HeatmapCoordinateContext,
+  HeatmapDevice,
+  HeatmapUnderlayCapture,
   LayerKey,
   SideTab,
   SignalKey,
@@ -53,11 +59,13 @@ import { HeatmapAccessibleTable } from './heatmap-accessible-table'
 import { HeatmapSidePanel } from './heatmap-side-panel'
 import { HeatmapToolbar } from './heatmap-toolbar'
 import { MockProductPageUnderlay } from './mock-product-page-underlay'
+import { RealPageScreenshotUnderlay } from './real-page-screenshot-underlay'
 import { SignalOverlay } from './signal-overlay'
 
 export interface HeatmapCanvasProps {
   /** legacy: HeatmapPage が選んだ初期 layer。複数 layer 同時 ON に拡張済 */
   layer: HeatmapLayer
+  siteId: string
   pageUrl: string
   tiles: HeatmapTile[]
   loading: boolean
@@ -67,10 +75,18 @@ export interface HeatmapCanvasProps {
   meta: HeatmapTileMeta | null
   loadMore: () => void
   onHotspotSelect?: (point: HeatmapPoint, tile: HeatmapTile) => void
+  /**
+   * Phase 2 (B 改修): heatmap-toolbar (canvas-top) に集約表示する page-stats。
+   * heatmap-page 側 `usePageStats` の取得結果を string label 化して渡す。
+   */
+  pvLabel?: string
+  ctrLabel?: string
+  dwellLabel?: string
+  scrollLabel?: string
 }
 
-const SENTINEL_LEAD = 600
-const INITIAL_SENTINEL_TOP = 1800
+/** view-model に渡す sourceWidth: ClickHouse 正規化済 click_x の最大幅 */
+const SOURCE_WIDTH = 1280
 
 /** legacy HeatmapLayer → mockup LayerKey 変換 */
 function mapLegacyLayer(l: HeatmapLayer): LayerKey {
@@ -89,8 +105,26 @@ function initialActiveEmotions(): Set<EmotionKey> {
   return new Set(EMOTIONS.filter((e) => e.defaultActive).map((e) => e.key))
 }
 
+/**
+ * capture.capturedAt (ISO 文字列) を ja-JP の読みやすい日時に整形する。
+ * 不正値 / 空のときは生文字列をそのまま返す (UI を壊さない安全側)。
+ */
+function formatCapturedAt(iso: string): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString('ja-JP', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 export function HeatmapCanvas({
   layer,
+  siteId,
   pageUrl,
   tiles,
   loading,
@@ -100,6 +134,10 @@ export function HeatmapCanvas({
   meta,
   loadMore,
   onHotspotSelect,
+  pvLabel,
+  ctrLabel,
+  dwellLabel,
+  scrollLabel,
 }: HeatmapCanvasProps) {
   // pageHeightEstimate は legacy 契約。mockup parity rebuild では 720px 固定 underlay
   // のため canvas 高さ計算には使わない。Phase 2 (実 screenshot underlay) で復活予定。
@@ -120,21 +158,121 @@ export function HeatmapCanvas({
 
   const sentinelRef = useRef<HTMLDivElement>(null)
   const tagRefs = useRef<Map<string, HTMLButtonElement | null>>(new Map())
+  // 続 116 Codex T2 HIGH fix: outer hm-page の実 rendered width を測定して stage scale 計算に使う。
+  //   width: '100%' + maxWidth で narrow container 内では outer が pageMaxWidth 未満になるため、
+  //   pageMaxWidth ベースの scale だと右側 clip される。実 px で scale 再計算する。
+  const hmPageRef = useRef<HTMLDivElement>(null)
 
-  // tiles + meta → view model
+  // ── Phase 2: screenshot underlay state ─────────────────────────────────
+  // device は HeatmapToolbar の選択 (pc/sp/tab)。view-model 上の HeatmapDevice と一致するため
+  // そのまま渡せる (DeviceKind = HeatmapDevice)。
+  const screenshotDevice: HeatmapDevice = device
+  type CaptureState =
+    | { kind: 'idle' }
+    | { kind: 'loading' }
+    | { kind: 'ready'; capture: HeatmapUnderlayCapture }
+    | { kind: 'error'; code: string; message: string }
+
+  const [captureState, setCaptureState] = useState<CaptureState>({ kind: 'idle' })
+
+  // .hm-page の幅 (mockup SSOT 720px、fullscreen 時のみ device で切替)
+  const pageMaxWidth = fullscreen
+    ? (DEVICES.find((d) => d.key === device)?.fsMaxWidth ?? PAGE_WIDTH)
+    : PAGE_WIDTH
+
+  // ── 続 117 v2: capture geometry (transform stage 廃止、native img + displayScale) ──
+  //   cap が取れたら capture CSS px 空間で座標計算し、displayScale で実 px に縮小する。
+  const cap = captureState.kind === 'ready' ? captureState.capture : null
+  const ready = cap != null
+  // referenceWidth = capture の CSS px 基準幅 (= viewportWidth、DPR 非依存)。fallback は mockup 720。
+  const referenceWidth = cap ? cap.viewportWidth : PAGE_WIDTH
+  // pageCssHeight = DPR 除去後の screenshot CSS px 全高 (click_y と同じ document 絶対 CSS px 空間)。
+  const pageCssHeight = cap
+    ? computePageCssHeight(cap.naturalWidth, cap.naturalHeight, referenceWidth) || MOCK_PAGE_HEIGHT
+    : MOCK_PAGE_HEIGHT
+  // outer .hm-page の最大幅: ready 時は referenceWidth で頭打ち (wide screenshot を column 幅に収め、
+  //   sp は native 390 に収める、それ以上 upscale しない)。fallback は mockup pageMaxWidth。
+  const displayMaxWidth = cap ? Math.min(pageMaxWidth, referenceWidth) : pageMaxWidth
+
+  // outer hm-page の実 rendered width (CSS で shrink された場合の実 px)。
+  // 初期値は displayMaxWidth (ResizeObserver fire 前の暫定)、ResizeObserver で実 px に追従。
+  const [actualOuterWidth, setActualOuterWidth] = useState<number>(displayMaxWidth)
+  useEffect(() => {
+    // displayMaxWidth (fullscreen / device / capture) 変更時は実測値を一旦リセットして暫定値に
+    setActualOuterWidth(displayMaxWidth)
+  }, [displayMaxWidth])
+  useEffect(() => {
+    const el = hmPageRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = Math.round(entry.contentRect.width)
+        if (w > 0) setActualOuterWidth(w)
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+    // capture 切替 / displayMaxWidth 変更時に outer DOM が変わるため再 observe
+  }, [ready, displayMaxWidth])
+
+  // displayScale = <img width:100%> の実縮小率。overlay 各要素に掛けて画像と座標一致。
+  //   ready でない (mock fallback) 時は 1 (mockup 720/860 空間そのまま)。
+  const displayScale = cap ? computeDisplayScale(actualOuterWidth, referenceWidth) : 1
+
+  useEffect(() => {
+    if (!pageUrl || !siteId) return
+    const ctrl = new AbortController()
+    setCaptureState({ kind: 'loading' })
+    fetchHeatmapUnderlay({
+      siteId,
+      pageUrl,
+      device: screenshotDevice,
+      signal: ctrl.signal,
+    })
+      .then((res) => {
+        if (ctrl.signal.aborted) return
+        if (res.success) {
+          setCaptureState({ kind: 'ready', capture: res.data })
+        } else {
+          setCaptureState({
+            kind: 'error',
+            code: res.error.code,
+            message: res.error.message,
+          })
+        }
+      })
+      .catch((err: unknown) => {
+        if (ctrl.signal.aborted) return
+        const msg = err instanceof Error ? err.message : 'screenshot fetch failed'
+        setCaptureState({ kind: 'error', code: 'NETWORK', message: msg })
+      })
+    return () => ctrl.abort()
+  }, [siteId, pageUrl, screenshotDevice])
+
+  // tiles + meta + screenshot → view model。
+  // 続 117 v2: view-model は capture CSS px 空間 (referenceWidth × pageCssHeight) で blob/tag を
+  //   配置し、overlay 側が displayScale を掛けて native <img width:100%> と座標一致させる。
+  //   referenceWidth は DPR 非依存 (viewportWidth)、pageHeight は DPR 除去後の CSS px 全高。
+  const coordinateContext: HeatmapCoordinateContext | undefined = cap
+    ? {
+        sourceWidth: SOURCE_WIDTH,
+        referenceWidth,
+        pageHeight: pageCssHeight,
+      }
+    : undefined
+
+  // coordinateContext を primitive 依存に分解 (object 参照で useMemo が毎回 invalidate しないよう)
+  const ctxSig = cap ? `${SOURCE_WIDTH}|${referenceWidth}|${pageCssHeight}` : ''
   const vm = useMemo(
-    () => buildHeatmapViewModel({ tiles, meta }),
-    [tiles, meta],
+    () => buildHeatmapViewModel({ tiles, meta, coordinateContext }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tiles, meta, ctxSig],
   )
 
   // signal overlay は signals tab を開くと自動 ON (mockup 同等)
   const signalsOn = sideTab === 'signals'
 
-  // load-more sentinel
-  const sentinelTop = tiles.length
-    ? Math.max(0, tiles[tiles.length - 1].y_end - SENTINEL_LEAD)
-    : INITIAL_SENTINEL_TOP
-
+  // load-more sentinel (続 119: 位置は marginTop:0 で screenshot 直下。下記 IntersectionObserver で発火)
   useEffect(() => {
     if (!sentinelRef.current || !hasMore) return
     const io = new IntersectionObserver(
@@ -193,6 +331,19 @@ export function HeatmapCanvas({
   const isDummySource =
     meta?.data_source === 'dummy_lcg' || (meta != null && meta.data_source === undefined)
 
+  // 続 117 v3 (Owner:「ヒートマップが表示されない」): 実 query 成功だが 0 hotspot の状態を検知する。
+  //   GTM が v1 tracking (tenant_id='__legacy__') を fire していると tenant-scoped query が空 row を
+  //   返し、data_source='clickhouse_events' のまま blob/tag 0 になる。従来は underlay のみ描画して
+  //   無言の白紙になっていた。informative な empty-state を出すための flag。
+  const realEmpty = isRealEmptyHeatmap({
+    dataSource: meta?.data_source,
+    blobCount: vm.blobs.length,
+    tagCount: vm.tags.length,
+    tileCount: tiles.length,
+    loading,
+    error,
+  })
+
   // hotspot card クリック: 該当 tag を highlight + scroll、real data の場合のみ
   // legacy slide-in detail を起動 (fixture 時は detail 不一致を避けるため抑止 — Codex review MEDIUM)。
   const onSelectHotspot = useCallback(
@@ -216,11 +367,6 @@ export function HeatmapCanvas({
     },
     [vm.tags, onHotspotSelect, tiles, isDummySource],
   )
-
-  // .hm-page の幅 (fullscreen 時に device で切替)
-  const pageMaxWidth = fullscreen
-    ? (DEVICES.find((d) => d.key === device)?.fsMaxWidth ?? PAGE_WIDTH)
-    : PAGE_WIDTH
 
   // 全画面時はビューポート全体を fixed で覆う
   const rootStyle: React.CSSProperties = fullscreen
@@ -272,10 +418,10 @@ export function HeatmapCanvas({
           <HeatmapToolbar
             device={device}
             onDeviceChange={setDevice}
-            pageUrl={pageUrl}
-            pvLabel="6,210"
-            ctrLabel="26.5%"
-            dwellLabel="2m 18s"
+            pvLabel={pvLabel}
+            ctrLabel={ctrLabel}
+            dwellLabel={dwellLabel}
+            scrollLabel={scrollLabel}
             controlsVisible={controlsVisible}
             onToggleControls={() => setControlsVisible((v) => !v)}
             sideVisible={sideVisible}
@@ -321,37 +467,131 @@ export function HeatmapCanvas({
               </div>
             ) : null}
 
-            <div
-              data-testid="hm-page"
-              className="hm-page relative mx-auto overflow-hidden rounded-md border border-[#e3e6ec] bg-white shadow-[0_8px_32px_rgba(15,17,23,.06)]"
-              style={{
-                maxWidth: pageMaxWidth,
-                width: '100%',
-                minHeight: MOCK_PAGE_HEIGHT,
-              }}
-            >
-              <MockProductPageUnderlay />
-              <HeatOverlay
-                vm={vm}
-                layers={activeLayers}
-                activeEmotions={activeEmotions}
-                highlightedTagId={highlightedTagId}
-                tagRefs={tagRefs}
-              />
-              <SignalOverlay
-                signals={vm.signals}
-                signalsOn={signalsOn}
-                enabledSignals={activeSignals}
-              />
-            </div>
+            {/* 続 117 v3: 実 query 成功 (clickhouse_events) だが hotspot 0 件の empty-state。
+                数値の捏造をせず (Evidence Level: observed, 0 行)、無言の白紙を避けて状況を伝える。
+                underlay (実 page / mock) はそのまま下に残し「どのページか」は分かるようにする。 */}
+            {realEmpty ? (
+              <div
+                role="status"
+                aria-live="polite"
+                data-testid="heatmap-empty-state"
+                className="mx-auto mb-3 max-w-md rounded-lg border border-[var(--ug-border)] bg-white/95 px-5 py-4 text-center shadow-sm backdrop-blur"
+              >
+                <p className="text-sm font-semibold text-[var(--ug-text-1)]">
+                  このページのクリックデータはまだありません
+                </p>
+                <p className="mt-1.5 text-xs leading-relaxed text-[var(--ug-text-2)]">
+                  選択中の期間・デバイスで計測されたクリックがまだ届いていません。
+                  計測タグの設置直後はデータ反映に数時間かかることがあります。
+                  半日〜1 日待っても表示されない場合は、タグが正しく設置されているかご確認ください。
+                </p>
+              </div>
+            ) : null}
 
+            {(() => {
+              // 続 117 v2 root-fix (Owner: 重い / heatmap 出ない / PC でスマホ / ページ切れ):
+              //
+              //   旧: `.hm-page-stage` を naturalWidth×naturalHeight (DPR 込で最大 2560×80000) に
+              //       広げ `transform: scale` + `contain:paint` → 数百 MB の GPU layer = 重さの主因。
+              //   新: native `<img width:100% height:auto>` を normal flow で配置 (ブラウザが効率 tile)。
+              //       overlay は capture CSS px 空間で配置し displayScale を掛けて img と座標一致。
+              //
+              //   - outer `.hm-page` 高さは img が決める (height:auto)、巨大 layer を作らない
+              //   - overlay は `displayScale = actualOuterWidth / referenceWidth` で縮小
+              //   - fallback (loading / error / 未取得) は mock underlay + 同 overlay (displayScale=1)
+              const outerStyle: React.CSSProperties = cap
+                ? { maxWidth: displayMaxWidth, width: '100%', height: 'auto' }
+                : { maxWidth: displayMaxWidth, width: '100%', minHeight: MOCK_PAGE_HEIGHT }
+              return (
+                <>
+                  <div
+                    ref={hmPageRef}
+                    data-testid="hm-page"
+                    data-underlay={cap ? 'screenshot' : 'mock'}
+                    data-capture-natural-width={cap?.naturalWidth ?? ''}
+                    data-capture-natural-height={cap?.naturalHeight ?? ''}
+                    data-reference-width={referenceWidth}
+                    data-page-css-height={cap ? pageCssHeight : ''}
+                    data-display-width={displayMaxWidth}
+                    data-actual-outer-width={actualOuterWidth}
+                    data-display-scale={displayScale.toFixed(4)}
+                    className="hm-page relative mx-auto overflow-hidden rounded-md border border-[#e3e6ec] bg-white shadow-[0_8px_32px_rgba(15,17,23,.06)]"
+                    style={outerStyle}
+                  >
+                    {cap ? (
+                      <RealPageScreenshotUnderlay
+                        capture={cap}
+                        onImageError={() =>
+                          setCaptureState({
+                            kind: 'error',
+                            code: 'IMAGE_LOAD_FAILED',
+                            message: 'screenshot image failed to load',
+                          })
+                        }
+                      />
+                    ) : (
+                      <MockProductPageUnderlay />
+                    )}
+                    <HeatOverlay
+                      vm={vm}
+                      layers={activeLayers}
+                      activeEmotions={activeEmotions}
+                      highlightedTagId={highlightedTagId}
+                      tagRefs={tagRefs}
+                      displayScale={displayScale}
+                    />
+                    <SignalOverlay
+                      signals={vm.signals}
+                      signalsOn={signalsOn}
+                      enabledSignals={activeSignals}
+                      displayScale={displayScale}
+                    />
+                    {captureState.kind === 'loading' ? (
+                      <div
+                        role="status"
+                        aria-live="polite"
+                        data-testid="screenshot-loading-badge"
+                        className="absolute right-3 top-3 z-10 rounded-full border border-[var(--ug-border)] bg-white/90 px-2.5 py-1 font-mono text-[10.5px] text-[var(--ug-text-3)] shadow-sm"
+                      >
+                        実 page 取得中…
+                      </div>
+                    ) : null}
+                    {captureState.kind === 'error' ? (
+                      <div
+                        role="status"
+                        data-testid="screenshot-error-badge"
+                        className="absolute right-3 top-3 z-10 rounded-full border border-amber-400/40 bg-amber-100/95 px-2.5 py-1 font-mono text-[10.5px] text-amber-900 shadow-sm"
+                        title={`${captureState.code}: ${captureState.message}`}
+                      >
+                        実 page 未取得 — 仮 underlay 表示中
+                      </div>
+                    ) : null}
+                  </div>
+                  {cap ? (
+                    <p
+                      data-testid="capture-meta-caption"
+                      className="mx-auto mt-2 max-w-[720px] text-center font-mono text-[10px] leading-relaxed text-[var(--ug-text-3)]"
+                    >
+                      実ページ取得: {formatCapturedAt(cap.capturedAt)}
+                      {cap.cached ? ' (cache)' : ''} · レイアウトは閲覧時と異なる場合があります
+                    </p>
+                  ) : null}
+                </>
+              )
+            })()}
+
+            {/* 続 119 fix: load-more sentinel は screenshot/overlay の直下に置く。
+                旧実装は marginTop に「tile 空間 (固定 36000px) − MOCK_PAGE_HEIGHT」を入れ、
+                データ量と無関係に画像の遥か下 (~34,500px) へ sentinel を飛ばしていたため、
+                スクリーンショット下に巨大な空白スクロール領域が生まれていた (切れ/重さの一因)。
+                img は height:auto で実寸描画されるので、sentinel は直後 (marginTop:0) で良い。 */}
             <div
               ref={sentinelRef}
               data-testid="heatmap-load-more-sentinel"
               aria-hidden
               style={{
                 position: 'relative',
-                marginTop: Math.max(0, sentinelTop - MOCK_PAGE_HEIGHT),
+                marginTop: 0,
                 height: 1,
                 width: '100%',
               }}
