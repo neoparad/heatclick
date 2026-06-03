@@ -17,6 +17,7 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,md,json}\""
   },
   "dependencies": {
+    "@ai-sdk/gateway": "^3.0.123",
     "@anthropic-ai/sdk": "^0.30.0",
     "@clickhouse/client": "^1.4.0",
     "@google/generative-ai": "^0.21.0",
@@ -28,6 +29,7 @@
     "@radix-ui/react-slot": "^1.1.0",
     "@radix-ui/react-tabs": "^1.1.0",
     "@sentry/nextjs": "^8.0.0",
+    "ai": "^6.0.195",
     "bcryptjs": "^2.4.3",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.0",

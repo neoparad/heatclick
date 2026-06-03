@@ -1,0 +1,410 @@
+/**
+ * lib/llm/analytics-tools.ts — 4 Tools (overview/contributors/drilldown/verify) (続 68 W2-A、続 66 §3 M-1)
+ *
+ * 親 SSOT §3.8.1 tenant isolation / CLAUDE.md tenant isolation
+ * 配備根拠: Codex Round 1+2+3 + 続 66 §2 Layer 2 (4 Tools) + 続 64 §2 (c) IDOR 防御継承
+ *
+ * 設計 (続 64 hardening 1:1 継承):
+ *   1. tool input schema に `siteId` を含めない (declarative defense)
+ *   2. caller 規約: `executeAnalyticsTool(name, input, ctx)` で `ctx.requestSiteId` を server-side 固定
+ *   3. 各 tool execute で `canAccessSite(ctx, fixedSiteId)` 再認可 (`ToolIDORError` throw)
+ *   4. parentQueryId enforcement: `contributors` / `drilldown` / `verify` は必須
+ *
+ * Tool 規格:
+ *   - 各 tool は `{ name, description, inputSchema, execute }` の object
+ *   - execute は `(input, execCtx) => Promise<ToolResult>` 形式
+ *   - AI SDK v6 `tool()` 互換シェイプ (将来の `ai` package 導入時に `tool({...})` でラップ可)
+ *
+ * Sprint 3 W2-A での結線:
+ *   - `orchestrator.ts` (M-4) が `executeAnalyticsTool()` を tool callback として呼ぶ
+ *   - tool 失敗時の error は `ToolIDORError` (403) / `ToolValidationError` (400) / `Error` (500) のいずれか
+ *   - 全 tool 結果に `evidenceLevelV2` + `parentQueryId` (overview のみ生成) を含める
+ */
+
+import { z } from 'zod'
+
+import { canAccessSite, type TenantContext } from '@/lib/tenant'
+import { ToolIDORError, ToolValidationError } from '@/lib/llm/tools'
+import {
+  ANALYTICS_METRICS,
+  executeAnalyticsQuery,
+  executeContributorsQuery,
+  executeDrilldownQuery,
+  executeVerifyQuery,
+  getParentQuery,
+  MAX_PERIOD_DAYS_ANALYTICS,
+  registerParentQuery,
+  type AnalyticsQueryResult,
+  type ContributorsResult,
+  type DrilldownResult,
+  type VerifyResult,
+} from '@/lib/llm/hybrid-query'
+
+// ── Tool 1: analytics.overview ──────────────────────────────────────
+
+/**
+ * 期間全体の baseline metric を取得。後続 contributors/drilldown/verify の親 query。
+ *
+ * Input schema (続 64 §2c 継承: **siteId 含めない**):
+ *   - dateRange.start / .end (ISO 8601)
+ *   - metrics: AnalyticsMetric の subset
+ *   - timezone: default 'Asia/Tokyo' (W2-B で tenant_settings.timezone 連携)
+ *
+ * Output:
+ *   - queryId (後続 tool 必須)
+ *   - summary (sessions / conversions / cvr / page_views) — 続 78 Task B: bounce_rate / avg_duration は削除
+ *   - tier ('hourly' / 'daily' / 'monthly')
+ *   - evidenceLevel 'observed_approx' (uniqCombined64 等の近似集計使用)
+ *   - approxErrorPct (誤差目安 %)
+ *   - approximation (使った近似関数名、audit 用)
+ */
+export const overviewInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  metrics: z.array(z.enum([...ANALYTICS_METRICS])).min(1).max(ANALYTICS_METRICS.length),
+  timezone: z.string().default('Asia/Tokyo'),
+})
+export type OverviewInput = z.infer<typeof overviewInputSchema>
+
+export interface OverviewResult {
+  queryId: string
+  summary: AnalyticsQueryResult['summary']
+  tier: AnalyticsQueryResult['tier']
+  evidenceLevel: AnalyticsQueryResult['evidenceLevel']
+  approxErrorPct: AnalyticsQueryResult['approxErrorPct']
+  approximation: AnalyticsQueryResult['approximation']
+}
+
+// ── Tool 2: analytics.contributors ──────────────────────────────────
+
+export const contributorsInputSchema = z.object({
+  parentQueryId: z.string().uuid(),
+  // 続 80: persona は S2-03 別 table 配備まで unsupported
+  // 続 82-ml skeleton: utm_source / visitor_type 追加 (Infra 完了 + MV dim 配備後に実データ返却)
+  dimension: z.enum(['page_url', 'device', 'utm_source', 'visitor_type']),
+  limit: z.number().int().min(5).max(100).default(20),
+  minDenominator: z.number().int().min(1).default(30),
+})
+export type ContributorsInput = z.infer<typeof contributorsInputSchema>
+
+export interface ContributorsToolResult {
+  contributors: ContributorsResult['top']
+  other: ContributorsResult['other']
+  coveragePct: number
+  excludedLowVolume: number
+  evidenceLevel: ContributorsResult['evidenceLevel']
+}
+
+// ── Tool 3: analytics.drilldown ─────────────────────────────────────
+
+export const drilldownInputSchema = z.object({
+  parentQueryId: z.string().uuid(),
+  // 続 80: persona は S2-03 別 table 配備まで unsupported
+  // 続 82-ml skeleton: utm_source / visitor_type 追加
+  dimension: z.enum(['page_url', 'device', 'utm_source', 'visitor_type']),
+  value: z.string().min(1),
+  // 続 78 Task B: 'bounce_rate' を削除 (続 67 D-1 schema 整合、events table に is_bounce 列なし)
+  // 続 82-ml skeleton: drilldown は MV 経由のため bounce_rate 復活には MV revival が必須 → Phase 2 で追加
+  metric: z.enum(['cvr', 'sessions']).default('cvr'),
+  window: z
+    .object({
+      start: z.string().min(1),
+      end: z.string().min(1),
+    })
+    .optional(),
+  grain: z.enum(['hour', 'day']).default('hour'),
+})
+export type DrilldownInput = z.infer<typeof drilldownInputSchema>
+
+export interface DrilldownToolResult {
+  series: DrilldownResult['series']
+  anomalies: DrilldownResult['anomalies']
+  grain: DrilldownResult['grain']
+  evidenceLevel: DrilldownResult['evidenceLevel']
+}
+
+// ── Tool 4: analytics.verify ────────────────────────────────────────
+
+export const verifyInputSchema = z.object({
+  parentQueryId: z.string().uuid(),
+  claim: z.object({
+    // 続 78 Task B: 'bounce_rate' を削除 (続 67 D-1 schema 整合)
+    // 続 82-ml Phase 2 (2026-05-25): Infra 続 82 で session_duration_sec / page_views_in_session 列が
+    //   events table に追加されたため bounce_rate / avg_session_duration を verify でも raw exact 再計算可能。
+    metric: z.enum(['cvr', 'sessions', 'page_views', 'bounce_rate', 'avg_session_duration']),
+    value: z.number().finite(),
+    filter: z.record(z.string()).default({}),
+  }),
+  tolerancePct: z.number().min(0.1).max(20).default(2.0),
+})
+export type VerifyInput = z.infer<typeof verifyInputSchema>
+
+export interface VerifyToolResult {
+  claimedValue: number
+  exactValue: number
+  withinTolerance: boolean
+  tolerancePct: number
+  evidenceLevel: VerifyResult['evidenceLevel']
+}
+
+// ── Tool registry (declarative + executor) ──────────────────────────
+
+export interface AnalyticsToolExecuteContext {
+  ctx: TenantContext
+  /** request body 由来の検証済 siteId (LLM 入力から採用しない、続 64 §2c 継承) */
+  requestSiteId: string
+}
+
+export type AnalyticsToolName =
+  | 'analytics.overview'
+  | 'analytics.contributors'
+  | 'analytics.drilldown'
+  | 'analytics.verify'
+
+export type AnalyticsToolResult =
+  | { tool: 'analytics.overview'; result: OverviewResult }
+  | { tool: 'analytics.contributors'; result: ContributorsToolResult }
+  | { tool: 'analytics.drilldown'; result: DrilldownToolResult }
+  | { tool: 'analytics.verify'; result: VerifyToolResult }
+
+/**
+ * 公開 tool schema list (AI SDK v6 `tool()` 互換シェイプ)。
+ *
+ * **重要**: `inputSchema` に `siteId` を含めない (続 64 §2c declarative defense)。
+ * LLM が余計な `siteId` を出してきても executor が破棄 + server-side `requestSiteId` で上書き。
+ */
+export const ANALYTICS_TOOL_SCHEMAS = [
+  {
+    name: 'analytics.overview' as const,
+    description:
+      'Aggregate metric for active site within a date range. Returns queryId which subsequent ' +
+      'analytics.contributors / drilldown / verify tools require. siteId is server-controlled (do NOT include in tool input).',
+    inputSchema: overviewInputSchema,
+  },
+  {
+    name: 'analytics.contributors' as const,
+    description:
+      'Top contributing dim_values for the parent query, with __other__ bucket and coverage %. ' +
+      'parentQueryId from analytics.overview is required.',
+    inputSchema: contributorsInputSchema,
+  },
+  {
+    name: 'analytics.drilldown' as const,
+    description:
+      'Time-series + anomaly detection for a specific dim_value (e.g. /pricing). ' +
+      'parentQueryId from analytics.overview is required.',
+    inputSchema: drilldownInputSchema,
+  },
+  {
+    name: 'analytics.verify' as const,
+    description:
+      'Re-compute a claim with raw events (proven_exact). Use when downstream consumers need ' +
+      'audit-grade certainty. parentQueryId is required.',
+    inputSchema: verifyInputSchema,
+  },
+] as const
+
+// ── Authorization gate (続 64 §2c continuation) ─────────────────────
+
+/**
+ * tool execute 前に必ず呼ぶ authorization gate。
+ * - `fixedSiteId` (server-controlled) が tenant の site_ids に含まれるか再確認
+ * - 違反時は `ToolIDORError` (status 403) を throw
+ */
+function authorize(execCtx: AnalyticsToolExecuteContext, toolName: AnalyticsToolName): void {
+  if (!canAccessSite(execCtx.ctx, execCtx.requestSiteId)) {
+    throw new ToolIDORError(execCtx.ctx.tenant_id, execCtx.requestSiteId, toolName)
+  }
+}
+
+// ── Executor (dispatcher、IDOR + Zod + parentQueryId enforcement) ───
+
+/**
+ * Tool 実行 entrypoint。
+ *
+ * 順序 (続 64 §2c の defense in depth):
+ *   1. authorize (canAccessSite で 403 即弾き)
+ *   2. Zod parse (input shape 強制、不正 metric/dimension は 400)
+ *   3. parentQueryId 検証 (overview 以外、tenant 越え試行は ToolIDORError)
+ *   4. ClickHouse query 実行
+ *   5. 結果を server-controlled な構造で返却
+ *
+ * @throws ToolIDORError cross-tenant access のとき (403)
+ * @throws ToolValidationError tool input が不正 / parentQueryId 不在のとき (400)
+ */
+export async function executeAnalyticsTool(
+  toolName: AnalyticsToolName,
+  rawLlmInput: unknown,
+  execCtx: AnalyticsToolExecuteContext,
+): Promise<AnalyticsToolResult> {
+  authorize(execCtx, toolName)
+
+  switch (toolName) {
+    case 'analytics.overview': {
+      const input = parseToolInput(overviewInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryInput = {
+        siteId: execCtx.requestSiteId, // server-controlled
+        tenantId: execCtx.ctx.tenant_id, // server-controlled (LLM から採用しない)
+        dim: 'all' as const,
+        dimValue: '__all__',
+        dateRange: input.dateRange,
+        metrics: input.metrics,
+        timezone: input.timezone,
+      }
+      const queryResult = await executeAnalyticsQuery(queryInput)
+      const queryId = registerParentQuery(execCtx.ctx.tenant_id, queryInput, queryResult)
+
+      return {
+        tool: 'analytics.overview',
+        result: {
+          queryId,
+          summary: queryResult.summary,
+          tier: queryResult.tier,
+          evidenceLevel: queryResult.evidenceLevel,
+          approxErrorPct: queryResult.approxErrorPct,
+          approximation: queryResult.approximation,
+        },
+      }
+    }
+
+    case 'analytics.contributors': {
+      const input = parseToolInput(contributorsInputSchema, rawLlmInput, toolName)
+      const parent = requireParent(execCtx.ctx, input.parentQueryId, toolName)
+
+      // tenant_id / site_id は parent に登録済の server-controlled 値を使う
+      // (LLM が今 turn で違う siteId を持っていた場合でも parent が正規)
+      const contribResult = await executeContributorsQuery({
+        parent: parent.input,
+        dimension: input.dimension,
+        limit: input.limit,
+        minDenominator: input.minDenominator,
+      })
+
+      return {
+        tool: 'analytics.contributors',
+        result: {
+          contributors: contribResult.top,
+          other: contribResult.other,
+          coveragePct: contribResult.coveragePct,
+          excludedLowVolume: contribResult.excludedLowVolumeCount,
+          evidenceLevel: contribResult.evidenceLevel,
+        },
+      }
+    }
+
+    case 'analytics.drilldown': {
+      const input = parseToolInput(drilldownInputSchema, rawLlmInput, toolName)
+      const parent = requireParent(execCtx.ctx, input.parentQueryId, toolName)
+
+      const drillResult = await executeDrilldownQuery({
+        parent: parent.input,
+        dimension: input.dimension,
+        value: input.value,
+        window: input.window,
+        grain: input.grain,
+        metric: input.metric,
+      })
+
+      return {
+        tool: 'analytics.drilldown',
+        result: {
+          series: drillResult.series,
+          anomalies: drillResult.anomalies,
+          grain: drillResult.grain,
+          evidenceLevel: drillResult.evidenceLevel,
+        },
+      }
+    }
+
+    case 'analytics.verify': {
+      const input = parseToolInput(verifyInputSchema, rawLlmInput, toolName)
+      const parent = requireParent(execCtx.ctx, input.parentQueryId, toolName)
+
+      // 続 82-ml Codex T1 fix #2 (isolation): verify は execCtx.requestSiteId を exec site として
+      //   raw events を再計算するが、parent (overview) が登録された siteId と異なると、
+      //   同一 tenant 内の cross-site 混在 (例: site_A の overview を親に site_B の verify) を
+      //   silently 許してしまう。parent.input.siteId と requestSiteId の不一致を明示的に拒否する。
+      //   authorize() と同じ ToolIDORError (403) を throw (同一 tenant でも別 site への越境は IDOR)。
+      if (parent.input.siteId !== execCtx.requestSiteId) {
+        throw new ToolIDORError(execCtx.ctx.tenant_id, execCtx.requestSiteId, toolName)
+      }
+
+      const verifyResult = await executeVerifyQuery({
+        tenantId: execCtx.ctx.tenant_id, // server-controlled
+        siteId: execCtx.requestSiteId,   // server-controlled (parent.siteId と一致を上で検証済)
+        metric: input.claim.metric,
+        filter: input.claim.filter,
+        claimedValue: input.claim.value,
+        dateRange: parent.input.dateRange,
+        timezone: parent.input.timezone,
+        tolerancePct: input.tolerancePct,
+      })
+
+      return {
+        tool: 'analytics.verify',
+        result: {
+          claimedValue: verifyResult.claimedValue,
+          exactValue: verifyResult.exactValue,
+          withinTolerance: verifyResult.withinTolerance,
+          tolerancePct: verifyResult.tolerancePct,
+          evidenceLevel: verifyResult.evidenceLevel,
+        },
+      }
+    }
+
+    default: {
+      // exhaustiveness
+      const _exhaustive: never = toolName
+      throw new ToolValidationError(`unknown analytics tool: ${String(_exhaustive)}`)
+    }
+  }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+function parseToolInput<T extends z.ZodTypeAny>(
+  schema: T,
+  raw: unknown,
+  toolName: string,
+): z.infer<T> {
+  const parsed = schema.safeParse(raw)
+  if (!parsed.success) {
+    const first = parsed.error.issues[0]
+    throw new ToolValidationError(
+      `tool '${toolName}' input invalid: [${first?.path.join('.') || '$root'}] ${first?.message ?? 'unknown'}`,
+    )
+  }
+  return parsed.data
+}
+
+function requireParent(
+  ctx: TenantContext,
+  parentQueryId: string,
+  toolName: AnalyticsToolName,
+): { input: ReturnType<typeof getParentQuery> extends null ? never : NonNullable<ReturnType<typeof getParentQuery>>['input']; result: AnalyticsQueryResult } {
+  const parent = getParentQuery(ctx.tenant_id, parentQueryId)
+  if (!parent) {
+    throw new ToolValidationError(
+      `tool '${toolName}': parentQueryId not found or expired (5 min TTL). Run analytics.overview first.`,
+    )
+  }
+  return parent
+}
+
+function enforcePeriodDays(dateRange: { start: string; end: string }, toolName: string): void {
+  const startMs = Date.parse(dateRange.start)
+  const endMs = Date.parse(dateRange.end)
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    throw new ToolValidationError(`tool '${toolName}': invalid dateRange (start < end required, ISO 8601)`)
+  }
+  const periodDays = Math.ceil((endMs - startMs) / (24 * 60 * 60 * 1000))
+  if (periodDays > MAX_PERIOD_DAYS_ANALYTICS) {
+    throw new ToolValidationError(
+      `tool '${toolName}': periodDays=${periodDays} exceeds MAX=${MAX_PERIOD_DAYS_ANALYTICS}`,
+    )
+  }
+}
