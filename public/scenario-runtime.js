@@ -50,6 +50,56 @@
     console.error('[scenario-runtime] missing data-site-id / data-tenant-id')
     return
   }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // REQ-SEC-013: Consent gate (fail-closed). Mirrors public/v2/tracking.js init():
+  //   - localStorage 'clickinsight_optout' === 'true'  → user opted out → no render
+  //   - when consent is required, localStorage 'clickinsight_cookie_consent' must be 'true'
+  // We also honor cookie-form values of the same names (some integrations set cookies
+  // rather than localStorage). Consent required-ness is taken from the same global flag
+  // tracking.js uses (window.CLICKINSIGHT_REQUIRE_CONSENT). Any read error fails closed.
+  // ──────────────────────────────────────────────────────────────────────────
+  function _lsGet(key) {
+    try { return window.localStorage ? window.localStorage.getItem(key) : null } catch (e) { return null }
+  }
+  function _consentAllowsRender() {
+    try {
+      // Opt-out wins regardless of consent mode (localStorage OR cookie).
+      if (_lsGet('clickinsight_optout') === 'true') return false
+      if (_cookie('clickinsight_optout') === 'true') return false
+      var requireConsent = window.CLICKINSIGHT_REQUIRE_CONSENT === true
+      if (requireConsent) {
+        var lsConsent = _lsGet('clickinsight_cookie_consent') === 'true'
+        var ckConsent = _cookie('clickinsight_cookie_consent') === 'true'
+        if (!lsConsent && !ckConsent) return false
+      }
+      return true
+    } catch (e) {
+      // Fail-closed: if we cannot determine consent, do not render.
+      return false
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // REQ-SEC-003: URL scheme allowlist. Variant cta_url / image_url are assigned to
+  // href / location / img.src; only absolute https:// URLs (no credentials) are allowed.
+  // javascript:/data:/blob:/relative are rejected. Mirrors lib/scenarios/safe-url.ts.
+  // ──────────────────────────────────────────────────────────────────────────
+  function _isSafeHttpsUrl(rawUrl) {
+    if (typeof rawUrl !== 'string' || rawUrl.length === 0) return false
+    try {
+      var u = new URL(rawUrl, window.location.href)
+      if (u.protocol !== 'https:') return false
+      if (u.username || u.password) return false
+      if (!u.hostname) return false
+      // Reject relative inputs that resolved against the page origin: require the raw
+      // string to itself start with a scheme so "/path" or "javascript:..." don't slip in.
+      if (!/^https:\/\//i.test(rawUrl)) return false
+      return true
+    } catch (e) {
+      return false
+    }
+  }
   if (!RUNTIME_URL) {
     var origin = (function () {
       if (_cs && _cs.src) {
@@ -268,9 +318,97 @@
     sendMatchEvent(scenario, variant, 'click', 0)
     // Allow event flush (best effort) before navigation
     setTimeout(function () {
-      if (ctaUrl) window.location.href = ctaUrl
+      // REQ-SEC-003: re-validate before navigation — never location = untrusted scheme.
+      if (_isSafeHttpsUrl(ctaUrl)) window.location.href = ctaUrl
     }, 50)
   }
+  // ──────────────────────────────────────────────────────────────────────────
+  // REQ-SEC-001/002: client-side HTML sanitizer (defense-in-depth on top of the
+  // server-side sanitize at the write boundary). Bundling DOMPurify into this
+  // standalone served script is impractical (size/build), so this is a strict
+  // allowlist sanitizer built on the browser's own parser (DOMParser): it walks the
+  // parsed tree and rebuilds an output containing ONLY allowlisted elements,
+  // attributes and https: URLs. Everything else (script/iframe/object/embed/form/
+  // on*=/javascript:/data:/style-url) is dropped. Result is inserted via a
+  // DocumentFragment — never `innerHTML = rawConfig`.
+  // ──────────────────────────────────────────────────────────────────────────
+  var _SAFE_TAGS = {
+    A: 1, B: 1, STRONG: 1, I: 1, EM: 1, U: 1, S: 1, SMALL: 1, SUB: 1, SUP: 1,
+    BR: 1, HR: 1, P: 1, DIV: 1, SPAN: 1, SECTION: 1, HEADER: 1, FOOTER: 1,
+    H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, UL: 1, OL: 1, LI: 1,
+    BLOCKQUOTE: 1, FIGURE: 1, FIGCAPTION: 1, IMG: 1, PICTURE: 1, SOURCE: 1,
+    TABLE: 1, THEAD: 1, TBODY: 1, TR: 1, TD: 1, TH: 1,
+  }
+  // Allowed attributes per tag. 'style' is allowed but filtered for url()/expression/scheme.
+  var _SAFE_ATTRS = {
+    A: { href: 1, title: 1, target: 1, rel: 1, style: 1 },
+    IMG: { src: 1, alt: 1, width: 1, height: 1, style: 1 },
+    SOURCE: { srcset: 1, media: 1, type: 1 },
+    TD: { colspan: 1, rowspan: 1, style: 1 },
+    TH: { colspan: 1, rowspan: 1, scope: 1, style: 1 },
+  }
+  function _safeStyle(value) {
+    if (typeof value !== 'string') return ''
+    // Drop any style that tries to load a URL or run an expression.
+    if (/url\s*\(|expression\s*\(|javascript:|vbscript:|@import|<|>/i.test(value)) return ''
+    return value
+  }
+  function _attrAllowed(tag, name) {
+    if (/^on/i.test(name)) return false // never allow on* event handlers
+    var generic = name === 'style' || name === 'title'
+    var perTag = _SAFE_ATTRS[tag] && _SAFE_ATTRS[tag][name]
+    return !!perTag || generic
+  }
+  // Rebuild a sanitized clone of `srcEl` into the document `doc`. Returns a Node or null.
+  function _sanitizeNode(srcEl, doc) {
+    if (srcEl.nodeType === 3) return doc.createTextNode(srcEl.nodeValue) // text
+    if (srcEl.nodeType !== 1) return null // drop comments / others
+    var tag = srcEl.tagName ? srcEl.tagName.toUpperCase() : ''
+    if (!_SAFE_TAGS[tag]) return null // disallowed element → drop (incl. children)
+    var out = doc.createElement(tag.toLowerCase())
+    var attrs = srcEl.attributes || []
+    for (var a = 0; a < attrs.length; a++) {
+      var name = attrs[a].name
+      var value = attrs[a].value
+      var lname = name.toLowerCase()
+      if (!_attrAllowed(tag, lname)) continue
+      if (lname === 'href' || lname === 'src') {
+        if (!_isSafeHttpsUrl(value)) continue // only https: URLs on links/images
+      } else if (lname === 'srcset') {
+        continue // srcset can carry multiple URLs; skip for simplicity/safety
+      } else if (lname === 'style') {
+        value = _safeStyle(value)
+        if (!value) continue
+      }
+      try { out.setAttribute(lname, value) } catch (e) { /* skip bad attr */ }
+    }
+    var kids = srcEl.childNodes || []
+    for (var k = 0; k < kids.length; k++) {
+      var child = _sanitizeNode(kids[k], doc)
+      if (child) out.appendChild(child)
+    }
+    return out
+  }
+  // Parse untrusted HTML and return a sanitized DocumentFragment for safe insertion.
+  function _sanitizeToFragment(rawHtml) {
+    var frag = document.createDocumentFragment()
+    if (typeof rawHtml !== 'string' || rawHtml.length === 0) return frag
+    var doc
+    try {
+      doc = new DOMParser().parseFromString('<div id="__ugk_root">' + rawHtml + '</div>', 'text/html')
+    } catch (e) {
+      return frag // parse failure → render nothing (fail-closed)
+    }
+    var root = doc.getElementById('__ugk_root')
+    if (!root) return frag
+    var nodes = root.childNodes || []
+    for (var i = 0; i < nodes.length; i++) {
+      var clean = _sanitizeNode(nodes[i], document)
+      if (clean) frag.appendChild(clean)
+    }
+    return frag
+  }
+
   function renderVariant(scenario, variant) {
     var host = _ensureHost()
     var isCenter = !variant.position || variant.position === 'center'
@@ -288,29 +426,36 @@
     close.addEventListener('click', function () { _closeRendered(scenario, variant) })
     content.appendChild(close)
 
+    // REQ-SEC-003: only assign cta_url when it is a safe https: URL.
+    var safeCtaUrl = _isSafeHttpsUrl(variant.cta_url) ? variant.cta_url : ''
+
     var body = document.createElement('div')
     if (variant.content_type === 'image') {
       var img = document.createElement('img')
       img.className = 'ugk-img'
-      img.src = variant.image_url
+      // REQ-SEC-003: reject non-https image_url (javascript:/data:/blob:/relative).
+      if (_isSafeHttpsUrl(variant.image_url)) {
+        img.src = variant.image_url
+      }
       img.alt = variant.image_alt || ''
       if (variant.image_width) img.width = variant.image_width
       if (variant.image_height) img.height = variant.image_height
-      if (variant.cta_url) {
+      if (safeCtaUrl) {
         img.style.cursor = 'pointer'
-        img.addEventListener('click', function (e) { _onCtaClick(scenario, variant, variant.cta_url, e) })
+        img.addEventListener('click', function (e) { _onCtaClick(scenario, variant, safeCtaUrl, e) })
       }
       body.appendChild(img)
     } else if (variant.content_type === 'html') {
-      // Phase 1: hard-code Owner-signed HTML. Phase 2 adds DOMPurify before this point.
-      body.innerHTML = variant.html || ''
-      // Attach CTA on root buttons / links if cta_url provided
-      if (variant.cta_url) {
+      // REQ-SEC-001/002: sanitize untrusted inline HTML and insert a fragment.
+      // NEVER `innerHTML = rawConfig` (that ran in the customer's first-party origin = XSS).
+      body.appendChild(_sanitizeToFragment(variant.html || ''))
+      // Attach CTA on root buttons / links if a SAFE cta_url provided
+      if (safeCtaUrl) {
         var cta = document.createElement('a')
         cta.className = 'ugk-cta'
-        cta.href = variant.cta_url
+        cta.href = safeCtaUrl
         cta.textContent = 'クーポンを使う'
-        cta.addEventListener('click', function (e) { _onCtaClick(scenario, variant, variant.cta_url, e) })
+        cta.addEventListener('click', function (e) { _onCtaClick(scenario, variant, safeCtaUrl, e) })
         body.appendChild(cta)
       }
     }
@@ -363,11 +508,15 @@
   }
 
   function evaluateAll(scenarios) {
+    // REQ-SEC-013: fail-closed consent gate — no consent → no evaluation, no render, no events.
+    if (!_consentAllowsRender()) return
     var ctx = buildCtx()
     if (!ctx.session_id || !ctx.visitor_id) return
     for (var i = 0; i < scenarios.length; i++) {
       var sc = scenarios[i]
-      if (sc.status !== 'live' && sc.status !== 'preview') continue
+      // Only 'live' is rendered. The server gates 'preview' out of the public payload
+      // (REQ-SEC-006), so it should never reach here; defensively render 'live' only.
+      if (sc.status !== 'live') continue
       if (_wasMatchedInSession(sc.id, ctx.session_id)) continue
       var t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now())
       var matched = false
@@ -377,7 +526,7 @@
         _markMatched(sc.id, ctx.session_id)
         var variant = pickVariant(sc, ctx.visitor_id)
         sendMatchEvent(sc, variant, 'match', Math.round(t1 - t0))
-        if (variant && (sc.status === 'live' || sc.status === 'preview')) {
+        if (variant) {
           renderVariant(sc, variant)
         }
       }
@@ -398,6 +547,9 @@
       .catch(function () { /* noop, retry next page */ })
   }
   function init() {
+    // REQ-SEC-013: fail-closed consent gate at entry — without consent, never fetch or render
+    // scenario config at all. evaluateAll() re-checks consent before each render as well.
+    if (!_consentAllowsRender()) return
     _appendVisitedPath()
     fetchScenarios().then(function () {
       evaluateAll(_scenarios)

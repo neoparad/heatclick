@@ -9,12 +9,20 @@
  *
  * Phase 1 strategy:
  *   - Reads in-memory hard-code (lib/scenarios/poc-scenario.ts)
- *   - status='measure_only' only (Path C, §1.7.1 compliant)
  *   - public endpoint (no JWT) because tracking.js v2 already runs on customer pages
  *     and the runtime payload contains no PII — only condition AST + variant HTML.
  *   - tenant_id + site_id must match a configured site_id (validated against poc data).
  *     Cross-tenant probing returns 404, not 403, to avoid info leak about tenant existence.
- *   - Cache-Control public + s-maxage=300 for CDN edge caching.
+ *
+ * REQ-SEC-006 (don't public-cache executable config + kill-switch):
+ *   - This payload contains EXECUTABLE config (inline HTML the runtime injects). It is served
+ *     with `Cache-Control: no-store` so a poisoned/compromised entry cannot fan out via CDN
+ *     for minutes and an emergency kill takes effect on the very next request (no TTL wait).
+ *   - A kill-switch (lib/scenarios/kill-switch.ts) is consulted on every serve, independent
+ *     of any cache: global / per-tenant / per-scenario disable flags drop scenarios at serve
+ *     time. If everything is killed, we serve nothing (404).
+ *   - `preview` status is NOT exposed in this public payload — preview is for authoring/QA,
+ *     not for delivery to every anonymous visitor. Only `live` (+ measure-path) reaches here.
  *
  * Phase 2: backing store switches to PostgreSQL `scenarios` table.
  * Phase 3: JWT-gated CRUD endpoints (POST/PUT/DELETE) live separately under /api/scenarios/[id].
@@ -25,6 +33,10 @@ import { z } from 'zod'
 
 import { getPocScenariosForTenant } from '@/lib/scenarios/poc-scenario'
 import { canonicalizeAst } from '@/lib/scenarios/evaluator'
+import {
+  isScenarioDeliveryGloballyDisabled,
+  isDeliveryKilled,
+} from '@/lib/scenarios/kill-switch'
 import { CloudflareKvError } from '@/lib/scenarios/kv-storage'
 import { ScenarioValidationError, createScenarioRepository } from '@/lib/scenarios/repository'
 import {
@@ -63,6 +75,14 @@ export async function GET(request: Request): Promise<NextResponse> {
 
   const { tenant_id, site_id } = parsed.data
 
+  // REQ-SEC-006: global kill-switch — serve nothing if scenario delivery is globally disabled.
+  if (isScenarioDeliveryGloballyDisabled()) {
+    return NextResponse.json(
+      { error: 'no_scenarios' },
+      { status: 404, headers: { 'Cache-Control': 'no-store' } },
+    )
+  }
+
   // Stage 5 (続 M-12): KV-first merge with POC fallback
   let kvScenarios: Scenario[] = []
   try {
@@ -77,13 +97,17 @@ export async function GET(request: Request): Promise<NextResponse> {
     }
   }
   const pocScenarios = getPocScenariosForTenant(tenant_id, site_id)
-  const scenarios = mergeForRuntime(kvScenarios, pocScenarios)
+  const merged = mergeForRuntime(kvScenarios, pocScenarios)
+
+  // REQ-SEC-006: per-tenant / per-scenario kill-switch — drop killed scenarios at serve time,
+  // independent of any cache (route is no-store, so this takes effect on the next request).
+  const scenarios = merged.filter((s) => !isDeliveryKilled(tenant_id, s.id))
 
   if (scenarios.length === 0) {
     // 404 (not 403) to avoid leaking tenant existence.
     return NextResponse.json(
       { error: 'no_scenarios' },
-      { status: 404, headers: { 'Cache-Control': 'public, s-maxage=60' } },
+      { status: 404, headers: { 'Cache-Control': 'no-store' } },
     )
   }
 
@@ -107,10 +131,12 @@ export async function GET(request: Request): Promise<NextResponse> {
   // Defensive: re-validate before serializing (catches schema drift in dev).
   const validated = ScenarioRuntimePayloadSchema.parse(payload)
 
+  // REQ-SEC-006: executable config MUST NOT be public-cached. no-store ensures a poisoned
+  // entry cannot fan out via CDN and a kill-switch flip takes effect on the next request.
   return NextResponse.json(validated, {
     status: 200,
     headers: {
-      'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=600',
+      'Cache-Control': 'no-store',
       'X-M-Director-Phase': '2',
     },
   })
@@ -118,13 +144,17 @@ export async function GET(request: Request): Promise<NextResponse> {
 
 /**
  * Stage 5 (続 M-12): Merge KV + POC scenarios for runtime serving.
- *   - KV scenarios with status in {live, preview, measure_only} are exposed.
+ *   - KV scenarios with status in {live, measure_only} are exposed.
  *     'draft' / 'paused' / 'archived' は server-side gate で除外。
+ *   - REQ-SEC-006: 'preview' is NOT exposed in this public payload — preview is for
+ *     authoring/QA review, not for delivery to every anonymous visitor. Gating it here
+ *     (and not in scenario-runtime.js) ensures preview HTML never leaves the server to the
+ *     general public, even if a client tweaks its evaluation.
  *   - POC fallback は KV に同 id が無いときのみ採用 (legacy 維持)。
  *   - updated_at desc sort で最新順配信。
  */
 function mergeForRuntime(kv: Scenario[], poc: ReadonlyArray<Scenario>): Scenario[] {
-  const RUNTIME_STATUSES = new Set(['live', 'preview', 'measure_only'])
+  const RUNTIME_STATUSES = new Set(['live', 'measure_only'])
   const byId = new Map<string, Scenario>()
   for (const s of poc) {
     if (s.archived_at !== null) continue

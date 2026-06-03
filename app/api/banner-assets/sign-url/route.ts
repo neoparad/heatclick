@@ -34,11 +34,12 @@ import {
   buildAssetObjectKey,
   signR2PutUrl,
 } from '@/lib/scenarios/r2-signed-url'
+import { createScenarioRepository } from '@/lib/scenarios/repository'
+import { isTenantContext, resolveScenarioTenantContext } from '@/lib/scenarios/tenant-context'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const DEFAULT_TENANT = 'linkth_internal'
 const MAX_BYTES = 5 * 1024 * 1024 // 5 MiB
 
 const ALLOWED_MIME_BY_EXT: Record<string, string[]> = {
@@ -49,8 +50,16 @@ const ALLOWED_MIME_BY_EXT: Record<string, string[]> = {
   '.gif': ['image/gif'],
 }
 
+// REQ-SEC-004: tenant_id is NOT accepted from the body — it is derived from the JWT.
+// site_id is required so we can verify the target scenario belongs to the caller's tenant/site
+// before minting an upload URL under that tenant's asset prefix.
 const RequestSchema = z.object({
   scenario_id: z.string().regex(/^[0-9a-f-]{36}$/i, 'must be UUID v4'),
+  site_id: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9_-]+$/, 'site_id must be [A-Za-z0-9_-]+'),
   filename: z
     .string()
     .min(1)
@@ -58,7 +67,6 @@ const RequestSchema = z.object({
     .regex(/^[A-Za-z0-9._-]+$/, 'filename must be [A-Za-z0-9._-]+'),
   content_type: z.string().min(1).max(64),
   byte_size: z.number().int().positive().max(MAX_BYTES),
-  tenant_id: z.string().regex(/^[a-z0-9_-]+$/).optional(),
 })
 
 interface AssetMetadata {
@@ -73,10 +81,6 @@ interface AssetMetadata {
   uploaded_by: string
   created_at: string
   expires_at: string
-}
-
-function userIdFromRequest(req: NextRequest): string {
-  return req.headers.get('x-user-id') ?? 'system'
 }
 
 function validateMimeAgainstFilename(filename: string, mime: string): boolean {
@@ -107,7 +111,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     )
   }
 
-  const tenantId = parsed.data.tenant_id ?? DEFAULT_TENANT
+  // REQ-SEC-004: tenant_id from JWT header; body site_id must be in JWT site_ids.
+  const ctx = resolveScenarioTenantContext(request, parsed.data.site_id)
+  if (!isTenantContext(ctx)) return ctx
+  const tenantId = ctx.tenantId
 
   if (!validateMimeAgainstFilename(parsed.data.filename, parsed.data.content_type)) {
     return NextResponse.json(
@@ -118,6 +125,32 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       },
       { status: 400 },
     )
+  }
+
+  // REQ-SEC-004: verify the target scenario actually belongs to this tenant/site BEFORE
+  // signing an upload URL under that tenant's asset prefix. getScenario re-checks the row's
+  // own tenant_id/site_id (assertScenarioOwnership) and returns null when absent.
+  try {
+    const repo = createScenarioRepository()
+    const owned = await repo.getScenario(tenantId, ctx.siteId, parsed.data.scenario_id)
+    if (!owned) {
+      return NextResponse.json(
+        { error: 'scenario_not_found', message: 'scenario does not exist for this tenant/site' },
+        { status: 404 },
+      )
+    }
+  } catch (e) {
+    if (e instanceof CloudflareKvError) {
+      // eslint-disable-next-line no-console
+      console.error(`[banner-assets/sign-url] ownership check KV error: ${e.message}`)
+      return NextResponse.json(
+        { error: 'storage_error', message: 'ownership check failed' },
+        { status: 502 },
+      )
+    }
+    // eslint-disable-next-line no-console
+    console.error('[banner-assets/sign-url] ownership check failed', e)
+    return NextResponse.json({ error: 'internal_error' }, { status: 500 })
   }
 
   const assetId = randomUUID()
@@ -143,7 +176,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       mime_type: parsed.data.content_type,
       byte_size: parsed.data.byte_size,
       status: 'pending',
-      uploaded_by: userIdFromRequest(request),
+      uploaded_by: ctx.userId,
       created_at: signed.signedAt,
       expires_at: signed.expiresAt,
     }

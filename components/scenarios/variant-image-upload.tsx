@@ -29,6 +29,9 @@ const ALLOWED_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gi
 
 export interface VariantImageUploadProps {
   scenarioId: string
+  /** REQ-SEC-004: sign-url で必須。tenant は JWT 由来だが site_id は body 必須 (権限照合用)。 */
+  siteId: string
+  /** @deprecated server は JWT から tenant を導出するため無視されるが互換のため受領可。 */
   tenantId?: string
   /** 現在の画像 URL (アップロード前後の比較用) */
   currentUrl?: string | null
@@ -49,7 +52,7 @@ interface SignUrlResponse {
 
 export function VariantImageUpload({
   scenarioId,
-  tenantId,
+  siteId,
   currentUrl,
   onUploaded,
   disabled = false,
@@ -94,7 +97,8 @@ export function VariantImageUpload({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             scenario_id: scenarioId,
-            tenant_id: tenantId,
+            // REQ-SEC-004: tenant は送らない (server が JWT から導出)。site_id は必須。
+            site_id: siteId,
             filename: file.name,
             content_type: file.type,
             byte_size: file.size,
@@ -148,7 +152,7 @@ export function VariantImageUpload({
         window.setTimeout(() => setProgress(0), 500)
       }
     },
-    [onUploaded, scenarioId, tenantId],
+    [onUploaded, scenarioId, siteId],
   )
 
   return (

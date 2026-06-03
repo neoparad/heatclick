@@ -17,6 +17,8 @@
 
 import { z } from 'zod'
 
+import { isSafeHttpsUrl } from './safe-url'
+
 // ────────────────────────────────────────────────────────────────────────────
 // Condition AST (dsl-spec §2.1)
 // ────────────────────────────────────────────────────────────────────────────
@@ -163,14 +165,23 @@ export const VARIANT_POSITIONS = [
 ] as const
 export type VariantPosition = (typeof VARIANT_POSITIONS)[number]
 
+// REQ-SEC-003: variant URLs are assigned to img.src / href / location at runtime, so they
+// must be HTTPS-only absolute URLs. `z.string().url()` alone accepts javascript:/data:/blob:
+// and relative URLs, which become click-to-XSS / data-exfil vectors. Enforce https: here at
+// the write boundary; scenario-runtime.js mirrors the same check before any DOM assignment.
+const SafeHttpsUrlSchema = z
+  .string()
+  .max(2048)
+  .refine(isSafeHttpsUrl, { message: 'must be an absolute https:// URL (no javascript:/data:/blob:/relative)' })
+
 const ImageVariantSchema = z.object({
   id: z.string().min(1).max(8), // 'A' | 'B' | 'C'
   content_type: z.literal('image'),
-  image_url: z.string().url().max(2048),
+  image_url: SafeHttpsUrlSchema,
   image_alt: z.string().max(255).default(''),
   image_width: z.number().int().min(1).max(4096).optional(),
   image_height: z.number().int().min(1).max(4096).optional(),
-  cta_url: z.string().url().max(2048).optional(),
+  cta_url: SafeHttpsUrlSchema.optional(),
   position: z.enum(VARIANT_POSITIONS).default('center'),
   traffic_split: z.number().int().min(0).max(100), // 0-100, sum across variants must be 100
 })
@@ -178,8 +189,8 @@ const ImageVariantSchema = z.object({
 const HtmlVariantSchema = z.object({
   id: z.string().min(1).max(8),
   content_type: z.literal('html'),
-  html: z.string().max(8192), // sanitized at server boundary, signed-trusted at runtime
-  cta_url: z.string().url().max(2048).optional(),
+  html: z.string().max(8192), // sanitized at server boundary (lib/scenarios/html-sanitizer.ts)
+  cta_url: SafeHttpsUrlSchema.optional(),
   position: z.enum(VARIANT_POSITIONS).default('center'),
   traffic_split: z.number().int().min(0).max(100),
 })

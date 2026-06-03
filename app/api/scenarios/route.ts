@@ -2,43 +2,44 @@
  * M-Director Stage 1 (続 M-7/M-8) — Scenarios CRUD: list + create
  *
  * Endpoints:
- *   GET  /api/scenarios?tenant_id=...&site_id=...
- *   POST /api/scenarios  body: CreateScenarioInput (tenant_id + site_id inline)
+ *   GET  /api/scenarios?site_id=...
+ *   POST /api/scenarios  body: CreateScenarioInput (site_id selects among the tenant's sites)
  *
- * Phase 1 (続 M-7 整合):
- *   - tenant_id is enforced from query/body; later phases inject from JWT middleware.
- *   - created_by is read from `x-user-id` header; defaults to 'system' for now.
- *   - tenant_id default = 'linkth_internal' if query omitted.
+ * REQ-SEC-004 (tenant isolation, §3.8.1):
+ *   - tenant_id is derived ONLY from the middleware-injected, JWT-verified `x-tenant-id`
+ *     header. Any tenant_id in the body/query is IGNORED (no `linkth_internal` default).
+ *   - site_id is the only caller-controlled selector and MUST be a member of the JWT's
+ *     `x-site-ids`; otherwise 403.
+ *   - created_by is read from the JWT-verified `x-user-id` header.
  *
  * Reference:
- *   - lib/scenarios/repository.ts (CRUD ops + Zod validate + audit)
- *   - app/api/scenarios/runtime/route.ts (continued runtime read path, unchanged)
+ *   - lib/scenarios/tenant-context.ts (JWT-derived tenant context)
+ *   - lib/scenarios/repository.ts (CRUD ops + Zod validate + sanitize + audit)
+ *   - app/api/heatmap/screenshot/route.ts (same x-tenant-id / x-site-ids pattern)
  */
 
 import { NextResponse, type NextRequest } from 'next/server'
 import { z } from 'zod'
 
 import {
+  HtmlSanitizationError,
   ScenarioNotFoundError,
   ScenarioValidationError,
   createScenarioRepository,
 } from '@/lib/scenarios/repository'
 import { CloudflareKvError } from '@/lib/scenarios/kv-storage'
 import { ConditionNodeSchema, VariantsSchema, SCENARIO_STATUSES, EVIDENCE_LEVELS } from '@/lib/scenarios/types'
+import { isTenantContext, resolveScenarioTenantContext } from '@/lib/scenarios/tenant-context'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const DEFAULT_TENANT = 'linkth_internal'
+const SiteIdSchema = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/)
 
-const QuerySchema = z.object({
-  tenant_id: z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/).default(DEFAULT_TENANT),
-  site_id: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/),
-})
-
+// tenant_id is NOT accepted from the body — it is derived from the JWT. site_id is validated
+// against the JWT's site_ids in resolveScenarioTenantContext (here it is only shape-checked).
 const CreateBodySchema = z.object({
-  tenant_id: z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/).default(DEFAULT_TENANT),
-  site_id: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/),
+  site_id: SiteIdSchema,
   name: z.string().min(1).max(255),
   description: z.string().max(2000).optional(),
   condition_ast: ConditionNodeSchema,
@@ -48,11 +49,13 @@ const CreateBodySchema = z.object({
   evidence_data: z.record(z.unknown()).optional(),
 })
 
-function userIdFromRequest(req: NextRequest): string {
-  return req.headers.get('x-user-id') ?? 'system'
-}
-
 function handleError(err: unknown): NextResponse {
+  if (err instanceof HtmlSanitizationError) {
+    return NextResponse.json(
+      { error: 'unsafe_html', reason: err.reason, message: err.message },
+      { status: 400 },
+    )
+  }
   if (err instanceof ScenarioValidationError) {
     return NextResponse.json(
       { error: 'validation_failed', message: err.message, issues: err.issues },
@@ -77,26 +80,20 @@ function handleError(err: unknown): NextResponse {
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const { searchParams } = new URL(request.url)
-  const parsed = QuerySchema.safeParse({
-    tenant_id: searchParams.get('tenant_id') ?? undefined,
-    site_id: searchParams.get('site_id') ?? undefined,
-  })
-  if (!parsed.success) {
-    return NextResponse.json(
-      {
-        error: 'invalid_query',
-        issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
-      },
-      { status: 400 },
-    )
+  const siteParse = SiteIdSchema.safeParse(searchParams.get('site_id') ?? undefined)
+  if (!siteParse.success) {
+    return NextResponse.json({ error: 'invalid_query', message: 'site_id required' }, { status: 400 })
   }
-  const { tenant_id, site_id } = parsed.data
+
+  // tenant_id from JWT header; site_id must be in JWT site_ids (REQ-SEC-004).
+  const ctx = resolveScenarioTenantContext(request, siteParse.data)
+  if (!isTenantContext(ctx)) return ctx
 
   try {
     const repo = createScenarioRepository()
-    const scenarios = await repo.listScenarios(tenant_id, site_id)
+    const scenarios = await repo.listScenarios(ctx.tenantId, ctx.siteId)
     return NextResponse.json(
-      { tenant_id, site_id, count: scenarios.length, scenarios },
+      { tenant_id: ctx.tenantId, site_id: ctx.siteId, count: scenarios.length, scenarios },
       { status: 200, headers: { 'Cache-Control': 'no-store' } },
     )
   } catch (err) {
@@ -123,11 +120,23 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     )
   }
 
+  // tenant_id from JWT header; body site_id must be in JWT site_ids (REQ-SEC-004).
+  const ctx = resolveScenarioTenantContext(request, parsed.data.site_id)
+  if (!isTenantContext(ctx)) return ctx
+
   try {
     const repo = createScenarioRepository()
     const created = await repo.createScenario({
-      ...parsed.data,
-      created_by: userIdFromRequest(request),
+      name: parsed.data.name,
+      description: parsed.data.description,
+      condition_ast: parsed.data.condition_ast,
+      variants: parsed.data.variants,
+      status: parsed.data.status,
+      evidence_level: parsed.data.evidence_level,
+      evidence_data: parsed.data.evidence_data,
+      tenant_id: ctx.tenantId,
+      site_id: ctx.siteId,
+      created_by: ctx.userId,
     })
     return NextResponse.json(created, { status: 201, headers: { 'Cache-Control': 'no-store' } })
   } catch (err) {

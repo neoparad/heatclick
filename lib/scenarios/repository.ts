@@ -19,10 +19,12 @@
 import { randomUUID } from 'node:crypto'
 
 import { emitScenarioAudit } from './audit'
+import { HtmlSanitizationError, sanitizeHtmlVariant } from './html-sanitizer'
 import { getDefaultStorage, type KvStorage } from './kv-storage'
 import {
   ScenarioSchema,
   type Scenario,
+  type Variants,
   validateConditionAst,
   conditionDepth,
   countLeaves,
@@ -48,6 +50,9 @@ export class ScenarioNotFoundError extends Error {
     this.name = 'ScenarioNotFoundError'
   }
 }
+
+// Re-export so API routes can catch sanitizer rejections without importing the sanitizer module.
+export { HtmlSanitizationError } from './html-sanitizer'
 
 // ── Key helpers (続 M-7 §3) ─────────────────────────────────────────────────
 
@@ -164,11 +169,15 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
         parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
       )
     }
+    // REQ-SEC-004: never trust the key alone — confirm the row's own tenant/site.
+    assertScenarioOwnership(parsed.data, tenantId, siteId)
     return parsed.data
   }
 
   async function createScenario(input: CreateScenarioInput): Promise<Scenario> {
     validateAstOrThrow(input.condition_ast)
+    // REQ-SEC-001/002: sanitize inline HTML before persist (store ONLY the sanitized result).
+    const safeVariants = sanitizeVariantsOrThrow(input.variants)
     const ts = now()
     const candidate = {
       id: uuid(),
@@ -177,7 +186,7 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
       name: input.name,
       description: input.description ?? '',
       condition_ast: input.condition_ast,
-      variants: input.variants,
+      variants: safeVariants,
       status: input.status ?? 'draft',
       evidence_level: input.evidence_level ?? 'planned',
       evidence_data: input.evidence_data ?? {},
@@ -214,13 +223,16 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
     const existing = await getScenario(tenantId, siteId, scenarioId)
     if (!existing) throw new ScenarioNotFoundError(scenarioId)
     if (patch.condition_ast !== undefined) validateAstOrThrow(patch.condition_ast)
+    // REQ-SEC-001/002: re-sanitize inline HTML on every variant update.
+    const safeVariants =
+      patch.variants !== undefined ? sanitizeVariantsOrThrow(patch.variants) : undefined
 
     const merged = {
       ...existing,
       ...(patch.name !== undefined ? { name: patch.name } : {}),
       ...(patch.description !== undefined ? { description: patch.description } : {}),
       ...(patch.condition_ast !== undefined ? { condition_ast: patch.condition_ast } : {}),
-      ...(patch.variants !== undefined ? { variants: patch.variants } : {}),
+      ...(safeVariants !== undefined ? { variants: safeVariants } : {}),
       ...(patch.status !== undefined ? { status: patch.status } : {}),
       ...(patch.evidence_level !== undefined ? { evidence_level: patch.evidence_level } : {}),
       ...(patch.evidence_data !== undefined ? { evidence_data: patch.evidence_data } : {}),
@@ -250,6 +262,11 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
     siteId: string,
     scenarioId: string,
   ): Promise<boolean> {
+    // REQ-SEC-004: load + re-verify the row's own tenant/site before deleting, so a delete
+    // can never act on a row that doesn't actually belong to this tenant/site. getScenario
+    // throws ScenarioNotFoundError on ownership mismatch and returns null when absent.
+    const existing = await getScenario(tenantId, siteId, scenarioId)
+    if (!existing) return false
     const key = scenarioKey(tenantId, siteId, scenarioId)
     const existed = await storage.delete(key)
     if (existed) {
@@ -273,6 +290,47 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
 }
 
 export type ScenarioRepository = ReturnType<typeof createScenarioRepository>
+
+// ── Inline-HTML sanitization (REQ-SEC-001 / 002) ─────────────────────────────
+
+/**
+ * Sanitize every `content_type:'html'` variant's inline HTML at the write boundary.
+ * Returns a NEW variants array (immutable); throws HtmlSanitizationError (surfaced as a
+ * validation error to the author) if any variant contains forbidden markup.
+ */
+function sanitizeVariantsOrThrow(variants: Variants): Variants {
+  return variants.map((variant) => {
+    if (variant.content_type !== 'html') return variant
+    try {
+      const cleanHtml = sanitizeHtmlVariant(variant.html)
+      return { ...variant, html: cleanHtml }
+    } catch (err) {
+      if (err instanceof HtmlSanitizationError) {
+        throw new ScenarioValidationError('inline HTML variant failed sanitization', [
+          { path: `variants.${variant.id}.html`, message: `${err.reason}: ${err.message}` },
+        ])
+      }
+      throw err
+    }
+  }) as Variants
+}
+
+/**
+ * Re-verify that a loaded scenario actually belongs to the requested tenant/site
+ * (REQ-SEC-004 defense-in-depth). The KV key is tenant/site-scoped, but never trust the
+ * key alone — confirm the stored row's own tenant_id/site_id match before returning or
+ * mutating, so a key collision or data drift can never leak across tenants.
+ */
+function assertScenarioOwnership(
+  scenario: Scenario,
+  tenantId: string,
+  siteId: string,
+): void {
+  if (scenario.tenant_id !== tenantId || scenario.site_id !== siteId) {
+    // Treat an ownership mismatch as "not found" to avoid confirming the resource exists.
+    throw new ScenarioNotFoundError(scenario.id)
+  }
+}
 
 // ── AST validation helper ───────────────────────────────────────────────────
 

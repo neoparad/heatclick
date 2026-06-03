@@ -205,6 +205,7 @@ export function ScenarioEditorView({ scenario }: ScenarioEditorViewProps) {
                     variant={activeVariant}
                     scenarioId={scenario.id}
                     tenantId={scenario.tenant_id}
+                    siteId={scenario.site_id}
                     onChange={(patch) => editor.updateVariant(activeVariant.id, patch)}
                   />
                 ) : null}
@@ -349,10 +350,11 @@ interface VariantEditorProps {
   variant: Variant
   scenarioId: string
   tenantId: string
+  siteId: string
   onChange: (patch: Partial<Variant>) => void
 }
 
-function VariantEditor({ variant, scenarioId, tenantId, onChange }: VariantEditorProps) {
+function VariantEditor({ variant, scenarioId, tenantId, siteId, onChange }: VariantEditorProps) {
   return (
     <div>
       {/* content_type radio (Stage 3 で switch 可能化) */}
@@ -414,6 +416,7 @@ function VariantEditor({ variant, scenarioId, tenantId, onChange }: VariantEdito
               <VariantImageUpload
                 scenarioId={scenarioId}
                 tenantId={tenantId}
+                siteId={siteId}
                 currentUrl={variant.image_url}
                 onUploaded={({ publicUrl }) => onChange({ image_url: publicUrl } as Partial<Variant>)}
               />
