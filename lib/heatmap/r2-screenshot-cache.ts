@@ -47,10 +47,10 @@ import {
 
 /** R2 key prefix + 内容バージョン (capture pipeline 変更時に bump して cache 全体を無効化) */
 const KEY_PREFIX = 'heatmap-screenshots'
-// 続 119 (B): waitUntil 'networkidle2' 化で撮影内容が変わったため v2 に bump。
-// Cloudflare Browser Rendering 移行 (primary provider 交代 + capture pipeline 変更) で v3 に bump。
-//   旧 v2 (Microlink、free tier で full-page 下部が切れる) を全 cache miss にして再撮影させる。
-const CAPTURE_VERSION = 'v3'
+// 続 119 (B): waitUntil 'networkidle2' 化で v2、Cloudflare Browser Rendering 移行で v3。
+// 続 119 (B-2): lazy-load 画像対策 (addScriptTag で eager 化+scroll) で撮影内容が変わったため v4。
+//   旧 v3 (CF だが lazy 画像が空) を全 cache miss にして再撮影させる。
+const CAPTURE_VERSION = 'v4'
 
 /** TTL (capturedAt 比較) */
 const FRESH_TTL_MS = 24 * 60 * 60 * 1000 // 24h: これ以内なら即返す

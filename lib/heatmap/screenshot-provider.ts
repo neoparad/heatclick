@@ -51,6 +51,21 @@ const CLOUDFLARE_DEVICE_SCALE_FACTOR = 1
 const CLOUDFLARE_GOTO_TIMEOUT_MS = 30_000
 
 /**
+ * 続 119 (B-2) lazy-load 画像対策スクリプト (CF `addScriptTag` で注入)。
+ *   - 全 img を loading='eager' に変え、data-src / data-srcset (WP lazyload plugin 慣習) を解決
+ *   - data-bg / data-background の CSS 背景 lazy も解決
+ *   - 最下部→最上部にスクロールして native lazy / IntersectionObserver を誘発
+ * 注: CF REST には「スクリプト実行後の追加 wait」が無く、networkidle0 後に走るため完全保証では
+ *     ない。不十分な場合は Worker(Puppeteer) で autoScroll + waitForNetworkIdle 方式へ移行する。
+ */
+const CLOUDFLARE_LAZY_LOAD_SCRIPT =
+  "document.querySelectorAll('img').forEach(function(i){i.loading='eager';" +
+  'if(i.dataset.src)i.src=i.dataset.src;if(i.dataset.srcset)i.srcset=i.dataset.srcset;});' +
+  "document.querySelectorAll('[data-bg],[data-background]').forEach(function(e){" +
+  "var b=e.dataset.bg||e.dataset.background;if(b)e.style.backgroundImage='url('+b+')';});" +
+  'window.scrollTo(0,document.body.scrollHeight);window.scrollTo(0,0);'
+
+/**
  * Microlink CDN host allowlist. provider 応答が任意の URL を返した場合の image src
  * (browser からのアクセス) を防御 (Codex T2 review HIGH H-2 fix)。
  *
@@ -262,7 +277,7 @@ export function buildCacheKey(input: {
 }): string {
   const width = CAPTURE_WIDTH_FOR_DEVICE[input.device]
   // 続 116: format / quality を cache key に含める (perf 改修で値変更時に cache miss を起こす)
-  const raw = `${input.tenantId}|${input.siteId}|${input.pageUrl}|${input.device}|${width}|fullPage-ni2|${SCREENSHOT_FORMAT}|q${SCREENSHOT_QUALITY}`
+  const raw = `${input.tenantId}|${input.siteId}|${input.pageUrl}|${input.device}|${width}|fullPage-ni2-lz|${SCREENSHOT_FORMAT}|q${SCREENSHOT_QUALITY}`
   return createHash('sha256').update(raw).digest('hex').slice(0, 32)
 }
 
@@ -625,6 +640,7 @@ export function buildCloudflareBRRequestBody(input: {
   viewport: { width: number; height: number; deviceScaleFactor: number }
   screenshotOptions: { fullPage: true; type: 'jpeg'; quality: number }
   gotoOptions: { waitUntil: 'networkidle0'; timeout: number }
+  addScriptTag: Array<{ content: string }>
 } {
   const width = CAPTURE_WIDTH_FOR_DEVICE[input.device]
   return {
@@ -646,6 +662,8 @@ export function buildCloudflareBRRequestBody(input: {
       waitUntil: 'networkidle0',
       timeout: CLOUDFLARE_GOTO_TIMEOUT_MS,
     },
+    // 続 119 (B-2): lazy-load 画像を撮影前にロードさせる注入スクリプト。
+    addScriptTag: [{ content: CLOUDFLARE_LAZY_LOAD_SCRIPT }],
   }
 }
 
