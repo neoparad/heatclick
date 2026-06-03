@@ -193,12 +193,32 @@ function NavLink({
     )
   }
 
+  // 続 119: ログアウトは「状態を変える操作」。GET リンクだと Next.js の自動
+  // プリフェッチ (先読み GET) で sign-out が走り「ページ表示だけでログアウト →
+  // 次の soft navigation が no_token で弾かれる」事故になる。フォーム POST は
+  // プリフェッチ対象外なので、この事故を構造的に封じる (ルート側にもガード有=多層防御)。
+  if (item.navKey === 'logout') {
+    return (
+      <form action={item.href} method="post" style={{ display: 'contents' }}>
+        <button type="submit" className={className} data-nav={item.navKey}>
+          {item.icon}
+          <span>{item.label}</span>
+        </button>
+      </form>
+    )
+  }
+
   return (
     <Link
       href={item.href}
       className={className}
       data-nav={item.navKey}
       aria-current={isActive ? 'page' : undefined}
+      // 続 119: 副作用を持つ GET ルート (/auth/sign-out = cookie 削除) を自動
+      // プリフェッチさせない。プリフェッチで sign-out が走り「ページ表示だけで
+      // ログアウト → 次の soft navigation が no_token で弾かれる」のを防ぐ。
+      // ルート側でも prefetch をガード済 (多層防御)。
+      prefetch={item.href === '/auth/sign-out' ? false : undefined}
     >
       {item.icon}
       <span>{item.label}</span>
