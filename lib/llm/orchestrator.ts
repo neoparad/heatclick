@@ -358,7 +358,7 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
 # freeform 分析モード (重要)
 - 数値を述べる前に必ず analytics tool を呼び出すこと。tool 結果なしに数値を断定してはならない。
 - siteId / tenantId は server-side で固定済。tool input に含めないこと (含めても無視される)。
-- analytics.overview を最初に呼んで queryId を得てから contributors / drilldown / verify を使う。
+- analytics_overview を最初に呼んで queryId を得てから analytics_contributors / analytics_drilldown / analytics_verify を使う。
 - 最終回答は markdown-lite (番号付きリスト可)。簡潔に、根拠 (tool 結果) に基づいて述べること。`,
       prompt: input.message,
       tools,

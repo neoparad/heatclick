@@ -89,9 +89,17 @@ export function buildFreeformTools(params: {
 
   const set: ToolSet = {}
   for (const schema of ANALYTICS_TOOL_SCHEMAS) {
-    set[schema.name] = make(schema.name)
+    // 続120 fix: Anthropic/Gateway の tool 名は ^[a-zA-Z0-9_-]+$ (dot 不可)。canonical 名は
+    // dotted (analytics.overview) のため generateText が HTTP 400 (freeform が常に stub) だった。
+    // LLM へは dot→underscore に変換した alias 名で公開し、executor は元の dotted 名のまま使う。
+    set[toLlmToolName(schema.name)] = make(schema.name)
   }
   return set
+}
+
+/** Anthropic tool-name 制約 (dot 不可) 対応: dotted 内部名 → underscore の LLM 公開名。 */
+function toLlmToolName(name: string): string {
+  return name.replace(/\./g, '_')
 }
 
 function schemaFor(name: AnalyticsToolName): (typeof ANALYTICS_TOOL_SCHEMAS)[number]['inputSchema'] {
