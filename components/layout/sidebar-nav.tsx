@@ -142,6 +142,16 @@ const M_AGENT_NAV: ReadonlyArray<NavItem> = [
     label: 'ターゲティングバナー',
     icon: <LayoutGrid className="h-4 w-4" aria-hidden />,
   },
+  {
+    // 2026-06-04 (Owner REQ): CV Bridge / form-tweak scenario type のメニュー枠のみ先行追加。
+    //   本実装(form-intervention scenario type の DSL/runtime/計測)は別チケット (banner MVP 後)。
+    //   現状は disabled の「準備中」表示 = クリック不可のメニューテキストのみ。
+    navKey: 'form-intervention',
+    href: '/scenarios/form',
+    label: 'フォーム最適化',
+    icon: <FileText className="h-4 w-4" aria-hidden />,
+    disabled: true,
+  },
 ]
 
 const ACCOUNT_NAV: ReadonlyArray<NavItem> = [
