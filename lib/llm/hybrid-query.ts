@@ -674,6 +674,377 @@ SETTINGS max_execution_time = 30
   }
 }
 
+// ── Standalone insight queries (top_pages / scroll_depth / attention / device_breakdown) ──
+
+/**
+ * analytics_top_pages: 人気ページ (pageview 数 + session 数)
+ *
+ * 設計:
+ *   - event_type='pageview', is_agent=0 で絞り込み
+ *   - url 別 uniqExact(session_id) + count() を period 全体で集計
+ *   - tenant_id / site_id は query_params で parameter binding (SQL injection 防止)
+ *   - timestamp range は hybrid-query.ts 確立済の Code 386 fix を流用:
+ *     toDateTime(toDateTime({start:String}, {tz:String})) で tz tag を剥がし plain DateTime に統一
+ */
+export interface TopPageRow {
+  url: string
+  sessions: number
+  pageviews: number
+}
+
+export interface TopPagesResult {
+  rows: TopPageRow[]
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  /** D-07 準拠: uniqExact は正確だが period-cap 近似の観点から observed_approx とする */
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeTopPagesQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  limit: number
+}): Promise<TopPagesResult> {
+  const sql = `
+SELECT
+  url,
+  uniqExact(session_id) AS sessions,
+  count() AS pageviews
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND event_type = 'pageview'
+  AND is_agent = 0
+  -- 続 83 Code 386 fix: toDateTime(toDateTime({start:String}, {tz:String})) で
+  --   tz tag を剥がして plain DateTime に統一 (instant 不変、比較 operand の supertype を解消)
+  AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+GROUP BY url
+ORDER BY sessions DESC
+LIMIT {limit:UInt32}
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({
+    query: sql,
+    query_params: {
+      tenant_id: params.tenantId,
+      site_id: params.siteId,
+      start: params.dateRange.start,
+      end: params.dateRange.end,
+      tz: params.timezone,
+      limit: String(params.limit),
+    },
+    format: 'JSONEachRow',
+  })
+
+  const rows = await rs.json<TopPageRow>()
+
+  return {
+    rows,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: 'uniqExact はセッション単位の正確な集計ですが、期間フィルタは近似タイムゾーン変換を含むため observed_approx とします。',
+  }
+}
+
+// ── analytics_scroll_depth ───────────────────────────────────────────
+
+/**
+ * Scroll reach バンド分布: per-session max scroll_y を bandPx 幅でバケット化し、
+ * 各バンドに到達したセッション数 + 全体に対する累積 reach% を返す。
+ *
+ * SQL 設計:
+ *   1. CTE ps: session ごとの max scroll_y (event_type='scroll', is_agent=0)
+ *   2. outer: バンド別 count() でセッション数、全体 total_sessions も含む
+ *
+ * Code 386 fix: timestamp 比較は toDateTime(toDateTime(...)) パターンを使う。
+ * session_end の scroll_y=0 は除外しない (WHERE event_type='scroll' で自動除外)。
+ */
+export interface ScrollDepthBand {
+  depth_px: number
+  sessions: number
+  /** このバンド以上にスクロールしたセッションの割合 (cumulative reach %) */
+  reach_pct: number
+}
+
+export interface ScrollDepthResult {
+  bands: ScrollDepthBand[]
+  total_sessions: number
+  page_url: string | null
+  band_px: number
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeScrollDepthQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  pageUrl?: string
+  bandPx: number
+}): Promise<ScrollDepthResult> {
+  const pageUrlFilter = params.pageUrl ? 'AND url = {page_url:String}' : ''
+
+  // CTE で per-session max を取り、バンド別に集計
+  // total_sessions は subquery で全バンド合計として算出
+  const sql = `
+WITH ps AS (
+  SELECT session_id, max(scroll_y) AS m
+  FROM clickinsight.events
+  WHERE tenant_id = {tenant_id:String}
+    AND site_id = {site_id:String}
+    AND event_type = 'scroll'
+    AND is_agent = 0
+    ${pageUrlFilter}
+    AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+    AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+  GROUP BY session_id
+),
+total AS (
+  SELECT count() AS total_sessions FROM ps
+)
+SELECT
+  toUInt32(intDiv(m, {band:UInt32}) * {band:UInt32}) AS depth_px,
+  count() AS sessions,
+  (SELECT total_sessions FROM total) AS total_sessions
+FROM ps
+GROUP BY depth_px
+ORDER BY depth_px
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const queryParams: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+    band: String(params.bandPx),
+  }
+  if (params.pageUrl) {
+    queryParams.page_url = params.pageUrl
+  }
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({
+    query: sql,
+    query_params: queryParams,
+    format: 'JSONEachRow',
+  })
+
+  const rawRows = await rs.json<{ depth_px: number; sessions: number; total_sessions: number }>()
+
+  const totalSessions = rawRows[0]?.total_sessions ?? 0
+
+  // cumulative reach: セッション数が depth_px 以上のバンドの合計 / total
+  // rawRows は depth_px 昇順なので suffix sum で計算する
+  const suffixSums: number[] = new Array<number>(rawRows.length).fill(0)
+  let running = 0
+  for (let i = rawRows.length - 1; i >= 0; i--) {
+    running += rawRows[i].sessions
+    suffixSums[i] = running
+  }
+
+  const bands: ScrollDepthBand[] = rawRows.map((r, i) => ({
+    depth_px: r.depth_px,
+    sessions: r.sessions,
+    reach_pct: totalSessions > 0 ? (suffixSums[i] / totalSessions) * 100 : 0,
+  }))
+
+  return {
+    bands,
+    total_sessions: totalSessions,
+    page_url: params.pageUrl ?? null,
+    band_px: params.bandPx,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: 'per-session max scroll_y をバンド化した近似集計です。uniqExact は使用していません。',
+  }
+}
+
+// ── analytics_attention ──────────────────────────────────────────────
+
+/**
+ * Read/dwell 密度: event_type='read_area' の read_y をバンド幅で集計し、
+ * どの深度が最も読まれたかを返す。
+ *
+ * Code 386 fix: timestamp 比較は toDateTime(toDateTime(...)) パターンを使う。
+ */
+export interface AttentionBand {
+  depth_px: number
+  read_events: number
+  sessions: number
+}
+
+export interface AttentionResult {
+  bands: AttentionBand[]
+  page_url: string | null
+  band_px: number
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeAttentionQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  pageUrl?: string
+  bandPx: number
+}): Promise<AttentionResult> {
+  const pageUrlFilter = params.pageUrl ? 'AND url = {page_url:String}' : ''
+
+  const sql = `
+SELECT
+  toUInt32(intDiv(read_y, {band:UInt32}) * {band:UInt32}) AS depth_px,
+  count() AS read_events,
+  uniqExact(session_id) AS sessions
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND event_type = 'read_area'
+  AND is_agent = 0
+  ${pageUrlFilter}
+  AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+GROUP BY depth_px
+ORDER BY depth_px
+LIMIT 500
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const queryParams: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+    band: String(params.bandPx),
+  }
+  if (params.pageUrl) {
+    queryParams.page_url = params.pageUrl
+  }
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({
+    query: sql,
+    query_params: queryParams,
+    format: 'JSONEachRow',
+  })
+
+  const rawRows = await rs.json<AttentionBand>()
+
+  return {
+    bands: rawRows,
+    page_url: params.pageUrl ?? null,
+    band_px: params.bandPx,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: 'read_area イベントの read_y 密度集計です。uniqExact(session_id) 使用。',
+  }
+}
+
+// ── analytics_device_breakdown ───────────────────────────────────────
+
+/**
+ * Device type 別 session + pageview 分布。share_pct は in-process 計算。
+ *
+ * Code 386 fix: timestamp 比較は toDateTime(toDateTime(...)) パターンを使う。
+ */
+export interface DeviceRow {
+  device_type: string
+  sessions: number
+  pageviews: number
+  share_pct: number
+}
+
+export interface DeviceBreakdownResult {
+  rows: DeviceRow[]
+  total_sessions: number
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeDeviceBreakdownQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+}): Promise<DeviceBreakdownResult> {
+  const sql = `
+SELECT
+  device_type,
+  uniqExact(session_id) AS sessions,
+  count() AS pageviews
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND event_type = 'pageview'
+  AND is_agent = 0
+  AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+GROUP BY device_type
+ORDER BY sessions DESC
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({
+    query: sql,
+    query_params: {
+      tenant_id: params.tenantId,
+      site_id: params.siteId,
+      start: params.dateRange.start,
+      end: params.dateRange.end,
+      tz: params.timezone,
+    },
+    format: 'JSONEachRow',
+  })
+
+  const rawRows = await rs.json<{ device_type: string; sessions: number; pageviews: number }>()
+
+  const totalSessions = rawRows.reduce((s, r) => s + r.sessions, 0)
+
+  const rows: DeviceRow[] = rawRows.map((r) => ({
+    device_type: r.device_type,
+    sessions: r.sessions,
+    pageviews: r.pageviews,
+    share_pct: totalSessions > 0 ? (r.sessions / totalSessions) * 100 : 0,
+  }))
+
+  return {
+    rows,
+    total_sessions: totalSessions,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: 'uniqExact(session_id) によるデバイス別セッション集計。',
+  }
+}
+
 // ── Verify query (raw events で exact 再計算 → proven_exact) ─────────
 
 export interface VerifyResult {

@@ -295,6 +295,13 @@ interface RunFreeformParams {
   providerMode: 'stub' | 'anthropic-direct' | 'ai-gateway'
   startedAt: number
   classificationConfidence: number
+  /**
+   * stub degrade の理由を呼び出し側から伝える (stub メッセージの出し分け用)。
+   *   - 'validation': LLM は回答したが D-07 validation が reject した場合
+   *   - 'gateway_error': LLM call / gateway で例外が発生した場合
+   *   - undefined: dev/stub mode (LLM 未結線)
+   */
+  _failReason?: 'validation' | 'gateway_error'
 }
 
 /** freeform LLM 経路の multi-step tool loop 上限 (4 tools chain + 最終合成で十分) */
@@ -361,6 +368,11 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
 - 数値を述べる前に必ず analytics tool を呼び出すこと。tool 結果なしに数値を断定してはならない。
 - siteId / tenantId は server-side で固定済。tool input に含めないこと (含めても無視される)。
 - analytics_overview を最初に呼んで queryId を得てから analytics_contributors / analytics_drilldown / analytics_verify を使う。
+- 人気ページを知りたい場合は analytics_top_pages を使う (parentQueryId 不要、単独で呼べる)。
+- スクロール深度・ページ深度を知りたい場合は analytics_scroll_depth を使う (parentQueryId 不要)。
+- 読まれた深度・注目密度を知りたい場合は analytics_attention を使う (parentQueryId 不要)。
+- デバイス構成 (mobile/desktop/tablet 比率) を知りたい場合は analytics_device_breakdown を使う (parentQueryId 不要)。
+- analytics_top_pages / analytics_scroll_depth / analytics_attention / analytics_device_breakdown はいずれも dateRange + timezone だけで呼べる standalone tool。
 - 最終回答は markdown-lite (番号付きリスト可)。簡潔に、根拠 (tool 結果) に基づいて述べること。`,
       prompt: input.message,
       tools,
@@ -404,9 +416,16 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
       //   minimal reply に degrade した場合、real answer として planned を返さない。明示的に
       //   freeform stub (honest な「分析未提供」応答) に degrade し、audit に errorCode を残す。
       //   LLM call は発火済のため実トークン数は記録する。
-      const stub = await runFreeformStub(params)
+      // stub message は validation-fail 用 (gateway/API 設定の話ではない)
+      const stub = await runFreeformStub({ ...params, _failReason: 'validation' })
+      // [diag] を validation-fail でも付与して両経路の失敗を診断可能にする
+      const diagHint = `validation: FREEFORM_VALIDATION_FAILED model=${model}`
+      const replyWithDiag: ChatReply = {
+        ...stub.reply,
+        reply: `${stub.reply.reply}\n\n[diag] ${diagHint}`,
+      }
       return {
-        reply: stub.reply,
+        reply: replyWithDiag,
         audit: {
           ...stub.audit,
           intentCategory: 'freeform',
@@ -459,7 +478,7 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
       err instanceof Error && 'code' in err && typeof (err as { code: unknown }).code === 'string'
         ? (err as { code: string }).code
         : 'FREEFORM_LLM_ERROR'
-    const stub = await runFreeformStub(params)
+    const stub = await runFreeformStub({ ...params, _failReason: 'gateway_error' })
     // 続120 一時診断: gateway 失敗の原因を切り分けるため、secret を含まない短い hint
     //   (error name + HTTP status + code) を reply 末尾に出す。原因特定後に撤去する。
     const hint = safeGatewayErrorHint(err)
@@ -598,6 +617,14 @@ function freeformResultLabel(result: AnalyticsToolResult): string {
       return `drilldown grain=${result.result.grain}`
     case 'analytics.verify':
       return `verify withinTolerance=${result.result.withinTolerance}`
+    case 'analytics_top_pages':
+      return `top_pages rows=${result.result.rows.length}件`
+    case 'analytics_scroll_depth':
+      return `scroll_depth bands=${result.result.bands.length} total_sessions=${result.result.total_sessions}`
+    case 'analytics_attention':
+      return `attention bands=${result.result.bands.length}`
+    case 'analytics_device_breakdown':
+      return `device_breakdown total_sessions=${result.result.total_sessions}`
   }
 }
 
@@ -611,12 +638,27 @@ async function runFreeformStub(params: RunFreeformParams): Promise<OrchestratorO
   // W2-A: LLM call せず planned-only stub を返す (D-07 整合、断定数値なし)
   // W2-B: ここに Haiku classifier + Sonnet generateText() を結線
   const trimmed = input.message.trim().slice(0, 200)
-  // 続120: 旧文言「Sprint 3 W2-B で提供予定」は freeform 実装済の現在では誤解を招く。
-  //   stub に落ちる理由を providerMode で出し分け、正直に表示する。
-  const reason =
-    providerMode === 'ai-gateway'
-      ? 'AI 自由分析を一時的に利用できませんでした（モデル接続、または本番環境変数 AI_GATEWAY_API_KEY の設定をご確認ください）。'
-      : 'AI 自由分析はこの環境では現在無効です（LLM 接続が未設定）。'
+
+  // 失敗理由別に正直なメッセージを出し分ける。
+  //   - validation: LLM は回答したが根拠データ不足で D-07 検証が reject した
+  //     → 接続/設定の話ではないため AI_GATEWAY_API_KEY 等に言及しない
+  //   - gateway_error: LLM / gateway で接続例外が発生した
+  //     → 接続・設定を確認してもらう
+  //   - undefined (dev/stub mode): LLM 未接続の環境で呼ばれた
+  let reason: string
+  if (params._failReason === 'validation') {
+    reason =
+      'うまく分析できませんでした（十分な根拠データが得られなかった可能性）。質問を具体的にするか、期間やページを変えてお試しください。'
+  } else if (params._failReason === 'gateway_error') {
+    reason =
+      'AI 自由分析を一時的に利用できませんでした（モデル接続エラー、または本番環境変数の設定をご確認ください）。'
+  } else {
+    reason =
+      providerMode === 'ai-gateway'
+        ? 'AI 自由分析を一時的に利用できませんでした（モデル接続エラー、または本番環境変数の設定をご確認ください）。'
+        : 'AI 自由分析はこの環境では現在無効です（LLM 接続が未設定）。'
+  }
+
   const replyText = [
     `ご質問「${trimmed}」を受け付けました。`,
     reason,
@@ -962,14 +1004,7 @@ function fillSkeleton(params: FillSkeletonParams): FillSkeletonOutput {
     id: `tool-${idx}-${params.siteId}`,
     kind: 'metric',
     level: reducedV1,
-    label:
-      r.tool === 'analytics.overview'
-        ? `overview tier=${r.result.tier}`
-        : r.tool === 'analytics.contributors'
-        ? `contributors dim=${r.result.contributors.length}件`
-        : r.tool === 'analytics.drilldown'
-        ? `drilldown grain=${r.result.grain}`
-        : `verify withinTolerance=${r.result.withinTolerance}`,
+    label: freeformResultLabel(r),
     target: {
       kind: 'metric',
       metric: r.tool,

@@ -31,6 +31,10 @@ import {
   executeContributorsQuery,
   executeDrilldownQuery,
   executeVerifyQuery,
+  executeTopPagesQuery,
+  executeScrollDepthQuery,
+  executeAttentionQuery,
+  executeDeviceBreakdownQuery,
   getParentQuery,
   MAX_PERIOD_DAYS_ANALYTICS,
   registerParentQuery,
@@ -38,6 +42,10 @@ import {
   type ContributorsResult,
   type DrilldownResult,
   type VerifyResult,
+  type TopPagesResult,
+  type ScrollDepthResult,
+  type AttentionResult,
+  type DeviceBreakdownResult,
 } from '@/lib/llm/hybrid-query'
 
 // ── Tool 1: analytics.overview ──────────────────────────────────────
@@ -149,6 +157,103 @@ export interface VerifyToolResult {
   evidenceLevel: VerifyResult['evidenceLevel']
 }
 
+// ── Tool 5: analytics_top_pages ─────────────────────────────────────
+
+/**
+ * Standalone: 指定期間の人気ページ (pageview / session 数) を返す。
+ * parentQueryId 不要。siteId / tenantId は server-controlled (execCtx 由来)。
+ */
+export const topPagesInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+  limit: z.number().int().min(5).max(50).default(10),
+})
+export type TopPagesInput = z.infer<typeof topPagesInputSchema>
+
+export interface TopPagesToolResult {
+  rows: TopPagesResult['rows']
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: TopPagesResult['evidenceLevel']
+  note: string
+}
+
+// ── Tool 6: analytics_scroll_depth ──────────────────────────────────
+
+export const scrollDepthInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+  /** フィルタするページ URL (省略時はサイト全体) */
+  page_url: z.string().min(1).optional(),
+  /** スクロール深度バンド幅 (px) */
+  bandPx: z.number().int().min(100).max(2000).default(500),
+})
+export type ScrollDepthInput = z.infer<typeof scrollDepthInputSchema>
+
+export interface ScrollDepthToolResult {
+  bands: ScrollDepthResult['bands']
+  total_sessions: number
+  page_url: string | null
+  band_px: number
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: ScrollDepthResult['evidenceLevel']
+  note: string
+}
+
+// ── Tool 7: analytics_attention ──────────────────────────────────────
+
+export const attentionInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+  page_url: z.string().min(1).optional(),
+  bandPx: z.number().int().min(100).max(2000).default(500),
+})
+export type AttentionInput = z.infer<typeof attentionInputSchema>
+
+export interface AttentionToolResult {
+  bands: AttentionResult['bands']
+  page_url: string | null
+  band_px: number
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: AttentionResult['evidenceLevel']
+  note: string
+}
+
+// ── Tool 8: analytics_device_breakdown ──────────────────────────────
+
+export const deviceBreakdownInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+})
+export type DeviceBreakdownInput = z.infer<typeof deviceBreakdownInputSchema>
+
+export interface DeviceBreakdownToolResult {
+  rows: DeviceBreakdownResult['rows']
+  total_sessions: number
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: DeviceBreakdownResult['evidenceLevel']
+  note: string
+}
+
 // ── Tool registry (declarative + executor) ──────────────────────────
 
 export interface AnalyticsToolExecuteContext {
@@ -162,12 +267,20 @@ export type AnalyticsToolName =
   | 'analytics.contributors'
   | 'analytics.drilldown'
   | 'analytics.verify'
+  | 'analytics_top_pages'
+  | 'analytics_scroll_depth'
+  | 'analytics_attention'
+  | 'analytics_device_breakdown'
 
 export type AnalyticsToolResult =
   | { tool: 'analytics.overview'; result: OverviewResult }
   | { tool: 'analytics.contributors'; result: ContributorsToolResult }
   | { tool: 'analytics.drilldown'; result: DrilldownToolResult }
   | { tool: 'analytics.verify'; result: VerifyToolResult }
+  | { tool: 'analytics_top_pages'; result: TopPagesToolResult }
+  | { tool: 'analytics_scroll_depth'; result: ScrollDepthToolResult }
+  | { tool: 'analytics_attention'; result: AttentionToolResult }
+  | { tool: 'analytics_device_breakdown'; result: DeviceBreakdownToolResult }
 
 /**
  * 公開 tool schema list (AI SDK v6 `tool()` 互換シェイプ)。
@@ -203,6 +316,35 @@ export const ANALYTICS_TOOL_SCHEMAS = [
       'Re-compute a claim with raw events (proven_exact). Use when downstream consumers need ' +
       'audit-grade certainty. parentQueryId is required.',
     inputSchema: verifyInputSchema,
+  },
+  {
+    name: 'analytics_top_pages' as const,
+    description:
+      'Popular pages ranked by unique sessions and pageviews for the active site within a date range. ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled (do NOT include in tool input).',
+    inputSchema: topPagesInputSchema,
+  },
+  {
+    name: 'analytics_scroll_depth' as const,
+    description:
+      'Per-session max scroll depth distribution in pixel bands. Returns cumulative reach% per band so you can say ' +
+      '"X% of sessions scrolled past N px". Optional page_url to filter to a single page. ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: scrollDepthInputSchema,
+  },
+  {
+    name: 'analytics_attention' as const,
+    description:
+      'Read/dwell density by page depth (read_area events). Shows which vertical segments of a page are actually read. ' +
+      'Optional page_url filter. Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: attentionInputSchema,
+  },
+  {
+    name: 'analytics_device_breakdown' as const,
+    description:
+      'Device type split (mobile/desktop/tablet/unknown) by sessions and pageviews with share_pct per device. ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: deviceBreakdownInputSchema,
   },
 ] as const
 
@@ -352,6 +494,113 @@ export async function executeAnalyticsTool(
           withinTolerance: verifyResult.withinTolerance,
           tolerancePct: verifyResult.tolerancePct,
           evidenceLevel: verifyResult.evidenceLevel,
+        },
+      }
+    }
+
+    case 'analytics_top_pages': {
+      const input = parseToolInput(topPagesInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryResult = await executeTopPagesQuery({
+        tenantId: execCtx.ctx.tenant_id,   // server-controlled
+        siteId: execCtx.requestSiteId,      // server-controlled
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        limit: input.limit,
+      })
+
+      return {
+        tool: 'analytics_top_pages',
+        result: {
+          rows: queryResult.rows,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
+        },
+      }
+    }
+
+    case 'analytics_scroll_depth': {
+      const input = parseToolInput(scrollDepthInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryResult = await executeScrollDepthQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        pageUrl: input.page_url,
+        bandPx: input.bandPx,
+      })
+
+      return {
+        tool: 'analytics_scroll_depth',
+        result: {
+          bands: queryResult.bands,
+          total_sessions: queryResult.total_sessions,
+          page_url: queryResult.page_url,
+          band_px: queryResult.band_px,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
+        },
+      }
+    }
+
+    case 'analytics_attention': {
+      const input = parseToolInput(attentionInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryResult = await executeAttentionQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        pageUrl: input.page_url,
+        bandPx: input.bandPx,
+      })
+
+      return {
+        tool: 'analytics_attention',
+        result: {
+          bands: queryResult.bands,
+          page_url: queryResult.page_url,
+          band_px: queryResult.band_px,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
+        },
+      }
+    }
+
+    case 'analytics_device_breakdown': {
+      const input = parseToolInput(deviceBreakdownInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryResult = await executeDeviceBreakdownQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+      })
+
+      return {
+        tool: 'analytics_device_breakdown',
+        result: {
+          rows: queryResult.rows,
+          total_sessions: queryResult.total_sessions,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
         },
       }
     }
