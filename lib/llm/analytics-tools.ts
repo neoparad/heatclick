@@ -40,6 +40,10 @@ import {
   executeDeviceBreakdownQuery,
   executeMetricsQuery,
   executeTimeseriesQuery,
+  executeFormAnalysisQuery,
+  executeFrustrationQuery,
+  executePerformanceQuery,
+  executeCtaFunnelQuery,
   getParentQuery,
   MAX_PERIOD_DAYS_ANALYTICS,
   registerParentQuery,
@@ -53,6 +57,10 @@ import {
   type DeviceBreakdownResult,
   type MetricsResult,
   type TimeseriesResult,
+  type FormAnalysisResult,
+  type FrustrationResult,
+  type PerformanceResult,
+  type CtaFunnelResult,
 } from '@/lib/llm/hybrid-query'
 
 // ── Tool 1: analytics.overview ──────────────────────────────────────
@@ -328,6 +336,123 @@ export interface TimeseriesToolResult {
   note: string
 }
 
+// ── Tool 11: analytics_form_analysis ─────────────────────────────────
+
+/**
+ * フォーム分析: form_interactions テーブルから per-form / per-field の
+ * 開始数・完了数・完了率・離脱率・最終フィールド分布・平均フィールド滞在時間を返す。
+ * Standalone — parentQueryId 不要。siteId は server 固定。
+ */
+export const formAnalysisInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+  /** フィルタする form_id (省略時は全フォーム) */
+  form_id: z.string().min(1).optional(),
+  /** フィルタするページ URL (省略時は全ページ) */
+  page_url: z.string().min(1).optional(),
+})
+export type FormAnalysisInput = z.infer<typeof formAnalysisInputSchema>
+
+export interface FormAnalysisToolResult {
+  forms: FormAnalysisResult['forms']
+  fields: FormAnalysisResult['fields']
+  last_field_distribution: FormAnalysisResult['last_field_distribution']
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: FormAnalysisResult['evidenceLevel']
+  note: string
+}
+
+// ── Tool 12: analytics_frustration ───────────────────────────────────
+
+/**
+ * 欲求不満シグナル合成スコア: events (dead_click/rage_click) + behavior_signals を合成。
+ * per-page または全体の frustration_score を返す。
+ * Standalone — parentQueryId 不要。siteId は server 固定。
+ */
+export const frustrationInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+  /** フィルタするページ URL (省略時は全ページ) */
+  page_url: z.string().min(1).optional(),
+})
+export type FrustrationInput = z.infer<typeof frustrationInputSchema>
+
+export interface FrustrationToolResult {
+  rows: FrustrationResult['rows']
+  total: FrustrationResult['total']
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: FrustrationResult['evidenceLevel']
+  note: string
+}
+
+// ── Tool 13: analytics_performance ───────────────────────────────────
+
+/**
+ * Web Vitals p75 パフォーマンス分析: LCP/INP/CLS/TTFB/FCP の p75 + Core Web Vitals 評価。
+ * page_url または device_type でフィルタ・グループ化可能。
+ * Standalone — parentQueryId 不要。siteId は server 固定。
+ */
+export const performanceInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+  /** フィルタするページ URL (省略時はサイト全体) */
+  page_url: z.string().min(1).optional(),
+  /** フィルタするデバイスタイプ (例: 'mobile', 'desktop') */
+  device: z.string().min(1).optional(),
+})
+export type PerformanceInput = z.infer<typeof performanceInputSchema>
+
+export interface PerformanceToolResult {
+  rows: PerformanceResult['rows']
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: PerformanceResult['evidenceLevel']
+  note: string
+}
+
+// ── Tool 14: analytics_cta_funnel ────────────────────────────────────
+
+/**
+ * CTA ファネル: element_visibility_v2 露出 × events click を element_selector キーで近似結合し
+ * per-CTA の impressions / clicks / CTR を返す。
+ * Standalone — parentQueryId 不要。siteId は server 固定。
+ */
+export const ctaFunnelInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+  /** フィルタするページ URL (省略時は全ページ) */
+  page_url: z.string().min(1).optional(),
+})
+export type CtaFunnelInput = z.infer<typeof ctaFunnelInputSchema>
+
+export interface CtaFunnelToolResult {
+  rows: CtaFunnelResult['rows']
+  approximation_note: string
+  conversion_note: string
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: CtaFunnelResult['evidenceLevel']
+  note: string
+}
+
 // ── Tool registry (declarative + executor) ──────────────────────────
 
 export interface AnalyticsToolExecuteContext {
@@ -347,6 +472,10 @@ export type AnalyticsToolName =
   | 'analytics_device_breakdown'
   | 'analytics_metrics'
   | 'analytics_timeseries'
+  | 'analytics_form_analysis'
+  | 'analytics_frustration'
+  | 'analytics_performance'
+  | 'analytics_cta_funnel'
 
 export type AnalyticsToolResult =
   | { tool: 'analytics.overview'; result: OverviewResult }
@@ -359,6 +488,10 @@ export type AnalyticsToolResult =
   | { tool: 'analytics_device_breakdown'; result: DeviceBreakdownToolResult }
   | { tool: 'analytics_metrics'; result: MetricsToolResult }
   | { tool: 'analytics_timeseries'; result: TimeseriesToolResult }
+  | { tool: 'analytics_form_analysis'; result: FormAnalysisToolResult }
+  | { tool: 'analytics_frustration'; result: FrustrationToolResult }
+  | { tool: 'analytics_performance'; result: PerformanceToolResult }
+  | { tool: 'analytics_cta_funnel'; result: CtaFunnelToolResult }
 
 /**
  * 公開 tool schema list (AI SDK v6 `tool()` 互換シェイプ)。
@@ -442,6 +575,50 @@ export const ANALYTICS_TOOL_SCHEMAS = [
       'Returns ordered time-bucketed points in Asia/Tokyo timezone. ' +
       'Standalone — no parentQueryId required. siteId is server-controlled.',
     inputSchema: timeseriesInputSchema,
+  },
+  {
+    name: 'analytics_form_analysis' as const,
+    description:
+      'Form completion funnel analysis from form_interactions table. ' +
+      'Returns per-form starts/submits/completion_rate/abandonment_rate, per-field touches and avg_field_duration_ms, ' +
+      'and last_field abandonment distribution (which field users abandon on). ' +
+      'Use for questions like "フォーム完了率", "どのフィールドで離脱しているか", "フォームの入力摩擦". ' +
+      'Optional filters: form_id (specific form), page_url (specific page). ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: formAnalysisInputSchema,
+  },
+  {
+    name: 'analytics_frustration' as const,
+    description:
+      'Frustration signal composite score per page. Combines dead_click and rage_click counts from events table ' +
+      'with reversal_count, tab_switch_count, pinch_zoom_count, away_duration_ms, hover_no_click from behavior_signals table. ' +
+      'Returns per-page frustration_score (normalized by sessions) and a site-wide total. ' +
+      'Use for questions like "フラストレーションが高いページ", "ユーザーが不満を感じているページ", "デッドクリック/レイジクリック分析". ' +
+      'Optional filter: page_url (specific page). ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: frustrationInputSchema,
+  },
+  {
+    name: 'analytics_performance' as const,
+    description:
+      'Core Web Vitals p75 analysis from web_vitals table. ' +
+      'Returns p75 for LCP, INP, CLS, TTFB, FCP with Good/NeedsImprovement/Poor ratings per Google CWV standards. ' +
+      'Optional filters: page_url (specific page), device (specific device type e.g. "mobile"/"desktop"). ' +
+      'Use for questions like "ページ速度", "LCP遅延", "Core Web Vitals", "パフォーマンス改善". ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: performanceInputSchema,
+  },
+  {
+    name: 'analytics_cta_funnel' as const,
+    description:
+      'CTA exposure-to-click funnel from element_visibility_v2 (impressions) and events (clicks). ' +
+      'Returns per-CTA impressions, clicks, and approximate CTR keyed by element_selector (+page_url). ' +
+      'Approximation: exposure and click counts are joined by element_selector key (not strict session-order join), ' +
+      'so CTR may be slightly overestimated. Conversion leg not included (bihadashop has no conversion events). ' +
+      'Use for questions like "CTAのクリック率", "どのCTAが見られているが押されていないか", "ボタン効果測定". ' +
+      'Optional filter: page_url (specific page). ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: ctaFunnelInputSchema,
   },
 ] as const
 
@@ -752,6 +929,113 @@ export async function executeAnalyticsTool(
           metric: queryResult.metric,
           grain: queryResult.grain,
           points: queryResult.points,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
+        },
+      }
+    }
+
+    case 'analytics_form_analysis': {
+      const input = parseToolInput(formAnalysisInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryResult = await executeFormAnalysisQuery({
+        tenantId: execCtx.ctx.tenant_id,   // server-controlled
+        siteId: execCtx.requestSiteId,      // server-controlled
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        formId: input.form_id,
+        pageUrl: input.page_url,
+      })
+
+      return {
+        tool: 'analytics_form_analysis',
+        result: {
+          forms: queryResult.forms,
+          fields: queryResult.fields,
+          last_field_distribution: queryResult.last_field_distribution,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
+        },
+      }
+    }
+
+    case 'analytics_frustration': {
+      const input = parseToolInput(frustrationInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryResult = await executeFrustrationQuery({
+        tenantId: execCtx.ctx.tenant_id,   // server-controlled
+        siteId: execCtx.requestSiteId,      // server-controlled
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        pageUrl: input.page_url,
+      })
+
+      return {
+        tool: 'analytics_frustration',
+        result: {
+          rows: queryResult.rows,
+          total: queryResult.total,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
+        },
+      }
+    }
+
+    case 'analytics_performance': {
+      const input = parseToolInput(performanceInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryResult = await executePerformanceQuery({
+        tenantId: execCtx.ctx.tenant_id,   // server-controlled
+        siteId: execCtx.requestSiteId,      // server-controlled
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        pageUrl: input.page_url,
+        deviceType: input.device,
+      })
+
+      return {
+        tool: 'analytics_performance',
+        result: {
+          rows: queryResult.rows,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
+        },
+      }
+    }
+
+    case 'analytics_cta_funnel': {
+      const input = parseToolInput(ctaFunnelInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryResult = await executeCtaFunnelQuery({
+        tenantId: execCtx.ctx.tenant_id,   // server-controlled
+        siteId: execCtx.requestSiteId,      // server-controlled
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        pageUrl: input.page_url,
+      })
+
+      return {
+        tool: 'analytics_cta_funnel',
+        result: {
+          rows: queryResult.rows,
+          approximation_note: queryResult.approximation_note,
+          conversion_note: queryResult.conversion_note,
           periodStart: queryResult.periodStart,
           periodEnd: queryResult.periodEnd,
           timezone: queryResult.timezone,

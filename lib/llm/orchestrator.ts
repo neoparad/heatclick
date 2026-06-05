@@ -376,6 +376,11 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
 - 「X の Y 別」「デバイス別 CVR」「ページ別セッション数」等 "X by Y" 形式の質問には analytics_metrics(metric=X, dimension=Y) を使う。
 - 「CVR の時系列推移」「セッションの週次推移」等のトレンド質問には analytics_timeseries を使う。
 - 数値の合計だけ欲しい場合は analytics_metrics(dimension=none) を使う。
+- フォーム完了率・フィールド別離脱・入力摩擦を知りたい場合は analytics_form_analysis を使う (parentQueryId 不要)。任意で form_id / page_url でフィルタ可。
+- ユーザーのフラストレーション(デッドクリック・レイジクリック・巻き戻し・タブ離脱等)を知りたい場合は analytics_frustration を使う (parentQueryId 不要)。frustration_score が高いページが改善候補。
+- ページ表示速度・Core Web Vitals (LCP/INP/CLS/TTFB/FCP) を知りたい場合は analytics_performance を使う (parentQueryId 不要)。p75 値と Good/NeedsImprovement/Poor 評価を返す。
+- CTA の露出 (impressions) とクリック率 (CTR) を知りたい場合は analytics_cta_funnel を使う (parentQueryId 不要)。element_selector 別に impressions/clicks/CTR を返す。bihadashop はコンバージョンイベント未計測のため conversion レグはなし。
+- analytics_form_analysis / analytics_frustration / analytics_performance / analytics_cta_funnel も standalone tool (parentQueryId 不要)。
 - 最終回答は markdown-lite (番号付きリスト可)。簡潔に、根拠 (tool 結果) に基づいて述べること。`,
       prompt: input.message,
       tools,
@@ -632,6 +637,14 @@ function freeformResultLabel(result: AnalyticsToolResult): string {
       return `metrics metric=${result.result.metric} dimension=${result.result.dimension} rows=${result.result.rows.length}`
     case 'analytics_timeseries':
       return `timeseries metric=${result.result.metric} grain=${result.result.grain} points=${result.result.points.length}`
+    case 'analytics_form_analysis':
+      return `form_analysis forms=${result.result.forms.length}件 fields=${result.result.fields.length}件`
+    case 'analytics_frustration':
+      return `frustration rows=${result.result.rows.length}件 total=${result.result.total !== null ? 'yes' : 'no'}`
+    case 'analytics_performance':
+      return `performance rows=${result.result.rows.length}件`
+    case 'analytics_cta_funnel':
+      return `cta_funnel rows=${result.result.rows.length}件`
   }
 }
 

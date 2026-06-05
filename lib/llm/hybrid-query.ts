@@ -1430,6 +1430,741 @@ SETTINGS max_execution_time = 30
   }
 }
 
+// ── analytics_form_analysis ──────────────────────────────────────────
+
+/**
+ * フォーム分析: form_interactions テーブルから per-form / per-field の
+ * 開始数・完了数・完了率・離脱率・最終フィールド分布・平均フィールド滞在時間を返す。
+ *
+ * 日付列: created_at (NOT timestamp) — Code 386 fix: toDateTime(toDateTime({start:String},{tz:String})) パターン。
+ * テーブル: clickinsight.form_interactions。
+ * is_agent 列は form_interactions に存在しないため使用しない。
+ * tenant_id / site_id は query_params で parameter binding。
+ */
+
+export interface FormAnalysisFormRow {
+  form_id: string
+  page_url: string
+  starts: number
+  submits: number
+  completion_rate: number | null
+  abandonment_rate: number | null
+  sample_count: number
+}
+
+export interface FormAnalysisFieldRow {
+  form_id: string
+  page_url: string
+  field_name: string
+  field_type: string
+  /** form_field_focus 件数 (フィールドにフォーカスした回数) */
+  touches: number
+  avg_field_duration_ms: number | null
+}
+
+export interface FormAnalysisLastFieldRow {
+  form_id: string
+  page_url: string
+  last_field: string
+  abandon_count: number
+}
+
+export interface FormAnalysisResult {
+  forms: FormAnalysisFormRow[]
+  fields: FormAnalysisFieldRow[]
+  last_field_distribution: FormAnalysisLastFieldRow[]
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeFormAnalysisQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  formId?: string
+  pageUrl?: string
+}): Promise<FormAnalysisResult> {
+  const client = getClickHouseClient('analytics_reader')
+
+  // Optional filters
+  const filterClauses: string[] = []
+  const queryParams: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+  }
+  if (params.formId) {
+    filterClauses.push('AND form_id = {form_id:String}')
+    queryParams.form_id = params.formId
+  }
+  if (params.pageUrl) {
+    filterClauses.push('AND page_url = {page_url:String}')
+    queryParams.page_url = params.pageUrl
+  }
+
+  const baseWhere = `
+    tenant_id = {tenant_id:String}
+    AND site_id = {site_id:String}
+    AND created_at >= toDateTime(toDateTime({start:String}, {tz:String}))
+    AND created_at < toDateTime(toDateTime({end:String}, {tz:String}))
+    ${filterClauses.join(' ')}
+  `.trim()
+
+  // Query 1: per-form starts / submits / completion_rate
+  const formSql = `
+SELECT
+  form_id,
+  page_url,
+  countIf(event_type = 'form_view') AS starts,
+  countIf(event_type = 'form_submit') AS submits,
+  count() AS sample_count
+FROM clickinsight.form_interactions
+WHERE ${baseWhere}
+GROUP BY form_id, page_url
+ORDER BY starts DESC
+LIMIT 100
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const formRs = await client.query({
+    query: formSql,
+    query_params: queryParams,
+    format: 'JSONEachRow',
+  })
+  const rawForms = await formRs.json<{ form_id: string; page_url: string; starts: number; submits: number; sample_count: number }>()
+  const forms: FormAnalysisFormRow[] = rawForms.map((r) => ({
+    form_id: r.form_id,
+    page_url: r.page_url,
+    starts: r.starts,
+    submits: r.submits,
+    completion_rate: r.starts > 0 ? r.submits / r.starts : null,
+    abandonment_rate: r.starts > 0 ? (r.starts - r.submits) / r.starts : null,
+    sample_count: r.sample_count,
+  }))
+
+  // Query 2: per-field touches + avg field_duration_ms (from form_field_focus events with field_duration_ms)
+  const fieldSql = `
+SELECT
+  form_id,
+  page_url,
+  field_name,
+  field_type,
+  countIf(event_type = 'form_field_focus') AS touches,
+  avgIf(field_duration_ms, event_type = 'form_field_focus' AND field_duration_ms > 0) AS avg_field_duration_ms
+FROM clickinsight.form_interactions
+WHERE ${baseWhere}
+GROUP BY form_id, page_url, field_name, field_type
+ORDER BY form_id, page_url, touches DESC
+LIMIT 500
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const fieldRs = await client.query({
+    query: fieldSql,
+    query_params: queryParams,
+    format: 'JSONEachRow',
+  })
+  const rawFields = await fieldRs.json<{ form_id: string; page_url: string; field_name: string; field_type: string; touches: number; avg_field_duration_ms: number | null }>()
+  const fields: FormAnalysisFieldRow[] = rawFields.map((r) => ({
+    form_id: r.form_id,
+    page_url: r.page_url,
+    field_name: r.field_name,
+    field_type: r.field_type,
+    touches: r.touches,
+    avg_field_duration_ms: r.avg_field_duration_ms ?? null,
+  }))
+
+  // Query 3: last_field distribution (from form_abandon events using last_field column)
+  const lastFieldSql = `
+SELECT
+  form_id,
+  page_url,
+  last_field,
+  count() AS abandon_count
+FROM clickinsight.form_interactions
+WHERE ${baseWhere}
+  AND event_type = 'form_abandon'
+  AND last_field != ''
+GROUP BY form_id, page_url, last_field
+ORDER BY abandon_count DESC
+LIMIT 200
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const lastFieldRs = await client.query({
+    query: lastFieldSql,
+    query_params: queryParams,
+    format: 'JSONEachRow',
+  })
+  const lastFieldRows = await lastFieldRs.json<FormAnalysisLastFieldRow>()
+
+  return {
+    forms,
+    fields,
+    last_field_distribution: lastFieldRows,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: 'form_interactions テーブルから集計。日付列: created_at。is_agent 除外なし（form_interactions に is_agent 列なし）。completion_rate / abandonment_rate は TS で計算。',
+  }
+}
+
+// ── analytics_frustration ────────────────────────────────────────────
+
+/**
+ * 欲求不満シグナル合成スコア: events テーブルの dead_click / rage_click +
+ * behavior_signals テーブルの reversal_count / tab_switch_count / pinch_zoom_count / away_duration_ms / hover_clicked=0 を
+ * per-page または全体で集計し、合成 frustration score を返す。
+ *
+ * frustration_score 算出方法 (TS 側で計算):
+ *   score = dead_clicks * 1 + rage_clicks * 3 + reversals * 1 + tab_switches * 0.5
+ *           + pinch_zooms * 0.5 + hover_no_clicks * 0.5 + avg_away_duration_factor
+ *   away_duration_factor = min(1, avg_away_duration_ms / 30000) (30秒以上で上限 1 に正規化)
+ *   正規化: score / (sessions + 1) で per-session スコアを計算
+ *
+ * 日付列:
+ *   - events: timestamp (既存の Code 386 fix パターンを流用)
+ *   - behavior_signals: created_at (NOT timestamp)
+ * テーブル: clickinsight.events + clickinsight.behavior_signals (2 クエリ、TS で結合)
+ */
+
+export interface FrustrationPageRow {
+  page_url: string
+  sessions: number
+  dead_clicks: number
+  rage_clicks: number
+  reversals: number
+  tab_switches: number
+  pinch_zooms: number
+  hover_no_clicks: number
+  avg_away_duration_ms: number
+  /** 合成 frustration score (TS 計算、per-session 正規化済) */
+  frustration_score: number
+}
+
+export interface FrustrationResult {
+  rows: FrustrationPageRow[]
+  total: FrustrationPageRow | null
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeFrustrationQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  pageUrl?: string
+}): Promise<FrustrationResult> {
+  const client = getClickHouseClient('analytics_reader')
+
+  const eventsQueryParams: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+  }
+  if (params.pageUrl) {
+    eventsQueryParams.page_url = params.pageUrl
+  }
+
+  const pageUrlEventsFilter = params.pageUrl ? 'AND url = {page_url:String}' : ''
+  const pageUrlBsFilter = params.pageUrl ? 'AND page_url = {page_url:String}' : ''
+
+  // Query 1: events テーブルから dead_click / rage_click + sessions per page
+  // timestamp 列使用 (events テーブル)、is_agent=0 で bot 除外
+  const eventsGroupBy = params.pageUrl ? '' : 'GROUP BY url'
+  const eventsSelectUrl = params.pageUrl ? `'${params.pageUrl}' AS page_url` : 'url AS page_url'
+
+  const eventsSql = `
+SELECT
+  ${eventsSelectUrl},
+  uniqExact(session_id) AS sessions,
+  countIf(event_type = 'dead_click') AS dead_clicks,
+  countIf(event_type = 'rage_click') AS rage_clicks
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND is_agent = 0
+  AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+  ${pageUrlEventsFilter}
+${eventsGroupBy}
+ORDER BY sessions DESC
+LIMIT 200
+SETTINGS max_execution_time = 30
+`.trim()
+
+  // Query 2: behavior_signals テーブルから frustration signals per page
+  // created_at 列使用 (behavior_signals テーブル、NOT timestamp)
+  const bsGroupBy = params.pageUrl ? '' : 'GROUP BY page_url'
+  const bsSelectUrl = params.pageUrl ? `'${params.pageUrl}' AS page_url` : 'page_url'
+
+  const bsQueryParams: Record<string, string> = { ...eventsQueryParams }
+
+  const bsSql = `
+SELECT
+  ${bsSelectUrl},
+  sumIf(reversal_count, event_type = 'scroll_reversal') AS reversals,
+  countIf(event_type = 'tab_return') AS tab_switches,
+  countIf(event_type = 'pinch_zoom') AS pinch_zooms,
+  countIf(event_type = 'cta_hover' AND hover_clicked = 0) AS hover_no_clicks,
+  avgIf(away_duration_ms, event_type = 'tab_return' AND away_duration_ms > 0) AS avg_away_duration_ms
+FROM clickinsight.behavior_signals
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND created_at >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND created_at < toDateTime(toDateTime({end:String}, {tz:String}))
+  ${pageUrlBsFilter}
+${bsGroupBy}
+LIMIT 200
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const [eventsRs, bsRs] = await Promise.all([
+    client.query({ query: eventsSql, query_params: eventsQueryParams, format: 'JSONEachRow' }),
+    client.query({ query: bsSql, query_params: bsQueryParams, format: 'JSONEachRow' }),
+  ])
+
+  const eventsRows = await eventsRs.json<{ page_url: string; sessions: number; dead_clicks: number; rage_clicks: number }>()
+  const bsRows = await bsRs.json<{ page_url: string; reversals: number; tab_switches: number; pinch_zooms: number; hover_no_clicks: number; avg_away_duration_ms: number }>()
+
+  // TS 結合: page_url をキーに events + behavior_signals を merge
+  const bsMap = new Map<string, typeof bsRows[number]>()
+  for (const r of bsRows) {
+    bsMap.set(r.page_url, r)
+  }
+
+  const rows: FrustrationPageRow[] = eventsRows.map((ev) => {
+    const bs = bsMap.get(ev.page_url)
+    const reversals = bs?.reversals ?? 0
+    const tabSwitches = bs?.tab_switches ?? 0
+    const pinchZooms = bs?.pinch_zooms ?? 0
+    const hoverNoClicks = bs?.hover_no_clicks ?? 0
+    const avgAwayMs = bs?.avg_away_duration_ms ?? 0
+
+    const awayFactor = Math.min(1, avgAwayMs / 30000)
+    const rawScore = ev.dead_clicks * 1
+      + ev.rage_clicks * 3
+      + reversals * 1
+      + tabSwitches * 0.5
+      + pinchZooms * 0.5
+      + hoverNoClicks * 0.5
+      + awayFactor
+
+    return {
+      page_url: ev.page_url,
+      sessions: ev.sessions,
+      dead_clicks: ev.dead_clicks,
+      rage_clicks: ev.rage_clicks,
+      reversals,
+      tab_switches: tabSwitches,
+      pinch_zooms: pinchZooms,
+      hover_no_clicks: hoverNoClicks,
+      avg_away_duration_ms: avgAwayMs,
+      frustration_score: ev.sessions > 0 ? rawScore / ev.sessions : rawScore,
+    }
+  })
+
+  // Sort by frustration_score DESC
+  rows.sort((a, b) => b.frustration_score - a.frustration_score)
+
+  // Total (site-wide aggregate, only when page_url filter is absent)
+  let total: FrustrationPageRow | null = null
+  if (!params.pageUrl && rows.length > 0) {
+    const totalSessions = rows.reduce((s, r) => s + r.sessions, 0)
+    const totalDeadClicks = rows.reduce((s, r) => s + r.dead_clicks, 0)
+    const totalRageClicks = rows.reduce((s, r) => s + r.rage_clicks, 0)
+    const totalReversals = rows.reduce((s, r) => s + r.reversals, 0)
+    const totalTabSwitches = rows.reduce((s, r) => s + r.tab_switches, 0)
+    const totalPinchZooms = rows.reduce((s, r) => s + r.pinch_zooms, 0)
+    const totalHoverNoClicks = rows.reduce((s, r) => s + r.hover_no_clicks, 0)
+    const avgAway = rows.length > 0 ? rows.reduce((s, r) => s + r.avg_away_duration_ms, 0) / rows.length : 0
+    const awayFactor = Math.min(1, avgAway / 30000)
+    const rawScore = totalDeadClicks * 1 + totalRageClicks * 3 + totalReversals * 1
+      + totalTabSwitches * 0.5 + totalPinchZooms * 0.5 + totalHoverNoClicks * 0.5 + awayFactor
+
+    total = {
+      page_url: '__all__',
+      sessions: totalSessions,
+      dead_clicks: totalDeadClicks,
+      rage_clicks: totalRageClicks,
+      reversals: totalReversals,
+      tab_switches: totalTabSwitches,
+      pinch_zooms: totalPinchZooms,
+      hover_no_clicks: totalHoverNoClicks,
+      avg_away_duration_ms: avgAway,
+      frustration_score: totalSessions > 0 ? rawScore / totalSessions : rawScore,
+    }
+  }
+
+  return {
+    rows,
+    total,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: '日付列: events=timestamp, behavior_signals=created_at。2テーブルをTSで結合。frustration_score = (dead*1+rage*3+reversal*1+tab*0.5+pinch*0.5+hover_no_click*0.5+away_factor) / sessions。away_factor = min(1, avg_away_ms/30000)。',
+  }
+}
+
+// ── analytics_performance ────────────────────────────────────────────
+
+/**
+ * Web Vitals p75 パフォーマンス分析。
+ * web_vitals テーブルから LCP/INP/CLS/TTFB/FCP の p75 を返し、Core Web Vitals 評価を付与。
+ *
+ * 評価基準 (Google CWV 2024):
+ *   LCP: <=2500ms Good / <=4000ms NeedsImprovement / >4000ms Poor
+ *   INP: <=200ms Good / <=500ms NeedsImprovement / >500ms Poor
+ *   CLS: <=0.1 Good / <=0.25 NeedsImprovement / >0.25 Poor
+ *   TTFB: <=800ms Good / <=1800ms NeedsImprovement / >1800ms Poor
+ *   FCP: <=1800ms Good / <=3000ms NeedsImprovement / >3000ms Poor
+ *
+ * 日付列: created_at (NOT timestamp) — Code 386 fix: toDateTime(toDateTime(...)) パターン。
+ * テーブル: clickinsight.web_vitals。
+ */
+
+export type CwvRating = 'good' | 'needs_improvement' | 'poor' | 'no_data'
+
+export interface CwvMetric {
+  p75: number | null
+  rating: CwvRating
+}
+
+export interface PerformanceRow {
+  dimension_value: string
+  sample_count: number
+  lcp: CwvMetric
+  inp: CwvMetric
+  cls: CwvMetric
+  ttfb: CwvMetric
+  fcp: CwvMetric
+}
+
+export interface PerformanceResult {
+  rows: PerformanceRow[]
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+function rateLcp(p75: number | null): CwvRating {
+  if (p75 === null) return 'no_data'
+  if (p75 <= 2500) return 'good'
+  if (p75 <= 4000) return 'needs_improvement'
+  return 'poor'
+}
+
+function rateInp(p75: number | null): CwvRating {
+  if (p75 === null) return 'no_data'
+  if (p75 <= 200) return 'good'
+  if (p75 <= 500) return 'needs_improvement'
+  return 'poor'
+}
+
+function rateCls(p75: number | null): CwvRating {
+  if (p75 === null) return 'no_data'
+  if (p75 <= 0.1) return 'good'
+  if (p75 <= 0.25) return 'needs_improvement'
+  return 'poor'
+}
+
+function rateTtfb(p75: number | null): CwvRating {
+  if (p75 === null) return 'no_data'
+  if (p75 <= 800) return 'good'
+  if (p75 <= 1800) return 'needs_improvement'
+  return 'poor'
+}
+
+function rateFcp(p75: number | null): CwvRating {
+  if (p75 === null) return 'no_data'
+  if (p75 <= 1800) return 'good'
+  if (p75 <= 3000) return 'needs_improvement'
+  return 'poor'
+}
+
+export async function executePerformanceQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  pageUrl?: string
+  deviceType?: string
+}): Promise<PerformanceResult> {
+  const client = getClickHouseClient('analytics_reader')
+
+  const queryParams: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+  }
+
+  const filterClauses: string[] = []
+  if (params.pageUrl) {
+    filterClauses.push('AND page_url = {perf_page_url:String}')
+    queryParams.perf_page_url = params.pageUrl
+  }
+  if (params.deviceType) {
+    filterClauses.push('AND device_type = {perf_device_type:String}')
+    queryParams.perf_device_type = params.deviceType
+  }
+
+  // Determine grouping dimension
+  const hasGrouping = !params.pageUrl && !params.deviceType
+  const groupByExpr = hasGrouping ? null
+    : params.pageUrl && params.deviceType ? 'concat(page_url, \'|\', device_type)'
+    : params.pageUrl ? 'page_url'
+    : 'device_type'
+
+  let sql: string
+  if (groupByExpr === null) {
+    // No filters: overall site total
+    sql = `
+SELECT
+  '__total__' AS dimension_value,
+  count() AS sample_count,
+  quantile(0.75)(lcp_ms) AS lcp_p75,
+  quantile(0.75)(inp_ms) AS inp_p75,
+  quantile(0.75)(cls_score) AS cls_p75,
+  quantile(0.75)(ttfb_ms) AS ttfb_p75,
+  quantile(0.75)(fcp_ms) AS fcp_p75
+FROM clickinsight.web_vitals
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND created_at >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND created_at < toDateTime(toDateTime({end:String}, {tz:String}))
+  ${filterClauses.join(' ')}
+SETTINGS max_execution_time = 30
+`.trim()
+  } else {
+    sql = `
+SELECT
+  toString(${groupByExpr}) AS dimension_value,
+  count() AS sample_count,
+  quantile(0.75)(lcp_ms) AS lcp_p75,
+  quantile(0.75)(inp_ms) AS inp_p75,
+  quantile(0.75)(cls_score) AS cls_p75,
+  quantile(0.75)(ttfb_ms) AS ttfb_p75,
+  quantile(0.75)(fcp_ms) AS fcp_p75
+FROM clickinsight.web_vitals
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND created_at >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND created_at < toDateTime(toDateTime({end:String}, {tz:String}))
+  ${filterClauses.join(' ')}
+GROUP BY dimension_value
+ORDER BY sample_count DESC
+LIMIT 100
+SETTINGS max_execution_time = 30
+`.trim()
+  }
+
+  const rs = await client.query({
+    query: sql,
+    query_params: queryParams,
+    format: 'JSONEachRow',
+  })
+
+  const rawRows = await rs.json<{
+    dimension_value: string
+    sample_count: number
+    lcp_p75: number | null
+    inp_p75: number | null
+    cls_p75: number | null
+    ttfb_p75: number | null
+    fcp_p75: number | null
+  }>()
+
+  const rows: PerformanceRow[] = rawRows.map((r) => ({
+    dimension_value: r.dimension_value,
+    sample_count: r.sample_count,
+    lcp: { p75: r.lcp_p75, rating: rateLcp(r.lcp_p75) },
+    inp: { p75: r.inp_p75, rating: rateInp(r.inp_p75) },
+    cls: { p75: r.cls_p75, rating: rateCls(r.cls_p75) },
+    ttfb: { p75: r.ttfb_p75, rating: rateTtfb(r.ttfb_p75) },
+    fcp: { p75: r.fcp_p75, rating: rateFcp(r.fcp_p75) },
+  }))
+
+  return {
+    rows,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: 'web_vitals テーブルから集計。日付列: created_at。p75 = quantile(0.75)。評価基準: LCP<=2500 Good/<=4000 NI; INP<=200/<=500; CLS<=0.1/<=0.25; TTFB<=800/<=1800; FCP<=1800/<=3000。',
+  }
+}
+
+// ── analytics_cta_funnel ─────────────────────────────────────────────
+
+/**
+ * CTA ファネル: element_visibility_v2 の露出 + events の click を element_selector キーで結合し
+ * per-CTA の impressions / clicks / CTR を返す。
+ *
+ * 結合方法: element_selector (+page_url) を key に 2 クエリを TS で結合 (近似結合)。
+ * session 単位の厳密な順序結合 (先に見た → クリック) は実装しない。
+ * 代わりに「同期間内の同 selector の露出数 vs クリック数」で近似 CTR を算出する。
+ * この近似は 1 セッション内に複数回露出 + クリックが含まれ得るため、
+ * true CTR (一意セッションベース) より大きくなる可能性がある。
+ *
+ * コンバージョンレグ: bihadashop には conversion イベントが存在しないため実装しない。
+ *
+ * 日付列:
+ *   - element_visibility_v2: created_at (NOT timestamp)
+ *   - events: timestamp (既存の Code 386 fix パターンを流用)
+ * テーブル: clickinsight.element_visibility_v2 + clickinsight.events。
+ */
+
+export interface CtaFunnelRow {
+  element_selector: string
+  page_url: string
+  impressions: number
+  clicks: number
+  ctr: number | null
+}
+
+export interface CtaFunnelResult {
+  rows: CtaFunnelRow[]
+  approximation_note: string
+  conversion_note: string
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeCtaFunnelQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  pageUrl?: string
+}): Promise<CtaFunnelResult> {
+  const client = getClickHouseClient('analytics_reader')
+
+  const baseQueryParams: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+  }
+
+  const pageUrlVisFilter = params.pageUrl ? 'AND page_url = {cta_page_url:String}' : ''
+  const pageUrlEvFilter = params.pageUrl ? 'AND url = {cta_page_url:String}' : ''
+  if (params.pageUrl) {
+    baseQueryParams.cta_page_url = params.pageUrl
+  }
+
+  // Query 1: element_visibility_v2 impressions per (element_selector, page_url)
+  // created_at 列使用 (element_visibility_v2 テーブル)
+  const visGroupBy = params.pageUrl ? 'element_selector' : 'element_selector, page_url'
+  const visSelectUrl = params.pageUrl
+    ? `'${params.pageUrl}' AS page_url, element_selector`
+    : 'page_url, element_selector'
+
+  const visSql = `
+SELECT
+  ${visSelectUrl},
+  count() AS impressions
+FROM clickinsight.element_visibility_v2
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND created_at >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND created_at < toDateTime(toDateTime({end:String}, {tz:String}))
+  ${pageUrlVisFilter}
+GROUP BY ${visGroupBy}
+ORDER BY impressions DESC
+LIMIT 500
+SETTINGS max_execution_time = 30
+`.trim()
+
+  // Query 2: events click counts per (element_selector, url)
+  // timestamp 列使用 (events テーブル)、is_agent=0 で bot 除外
+  // element_selector 列は events テーブルに存在 (ALTER TABLE で追加済)
+  const evGroupBy = params.pageUrl ? 'element_selector' : 'element_selector, url'
+  const evSelectUrl = params.pageUrl
+    ? `'${params.pageUrl}' AS page_url, element_selector`
+    : 'url AS page_url, element_selector'
+
+  const evSql = `
+SELECT
+  ${evSelectUrl},
+  count() AS clicks
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND is_agent = 0
+  AND event_type = 'click'
+  AND element_selector != ''
+  AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+  ${pageUrlEvFilter}
+GROUP BY ${evGroupBy}
+ORDER BY clicks DESC
+LIMIT 500
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const [visRs, evRs] = await Promise.all([
+    client.query({ query: visSql, query_params: baseQueryParams, format: 'JSONEachRow' }),
+    client.query({ query: evSql, query_params: baseQueryParams, format: 'JSONEachRow' }),
+  ])
+
+  const visRows = await visRs.json<{ page_url: string; element_selector: string; impressions: number }>()
+  const evRows = await evRs.json<{ page_url: string; element_selector: string; clicks: number }>()
+
+  // TS 結合: (element_selector + page_url) をキーに結合
+  const evMap = new Map<string, number>()
+  for (const r of evRows) {
+    evMap.set(`${r.element_selector}|${r.page_url}`, r.clicks)
+  }
+
+  const rows: CtaFunnelRow[] = visRows.map((vis) => {
+    const key = `${vis.element_selector}|${vis.page_url}`
+    const clicks = evMap.get(key) ?? 0
+    return {
+      element_selector: vis.element_selector,
+      page_url: vis.page_url,
+      impressions: vis.impressions,
+      clicks,
+      ctr: vis.impressions > 0 ? clicks / vis.impressions : null,
+    }
+  })
+
+  // Sort by impressions DESC
+  rows.sort((a, b) => b.impressions - a.impressions)
+
+  return {
+    rows,
+    approximation_note: '露出数と clicks 数を element_selector + page_url キーで近似結合。厳密な session 単位の先後順序結合は未実施。同一 session 内の複数露出/クリックが含まれ得るため、true CTR (一意セッションベース) より大きくなる可能性あり。',
+    conversion_note: 'bihadashop には conversion イベントが存在しないため、コンバージョンレグ (click→conversion) は実装していません。',
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: '日付列: element_visibility_v2=created_at, events=timestamp。2テーブルをTSで近似結合。CTR = clicks / impressions (近似)。',
+  }
+}
+
 // ── Verify query (raw events で exact 再計算 → proven_exact) ─────────
 
 export interface VerifyResult {
