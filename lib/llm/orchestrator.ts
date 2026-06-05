@@ -381,6 +381,11 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
 - ページ表示速度・Core Web Vitals (LCP/INP/CLS/TTFB/FCP) を知りたい場合は analytics_performance を使う (parentQueryId 不要)。p75 値と Good/NeedsImprovement/Poor 評価を返す。
 - CTA の露出 (impressions) とクリック率 (CTR) を知りたい場合は analytics_cta_funnel を使う (parentQueryId 不要)。element_selector 別に impressions/clicks/CTR を返す。bihadashop はコンバージョンイベント未計測のため conversion レグはなし。
 - analytics_form_analysis / analytics_frustration / analytics_performance / analytics_cta_funnel も standalone tool (parentQueryId 不要)。
+- ユーザーの経路 (次のページ/前のページ/入口/出口ページ) を知りたい場合は analytics_path を使う (parentQueryId 不要)。direction="next"=次ページ, "prev"=前ページ。page_url 省略でサイト全体の遷移 top N。
+- 順序付きファネル (LPから申込など) を分析したい場合は analytics_funnel を使う (parentQueryId 不要)。steps に 2〜5 ステップを指定。kind="page" は pageview + url 一致、kind="event" は event_type 一致。
+- 2 指標の相関 (なぜ/関係) を調べたい場合は analytics_correlation を使う (parentQueryId 不要)。metricA と metricB を page_url または device_type 次元でペアリングし Pearson r を返す。by="page_url" でページ間比較、by="device_type" でデバイス間比較。指標: sessions, pageviews, cvr, avg_scroll_depth, dead_click_rate, rage_click_rate, bounce_rate。
+- why/原因/関係 系の質問では analytics_correlation や analytics_path + analytics_frustration を組み合わせてから統合回答を生成すること。
+- analytics_path / analytics_funnel / analytics_correlation も standalone tool (parentQueryId 不要)。
 - 最終回答は markdown-lite (番号付きリスト可)。簡潔に、根拠 (tool 結果) に基づいて述べること。`,
       prompt: input.message,
       tools,
@@ -645,6 +650,12 @@ function freeformResultLabel(result: AnalyticsToolResult): string {
       return `performance rows=${result.result.rows.length}件`
     case 'analytics_cta_funnel':
       return `cta_funnel rows=${result.result.rows.length}件`
+    case 'analytics_path':
+      return `path page_url=${result.result.page_url ?? 'all'} direction=${result.result.direction} transitions=${result.result.transitions.length}件`
+    case 'analytics_funnel':
+      return `funnel steps=${result.result.steps.length}件 total_sessions=${result.result.total_sessions}`
+    case 'analytics_correlation':
+      return `correlation ${result.result.metric_a} × ${result.result.metric_b} by=${result.result.by} pearson_r=${result.result.pearson_r !== null ? result.result.pearson_r.toFixed(3) : 'null'} sample=${result.result.sample_size}`
   }
 }
 

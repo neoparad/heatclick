@@ -30,6 +30,8 @@ import {
   METRICS_METRICS,
   METRICS_DIMENSIONS,
   TIMESERIES_METRICS,
+  CORRELATION_METRICS,
+  CORRELATION_BY,
   executeAnalyticsQuery,
   executeContributorsQuery,
   executeDrilldownQuery,
@@ -44,6 +46,9 @@ import {
   executeFrustrationQuery,
   executePerformanceQuery,
   executeCtaFunnelQuery,
+  executePathQuery,
+  executeFunnelQuery,
+  executeCorrelationQuery,
   getParentQuery,
   MAX_PERIOD_DAYS_ANALYTICS,
   registerParentQuery,
@@ -61,6 +66,10 @@ import {
   type FrustrationResult,
   type PerformanceResult,
   type CtaFunnelResult,
+  type PathResult,
+  type FunnelResult,
+  type CorrelationResult,
+  type FunnelStep,
 } from '@/lib/llm/hybrid-query'
 
 // ── Tool 1: analytics.overview ──────────────────────────────────────
@@ -453,6 +462,116 @@ export interface CtaFunnelToolResult {
   note: string
 }
 
+// ── Tool 15: analytics_path ──────────────────────────────────────────
+
+/**
+ * ユーザー経路分析: 指定ページへの流入元 or 離脱先、エントリーページ / 出口ページを返す。
+ * Standalone — parentQueryId 不要。siteId は server 固定。
+ *
+ * direction='next': {page_url} を見た後のページ (previous_url = page_url の rows)
+ * direction='prev': {page_url} に来る前のページ (url = page_url の previous_url)
+ * page_url 省略: サイト全体の top 遷移
+ */
+export const pathInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+  /** 対象ページ URL (省略時はサイト全体の top 遷移) */
+  page_url: z.string().min(1).optional(),
+  /** 'next'=次ページ / 'prev'=前ページ */
+  direction: z.enum(['next', 'prev']).default('next'),
+  limit: z.number().int().min(3).max(50).default(10),
+})
+export type PathInput = z.infer<typeof pathInputSchema>
+
+export interface PathToolResult {
+  transitions: PathResult['transitions']
+  entry_pages: PathResult['entry_pages']
+  exit_pages: PathResult['exit_pages']
+  page_url: string | null
+  direction: 'next' | 'prev'
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: PathResult['evidenceLevel']
+  note: string
+}
+
+// ── Tool 16: analytics_funnel ─────────────────────────────────────────
+
+/**
+ * 順序付きファネル分析 (ClickHouse windowFunnel)。
+ * steps: 2〜5 ステップの順序付き条件配列。
+ *   - { kind: 'page', value: '/path' } → event_type='pageview' AND url='/path'
+ *   - { kind: 'event', value: 'click' } → event_type='click'
+ * Standalone — parentQueryId 不要。siteId は server 固定。
+ * step の value は query_params binding で注入 (SQL injection 防御)。
+ */
+const funnelStepSchema = z.object({
+  kind: z.enum(['page', 'event']),
+  value: z.string().min(1).max(500),
+})
+export const funnelInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+  steps: z.array(funnelStepSchema).min(2).max(5),
+})
+export type FunnelInput = z.infer<typeof funnelInputSchema>
+
+export interface FunnelToolResult {
+  steps: FunnelResult['steps']
+  total_sessions: number
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: FunnelResult['evidenceLevel']
+  note: string
+}
+
+// ── Tool 17: analytics_correlation ───────────────────────────────────
+
+/**
+ * 2 指標の Pearson 相関 (per page_url または per device_type)。
+ * "avg_scroll_depth は CVR と相関があるか？" 等の why / 診断質問に使う。
+ * sessions >= minSample の dimension value のみ対象。
+ * cross-table (web_vitals 等) join は不可 — events 単一テーブルのみ。
+ * Standalone — parentQueryId 不要。siteId は server 固定。
+ */
+export const correlationInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+  metricA: z.enum([...CORRELATION_METRICS] as [string, ...string[]]).transform((v) => v as (typeof CORRELATION_METRICS)[number]),
+  metricB: z.enum([...CORRELATION_METRICS] as [string, ...string[]]).transform((v) => v as (typeof CORRELATION_METRICS)[number]),
+  /** 相関を計算する次元 */
+  by: z.enum([...CORRELATION_BY] as [string, ...string[]]).default('page_url').transform((v) => v as (typeof CORRELATION_BY)[number]),
+  /** この sessions 数以上の dimension value のみ対象 (デフォルト 30) */
+  minSample: z.number().int().min(1).max(10000).default(30),
+})
+export type CorrelationInput = z.infer<typeof correlationInputSchema>
+
+export interface CorrelationToolResult {
+  metric_a: CorrelationResult['metric_a']
+  metric_b: CorrelationResult['metric_b']
+  by: CorrelationResult['by']
+  pearson_r: number | null
+  sample_size: number
+  min_sample_filter: number
+  pairs: CorrelationResult['pairs']
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: CorrelationResult['evidenceLevel']
+  note: string
+}
+
 // ── Tool registry (declarative + executor) ──────────────────────────
 
 export interface AnalyticsToolExecuteContext {
@@ -476,6 +595,9 @@ export type AnalyticsToolName =
   | 'analytics_frustration'
   | 'analytics_performance'
   | 'analytics_cta_funnel'
+  | 'analytics_path'
+  | 'analytics_funnel'
+  | 'analytics_correlation'
 
 export type AnalyticsToolResult =
   | { tool: 'analytics.overview'; result: OverviewResult }
@@ -492,6 +614,9 @@ export type AnalyticsToolResult =
   | { tool: 'analytics_frustration'; result: FrustrationToolResult }
   | { tool: 'analytics_performance'; result: PerformanceToolResult }
   | { tool: 'analytics_cta_funnel'; result: CtaFunnelToolResult }
+  | { tool: 'analytics_path'; result: PathToolResult }
+  | { tool: 'analytics_funnel'; result: FunnelToolResult }
+  | { tool: 'analytics_correlation'; result: CorrelationToolResult }
 
 /**
  * 公開 tool schema list (AI SDK v6 `tool()` 互換シェイプ)。
@@ -619,6 +744,40 @@ export const ANALYTICS_TOOL_SCHEMAS = [
       'Optional filter: page_url (specific page). ' +
       'Standalone — no parentQueryId required. siteId is server-controlled.',
     inputSchema: ctaFunnelInputSchema,
+  },
+  {
+    name: 'analytics_path' as const,
+    description:
+      'User journey path analysis. For a given page_url, returns the most common NEXT pages (direction="next": rows where previous_url=page_url grouped by url) or PREV pages (direction="prev": rows where url=page_url grouped by previous_url). Also returns top entry pages (min sequence_id per session) and top exit pages (max sequence_id per session). ' +
+      'Omit page_url to get top overall previous_url→url transitions for the whole site. ' +
+      'Use for questions like "このページを見た後どこへ行くか", "どこから来ているか", "入口ページ/出口ページ", "次のページ", "経路分析". ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: pathInputSchema,
+  },
+  {
+    name: 'analytics_funnel' as const,
+    description:
+      'Ordered funnel analysis using ClickHouse windowFunnel (24h window). ' +
+      'Input: steps array of 2-5 ordered predicates, each {kind: "page"|"event", value: string}. ' +
+      'kind="page" matches event_type=pageview AND url=value; kind="event" matches event_type=value. ' +
+      'Returns per-step reached_sessions and conversion_rate to next step. ' +
+      'Step values are bound via query_params (SQL injection safe — do NOT fabricate event_type values not in the allowed list: pageview, click, conversion, session_end, dead_click, rage_click, scroll, read_area, scroll_depth, active_time, form_submit, form_view, form_abandon, scroll_anchor_hit, alt_read_signal, text_node_dwell). ' +
+      'Note: bihadashop has no conversion events so conversion step will show 0. ' +
+      'Use for questions like "ファネル分析", "LPから申込への転換", "ステップ別 CV 率". ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: funnelInputSchema,
+  },
+  {
+    name: 'analytics_correlation' as const,
+    description:
+      'Pearson correlation between two metrics across a dimension (page_url or device_type). ' +
+      'Computes per-dimension-value metricA and metricB, filters to sessions >= minSample, then returns Pearson r + paired rows. ' +
+      'Available metrics: sessions, pageviews, cvr, avg_scroll_depth, dead_click_rate, rage_click_rate, bounce_rate. ' +
+      'All metrics are derived from the events table only (no cross-table joins). ' +
+      'Use for "deep diagnosis" questions like "avg_scroll_depthとCVRは相関があるか？", "デッドクリック率とCVRの関係", "スクロール深度が高いページはCVRも高いか". ' +
+      'Note: bihadashop has no conversion events so cvr=0 for all pages. ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: correlationInputSchema,
   },
 ] as const
 
@@ -1036,6 +1195,103 @@ export async function executeAnalyticsTool(
           rows: queryResult.rows,
           approximation_note: queryResult.approximation_note,
           conversion_note: queryResult.conversion_note,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
+        },
+      }
+    }
+
+    case 'analytics_path': {
+      const input = parseToolInput(pathInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryResult = await executePathQuery({
+        tenantId: execCtx.ctx.tenant_id,   // server-controlled
+        siteId: execCtx.requestSiteId,      // server-controlled
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        pageUrl: input.page_url,
+        direction: input.direction,
+        limit: input.limit,
+      })
+
+      return {
+        tool: 'analytics_path',
+        result: {
+          transitions: queryResult.transitions,
+          entry_pages: queryResult.entry_pages,
+          exit_pages: queryResult.exit_pages,
+          page_url: queryResult.page_url,
+          direction: queryResult.direction,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
+        },
+      }
+    }
+
+    case 'analytics_funnel': {
+      const input = parseToolInput(funnelInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      // steps の型を FunnelStep[] に変換 (Zod infer で kind が string になる場合の対応)
+      const steps: FunnelStep[] = input.steps.map((s) => ({
+        kind: s.kind,
+        value: s.value,
+      }))
+
+      const queryResult = await executeFunnelQuery({
+        tenantId: execCtx.ctx.tenant_id,   // server-controlled
+        siteId: execCtx.requestSiteId,      // server-controlled
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        steps,
+      })
+
+      return {
+        tool: 'analytics_funnel',
+        result: {
+          steps: queryResult.steps,
+          total_sessions: queryResult.total_sessions,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
+        },
+      }
+    }
+
+    case 'analytics_correlation': {
+      const input = parseToolInput(correlationInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryResult = await executeCorrelationQuery({
+        tenantId: execCtx.ctx.tenant_id,   // server-controlled
+        siteId: execCtx.requestSiteId,      // server-controlled
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        metricA: input.metricA,
+        metricB: input.metricB,
+        by: input.by,
+        minSample: input.minSample,
+      })
+
+      return {
+        tool: 'analytics_correlation',
+        result: {
+          metric_a: queryResult.metric_a,
+          metric_b: queryResult.metric_b,
+          by: queryResult.by,
+          pearson_r: queryResult.pearson_r,
+          sample_size: queryResult.sample_size,
+          min_sample_filter: queryResult.min_sample_filter,
+          pairs: queryResult.pairs,
           periodStart: queryResult.periodStart,
           periodEnd: queryResult.periodEnd,
           timezone: queryResult.timezone,

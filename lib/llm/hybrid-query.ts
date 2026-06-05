@@ -2165,6 +2165,629 @@ SETTINGS max_execution_time = 30
   }
 }
 
+// ── analytics_path ───────────────────────────────────────────────────
+
+/**
+ * ユーザー経路分析: events テーブルの previous_url / url (event_type='pageview') を使い
+ * 指定ページへの流入元 or 離脱先を返す。
+ *
+ * direction='next': rows where previous_url = {page_url} → group by url (次ページ)
+ * direction='prev': rows where url = {page_url} → group by previous_url (前ページ)
+ * page_url 省略時: previous_url → url 遷移全体 top N
+ *
+ * 追加:
+ *   - top entry pages: per-session min(sequence_id) を持つ url (最初に見られたページ)
+ *   - top exit pages: per-session max(sequence_id) を持つ url (最後に見られたページ)
+ *
+ * SQL injection 防御:
+ *   - page_url は query_params binding
+ *   - is_agent=0, tenant/site server-fixed
+ *   - Code 386 fix: toDateTime(toDateTime({start:String}, {tz:String}))
+ */
+
+export interface PathTransitionRow {
+  from_url: string
+  to_url: string
+  sessions: number
+  share_pct: number
+}
+
+export interface PathEntryExitRow {
+  url: string
+  sessions: number
+  share_pct: number
+}
+
+export interface PathResult {
+  transitions: PathTransitionRow[]
+  entry_pages: PathEntryExitRow[]
+  exit_pages: PathEntryExitRow[]
+  page_url: string | null
+  direction: 'next' | 'prev'
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executePathQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  pageUrl?: string
+  direction: 'next' | 'prev'
+  limit: number
+}): Promise<PathResult> {
+  const client = getClickHouseClient('analytics_reader')
+
+  const baseParams: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+    limit: String(params.limit),
+  }
+  if (params.pageUrl) {
+    baseParams.page_url = params.pageUrl
+  }
+
+  const baseWhere = `
+    tenant_id = {tenant_id:String}
+    AND site_id = {site_id:String}
+    AND event_type = 'pageview'
+    AND is_agent = 0
+    AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+    AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+  `.trim()
+
+  // ── Transition query ──
+  let transitionSql: string
+  if (!params.pageUrl) {
+    // No page_url: top previous_url → url transitions overall
+    transitionSql = `
+WITH seq AS (
+  SELECT
+    url AS from_url,
+    leadInFrame(url) OVER (PARTITION BY session_id ORDER BY timestamp ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS to_url,
+    session_id
+  FROM clickinsight.events
+  WHERE ${baseWhere}
+),
+trans AS (
+  SELECT from_url, to_url, uniqExact(session_id) AS sessions
+  FROM seq
+  WHERE to_url != '' AND to_url != from_url
+  GROUP BY from_url, to_url
+  ORDER BY sessions DESC
+  LIMIT {limit:UInt32}
+),
+total AS (SELECT sum(sessions) AS t FROM trans)
+SELECT
+  from_url,
+  to_url,
+  sessions,
+  if((SELECT t FROM total) > 0, sessions / (SELECT t FROM total), 0) AS share_pct
+FROM trans
+ORDER BY sessions DESC
+SETTINGS max_execution_time = 30
+`.trim()
+  } else if (params.direction === 'next') {
+    // Sessions that viewed page_url → next page (rows where previous_url = page_url)
+    transitionSql = `
+WITH seq AS (
+  SELECT
+    url,
+    leadInFrame(url) OVER (PARTITION BY session_id ORDER BY timestamp ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS next_url,
+    session_id
+  FROM clickinsight.events
+  WHERE ${baseWhere}
+),
+trans AS (
+  SELECT
+    {page_url:String} AS from_url,
+    next_url AS to_url,
+    uniqExact(session_id) AS sessions
+  FROM seq
+  WHERE url = {page_url:String} AND next_url != '' AND next_url != url
+  GROUP BY to_url
+  ORDER BY sessions DESC
+  LIMIT {limit:UInt32}
+),
+total AS (SELECT sum(sessions) AS t FROM trans)
+SELECT
+  from_url,
+  to_url,
+  sessions,
+  if((SELECT t FROM total) > 0, sessions / (SELECT t FROM total), 0) AS share_pct
+FROM trans
+ORDER BY sessions DESC
+SETTINGS max_execution_time = 30
+`.trim()
+  } else {
+    // direction='prev': most common previous_url for page_url
+    transitionSql = `
+WITH seq AS (
+  SELECT
+    url,
+    lagInFrame(url) OVER (PARTITION BY session_id ORDER BY timestamp ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS prev_url,
+    session_id
+  FROM clickinsight.events
+  WHERE ${baseWhere}
+),
+trans AS (
+  SELECT
+    if(prev_url = '', '(direct)', prev_url) AS from_url,
+    {page_url:String} AS to_url,
+    uniqExact(session_id) AS sessions
+  FROM seq
+  WHERE url = {page_url:String}
+  GROUP BY from_url
+  ORDER BY sessions DESC
+  LIMIT {limit:UInt32}
+),
+total AS (SELECT sum(sessions) AS t FROM trans)
+SELECT
+  from_url,
+  to_url,
+  sessions,
+  if((SELECT t FROM total) > 0, sessions / (SELECT t FROM total), 0) AS share_pct
+FROM trans
+ORDER BY sessions DESC
+SETTINGS max_execution_time = 30
+`.trim()
+  }
+
+  // ── Entry pages query ──
+  const entrySql = `
+WITH first_pv AS (
+  SELECT session_id, argMin(url, timestamp) AS entry_url
+  FROM clickinsight.events
+  WHERE ${baseWhere}
+  GROUP BY session_id
+)
+SELECT
+  entry_url AS url,
+  count() AS sessions
+FROM first_pv
+GROUP BY url
+ORDER BY sessions DESC
+LIMIT {limit:UInt32}
+SETTINGS max_execution_time = 30
+`.trim()
+
+  // ── Exit pages query ──
+  const exitSql = `
+WITH last_pv AS (
+  SELECT session_id, argMax(url, timestamp) AS exit_url
+  FROM clickinsight.events
+  WHERE ${baseWhere}
+  GROUP BY session_id
+)
+SELECT
+  exit_url AS url,
+  count() AS sessions
+FROM last_pv
+GROUP BY url
+ORDER BY sessions DESC
+LIMIT {limit:UInt32}
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const [transRs, entryRs, exitRs] = await Promise.all([
+    client.query({ query: transitionSql, query_params: baseParams, format: 'JSONEachRow' }),
+    client.query({ query: entrySql, query_params: baseParams, format: 'JSONEachRow' }),
+    client.query({ query: exitSql, query_params: baseParams, format: 'JSONEachRow' }),
+  ])
+
+  const rawTrans = await transRs.json<PathTransitionRow>()
+  const rawEntry = await entryRs.json<{ url: string; sessions: number }>()
+  const rawExit = await exitRs.json<{ url: string; sessions: number }>()
+
+  // Share pct for entry/exit
+  const entryTotal = rawEntry.reduce((s, r) => s + r.sessions, 0)
+  const exitTotal = rawExit.reduce((s, r) => s + r.sessions, 0)
+
+  const entry_pages: PathEntryExitRow[] = rawEntry.map((r) => ({
+    url: r.url,
+    sessions: r.sessions,
+    share_pct: entryTotal > 0 ? r.sessions / entryTotal : 0,
+  }))
+  const exit_pages: PathEntryExitRow[] = rawExit.map((r) => ({
+    url: r.url,
+    sessions: r.sessions,
+    share_pct: exitTotal > 0 ? r.sessions / exitTotal : 0,
+  }))
+
+  return {
+    transitions: rawTrans,
+    entry_pages,
+    exit_pages,
+    page_url: params.pageUrl ?? null,
+    direction: params.direction,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: 'session 内の閲覧順(timestamp)を window で辿った経路分析(next=leadInFrame / prev=lagInFrame、event_type=pageview / is_agent=0)。previous_url 列は本番未投入のため timestamp 順に切替。share_pct は上位 N 件内の相対比率。entry/exit は session 内 min/max(timestamp)。1ページ完結が多いサイトでは遷移は少数。D-07 observed_approx。',
+  }
+}
+
+// ── analytics_funnel ─────────────────────────────────────────────────
+
+/**
+ * ClickHouse windowFunnel による順序付きファネル分析。
+ *
+ * steps: 2〜5 ステップの順序付き条件配列。
+ *   各 step は { kind: 'page' | 'event', value: string } の形式。
+ *   - kind='page': event_type='pageview' AND url = value
+ *   - kind='event': event_type = value
+ *
+ * SQL injection 防御:
+ *   - step の value は query_params binding ({step0_val:String} 等)
+ *   - kind は TS で 'page' | 'event' に enum 強制 (SQL に kind を流さない)
+ *   - is_agent=0, tenant/site server-fixed, max_execution_time=30
+ *
+ * windowFunnel(86400) = 86400 秒 (24 時間) ウィンドウ内の最大 step 進行を計算。
+ * per session の max reached level を集計し、各 step の reached count と
+ * 次 step への conversion_rate を返す。
+ */
+
+export interface FunnelStep {
+  kind: 'page' | 'event'
+  value: string
+}
+
+export interface FunnelStepResult {
+  step_index: number
+  /** step 定義 */
+  step_kind: 'page' | 'event'
+  step_value: string
+  /** このステップ以上に到達したセッション数 */
+  reached_sessions: number
+  /** 前ステップからの conversion rate (step 0 は null) */
+  conversion_rate: number | null
+}
+
+export interface FunnelResult {
+  steps: FunnelStepResult[]
+  total_sessions: number
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+/** event type allowlist (SQL injection 防止: kind='event' の value をバインドで渡すが念のため) */
+const ALLOWED_EVENT_TYPES = new Set([
+  'pageview',
+  'click',
+  'conversion',
+  'session_end',
+  'dead_click',
+  'rage_click',
+  'scroll',
+  'read_area',
+  'scroll_depth',
+  'active_time',
+  'form_submit',
+  'form_view',
+  'form_abandon',
+  'scroll_anchor_hit',
+  'alt_read_signal',
+  'text_node_dwell',
+])
+
+export async function executeFunnelQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  steps: FunnelStep[]
+}): Promise<FunnelResult> {
+  if (params.steps.length < 2 || params.steps.length > 5) {
+    throw new Error('funnel: steps must be 2-5')
+  }
+
+  // Validate event type values (SQL injection 防御)
+  for (const step of params.steps) {
+    if (step.kind === 'event' && !ALLOWED_EVENT_TYPES.has(step.value)) {
+      throw new Error(`funnel: event type '${step.value}' is not in the allowed list`)
+    }
+    // page URLs are bound via query_params (no interpolation)
+  }
+
+  // Build windowFunnel conditions: each step is a bound parameter
+  // step value は query_params binding ({step0_val:String} etc.) - 絶対に SQL 文字列に直接埋め込まない
+  const stepConditions = params.steps.map((step, i) => {
+    if (step.kind === 'page') {
+      return `(event_type = 'pageview' AND url = {step${i}_val:String})`
+    } else {
+      return `(event_type = {step${i}_val:String})`
+    }
+  })
+  const windowFunnelArgs = stepConditions.join(', ')
+
+  const sql = `
+WITH funnel_levels AS (
+  SELECT
+    session_id,
+    windowFunnel(86400)(toUInt32(toUnixTimestamp(timestamp)), ${windowFunnelArgs}) AS level
+  FROM clickinsight.events
+  WHERE tenant_id = {tenant_id:String}
+    AND site_id = {site_id:String}
+    AND is_agent = 0
+    AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+    AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+  GROUP BY session_id
+)
+SELECT level, count() AS cnt
+FROM funnel_levels
+GROUP BY level
+ORDER BY level
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const queryParams: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+  }
+  // Bind each step value
+  for (let i = 0; i < params.steps.length; i++) {
+    queryParams[`step${i}_val`] = params.steps[i].value
+  }
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({
+    query: sql,
+    query_params: queryParams,
+    format: 'JSONEachRow',
+  })
+
+  const rawRows = await rs.json<{ level: number; cnt: number }>()
+
+  // level=0 means no step reached; level=k means steps 0..k-1 reached
+  // Build level → count map
+  const levelMap = new Map<number, number>()
+  for (const r of rawRows) {
+    levelMap.set(r.level, (levelMap.get(r.level) ?? 0) + r.cnt)
+  }
+  const totalSessions = Array.from(levelMap.values()).reduce((s, v) => s + v, 0)
+
+  // reached_sessions[k] = sessions that reached at least step k (level >= k+1)
+  const steps: FunnelStepResult[] = params.steps.map((step, i) => {
+    // sessions with level >= i+1 (reached step i, 0-indexed)
+    let reached = 0
+    for (const [level, cnt] of levelMap.entries()) {
+      if (level >= i + 1) reached += cnt
+    }
+    const prevReached = i === 0 ? totalSessions : (() => {
+      let p = 0
+      for (const [level, cnt] of levelMap.entries()) {
+        if (level >= i) p += cnt
+      }
+      return p
+    })()
+    return {
+      step_index: i,
+      step_kind: step.kind,
+      step_value: step.value,
+      reached_sessions: reached,
+      conversion_rate: i === 0 ? null : (prevReached > 0 ? reached / prevReached : 0),
+    }
+  })
+
+  return {
+    steps,
+    total_sessions: totalSessions,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: `windowFunnel(86400秒) でセッション内の最大ステップ到達を集計。ステップ値は query_params でバインド (SQL injection 防御)。is_agent=0。bihadashop では conversion イベント未計測のため conversion ステップは CVR=0 になります。D-07 observed_approx。`,
+  }
+}
+
+// ── analytics_correlation ────────────────────────────────────────────
+
+/**
+ * 2 指標の相関分析 (per-dimension-value、例: per page_url)。
+ *
+ * 設計:
+ *   - per dimension value (page_url または device_type) で metricA と metricB を集計
+ *   - sessions >= minSample の dimension value のみ対象
+ *   - corr(a, b) over the paired (dim_value, a, b) rows を ClickHouse の corr() で計算
+ *   - cross-table join (web_vitals 等) は行わず、events 単一テーブルのみ
+ *     (future: web_vitals の LCP と CVR の相関は別途 executeFutureCorrelationQuery で実装)
+ *   - is_agent=0, tenant/site server-fixed, Code 386 fix
+ *
+ * 対応指標 (buildCorrelationMetricExpr):
+ *   sessions, pageviews, cvr, avg_scroll_depth, dead_click_rate, rage_click_rate, bounce_rate
+ *
+ * SQL injection 防御:
+ *   - metricA / metricB はホワイトリストで enum 強制 → SQL expression は TS で構築
+ *   - by (dimension) も enum 強制
+ */
+
+export type CorrelationMetric =
+  | 'sessions'
+  | 'pageviews'
+  | 'cvr'
+  | 'avg_scroll_depth'
+  | 'dead_click_rate'
+  | 'rage_click_rate'
+  | 'bounce_rate'
+
+export const CORRELATION_METRICS: CorrelationMetric[] = [
+  'sessions',
+  'pageviews',
+  'cvr',
+  'avg_scroll_depth',
+  'dead_click_rate',
+  'rage_click_rate',
+  'bounce_rate',
+]
+
+export type CorrelationBy = 'page_url' | 'device_type'
+export const CORRELATION_BY: CorrelationBy[] = ['page_url', 'device_type']
+
+export interface CorrelationPairRow {
+  dimension_value: string
+  metric_a: number
+  metric_b: number
+  sessions: number
+}
+
+export interface CorrelationResult {
+  metric_a: CorrelationMetric
+  metric_b: CorrelationMetric
+  by: CorrelationBy
+  pearson_r: number | null
+  sample_size: number
+  min_sample_filter: number
+  pairs: CorrelationPairRow[]
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+function buildCorrelationMetricExpr(metric: CorrelationMetric): string {
+  switch (metric) {
+    case 'sessions':
+      return 'toFloat64(uniqExact(session_id))'
+    case 'pageviews':
+      return "toFloat64(countIf(event_type = 'pageview'))"
+    case 'cvr':
+      return "if(uniqExact(session_id) > 0, toFloat64(uniqExactIf(session_id, event_type = 'conversion')) / toFloat64(uniqExact(session_id)), 0)"
+    case 'avg_scroll_depth':
+      return "toFloat64(avgIf(scroll_percentage, event_type = 'scroll'))"
+    case 'dead_click_rate':
+      return "if(countIf(event_type = 'click') + countIf(event_type = 'dead_click') > 0, toFloat64(countIf(event_type = 'dead_click')) / toFloat64(countIf(event_type = 'click') + countIf(event_type = 'dead_click')), 0)"
+    case 'rage_click_rate':
+      return "if(countIf(event_type = 'click') + countIf(event_type = 'rage_click') > 0, toFloat64(countIf(event_type = 'rage_click')) / toFloat64(countIf(event_type = 'click') + countIf(event_type = 'rage_click')), 0)"
+    case 'bounce_rate':
+      return (
+        'if(uniqExact(session_id) > 0,' +
+        " toFloat64(uniqExactIf(session_id, event_type = 'session_end' AND page_views_in_session <= 1 AND session_duration_sec < 10))" +
+        ' / toFloat64(uniqExact(session_id)), 0)'
+      )
+  }
+}
+
+export async function executeCorrelationQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  metricA: CorrelationMetric
+  metricB: CorrelationMetric
+  by: CorrelationBy
+  minSample: number
+}): Promise<CorrelationResult> {
+  const dimExpr = params.by === 'page_url' ? 'url' : 'device_type'
+  const exprA = buildCorrelationMetricExpr(params.metricA)
+  const exprB = buildCorrelationMetricExpr(params.metricB)
+
+  // Per-dimension pairs query + in-query Pearson corr()
+  const sql = `
+WITH pairs AS (
+  SELECT
+    toString(${dimExpr}) AS dimension_value,
+    ${exprA} AS metric_a,
+    ${exprB} AS metric_b,
+    toFloat64(uniqExact(session_id)) AS sessions
+  FROM clickinsight.events
+  WHERE tenant_id = {tenant_id:String}
+    AND site_id = {site_id:String}
+    AND is_agent = 0
+    AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+    AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+  GROUP BY dimension_value
+  HAVING sessions >= {min_sample:UInt32}
+)
+SELECT
+  dimension_value,
+  metric_a,
+  metric_b,
+  sessions
+FROM pairs
+ORDER BY sessions DESC
+LIMIT 500
+SETTINGS max_execution_time = 30
+`.trim()
+
+  // Pearson correlation query (computed over all qualifying pairs)
+  const corrSql = `
+WITH pairs AS (
+  SELECT
+    toString(${dimExpr}) AS dimension_value,
+    ${exprA} AS metric_a,
+    ${exprB} AS metric_b,
+    toFloat64(uniqExact(session_id)) AS sessions
+  FROM clickinsight.events
+  WHERE tenant_id = {tenant_id:String}
+    AND site_id = {site_id:String}
+    AND is_agent = 0
+    AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+    AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+  GROUP BY dimension_value
+  HAVING sessions >= {min_sample:UInt32}
+)
+SELECT
+  corr(metric_a, metric_b) AS pearson_r,
+  count() AS sample_size
+FROM pairs
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const queryParams: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+    min_sample: String(params.minSample),
+  }
+
+  const client = getClickHouseClient('analytics_reader')
+  const [pairsRs, corrRs] = await Promise.all([
+    client.query({ query: sql, query_params: queryParams, format: 'JSONEachRow' }),
+    client.query({ query: corrSql, query_params: queryParams, format: 'JSONEachRow' }),
+  ])
+
+  const rawPairs = await pairsRs.json<CorrelationPairRow>()
+  const rawCorr = await corrRs.json<{ pearson_r: number | null; sample_size: number }>()
+
+  const pearsonR = rawCorr[0]?.pearson_r ?? null
+  const sampleSize = rawCorr[0]?.sample_size ?? 0
+
+  // Handle NaN from ClickHouse (corr returns NaN if variance=0)
+  const safePearsonR = pearsonR !== null && Number.isFinite(pearsonR) ? pearsonR : null
+
+  return {
+    metric_a: params.metricA,
+    metric_b: params.metricB,
+    by: params.by,
+    pearson_r: safePearsonR,
+    sample_size: sampleSize,
+    min_sample_filter: params.minSample,
+    pairs: rawPairs,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: `events 単一テーブル per-${params.by} の ${params.metricA} × ${params.metricB} Pearson 相関。sessions >= ${params.minSample} の dimension 値のみ対象。cross-table (web_vitals 等) の join は今後の拡張。D-07 observed_approx。bihadashop はコンバージョン未計測のため cvr=0。`,
+  }
+}
+
 // ── Verify query (raw events で exact 再計算 → proven_exact) ─────────
 
 export interface VerifyResult {
@@ -2199,16 +2822,65 @@ export async function executeVerifyQuery(params: {
 
   // filter を WHERE 句に展開 (key は whitelist で enum 強制、value は parameter binding)
   // 続 80: UI 概念名 → DB 物理列名 mapping (page_url → url, device → device_type)、persona は unsupported
-  const FILTER_COLUMN = { page_url: 'url', device: 'device_type' } as const
+  // Step 3 拡張: utm_source / visitor_type / conversion_type / referrer_type を追加
+  //   - utm_source: events.utm_source 列 (続 82 Infra 追加済、空文字も許容)
+  //   - visitor_type: 直接 is_first_visit Bool 列ではなく derived expr は bind で使えないため
+  //     visitor_type は events table に列として存在しないが、is_first_visit Bool → 'new'/'returning' derive
+  //     → カラム名ではなく derived expression (if expr) での比較が必要。
+  //     セキュリティ上問題ないので visitor_type キーに対しては is_first_visit を使う特別扱いを実装。
+  //   - conversion_type: events.conversion_type 列
+  //   - referrer_type: events.referrer 列 (空='direct'、同ドメイン='internal'、他='referral') を
+  //     filter value 'direct'/'internal'/'referral' と比較するには CASE/if 式が必要。
+  //     セキュリティ上 filter value を enum で強制し SQL 式を構築する。
+  //
+  // 実装方針:
+  //   - 単純列 map (page_url, device, utm_source, conversion_type): physicalColumn = {colName} = {param}
+  //   - 特別 expr map (visitor_type, referrer_type): filter_expr を直接組み立て (value は param binding)
+  //     visitor_type: if(is_first_visit, 'new', 'returning') = {param}
+  //     referrer_type value allowlist: 'direct', 'internal', 'referral' のみ許可 (LLM が自由な値を渡せない)
+  const FILTER_COLUMN: Record<string, string | null> = {
+    page_url: 'url',
+    device: 'device_type',
+    // Step 3 additions
+    utm_source: 'utm_source',
+    conversion_type: 'conversion_type',
+    // special expr (null = not a simple column comparison)
+    visitor_type: null,
+    referrer_type: null,
+  }
+  // Allowlist for derived-expr filter values (injection 防御)
+  const VISITOR_TYPE_VALUES = new Set(['new', 'returning'])
+  const REFERRER_TYPE_VALUES = new Set(['direct', 'internal', 'referral'])
+
   const filterClauses: string[] = []
   const filterParams: Record<string, string> = {}
   for (const [k, v] of Object.entries(params.filter)) {
     if (!(k in FILTER_COLUMN)) {
       throw new Error(`verify: filter key '${k}' is not allowed`)
     }
-    const physicalColumn = FILTER_COLUMN[k as keyof typeof FILTER_COLUMN]
-    filterClauses.push(`AND ${physicalColumn} = {filter_${k}:String}`)
-    filterParams[`filter_${k}`] = v
+    if (k === 'visitor_type') {
+      if (!VISITOR_TYPE_VALUES.has(v)) {
+        throw new Error(`verify: visitor_type value '${v}' is not allowed (must be 'new' or 'returning')`)
+      }
+      // is_first_visit Bool → 'new' / 'returning' derived expression
+      filterClauses.push(`AND if(is_first_visit, 'new', 'returning') = {filter_visitor_type:String}`)
+      filterParams['filter_visitor_type'] = v
+    } else if (k === 'referrer_type') {
+      if (!REFERRER_TYPE_VALUES.has(v)) {
+        throw new Error(`verify: referrer_type value '${v}' is not allowed (must be 'direct', 'internal', or 'referral')`)
+      }
+      // referrer 列から referrer_type を derive して比較
+      // 'direct' = referrer = ''
+      // 'internal' = referrer LIKE concat('%', domain(url), '%')
+      // 'referral' = otherwise
+      // バインドでは derive 式に if() を使い、{param} と比較
+      filterClauses.push(`AND if(referrer = '', 'direct', if(referrer LIKE concat('%', domain(url), '%'), 'internal', 'referral')) = {filter_referrer_type:String}`)
+      filterParams['filter_referrer_type'] = v
+    } else {
+      const physicalColumn = FILTER_COLUMN[k]
+      filterClauses.push(`AND ${physicalColumn} = {filter_${k}:String}`)
+      filterParams[`filter_${k}`] = v
+    }
   }
 
   // 続 82-ml Phase 2 (2026-05-25): bounce_rate / avg_session_duration を raw exact 再計算で復活。
