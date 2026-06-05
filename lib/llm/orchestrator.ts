@@ -372,7 +372,10 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
 - スクロール深度・ページ深度を知りたい場合は analytics_scroll_depth を使う (parentQueryId 不要)。
 - 読まれた深度・注目密度を知りたい場合は analytics_attention を使う (parentQueryId 不要)。
 - デバイス構成 (mobile/desktop/tablet 比率) を知りたい場合は analytics_device_breakdown を使う (parentQueryId 不要)。
-- analytics_top_pages / analytics_scroll_depth / analytics_attention / analytics_device_breakdown はいずれも dateRange + timezone だけで呼べる standalone tool。
+- analytics_top_pages / analytics_scroll_depth / analytics_attention / analytics_device_breakdown / analytics_metrics / analytics_timeseries はいずれも standalone tool (parentQueryId 不要)。
+- 「X の Y 別」「デバイス別 CVR」「ページ別セッション数」等 "X by Y" 形式の質問には analytics_metrics(metric=X, dimension=Y) を使う。
+- 「CVR の時系列推移」「セッションの週次推移」等のトレンド質問には analytics_timeseries を使う。
+- 数値の合計だけ欲しい場合は analytics_metrics(dimension=none) を使う。
 - 最終回答は markdown-lite (番号付きリスト可)。簡潔に、根拠 (tool 結果) に基づいて述べること。`,
       prompt: input.message,
       tools,
@@ -625,6 +628,10 @@ function freeformResultLabel(result: AnalyticsToolResult): string {
       return `attention bands=${result.result.bands.length}`
     case 'analytics_device_breakdown':
       return `device_breakdown total_sessions=${result.result.total_sessions}`
+    case 'analytics_metrics':
+      return `metrics metric=${result.result.metric} dimension=${result.result.dimension} rows=${result.result.rows.length}`
+    case 'analytics_timeseries':
+      return `timeseries metric=${result.result.metric} grain=${result.result.grain} points=${result.result.points.length}`
   }
 }
 

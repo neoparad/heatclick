@@ -357,13 +357,13 @@ GROUP BY bucket_label
   //   - tenant + site + timestamp range で絞った後の cardinality は十分小さい (典型 < 100k session_id)
   //   - uniqExact は HashSet 実装、誤差ゼロ
   //   - 'raw' source flag を付与し、全 row 'raw' なら evidenceLevel='observed_exact' に格上げ
-  //   - countIf(event_type='page_view') は元から exact (LowCardinality カウント)
+  //   - countIf(event_type='pageview') は元から exact (LowCardinality カウント)
   const rawQuery = `
 SELECT
   formatDateTime(${tierBucketFn}(timestamp, {tz:String}), '%Y-%m-%dT%H:%M:%S') AS bucket_label,
   uniqExact(session_id) AS sessions,
   uniqExactIf(session_id, event_type = 'conversion') AS conversions,
-  countIf(event_type = 'page_view') AS page_views,
+  countIf(event_type = 'pageview') AS page_views,
   uniqExactIf(
     session_id,
     event_type = 'session_end'
@@ -1045,6 +1045,391 @@ SETTINGS max_execution_time = 30
   }
 }
 
+// ── analytics_metrics (汎用 metric × dimension × filter) ─────────────
+
+/**
+ * 汎用メトリクス: metric × dimension × filter × date-range。
+ *
+ * 設計:
+ *   - raw events table を直接集計 (近似 MV は使わない → observed_approx だが single-table)
+ *   - dimension='none' のとき GROUP BY なしで 1 行のみ返す
+ *   - dimension 指定時は GROUP BY dim ORDER BY metric DESC LIMIT
+ *   - is_agent=0 で bot 除外 / tenant_id・site_id は server 固定 / query_params binding
+ *   - Code 386 fix: toDateTime(toDateTime({start:String}, {tz:String})) pattern
+ *   - SETTINGS max_execution_time=30
+ *   - bounce_rate / avg_session_duration は session_duration_sec / page_views_in_session 列依存
+ *   - cvr / revenue / conversions は bihadashop で 0 が正しい (conversion イベント未計測)
+ */
+
+export type MetricsMetric =
+  | 'sessions'
+  | 'pageviews'
+  | 'visitors'
+  | 'new_visitors'
+  | 'returning_visitors'
+  | 'clicks'
+  | 'dead_clicks'
+  | 'rage_clicks'
+  | 'conversions'
+  | 'cvr'
+  | 'revenue'
+  | 'avg_scroll_depth'
+  | 'bounce_rate'
+  | 'avg_session_duration'
+
+export const METRICS_METRICS: MetricsMetric[] = [
+  'sessions',
+  'pageviews',
+  'visitors',
+  'new_visitors',
+  'returning_visitors',
+  'clicks',
+  'dead_clicks',
+  'rage_clicks',
+  'conversions',
+  'cvr',
+  'revenue',
+  'avg_scroll_depth',
+  'bounce_rate',
+  'avg_session_duration',
+]
+
+export type MetricsDimension =
+  | 'none'
+  | 'page_url'
+  | 'device_type'
+  | 'referrer_type'
+  | 'utm_source'
+  | 'utm_medium'
+  | 'utm_campaign'
+  | 'visitor_type'
+  | 'conversion_type'
+  | 'hour'
+  | 'day_of_week'
+  | 'day'
+  | 'month'
+
+export const METRICS_DIMENSIONS: MetricsDimension[] = [
+  'none',
+  'page_url',
+  'device_type',
+  'referrer_type',
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'visitor_type',
+  'conversion_type',
+  'hour',
+  'day_of_week',
+  'day',
+  'month',
+]
+
+export interface MetricsRow {
+  /** dimension 値 (dimension='none' の場合は '__total__') */
+  dimension_value: string
+  value: number
+}
+
+export interface MetricsResult {
+  metric: MetricsMetric
+  dimension: MetricsDimension
+  rows: MetricsRow[]
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+/**
+ * SQL metric 式を返す。
+ *
+ * bounce_rate / avg_session_duration は session_duration_sec / page_views_in_session 列が
+ * events table に必要 (Infra 続 82 Step 1 配備済)。
+ *
+ * revenue は conversion_value 列が必要 (bihadashop では 0 が正しい)。
+ * visitor_id は events table に必要 (Infra 続 82 続 __ugk_vid cookie + visitor_id 配備済)。
+ * is_first_visit Bool 列も必要 (同上)。
+ */
+function buildMetricExpr(metric: MetricsMetric): string {
+  switch (metric) {
+    case 'sessions':
+      return 'toFloat64(uniqExact(session_id))'
+    case 'pageviews':
+      return "toFloat64(countIf(event_type = 'pageview'))"
+    case 'visitors':
+      return 'toFloat64(uniqExact(visitor_id))'
+    case 'new_visitors':
+      return 'toFloat64(uniqExactIf(visitor_id, is_first_visit = 1))'
+    case 'returning_visitors':
+      return '(toFloat64(uniqExact(visitor_id)) - toFloat64(uniqExactIf(visitor_id, is_first_visit = 1)))'
+    case 'clicks':
+      return "toFloat64(countIf(event_type = 'click'))"
+    case 'dead_clicks':
+      return "toFloat64(countIf(event_type = 'dead_click'))"
+    case 'rage_clicks':
+      return "toFloat64(countIf(event_type = 'rage_click'))"
+    case 'conversions':
+      return "toFloat64(uniqExactIf(session_id, event_type = 'conversion'))"
+    case 'cvr':
+      return "if(uniqExact(session_id) > 0, toFloat64(uniqExactIf(session_id, event_type = 'conversion')) / toFloat64(uniqExact(session_id)), 0)"
+    case 'revenue':
+      return "toFloat64(sumIf(conversion_value, event_type = 'conversion'))"
+    case 'avg_scroll_depth':
+      return "avgIf(scroll_percentage, event_type = 'scroll')"
+    case 'bounce_rate':
+      return (
+        'if(uniqExact(session_id) > 0,' +
+        " toFloat64(uniqExactIf(session_id, event_type = 'session_end' AND page_views_in_session <= 1 AND session_duration_sec < 10))" +
+        ' / toFloat64(uniqExact(session_id)), 0)'
+      )
+    case 'avg_session_duration':
+      return "toFloat64(avgIf(session_duration_sec, event_type = 'session_end'))"
+  }
+}
+
+/**
+ * SQL dimension 式を返す。
+ *
+ * 'none' の場合は null を返す (GROUP BY 不要)。
+ * time 系 (hour/day_of_week/day/month) は Asia/Tokyo タイムゾーン関数を使う。
+ * utm_source/utm_medium/utm_campaign は events table の対応列から直接取得。
+ * referrer_type / visitor_type / conversion_type は derive 式。
+ */
+function buildDimensionExpr(dimension: MetricsDimension): string | null {
+  switch (dimension) {
+    case 'none':
+      return null
+    case 'page_url':
+      return 'url'
+    case 'device_type':
+      return 'device_type'
+    case 'referrer_type':
+      // referrer が空なら 'direct'、同ドメインなら 'internal'、それ以外は 'referral'
+      return "if(referrer = '', 'direct', if(referrer LIKE concat('%', domain(url), '%'), 'internal', 'referral'))"
+    case 'utm_source':
+      return "if(utm_source = '', '__none__', utm_source)"
+    case 'utm_medium':
+      return "if(utm_medium = '', '__none__', utm_medium)"
+    case 'utm_campaign':
+      return "if(utm_campaign = '', '__none__', utm_campaign)"
+    case 'visitor_type':
+      return "if(is_first_visit = 1, 'new', 'returning')"
+    case 'conversion_type':
+      return "if(event_type = 'conversion', if(conversion_type = '', 'unknown', conversion_type), '__non_conversion__')"
+    case 'hour':
+      return 'toHour(toDateTime(timestamp, {tz:String}))'
+    case 'day_of_week':
+      // ClickHouse toDayOfWeek: 1=Monday...7=Sunday
+      return 'toDayOfWeek(toDateTime(timestamp, {tz:String}))'
+    case 'day':
+      return "toString(toDate(toDateTime(timestamp, {tz:String})))"
+    case 'month':
+      return "toString(toStartOfMonth(toDateTime(timestamp, {tz:String})))"
+  }
+}
+
+export async function executeMetricsQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  metric: MetricsMetric
+  dimension: MetricsDimension
+  pageUrl?: string
+  deviceType?: string
+  limit: number
+}): Promise<MetricsResult> {
+  const metricExpr = buildMetricExpr(params.metric)
+  const dimExpr = buildDimensionExpr(params.dimension)
+
+  const queryParams: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+  }
+
+  // Optional filters
+  const filterClauses: string[] = []
+  if (params.pageUrl) {
+    filterClauses.push('AND url = {filter_page_url:String}')
+    queryParams.filter_page_url = params.pageUrl
+  }
+  if (params.deviceType) {
+    filterClauses.push('AND device_type = {filter_device_type:String}')
+    queryParams.filter_device_type = params.deviceType
+  }
+
+  let sql: string
+  if (dimExpr === null) {
+    // dimension='none': single total row
+    sql = `
+SELECT
+  '__total__' AS dimension_value,
+  ${metricExpr} AS value
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND is_agent = 0
+  AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+  ${filterClauses.join(' ')}
+SETTINGS max_execution_time = 30
+`.trim()
+  } else {
+    // dimension specified: GROUP BY dim ORDER BY metric DESC LIMIT
+    sql = `
+SELECT
+  toString(${dimExpr}) AS dimension_value,
+  ${metricExpr} AS value
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND is_agent = 0
+  AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+  ${filterClauses.join(' ')}
+GROUP BY dimension_value
+ORDER BY value DESC
+LIMIT {limit:UInt32}
+SETTINGS max_execution_time = 30
+`.trim()
+    queryParams.limit = String(params.limit)
+  }
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({
+    query: sql,
+    query_params: queryParams,
+    format: 'JSONEachRow',
+  })
+
+  const rows = await rs.json<MetricsRow>()
+
+  return {
+    metric: params.metric,
+    dimension: params.dimension,
+    rows,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: '直接 events table を uniqExact / countIf で集計しています。D-07 observed_approx。bihadashop では conversion イベント未計測のため cvr/revenue=0 は正常です。',
+  }
+}
+
+// ── analytics_timeseries (1 metric の時系列) ─────────────────────────
+
+/**
+ * 指定 metric の時系列 (day または hour grain)。
+ *
+ * CVR 時系列推移、セッション推移等に使う。
+ * 全体 (site 全体) のみ、page_url 等のフィルタは不可 (→ analytics_metrics + dimension=day/hour で代替)。
+ * grain=day → toStartOfDay(timestamp, tz) / grain=hour → toStartOfHour(timestamp, tz)
+ *
+ * Code 386 fix: timestamp 比較は toDateTime(toDateTime(...)) パターン。
+ */
+
+export type TimeseriesMetric = 'sessions' | 'pageviews' | 'conversions' | 'cvr' | 'clicks'
+export type TimeseriesGrain = 'day' | 'hour'
+
+export const TIMESERIES_METRICS: TimeseriesMetric[] = [
+  'sessions',
+  'pageviews',
+  'conversions',
+  'cvr',
+  'clicks',
+]
+
+export interface TimeseriesPoint {
+  bucket: string
+  value: number
+}
+
+export interface TimeseriesResult {
+  metric: TimeseriesMetric
+  grain: TimeseriesGrain
+  points: TimeseriesPoint[]
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+function buildTimeseriesMetricExpr(metric: TimeseriesMetric): string {
+  switch (metric) {
+    case 'sessions':
+      return 'toFloat64(uniqExact(session_id))'
+    case 'pageviews':
+      return "toFloat64(countIf(event_type = 'pageview'))"
+    case 'conversions':
+      return "toFloat64(uniqExactIf(session_id, event_type = 'conversion'))"
+    case 'cvr':
+      return "if(uniqExact(session_id) > 0, toFloat64(uniqExactIf(session_id, event_type = 'conversion')) / toFloat64(uniqExact(session_id)), 0)"
+    case 'clicks':
+      return "toFloat64(countIf(event_type = 'click'))"
+  }
+}
+
+export async function executeTimeseriesQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  metric: TimeseriesMetric
+  grain: TimeseriesGrain
+}): Promise<TimeseriesResult> {
+  const metricExpr = buildTimeseriesMetricExpr(params.metric)
+  const bucketFn = params.grain === 'day'
+    ? 'toStartOfDay(timestamp, {tz:String})'
+    : 'toStartOfHour(timestamp, {tz:String})'
+
+  const sql = `
+SELECT
+  toString(${bucketFn}) AS bucket,
+  ${metricExpr} AS value
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND is_agent = 0
+  AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+GROUP BY bucket
+ORDER BY bucket
+SETTINGS max_execution_time = 30
+`.trim()
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({
+    query: sql,
+    query_params: {
+      tenant_id: params.tenantId,
+      site_id: params.siteId,
+      start: params.dateRange.start,
+      end: params.dateRange.end,
+      tz: params.timezone,
+    },
+    format: 'JSONEachRow',
+  })
+
+  const points = await rs.json<TimeseriesPoint>()
+
+  return {
+    metric: params.metric,
+    grain: params.grain,
+    points,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: `${params.metric} の時系列 (grain=${params.grain}) を直接 events table から集計。D-07 observed_approx。`,
+  }
+}
+
 // ── Verify query (raw events で exact 再計算 → proven_exact) ─────────
 
 export interface VerifyResult {
@@ -1099,7 +1484,7 @@ export async function executeVerifyQuery(params: {
       case 'sessions':
         return 'toFloat64(uniqExact(session_id))'
       case 'page_views':
-        return 'toFloat64(countIf(event_type = \'page_view\'))'
+        return 'toFloat64(countIf(event_type = \'pageview\'))'
       case 'cvr':
         return 'if(uniqExact(session_id) > 0, uniqExactIf(session_id, event_type = \'conversion\') / uniqExact(session_id), 0)'
       case 'bounce_rate':

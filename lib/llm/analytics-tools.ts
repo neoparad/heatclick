@@ -27,6 +27,9 @@ import { canAccessSite, type TenantContext } from '@/lib/tenant'
 import { ToolIDORError, ToolValidationError } from '@/lib/llm/tools'
 import {
   ANALYTICS_METRICS,
+  METRICS_METRICS,
+  METRICS_DIMENSIONS,
+  TIMESERIES_METRICS,
   executeAnalyticsQuery,
   executeContributorsQuery,
   executeDrilldownQuery,
@@ -35,6 +38,8 @@ import {
   executeScrollDepthQuery,
   executeAttentionQuery,
   executeDeviceBreakdownQuery,
+  executeMetricsQuery,
+  executeTimeseriesQuery,
   getParentQuery,
   MAX_PERIOD_DAYS_ANALYTICS,
   registerParentQuery,
@@ -46,6 +51,8 @@ import {
   type ScrollDepthResult,
   type AttentionResult,
   type DeviceBreakdownResult,
+  type MetricsResult,
+  type TimeseriesResult,
 } from '@/lib/llm/hybrid-query'
 
 // ── Tool 1: analytics.overview ──────────────────────────────────────
@@ -254,6 +261,73 @@ export interface DeviceBreakdownToolResult {
   note: string
 }
 
+// ── Tool 9: analytics_metrics ───────────────────────────────────────
+
+/**
+ * 汎用メトリクス: metric × dimension × filter × date-range。
+ * siteId/tenantId は server 固定 (続 64 §2c 継承)。
+ * Standalone — parentQueryId 不要。
+ *
+ * 使いどころ:
+ *   - "X by Y" (例: "ページ別 CVR") → analytics_metrics(metric=cvr, dimension=page_url)
+ *   - 単一合計 → dimension=none
+ *   - セグメント比較 → dimension=device_type / utm_source など
+ */
+export const metricsInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+  metric: z.enum([...METRICS_METRICS] as [string, ...string[]]).transform((v) => v as (typeof METRICS_METRICS)[number]),
+  dimension: z.enum([...METRICS_DIMENSIONS] as [string, ...string[]]).default('none').transform((v) => v as (typeof METRICS_DIMENSIONS)[number]),
+  /** ページ URL フィルタ (省略時はサイト全体) */
+  page_url: z.string().min(1).optional(),
+  /** デバイスタイプフィルタ (例: 'mobile', 'desktop') */
+  device_type: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(200).default(20),
+})
+export type MetricsInput = z.infer<typeof metricsInputSchema>
+
+export interface MetricsToolResult {
+  metric: MetricsResult['metric']
+  dimension: MetricsResult['dimension']
+  rows: MetricsResult['rows']
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: MetricsResult['evidenceLevel']
+  note: string
+}
+
+// ── Tool 10: analytics_timeseries ────────────────────────────────────
+
+/**
+ * 1 metric の時系列。CVR 時系列推移 / セッション推移など「X の時系列」質問に使う。
+ * Standalone — parentQueryId 不要。siteId は server 固定。
+ */
+export const timeseriesInputSchema = z.object({
+  dateRange: z.object({
+    start: z.string().min(1),
+    end: z.string().min(1),
+  }),
+  timezone: z.string().default('Asia/Tokyo'),
+  metric: z.enum([...TIMESERIES_METRICS] as [string, ...string[]]).transform((v) => v as (typeof TIMESERIES_METRICS)[number]),
+  grain: z.enum(['day', 'hour']).default('day'),
+})
+export type TimeseriesInput = z.infer<typeof timeseriesInputSchema>
+
+export interface TimeseriesToolResult {
+  metric: TimeseriesResult['metric']
+  grain: TimeseriesResult['grain']
+  points: TimeseriesResult['points']
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: TimeseriesResult['evidenceLevel']
+  note: string
+}
+
 // ── Tool registry (declarative + executor) ──────────────────────────
 
 export interface AnalyticsToolExecuteContext {
@@ -271,6 +345,8 @@ export type AnalyticsToolName =
   | 'analytics_scroll_depth'
   | 'analytics_attention'
   | 'analytics_device_breakdown'
+  | 'analytics_metrics'
+  | 'analytics_timeseries'
 
 export type AnalyticsToolResult =
   | { tool: 'analytics.overview'; result: OverviewResult }
@@ -281,6 +357,8 @@ export type AnalyticsToolResult =
   | { tool: 'analytics_scroll_depth'; result: ScrollDepthToolResult }
   | { tool: 'analytics_attention'; result: AttentionToolResult }
   | { tool: 'analytics_device_breakdown'; result: DeviceBreakdownToolResult }
+  | { tool: 'analytics_metrics'; result: MetricsToolResult }
+  | { tool: 'analytics_timeseries'; result: TimeseriesToolResult }
 
 /**
  * 公開 tool schema list (AI SDK v6 `tool()` 互換シェイプ)。
@@ -345,6 +423,25 @@ export const ANALYTICS_TOOL_SCHEMAS = [
       'Device type split (mobile/desktop/tablet/unknown) by sessions and pageviews with share_pct per device. ' +
       'Standalone — no parentQueryId required. siteId is server-controlled.',
     inputSchema: deviceBreakdownInputSchema,
+  },
+  {
+    name: 'analytics_metrics' as const,
+    description:
+      'Generic metric × dimension workhorse. Use this for "X by Y" questions (e.g. CVR by page, sessions by device). ' +
+      'Supports metrics: sessions, pageviews, visitors, new_visitors, returning_visitors, clicks, dead_clicks, rage_clicks, conversions, cvr, revenue, avg_scroll_depth, bounce_rate, avg_session_duration. ' +
+      'Dimensions: none (single total), page_url, device_type, referrer_type, utm_source, utm_medium, utm_campaign, visitor_type, conversion_type, hour, day_of_week, day, month. ' +
+      'Optional filters: page_url (filter to one page), device_type. ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: metricsInputSchema,
+  },
+  {
+    name: 'analytics_timeseries' as const,
+    description:
+      'Time series for one metric over the whole site. Use for trend questions like "CVRの時系列推移", "セッション推移", "コンバージョン推移". ' +
+      'Metrics: sessions, pageviews, conversions, cvr, clicks. Grain: day (default) or hour. ' +
+      'Returns ordered time-bucketed points in Asia/Tokyo timezone. ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: timeseriesInputSchema,
   },
 ] as const
 
@@ -596,6 +693,65 @@ export async function executeAnalyticsTool(
         result: {
           rows: queryResult.rows,
           total_sessions: queryResult.total_sessions,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
+        },
+      }
+    }
+
+    case 'analytics_metrics': {
+      const input = parseToolInput(metricsInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryResult = await executeMetricsQuery({
+        tenantId: execCtx.ctx.tenant_id,   // server-controlled
+        siteId: execCtx.requestSiteId,      // server-controlled
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        metric: input.metric,
+        dimension: input.dimension,
+        pageUrl: input.page_url,
+        deviceType: input.device_type,
+        limit: input.limit,
+      })
+
+      return {
+        tool: 'analytics_metrics',
+        result: {
+          metric: queryResult.metric,
+          dimension: queryResult.dimension,
+          rows: queryResult.rows,
+          periodStart: queryResult.periodStart,
+          periodEnd: queryResult.periodEnd,
+          timezone: queryResult.timezone,
+          evidenceLevel: queryResult.evidenceLevel,
+          note: queryResult.note,
+        },
+      }
+    }
+
+    case 'analytics_timeseries': {
+      const input = parseToolInput(timeseriesInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+
+      const queryResult = await executeTimeseriesQuery({
+        tenantId: execCtx.ctx.tenant_id,   // server-controlled
+        siteId: execCtx.requestSiteId,      // server-controlled
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        metric: input.metric,
+        grain: input.grain,
+      })
+
+      return {
+        tool: 'analytics_timeseries',
+        result: {
+          metric: queryResult.metric,
+          grain: queryResult.grain,
+          points: queryResult.points,
           periodStart: queryResult.periodStart,
           periodEnd: queryResult.periodEnd,
           timezone: queryResult.timezone,
