@@ -4374,3 +4374,271 @@ SETTINGS max_execution_time = 30`.trim()
     note: '要素の露出回数・到達セッション・可視滞在の中央値。img は image_visibility テーブル由来 (element_visibility_v2 に img タグは無いため合成)。max_visible_ratio は未計装のため割合は出さない。',
   }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// UGOKI Crawl × UGOKI MAP 融合 v1 (2026-06-06):
+//   クロール由来テーブル(page_issues/page_content_sections/section_behavior_summary/crawl_runs)を
+//   行動と突合して「行動で裏取りした直す順」と「区間摩擦の説明」を返す。
+//   ※ これらのテーブルは Infra が DDL 適用 + ETL 投入後に有効。未投入時は available:false で graceful。
+// ════════════════════════════════════════════════════════════════════
+
+/** クロール融合テーブル未投入 (UNKNOWN_TABLE 等) を graceful に扱う。 */
+function isCrawlDataUnavailable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return /UNKNOWN_TABLE|doesn't exist|does not exist|Table .* doesn't/i.test(msg)
+}
+
+// ── rank_behavior_validated_fixes ────────────────────────────────────
+
+export interface BehaviorValidatedFix {
+  page_url: string
+  issue_category: string
+  issue_type: string
+  severity: string
+  section_heading: string
+  reached_sessions: number
+  rage_clicks: number
+  dead_clicks: number
+  exits: number
+  friction_score: number
+  match_confidence: number
+  behavioral_cost: number
+  recommendation: string
+}
+export interface RankBehaviorValidatedFixesResult {
+  available: boolean
+  rows: BehaviorValidatedFix[]
+  crawl_id: string | null
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeRankBehaviorValidatedFixesQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  pageUrl?: string
+  minConfidence: number
+  limit: number
+}): Promise<RankBehaviorValidatedFixesResult> {
+  const client = getClickHouseClient('analytics_reader')
+  const qp: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+    min_conf: String(params.minConfidence),
+    limit: String(params.limit),
+  }
+  const urlFilter = params.pageUrl ? 'AND i.page_url = {page_url:String}' : ''
+  if (params.pageUrl) qp.page_url = params.pageUrl
+
+  // 最新 completed crawl の issues を、section の行動集計(同 selector_hash)と突合し、
+  // behavioral_cost = severity重み × (1+friction) × log(1+到達) でランク。
+  const sql = `
+SELECT
+  i.page_url AS page_url,
+  i.issue_category AS issue_category,
+  i.issue_type AS issue_type,
+  i.severity AS severity,
+  s.section_heading AS section_heading,
+  toUInt32(ifNull(b.reached_sessions, 0)) AS reached_sessions,
+  toUInt32(ifNull(b.rage_clicks, 0)) AS rage_clicks,
+  toUInt32(ifNull(b.dead_clicks, 0)) AS dead_clicks,
+  toUInt32(ifNull(b.exits, 0)) AS exits,
+  round(ifNull(b.friction_score, 0), 3) AS friction_score,
+  round(ifNull(b.match_confidence, 0), 2) AS match_confidence,
+  round(multiIf(i.severity = 'critical', 4, i.severity = 'high', 3, i.severity = 'medium', 2, 1)
+    * (1 + ifNull(b.friction_score, 0))
+    * log(1 + ifNull(b.reached_sessions, 0)), 3) AS behavioral_cost,
+  i.recommendation AS recommendation
+FROM clickinsight.page_issues i
+LEFT JOIN clickinsight.page_content_sections s
+  ON s.tenant_id = i.tenant_id AND s.site_id = i.site_id AND s.page_url = i.page_url
+  AND s.crawl_id = i.crawl_id AND s.section_selector_hash = i.section_selector_hash
+LEFT JOIN (
+  SELECT section_selector_hash,
+    sum(reached_sessions) AS reached_sessions, sum(rage_clicks) AS rage_clicks,
+    sum(dead_clicks) AS dead_clicks, sum(exits) AS exits,
+    avg(friction_score) AS friction_score, avg(match_confidence) AS match_confidence
+  FROM clickinsight.section_behavior_summary FINAL
+  WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
+    AND window_start >= toDate(toDateTime({start:String}, {tz:String}))
+    AND window_start < toDate(toDateTime({end:String}, {tz:String}))
+  GROUP BY section_selector_hash
+) b ON b.section_selector_hash = i.section_selector_hash
+WHERE i.tenant_id = {tenant_id:String} AND i.site_id = {site_id:String}
+  AND i.crawl_id IN (
+    SELECT argMax(crawl_id, crawled_at) FROM clickinsight.crawl_runs
+    WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND status = 'completed'
+  )
+  AND ifNull(b.match_confidence, 0) >= toFloat64({min_conf:String})
+  ${urlFilter}
+ORDER BY behavioral_cost DESC
+LIMIT {limit:UInt32}
+SETTINGS max_execution_time = 30`.trim()
+
+  try {
+    const rs = await client.query({ query: sql, query_params: qp, format: 'JSONEachRow' })
+    const rows = await rs.json<BehaviorValidatedFix>()
+    return {
+      available: true,
+      rows: rows.map((r) => ({ ...r, behavioral_cost: Number(r.behavioral_cost) })),
+      crawl_id: rows.length > 0 ? null : null,
+      periodStart: params.dateRange.start,
+      periodEnd: params.dateRange.end,
+      timezone: params.timezone,
+      evidenceLevel: 'observed_approx',
+      note: 'クロール由来の問題(SEO/a11y/perf/content)を、同区間の実ユーザー行動(到達/rage/dead/離脱/摩擦)で裏取りし behavioral_cost 順に提示。match_confidence>=閾値の区間のみ。相関であり因果ではない。',
+    }
+  } catch (err: unknown) {
+    if (isCrawlDataUnavailable(err)) {
+      return {
+        available: false,
+        rows: [],
+        crawl_id: null,
+        periodStart: params.dateRange.start,
+        periodEnd: params.dateRange.end,
+        timezone: params.timezone,
+        evidenceLevel: 'planned',
+        note: 'このサイトはまだクロール(UGOKI Crawl)が取り込まれていません。クロール定期化+ETL投入後に「行動で裏取りした直す順」を返せます。',
+      }
+    }
+    throw err
+  }
+}
+
+// ── explain_section_friction ─────────────────────────────────────────
+
+export interface SectionFrictionExplanation {
+  available: boolean
+  page_url: string
+  section_selector_hash: string | null
+  section_heading: string
+  has_cta: number
+  has_price: number
+  visible_text_snippet: string
+  behavior: {
+    reached_sessions: number
+    clicks: number
+    dead_clicks: number
+    rage_clicks: number
+    avg_dwell_ms: number
+    exits: number
+    conversions: number
+    friction_score: number
+    match_confidence: number
+  } | null
+  issues: Array<{ issue_category: string; issue_type: string; severity: string; recommendation: string }>
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeExplainSectionFrictionQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  pageUrl: string
+  sectionSelectorHash: string
+}): Promise<SectionFrictionExplanation> {
+  const client = getClickHouseClient('analytics_reader')
+  const qp = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+    page_url: params.pageUrl,
+    sh: params.sectionSelectorHash,
+  }
+  const base: Omit<SectionFrictionExplanation, 'available' | 'section_heading' | 'has_cta' | 'has_price' | 'visible_text_snippet' | 'behavior' | 'issues'> = {
+    page_url: params.pageUrl,
+    section_selector_hash: params.sectionSelectorHash,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: '1区間の 内容(クロール) × 行動(集計) × 問題(issues) を統合。',
+  }
+  try {
+    const j = async <T>(sql: string): Promise<T[]> => {
+      const rs = await client.query({ query: sql, query_params: qp, format: 'JSONEachRow' })
+      return rs.json<T>()
+    }
+    const content = (await j<{ section_heading: string; has_cta: number; has_price: number; snip: string }>(`
+SELECT any(section_heading) AS section_heading, max(has_cta) AS has_cta, max(has_price) AS has_price,
+  substring(any(visible_text), 1, 300) AS snip
+FROM clickinsight.page_content_sections
+WHERE tenant_id={tenant_id:String} AND site_id={site_id:String} AND page_url={page_url:String}
+  AND section_selector_hash={sh:String}
+SETTINGS max_execution_time=30`.trim()))[0]
+
+    const beh = (await j<Record<string, number>>(`
+SELECT sum(reached_sessions) reached_sessions, sum(clicks) clicks, sum(dead_clicks) dead_clicks,
+  sum(rage_clicks) rage_clicks, round(avg(avg_dwell_ms),0) avg_dwell_ms, sum(exits) exits,
+  sum(conversions) conversions, round(avg(friction_score),3) friction_score, round(avg(match_confidence),2) match_confidence
+FROM clickinsight.section_behavior_summary FINAL
+WHERE tenant_id={tenant_id:String} AND site_id={site_id:String} AND page_url={page_url:String}
+  AND section_selector_hash={sh:String}
+  AND window_start >= toDate(toDateTime({start:String},{tz:String}))
+  AND window_start < toDate(toDateTime({end:String},{tz:String}))
+SETTINGS max_execution_time=30`.trim()))[0]
+
+    const issues = await j<{ issue_category: string; issue_type: string; severity: string; recommendation: string }>(`
+SELECT issue_category, issue_type, severity, any(recommendation) AS recommendation
+FROM clickinsight.page_issues
+WHERE tenant_id={tenant_id:String} AND site_id={site_id:String} AND page_url={page_url:String}
+  AND section_selector_hash={sh:String}
+GROUP BY issue_category, issue_type, severity
+ORDER BY severity LIMIT 20
+SETTINGS max_execution_time=30`.trim())
+
+    return {
+      available: true,
+      ...base,
+      section_heading: content?.section_heading ?? '',
+      has_cta: Number(content?.has_cta ?? 0),
+      has_price: Number(content?.has_price ?? 0),
+      visible_text_snippet: content?.snip ?? '',
+      behavior: beh
+        ? {
+            reached_sessions: Number(beh.reached_sessions ?? 0),
+            clicks: Number(beh.clicks ?? 0),
+            dead_clicks: Number(beh.dead_clicks ?? 0),
+            rage_clicks: Number(beh.rage_clicks ?? 0),
+            avg_dwell_ms: Number(beh.avg_dwell_ms ?? 0),
+            exits: Number(beh.exits ?? 0),
+            conversions: Number(beh.conversions ?? 0),
+            friction_score: Number(beh.friction_score ?? 0),
+            match_confidence: Number(beh.match_confidence ?? 0),
+          }
+        : null,
+      issues,
+    }
+  } catch (err: unknown) {
+    if (isCrawlDataUnavailable(err)) {
+      return {
+        available: false,
+        ...base,
+        section_heading: '',
+        has_cta: 0,
+        has_price: 0,
+        visible_text_snippet: '',
+        behavior: null,
+        issues: [],
+        evidenceLevel: 'planned',
+        note: 'このサイトはまだクロールが取り込まれていません (区間説明はクロール投入後)。',
+      }
+    }
+    throw err
+  }
+}

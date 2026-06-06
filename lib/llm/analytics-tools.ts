@@ -61,6 +61,8 @@ import {
   executeAnomalyQuery,
   executeActionCohortQuery,
   executeElementBreakdownQuery,
+  executeRankBehaviorValidatedFixesQuery,
+  executeExplainSectionFrictionQuery,
   CROSSTAB_DIMENSIONS,
   SEGMENT_COMPARE_METRICS,
   getParentQuery,
@@ -95,6 +97,8 @@ import {
   type AnomalyResult,
   type ActionCohortResult,
   type ElementBreakdownResult,
+  type RankBehaviorValidatedFixesResult,
+  type SectionFrictionExplanation,
   type FunnelStep,
 } from '@/lib/llm/hybrid-query'
 import {
@@ -721,6 +725,23 @@ export const elementBreakdownInputSchema = z.object({
 })
 export type ElementBreakdownInput = z.infer<typeof elementBreakdownInputSchema>
 
+// ── UGOKI Crawl 融合ツール (行動×コンテンツ) ─────────────────────────
+
+export const rankBehaviorValidatedFixesInputSchema = z.object({
+  ...dateRangeShape,
+  page_url: z.string().min(1).optional(),
+  minConfidence: z.number().min(0).max(1).default(0.3),
+  limit: z.number().int().min(5).max(50).default(15),
+})
+export type RankBehaviorValidatedFixesInput = z.infer<typeof rankBehaviorValidatedFixesInputSchema>
+
+export const explainSectionFrictionInputSchema = z.object({
+  ...dateRangeShape,
+  page_url: z.string().min(1),
+  section_selector_hash: z.string().min(1),
+})
+export type ExplainSectionFrictionInput = z.infer<typeof explainSectionFrictionInputSchema>
+
 // ── Deep Research 会話ツール (propose=読取 / enqueue=書込) ────────────
 
 export const deepResearchProposeInputSchema = z.object({ ...dateRangeShape })
@@ -779,6 +800,8 @@ export type AnalyticsToolName =
   | 'analytics_anomaly'
   | 'analytics_action_cohort'
   | 'analytics_element_breakdown'
+  | 'rank_behavior_validated_fixes'
+  | 'explain_section_friction'
   | 'deep_research_propose'
   | 'deep_research_enqueue'
 
@@ -812,6 +835,8 @@ export type AnalyticsToolResult =
   | { tool: 'analytics_anomaly'; result: AnomalyResult }
   | { tool: 'analytics_action_cohort'; result: ActionCohortResult }
   | { tool: 'analytics_element_breakdown'; result: ElementBreakdownResult }
+  | { tool: 'rank_behavior_validated_fixes'; result: RankBehaviorValidatedFixesResult }
+  | { tool: 'explain_section_friction'; result: SectionFrictionExplanation }
   | { tool: 'deep_research_propose'; result: DeepResearchOverview }
   | { tool: 'deep_research_enqueue'; result: DeepResearchEnqueueResult }
 
@@ -1079,6 +1104,23 @@ export const ANALYTICS_TOOL_SCHEMAS = [
       'Use for "急に増えた/減った日はいつか", "異常な日", "変化点", "いつ何が急変したか", "スパイク/急落の検出". ' +
       'Values are observed; the anomaly flag is a statistical inference. Standalone — no parentQueryId. siteId server-controlled.',
     inputSchema: anomalyInputSchema,
+  },
+  {
+    name: 'rank_behavior_validated_fixes' as const,
+    description:
+      'Behavior-Validated Fix Prioritization: ranks crawler-found page problems (SEO/a11y/perf/content) by REAL user pain. ' +
+      'Joins UGOKI Crawl issues × section content × measured behavior (reached sessions, rage/dead clicks, exits, friction) and orders by behavioral_cost (severity × friction × reach). ' +
+      'Answers "このページで(行動的に)直すべき所は?", "実ユーザーが苦しんでいる問題の優先順位". Optional page_url. ' +
+      'Returns available=false with a clear note if the site has no crawl ingested yet. Correlation not causation. Standalone — siteId server-controlled.',
+    inputSchema: rankBehaviorValidatedFixesInputSchema,
+  },
+  {
+    name: 'explain_section_friction' as const,
+    description:
+      'Explain ONE page section: its crawled content (heading, has_cta/price, text snippet) × measured behavior (sessions, rage/dead, dwell, exits, friction) × crawler issues. ' +
+      'Use after rank_behavior_validated_fixes to deep-dive a section (needs page_url + section_selector_hash). ' +
+      'available=false if no crawl ingested. Standalone — siteId server-controlled.',
+    inputSchema: explainSectionFrictionInputSchema,
   },
   {
     name: 'analytics_action_cohort' as const,
@@ -1817,6 +1859,35 @@ export async function executeAnalyticsTool(
         includeImages: input.include_images,
       })
       return { tool: 'analytics_element_breakdown', result }
+    }
+
+    case 'rank_behavior_validated_fixes': {
+      const input = parseToolInput(rankBehaviorValidatedFixesInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeRankBehaviorValidatedFixesQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        pageUrl: input.page_url,
+        minConfidence: input.minConfidence,
+        limit: input.limit,
+      })
+      return { tool: 'rank_behavior_validated_fixes', result }
+    }
+
+    case 'explain_section_friction': {
+      const input = parseToolInput(explainSectionFrictionInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeExplainSectionFrictionQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        pageUrl: input.page_url,
+        sectionSelectorHash: input.section_selector_hash,
+      })
+      return { tool: 'explain_section_friction', result }
     }
 
     case 'deep_research_propose': {

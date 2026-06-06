@@ -403,6 +403,9 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
 - 「〜した人(だけ)の指標」「Amazonクリックした人の滞在時間」「フォーム送信した人の回遊」「クリックした人としない人の違い」等の行動コホート絞り込みには analytics_action_cohort を使う (event_type + href_contains/selector_contains/url でコホート定義、cohort vs rest で滞在秒/PV/スクロールを比較、parentQueryId 不要)。アフィリエイトは href_contains='amzn' 等。
 - 「画像と表どちらがよく見られているか」「要素タイプ別の閲覧/滞在」「どの要素が一番見られている」には analytics_element_breakdown を使う (group_by=element_tag で img/table/h2... を比較、parentQueryId 不要)。img は image_visibility 由来。
 - analytics_action_cohort / analytics_element_breakdown も standalone tool (parentQueryId 不要)。
+- 「このページで(行動的に)直すべき所は?」「実ユーザーが苦しんでいる問題の優先順位」には rank_behavior_validated_fixes を使う (クロール問題×行動で behavioral_cost 順、parentQueryId 不要)。available=false なら「このサイトはまだクロール未取込」と正直に伝える。
+- ある区間を深掘りする時は explain_section_friction (page_url + section_selector_hash) を使う。
+- rank_behavior_validated_fixes / explain_section_friction も standalone tool。クロール(UGOKI Crawl)未取込サイトでは available=false で返るので、その旨を述べ断定しないこと。
 - 「このサイトの全体像を知りたい」「色々教えて」等の漠然とした依頼では、まず analytics_data_readiness で在庫を見て、点灯している領域から代表ツールを2〜3個呼んで統合すること。
 - 「深く調べて」「時間をかけて分析して」「何を深掘りできる?」や過去の Deep Research 結果確認では deep_research_propose を呼ぶ (読取専用)。available=true のプランをユーザーに提示し、どれを実行するか確認すること。recent_jobs で進行状況、latest_tickets で直近完了レポートを提示できる。
 - deep_research_enqueue は副作用(ジョブ作成)。ユーザーが実行するレポートを明示的に選んでから のみ呼ぶこと。実行後は「バックグラウンドで数分かかる、後で deep_research_propose で結果を見られる」と伝える。即時にチケットは返らない。
@@ -701,6 +704,10 @@ function freeformResultLabel(result: AnalyticsToolResult): string {
       return `action_cohort ${result.result.action.event_type}${result.result.action.href_contains ? `(${result.result.action.href_contains})` : ''} segs=${result.result.segments.length}`
     case 'analytics_element_breakdown':
       return `element_breakdown by=${result.result.group_by} rows=${result.result.rows.length}`
+    case 'rank_behavior_validated_fixes':
+      return `rank_fixes available=${result.result.available} rows=${result.result.rows.length}`
+    case 'explain_section_friction':
+      return `explain_section available=${result.result.available} issues=${result.result.issues.length}`
     case 'deep_research_propose':
       return `dr_propose plans=${result.result.plans.filter((p) => p.available).length}/${result.result.plans.length} jobs=${result.result.recent_jobs.length} tickets=${result.result.latest_tickets.length}`
     case 'deep_research_enqueue':
