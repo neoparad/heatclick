@@ -1170,12 +1170,14 @@ function buildMetricExpr(metric: MetricsMetric): string {
       return "toFloat64(countIf(event_type = 'dead_click'))"
     case 'rage_clicks':
       return "toFloat64(countIf(event_type = 'rage_click'))"
+    // 2026-06-06 修正: event_type='conversion' は本番に存在せず常に0だった。
+    //   コンバージョンは conversion_type 列 (非NULL/非空) で記録されるため、そちらで session を数える。
     case 'conversions':
-      return "toFloat64(uniqExactIf(session_id, event_type = 'conversion'))"
+      return "toFloat64(uniqExactIf(session_id, conversion_type IS NOT NULL AND conversion_type != ''))"
     case 'cvr':
-      return "if(uniqExact(session_id) > 0, toFloat64(uniqExactIf(session_id, event_type = 'conversion')) / toFloat64(uniqExact(session_id)), 0)"
+      return "if(uniqExact(session_id) > 0, toFloat64(uniqExactIf(session_id, conversion_type IS NOT NULL AND conversion_type != '')) / toFloat64(uniqExact(session_id)), 0)"
     case 'revenue':
-      return "toFloat64(sumIf(conversion_value, event_type = 'conversion'))"
+      return 'toFloat64(sumIf(conversion_value, conversion_value > 0))'
     case 'avg_scroll_depth':
       return "avgIf(scroll_percentage, event_type = 'scroll')"
     case 'bounce_rate':
@@ -1217,7 +1219,8 @@ function buildDimensionExpr(dimension: MetricsDimension): string | null {
     case 'visitor_type':
       return "if(is_first_visit = 1, 'new', 'returning')"
     case 'conversion_type':
-      return "if(event_type = 'conversion', if(conversion_type = '', 'unknown', conversion_type), '__non_conversion__')"
+      // 2026-06-06 修正: conversion_type 列 (非NULL/非空) で実際の CV 種別を分類。
+      return "if(conversion_type IS NOT NULL AND conversion_type != '', conversion_type, '__non_conversion__')"
     case 'hour':
       return 'toHour(toDateTime(timestamp, {tz:String}))'
     case 'day_of_week':
@@ -1317,7 +1320,7 @@ SETTINGS max_execution_time = 30
     periodEnd: params.dateRange.end,
     timezone: params.timezone,
     evidenceLevel: 'observed_approx',
-    note: '直接 events table を uniqExact / countIf で集計しています。D-07 observed_approx。bihadashop では conversion イベント未計測のため cvr/revenue=0 は正常です。',
+    note: '直接 events table を uniqExact / countIf で集計。D-07 observed_approx。cvr/conversions は conversion_type 列ベース (CV 未設定サイトは 0)。revenue は conversion_value>0 ベース (金額未計装サイトは 0)。',
   }
 }
 
@@ -3664,5 +3667,346 @@ SETTINGS max_execution_time = 30`.trim()
     timezone: params.timezone,
     evidenceLevel: 'observed_approx',
     note: 'above-fold は element_y<=viewport_height で導出 (is_above_fold/is_cta/element_clicked/max_visible_ratio は未計装=全0)。median_visible_sec が短く露出が多い要素は「見えてるが素通り」の候補。クリックは analytics_cta_funnel 参照。',
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Phase 1b 拡張 (2026-06-06): クロス分析 / 多段ジャーニー / セグメント比較(有意差)。
+//   metrics の buildMetricExpr / buildDimensionExpr を再利用 (cvr バグ修正済)。
+// ════════════════════════════════════════════════════════════════════
+
+// ── analytics_crosstab (指標 × 2 軸ピボット) ─────────────────────────
+
+/** crosstab で使える軸 (metrics の dimension から 'none' を除いたもの)。 */
+export const CROSSTAB_DIMENSIONS = METRICS_DIMENSIONS.filter(
+  (d): d is Exclude<MetricsDimension, 'none'> => d !== 'none',
+)
+export type CrosstabDimension = Exclude<MetricsDimension, 'none'>
+
+export interface CrosstabCell {
+  dim1_value: string
+  dim2_value: string
+  value: number
+}
+export interface CrosstabResult {
+  metric: MetricsMetric
+  dim1: CrosstabDimension
+  dim2: CrosstabDimension
+  rows: CrosstabCell[]
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeCrosstabQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  metric: MetricsMetric
+  dim1: CrosstabDimension
+  dim2: CrosstabDimension
+  pageUrl?: string
+  deviceType?: string
+  limit: number
+}): Promise<CrosstabResult> {
+  const metricExpr = buildMetricExpr(params.metric)
+  const dim1Expr = buildDimensionExpr(params.dim1)
+  const dim2Expr = buildDimensionExpr(params.dim2)
+  if (!dim1Expr || !dim2Expr) {
+    throw new Error('crosstab requires two non-none dimensions')
+  }
+
+  const queryParams: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+    limit: String(params.limit),
+  }
+  const filterClauses: string[] = []
+  if (params.pageUrl) {
+    filterClauses.push('AND url = {filter_page_url:String}')
+    queryParams.filter_page_url = params.pageUrl
+  }
+  if (params.deviceType) {
+    filterClauses.push('AND device_type = {filter_device_type:String}')
+    queryParams.filter_device_type = params.deviceType
+  }
+
+  const sql = `
+SELECT
+  toString(${dim1Expr}) AS dim1_value,
+  toString(${dim2Expr}) AS dim2_value,
+  ${metricExpr} AS value
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND is_agent = 0
+  AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+  ${filterClauses.join(' ')}
+GROUP BY dim1_value, dim2_value
+ORDER BY value DESC
+LIMIT {limit:UInt32}
+SETTINGS max_execution_time = 30`.trim()
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({ query: sql, query_params: queryParams, format: 'JSONEachRow' })
+  const rows = await rs.json<CrosstabCell>()
+
+  return {
+    metric: params.metric,
+    dim1: params.dim1,
+    dim2: params.dim2,
+    rows: rows.map((r) => ({ dim1_value: r.dim1_value, dim2_value: r.dim2_value, value: Number(r.value) })),
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: `${params.metric} を ${params.dim1} × ${params.dim2} の2軸で集計したピボット。各セルは2軸の組合せに対する値。`,
+  }
+}
+
+// ── analytics_journeys (多段ジャーニー全経路) ────────────────────────
+
+/**
+ * セッション単位の pageview を時系列順に連結した「経路文字列」を集計し、頻出経路 top N を返す。
+ * sequence_id / previous_url が空でも timestamp 順で再構築。連続重複 URL は折りたたむ。
+ */
+export interface JourneyRow {
+  path: string
+  sessions: number
+  steps: number
+}
+export interface JourneysResult {
+  rows: JourneyRow[]
+  min_steps: number
+  start_url: string | null
+  contains_url: string | null
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeJourneysQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  minSteps: number
+  limit: number
+  startUrl?: string
+  containsUrl?: string
+}): Promise<JourneysResult> {
+  const queryParams: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+    min_steps: String(params.minSteps),
+    limit: String(params.limit),
+  }
+  const outerFilters: string[] = ['steps >= {min_steps:UInt32}']
+  if (params.startUrl) {
+    outerFilters.push('dedup[1] = {start_url:String}')
+    queryParams.start_url = params.startUrl
+  }
+  if (params.containsUrl) {
+    outerFilters.push('has(dedup, {contains_url:String})')
+    queryParams.contains_url = params.containsUrl
+  }
+
+  // 1) per-session: (timestamp,url) を集めて時系列ソート → url 配列
+  // 2) 連続重複を折りたたむ (A>A>B → A>B)
+  // 3) 経路文字列で GROUP BY、頻出順 top N
+  const sql = `
+SELECT
+  path,
+  count() AS sessions,
+  any(steps) AS steps
+FROM (
+  SELECT
+    arrayFilter((x, i) -> i = 1 OR x != arr[i - 1], arr, arrayEnumerate(arr)) AS dedup,
+    arrayStringConcat(dedup, ' > ') AS path,
+    length(dedup) AS steps
+  FROM (
+    SELECT
+      session_id,
+      arrayMap(t -> t.2, arraySort(t -> t.1, groupArray((timestamp, url)))) AS arr
+    FROM clickinsight.events
+    WHERE tenant_id = {tenant_id:String}
+      AND site_id = {site_id:String}
+      AND is_agent = 0
+      AND event_type = 'pageview'
+      AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+      AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+    GROUP BY session_id
+  )
+  WHERE ${outerFilters.join(' AND ')}
+)
+GROUP BY path
+ORDER BY sessions DESC
+LIMIT {limit:UInt32}
+SETTINGS max_execution_time = 30`.trim()
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({ query: sql, query_params: queryParams, format: 'JSONEachRow' })
+  const rows = await rs.json<{ path: string; sessions: number; steps: number }>()
+
+  return {
+    rows: rows.map((r) => ({ path: r.path, sessions: Number(r.sessions), steps: Number(r.steps) })),
+    min_steps: params.minSteps,
+    start_url: params.startUrl ?? null,
+    contains_url: params.containsUrl ?? null,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: 'pageview を timestamp 順に連結した経路。連続重複は折りたたみ済。steps=経路のページ数。previous_url/sequence_id 非依存。',
+  }
+}
+
+// ── analytics_segment_compare (2 セグメント比率の有意差検定) ──────────
+
+/** 2 比率検定の対象にできる rate metric (session 単位の成功/試行が明確なもの)。 */
+export const SEGMENT_COMPARE_METRICS = ['cvr', 'bounce_rate'] as const
+export type SegmentCompareMetric = (typeof SEGMENT_COMPARE_METRICS)[number]
+
+export interface SegmentStat {
+  value: string
+  n: number
+  k: number
+  rate: number
+}
+export interface SegmentCompareResult {
+  metric: SegmentCompareMetric
+  dimension: CrosstabDimension
+  segmentA: SegmentStat
+  segmentB: SegmentStat
+  difference: number
+  z: number | null
+  pValue: number | null
+  significant: boolean
+  ciLow: number | null
+  ciHigh: number | null
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+/** Abramowitz-Stegun 7.1.26 erf 近似 → 標準正規 CDF。 */
+function normalCdf(z: number): number {
+  const sign = z < 0 ? -1 : 1
+  const x = Math.abs(z) / Math.SQRT2
+  const t = 1 / (1 + 0.3275911 * x)
+  const y =
+    1 -
+    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) *
+      t *
+      Math.exp(-x * x)
+  return 0.5 * (1 + sign * y)
+}
+
+function segmentSuccessCond(metric: SegmentCompareMetric): string {
+  if (metric === 'cvr') return "conversion_type IS NOT NULL AND conversion_type != ''"
+  // bounce_rate
+  return "event_type = 'session_end' AND page_views_in_session <= 1 AND session_duration_sec < 10"
+}
+
+export async function executeSegmentCompareQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  metric: SegmentCompareMetric
+  dimension: CrosstabDimension
+  valueA: string
+  valueB: string
+}): Promise<SegmentCompareResult> {
+  const dimExpr = buildDimensionExpr(params.dimension)
+  if (!dimExpr) throw new Error('segment_compare requires a non-none dimension')
+  const cond = segmentSuccessCond(params.metric)
+
+  const sql = `
+SELECT
+  toString(${dimExpr}) AS seg,
+  uniqExact(session_id) AS n,
+  uniqExactIf(session_id, ${cond}) AS k
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND is_agent = 0
+  AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+GROUP BY seg
+SETTINGS max_execution_time = 30`.trim()
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({
+    query: sql,
+    query_params: {
+      tenant_id: params.tenantId,
+      site_id: params.siteId,
+      start: params.dateRange.start,
+      end: params.dateRange.end,
+      tz: params.timezone,
+    },
+    format: 'JSONEachRow',
+  })
+  const rows = await rs.json<{ seg: string; n: number; k: number }>()
+  const find = (val: string): SegmentStat => {
+    const r = rows.find((x) => x.seg === val)
+    const n = Number(r?.n ?? 0)
+    const k = Number(r?.k ?? 0)
+    return { value: val, n, k, rate: n > 0 ? Number((k / n).toFixed(6)) : 0 }
+  }
+  const a = find(params.valueA)
+  const b = find(params.valueB)
+
+  let z: number | null = null
+  let pValue: number | null = null
+  let ciLow: number | null = null
+  let ciHigh: number | null = null
+  let significant = false
+  if (a.n > 0 && b.n > 0) {
+    const p1 = a.k / a.n
+    const p2 = b.k / b.n
+    const pPool = (a.k + b.k) / (a.n + b.n)
+    const se = Math.sqrt(pPool * (1 - pPool) * (1 / a.n + 1 / b.n))
+    if (se > 0) {
+      z = (p1 - p2) / se
+      pValue = Number((2 * (1 - normalCdf(Math.abs(z))).valueOf()).toFixed(6))
+      significant = pValue < 0.05
+    }
+    const seDiff = Math.sqrt((p1 * (1 - p1)) / a.n + (p2 * (1 - p2)) / b.n)
+    ciLow = Number((p1 - p2 - 1.96 * seDiff).toFixed(6))
+    ciHigh = Number((p1 - p2 + 1.96 * seDiff).toFixed(6))
+  }
+
+  return {
+    metric: params.metric,
+    dimension: params.dimension,
+    segmentA: a,
+    segmentB: b,
+    difference: Number((a.rate - b.rate).toFixed(6)),
+    z: z !== null ? Number(z.toFixed(4)) : null,
+    pValue,
+    significant,
+    ciLow,
+    ciHigh,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: '2 比率の差を two-sided z 検定。significant=p<0.05。counts は observed_exact だが有意性は統計的推定。サンプルが小さいと検定力不足に注意。',
   }
 }

@@ -52,6 +52,13 @@ fleet 実在: CV(conversion_type)、複数ページ経路、form_view 5,315、vi
 | `analytics_retention` | 再訪率・訪問回数分布 | events visitor_id | observed_approx | 再訪 有 |
 | `analytics_media_engagement` | 動画/画像のエンゲージ | video_events + image_visibility | observed_approx | メディア 有 |
 | `analytics_above_fold` | FV要素の露出 vs 滞在 (素通り候補) | element_visibility_v2 (element_y 導出) | observed_approx | element_visibility 有 |
+| `analytics_crosstab` (1b) | 指標×2軸ピボット (例: デバイス×参照元のCVR) | events (metrics 軸再利用) | observed_approx | 常時 |
+| `analytics_journeys` (1b) | 多段ジャーニー全経路 (A>B>C…) | events pageview (timestamp 連結) | observed_approx | 複数ページ 有 |
+| `analytics_segment_compare` (1b) | 2セグメント比率の有意差 (z検定) | events (cvr/bounce_rate) | observed_approx | 常時 |
+
+**CVR計測バグ修正 (1b)**: `buildMetricExpr`/`buildDimensionExpr` が `event_type='conversion'`(本番に存在せず全0) を見ていた →
+`conversion_type` 列ベースに修正。これで metrics/crosstab/segment_compare の cvr/conversions が、CV設定済サイトで正しく点灯する
+(売上 revenue は `conversion_value>0` ベース、金額未計装サイトは0)。
 
 ### 実装パターン (レジストリ駆動)
 - `lib/llm/hybrid-query.ts`: `execute*Query()` を追加 (テンプレ = `executeTopPagesQuery`)。

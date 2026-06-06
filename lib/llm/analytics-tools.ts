@@ -55,6 +55,11 @@ import {
   executeRetentionQuery,
   executeMediaEngagementQuery,
   executeAboveFoldQuery,
+  executeCrosstabQuery,
+  executeJourneysQuery,
+  executeSegmentCompareQuery,
+  CROSSTAB_DIMENSIONS,
+  SEGMENT_COMPARE_METRICS,
   getParentQuery,
   MAX_PERIOD_DAYS_ANALYTICS,
   registerParentQuery,
@@ -81,6 +86,9 @@ import {
   type RetentionResult,
   type MediaEngagementResult,
   type AboveFoldResult,
+  type CrosstabResult,
+  type JourneysResult,
+  type SegmentCompareResult,
   type FunnelStep,
 } from '@/lib/llm/hybrid-query'
 
@@ -629,6 +637,47 @@ export const aboveFoldInputSchema = z.object({
 })
 export type AboveFoldInput = z.infer<typeof aboveFoldInputSchema>
 
+// ── Phase 1b (2026-06-06): crosstab / journeys / segment_compare ─────
+
+export const crosstabInputSchema = z.object({
+  ...dateRangeShape,
+  metric: z
+    .enum([...METRICS_METRICS] as [string, ...string[]])
+    .transform((v) => v as (typeof METRICS_METRICS)[number]),
+  dim1: z
+    .enum([...CROSSTAB_DIMENSIONS] as [string, ...string[]])
+    .transform((v) => v as (typeof CROSSTAB_DIMENSIONS)[number]),
+  dim2: z
+    .enum([...CROSSTAB_DIMENSIONS] as [string, ...string[]])
+    .transform((v) => v as (typeof CROSSTAB_DIMENSIONS)[number]),
+  page_url: z.string().min(1).optional(),
+  device_type: z.string().min(1).optional(),
+  limit: z.number().int().min(5).max(100).default(30),
+})
+export type CrosstabInput = z.infer<typeof crosstabInputSchema>
+
+export const journeysInputSchema = z.object({
+  ...dateRangeShape,
+  minSteps: z.number().int().min(2).max(10).default(2),
+  limit: z.number().int().min(5).max(50).default(12),
+  start_url: z.string().min(1).optional(),
+  contains_url: z.string().min(1).optional(),
+})
+export type JourneysInput = z.infer<typeof journeysInputSchema>
+
+export const segmentCompareInputSchema = z.object({
+  ...dateRangeShape,
+  metric: z
+    .enum([...SEGMENT_COMPARE_METRICS] as [string, ...string[]])
+    .transform((v) => v as (typeof SEGMENT_COMPARE_METRICS)[number]),
+  dimension: z
+    .enum([...CROSSTAB_DIMENSIONS] as [string, ...string[]])
+    .transform((v) => v as (typeof CROSSTAB_DIMENSIONS)[number]),
+  valueA: z.string().min(1),
+  valueB: z.string().min(1),
+})
+export type SegmentCompareInput = z.infer<typeof segmentCompareInputSchema>
+
 // ── Tool registry (declarative + executor) ──────────────────────────
 
 export interface AnalyticsToolExecuteContext {
@@ -661,6 +710,9 @@ export type AnalyticsToolName =
   | 'analytics_retention'
   | 'analytics_media_engagement'
   | 'analytics_above_fold'
+  | 'analytics_crosstab'
+  | 'analytics_journeys'
+  | 'analytics_segment_compare'
 
 export type AnalyticsToolResult =
   | { tool: 'analytics.overview'; result: OverviewResult }
@@ -686,6 +738,9 @@ export type AnalyticsToolResult =
   | { tool: 'analytics_retention'; result: RetentionResult }
   | { tool: 'analytics_media_engagement'; result: MediaEngagementResult }
   | { tool: 'analytics_above_fold'; result: AboveFoldResult }
+  | { tool: 'analytics_crosstab'; result: CrosstabResult }
+  | { tool: 'analytics_journeys'; result: JourneysResult }
+  | { tool: 'analytics_segment_compare'; result: SegmentCompareResult }
 
 /**
  * 公開 tool schema list (AI SDK v6 `tool()` 互換シェイプ)。
@@ -909,6 +964,37 @@ export const ANALYTICS_TOOL_SCHEMAS = [
       'Use for "ファーストビューは効いているか", "上部の要素は見られているか", "FVの滞在". ' +
       'Standalone — no parentQueryId required. siteId is server-controlled.',
     inputSchema: aboveFoldInputSchema,
+  },
+  {
+    name: 'analytics_crosstab' as const,
+    description:
+      'Cross-tabulation (pivot): one metric across TWO dimensions simultaneously. ' +
+      'Use for "X by A and B" questions like "デバイス×参照元のCVR", "曜日×時間帯のセッション", "ページ×デバイスのスクロール深度". ' +
+      'metric: sessions/pageviews/visitors/cvr/conversions/revenue/clicks/dead_clicks/rage_clicks/avg_scroll_depth/bounce_rate/avg_session_duration etc. ' +
+      'dim1 & dim2: page_url/device_type/referrer_type/utm_source/utm_medium/utm_campaign/visitor_type/conversion_type/hour/day_of_week/day/month. ' +
+      'Returns cells {dim1_value, dim2_value, value} sorted by value. Optional filters page_url/device_type. ' +
+      'Prefer this over calling analytics_metrics multiple times. Standalone — no parentQueryId. siteId server-controlled.',
+    inputSchema: crosstabInputSchema,
+  },
+  {
+    name: 'analytics_journeys' as const,
+    description:
+      'Multi-step user journeys: the most common full page sequences (A > B > C ...) reconstructed from pageview timestamps. ' +
+      'Unlike analytics_path (single next/prev hop), this returns whole paths. Consecutive duplicate URLs are collapsed. ' +
+      'minSteps filters to journeys with >= N distinct pages (default 2). Optional start_url (journeys beginning at a page) and contains_url. ' +
+      'Use for "よくある回遊経路", "複数ページの行動パターン", "A から始まる経路", "離脱までの道筋". ' +
+      'After fetching, reason over the paths to explain user behavior. Standalone — no parentQueryId. siteId server-controlled.',
+    inputSchema: journeysInputSchema,
+  },
+  {
+    name: 'analytics_segment_compare' as const,
+    description:
+      'Compare a rate metric between TWO segments with a two-proportion z-test (statistical significance). ' +
+      'metric: cvr or bounce_rate. dimension + valueA/valueB define the two segments (e.g. dimension=device_type, valueA=mobile, valueB=desktop). ' +
+      'Returns each segment {n, k, rate}, the difference, z, pValue, significant (p<0.05), and 95% CI of the difference. ' +
+      'Use to answer "差は本物か / 有意か" like "モバイルとPCでCVRに有意差があるか", "新規と再訪で直帰率は違うか". ' +
+      'Counts are observed_exact; significance is a statistical inference (small samples = low power). Standalone — no parentQueryId. siteId server-controlled.',
+    inputSchema: segmentCompareInputSchema,
   },
 ] as const
 
@@ -1512,6 +1598,56 @@ export async function executeAnalyticsTool(
         pageUrl: input.page_url,
       })
       return { tool: 'analytics_above_fold', result }
+    }
+
+    case 'analytics_crosstab': {
+      const input = parseToolInput(crosstabInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeCrosstabQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        metric: input.metric,
+        dim1: input.dim1,
+        dim2: input.dim2,
+        pageUrl: input.page_url,
+        deviceType: input.device_type,
+        limit: input.limit,
+      })
+      return { tool: 'analytics_crosstab', result }
+    }
+
+    case 'analytics_journeys': {
+      const input = parseToolInput(journeysInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeJourneysQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        minSteps: input.minSteps,
+        limit: input.limit,
+        startUrl: input.start_url,
+        containsUrl: input.contains_url,
+      })
+      return { tool: 'analytics_journeys', result }
+    }
+
+    case 'analytics_segment_compare': {
+      const input = parseToolInput(segmentCompareInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeSegmentCompareQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        metric: input.metric,
+        dimension: input.dimension,
+        valueA: input.valueA,
+        valueB: input.valueB,
+      })
+      return { tool: 'analytics_segment_compare', result }
     }
 
     default: {

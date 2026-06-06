@@ -395,6 +395,10 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
 - 動画/画像のエンゲージを知りたい場合は analytics_media_engagement を使う (parentQueryId 不要)。video_events + image_visibility 由来。メディア未計測サイトでは空。
 - ファーストビュー(上部要素)の露出と滞在を知りたい場合は analytics_above_fold を使う (parentQueryId 不要)。is_above_fold/is_cta は未計装のため element_y で導出、クリックは analytics_cta_funnel が担当。
 - analytics_data_readiness / analytics_time_to_interaction / analytics_dead_zones / analytics_retention / analytics_media_engagement / analytics_above_fold も standalone tool (parentQueryId 不要)。
+- 「X を A 別 かつ B 別」「2軸の掛け合わせ」「デバイス×参照元のCVR」「曜日×時間帯」等のクロス分析には analytics_crosstab を使う (metric × dim1 × dim2、parentQueryId 不要)。analytics_metrics を2回呼ぶより crosstab を優先。
+- 「よくある回遊経路」「複数ページの行動パターン」「A から始まる経路」「離脱までの道筋」等の複雑な経路には analytics_journeys を使う (全経路を返す、parentQueryId 不要)。取得後は経路を読み解いて行動を考察すること。
+- 「差は本物か」「有意差はあるか」「モバイルとPCでCVRは違うか」等は analytics_segment_compare を使う (2比率 z 検定、metric=cvr/bounce_rate、parentQueryId 不要)。significant=p<0.05。サンプルが小さいと検定力不足なので断定しすぎないこと。
+- analytics_crosstab / analytics_journeys / analytics_segment_compare も standalone tool (parentQueryId 不要)。
 - 「このサイトの全体像を知りたい」「色々教えて」等の漠然とした依頼では、まず analytics_data_readiness で在庫を見て、点灯している領域から代表ツールを2〜3個呼んで統合すること。
 - 最終回答は markdown-lite (番号付きリスト可)。簡潔に、根拠 (tool 結果) に基づいて述べること。`,
       prompt: input.message,
@@ -678,6 +682,12 @@ function freeformResultLabel(result: AnalyticsToolResult): string {
       return `media_engagement video_sessions=${result.result.video.sessions_with_video} image_views=${result.result.images.image_views}`
     case 'analytics_above_fold':
       return `above_fold folds=${result.result.folds.length}件 top=${result.result.top_above_fold_elements.length}件`
+    case 'analytics_crosstab':
+      return `crosstab ${result.result.metric} ${result.result.dim1}×${result.result.dim2} cells=${result.result.rows.length}件`
+    case 'analytics_journeys':
+      return `journeys paths=${result.result.rows.length}件 min_steps=${result.result.min_steps}`
+    case 'analytics_segment_compare':
+      return `segment_compare ${result.result.metric} ${result.result.segmentA.value} vs ${result.result.segmentB.value} sig=${result.result.significant} p=${result.result.pValue ?? 'null'}`
   }
 }
 
