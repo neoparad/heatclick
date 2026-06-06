@@ -13,6 +13,8 @@
 -- ════════════════════════════════════════════════════════════════════
 
 -- 非同期 Deep Research ジョブのキュー兼ステータス管理。
+-- Codex review (2026-06-06): worker のジョブ取得/リトライ用に attempt_count / locked_by /
+--   locked_at を先行追加し、後の schema churn を回避。大きな JSON 列は ZSTD 圧縮。
 CREATE TABLE IF NOT EXISTS clickinsight.analysis_jobs
 (
   id              UUID DEFAULT generateUUIDv4(),
@@ -22,9 +24,13 @@ CREATE TABLE IF NOT EXISTS clickinsight.analysis_jobs
   job_type        LowCardinality(String),            -- 'deep_research'
   report_type     LowCardinality(String),            -- 'uiux_audit' | 'cta_form_tickets' | 'attention_action_gap'
   status          LowCardinality(String),            -- 'pending' | 'running' | 'completed' | 'failed'
-  input_config    String,                            -- JSON (period / filters / requested reports)
-  output_results  Nullable(String),                  -- JSON (完了時のみ。実行中は NULL)
-  error_message   Nullable(String),
+  input_config    String CODEC(ZSTD(3)),             -- JSON (period / filters / requested reports)
+  output_results  Nullable(String) CODEC(ZSTD(3)),   -- JSON (完了時のみ。実行中は NULL)
+  error_message   Nullable(String) CODEC(ZSTD(3)),
+  -- worker 並行制御 (claim ベース取得 + リトライ)
+  attempt_count   UInt8 DEFAULT 0,
+  locked_by       LowCardinality(String) DEFAULT '', -- 取得した worker インスタンス識別子
+  locked_at       Nullable(DateTime),
   scheduled_by    LowCardinality(String) DEFAULT 'user_request', -- 'user_request' | 'system_cron'
   model_id        LowCardinality(String) DEFAULT '',
   cost_usd        Float64 DEFAULT 0,
@@ -51,10 +57,10 @@ CREATE TABLE IF NOT EXISTS clickinsight.proposal_tickets
   report_type       LowCardinality(String),
   week              Date,                             -- 集計対象週 (月曜起点等、冪等キー)
   version           UInt16 DEFAULT 1,
-  problem           String,
-  evidence          String,                          -- JSON (根拠数値 + evidence_level + query_id 参照)
+  problem           String CODEC(ZSTD(3)),
+  evidence          String CODEC(ZSTD(3)),           -- JSON (根拠数値 + evidence_level + query_id 参照)
   affected_segment  String,
-  recommended_change String,
+  recommended_change String CODEC(ZSTD(3)),
   confidence        Float32 DEFAULT 0,
   evidence_level    LowCardinality(String),          -- observed_exact|observed_approx|inferred|planned (D-07)
   blocked_claims    Array(String),                   -- データ未計測で言えないこと
