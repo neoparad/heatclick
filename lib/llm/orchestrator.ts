@@ -304,8 +304,10 @@ interface RunFreeformParams {
   _failReason?: 'validation' | 'gateway_error'
 }
 
-/** freeform LLM 経路の multi-step tool loop 上限 (4 tools chain + 最終合成で十分) */
-const FREEFORM_MAX_STEPS = 6
+/** freeform LLM 経路の multi-step tool loop 上限。
+ *  Phase 1 (2026-06-06) で data_readiness→代表ツール2〜3個→合成の連鎖を許すため 6→8 に拡張。
+ *  各ツールは max_execution_time=30s で上限あり、route は Fluid Compute 300s 内。 */
+const FREEFORM_MAX_STEPS = 8
 
 /**
  * 続 82-ml Codex T1 fix #1(b) (trust/D-07): freeform の回答文末尾に必ず付与する可視 caveat。
@@ -386,6 +388,14 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
 - 2 指標の相関 (なぜ/関係) を調べたい場合は analytics_correlation を使う (parentQueryId 不要)。metricA と metricB を page_url または device_type 次元でペアリングし Pearson r を返す。by="page_url" でページ間比較、by="device_type" でデバイス間比較。指標: sessions, pageviews, cvr, avg_scroll_depth, dead_click_rate, rage_click_rate, bounce_rate。
 - why/原因/関係 系の質問では analytics_correlation や analytics_path + analytics_frustration を組み合わせてから統合回答を生成すること。
 - analytics_path / analytics_funnel / analytics_correlation も standalone tool (parentQueryId 不要)。
+- 「このサイトで何が分かる?」「何を分析できる?」や、深い分析の前段では analytics_data_readiness を最初に呼ぶ (parentQueryId 不要)。capabilities=回答可能, blocked=未計測。blocked の領域は「未計測」と正直に述べ、断定数値を作らないこと。
+- 初回操作までの速さ (TTFI) を知りたい場合は analytics_time_to_interaction を使う (parentQueryId 不要)。median 秒と interaction_rate を返す。
+- 押せない/反応しない箇所 (デッドゾーン) を知りたい場合は analytics_dead_zones を使う (parentQueryId 不要)。座標は絶対px、device 指定で精度向上。
+- リピート率・再訪・訪問回数分布を知りたい場合は analytics_retention を使う (parentQueryId 不要)。returning_rate と訪問回数バケット。
+- 動画/画像のエンゲージを知りたい場合は analytics_media_engagement を使う (parentQueryId 不要)。video_events + image_visibility 由来。メディア未計測サイトでは空。
+- ファーストビュー(上部要素)の露出と滞在を知りたい場合は analytics_above_fold を使う (parentQueryId 不要)。is_above_fold/is_cta は未計装のため element_y で導出、クリックは analytics_cta_funnel が担当。
+- analytics_data_readiness / analytics_time_to_interaction / analytics_dead_zones / analytics_retention / analytics_media_engagement / analytics_above_fold も standalone tool (parentQueryId 不要)。
+- 「このサイトの全体像を知りたい」「色々教えて」等の漠然とした依頼では、まず analytics_data_readiness で在庫を見て、点灯している領域から代表ツールを2〜3個呼んで統合すること。
 - 最終回答は markdown-lite (番号付きリスト可)。簡潔に、根拠 (tool 結果) に基づいて述べること。`,
       prompt: input.message,
       tools,
@@ -656,6 +666,18 @@ function freeformResultLabel(result: AnalyticsToolResult): string {
       return `funnel steps=${result.result.steps.length}件 total_sessions=${result.result.total_sessions}`
     case 'analytics_correlation':
       return `correlation ${result.result.metric_a} × ${result.result.metric_b} by=${result.result.by} pearson_r=${result.result.pearson_r !== null ? result.result.pearson_r.toFixed(3) : 'null'} sample=${result.result.sample_size}`
+    case 'analytics_data_readiness':
+      return `data_readiness capabilities=${result.result.capabilities.length}件 blocked=${result.result.blocked.length}件`
+    case 'analytics_time_to_interaction':
+      return `time_to_interaction median=${result.result.median_sec}s rate=${result.result.interaction_rate}`
+    case 'analytics_dead_zones':
+      return `dead_zones bins=${result.result.rows.length}件 bin_px=${result.result.bin_px}`
+    case 'analytics_retention':
+      return `retention visitors=${result.result.visitors} returning_rate=${result.result.returning_rate}`
+    case 'analytics_media_engagement':
+      return `media_engagement video_sessions=${result.result.video.sessions_with_video} image_views=${result.result.images.image_views}`
+    case 'analytics_above_fold':
+      return `above_fold folds=${result.result.folds.length}件 top=${result.result.top_above_fold_elements.length}件`
   }
 }
 

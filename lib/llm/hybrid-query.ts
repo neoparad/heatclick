@@ -2952,3 +2952,717 @@ SETTINGS max_execution_time = 30
     evidenceLevel: withinTolerance ? 'proven_exact' : 'observed_approx',
   }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Phase 1 単発ツール拡張 (2026-06-06): 既存17ツールと重複しない穴を埋める6ツール。
+//   全て本番 ClickHouse で schema/population 検証済 (read-only)。
+//   tenant_id/site_id は引数で server 固定。is_agent=0 (events のみ持つ列)。
+//   日付は Code 386 fix: toDateTime(toDateTime({str},{tz})) で tz tag を剥がす。
+// ════════════════════════════════════════════════════════════════════
+
+// ── analytics_data_readiness ─────────────────────────────────────────
+
+/**
+ * サイトの「何が分かるか」在庫 (D-07 防波堤 + Deep Research scoping の頭脳)。
+ * events + 各専用テーブルの実測 count を返し、capabilities / blocked を導出する。
+ * 検証済の現実: element_visibility_v2 の is_above_fold/is_cta/element_clicked は tracker 未投入で全0、
+ *   conversion_value(売上金額) は全サイト0、gsc_data は tenant_id 列なし & 空。
+ */
+export interface DataReadinessSignal {
+  area: string
+  available: boolean
+  detail: string
+}
+export interface DataReadinessResult {
+  signals: DataReadinessSignal[]
+  capabilities: string[]
+  blocked: string[]
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeDataReadinessQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+}): Promise<DataReadinessResult> {
+  const client = getClickHouseClient('analytics_reader')
+  const baseParams = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+  }
+  const tRange = `timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))`
+  const cRange = `created_at >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND created_at < toDateTime(toDateTime({end:String}, {tz:String}))`
+
+  const eventsSql = `
+SELECT
+  countIf(event_type = 'pageview') AS pageviews,
+  uniqExactIf(session_id, event_type = 'pageview') AS sessions,
+  uniqExact(visitor_id) AS visitors,
+  countIf(conversion_type IS NOT NULL AND conversion_type != '') AS conversions,
+  countIf(conversion_value > 0) AS conv_value_events,
+  countIf(page_views_in_session > 1) AS multipage_rows,
+  countIf(event_type IN ('click', 'dead_click', 'rage_click') AND click_x > 0) AS clicks_with_coords,
+  countIf(event_type = 'dead_click') AS dead_clicks,
+  countIf(event_type = 'rage_click') AS rage_clicks
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND is_agent = 0
+  AND ${tRange}
+SETTINGS max_execution_time = 30`.trim()
+
+  const sideCount = (table: string) => `
+SELECT count() AS c FROM clickinsight.${table}
+WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND ${cRange}
+SETTINGS max_execution_time = 30`.trim()
+
+  const gscSql = `
+SELECT count() AS c FROM clickinsight.gsc_data
+WHERE site_id = {site_id:String}
+  AND date >= toDate(toDateTime({start:String}, {tz:String}))
+  AND date < toDate(toDateTime({end:String}, {tz:String}))
+SETTINGS max_execution_time = 30`.trim()
+
+  const run = async <T>(sql: string): Promise<T> => {
+    const rs = await client.query({ query: sql, query_params: baseParams, format: 'JSONEachRow' })
+    const rows = await rs.json<T>()
+    return rows[0] ?? ({} as T)
+  }
+
+  const [ev, forms, vitals, elements, images, videos, signalsTbl, gsc] = await Promise.all([
+    run<{
+      pageviews: number
+      sessions: number
+      visitors: number
+      conversions: number
+      conv_value_events: number
+      multipage_rows: number
+      clicks_with_coords: number
+      dead_clicks: number
+      rage_clicks: number
+    }>(eventsSql),
+    run<{ c: number }>(sideCount('form_interactions')),
+    run<{ c: number }>(sideCount('web_vitals')),
+    run<{ c: number }>(sideCount('element_visibility_v2')),
+    run<{ c: number }>(sideCount('image_visibility')),
+    run<{ c: number }>(sideCount('video_events')),
+    run<{ c: number }>(sideCount('behavior_signals')),
+    run<{ c: number }>(gscSql),
+  ])
+
+  const n = (v: number | undefined): number => Number(v ?? 0)
+  const signals: DataReadinessSignal[] = [
+    { area: 'pageviews', available: n(ev.pageviews) > 0, detail: `pageviews=${n(ev.pageviews)} / sessions=${n(ev.sessions)} / visitors=${n(ev.visitors)}` },
+    { area: 'conversions', available: n(ev.conversions) > 0, detail: `conversion events=${n(ev.conversions)} (売上金額 conversion_value>0=${n(ev.conv_value_events)})` },
+    { area: 'multipage_journeys', available: n(ev.multipage_rows) > 0, detail: `multipage rows=${n(ev.multipage_rows)}` },
+    { area: 'clicks_dead_zones', available: n(ev.clicks_with_coords) > 0, detail: `clicks(coords)=${n(ev.clicks_with_coords)} / dead=${n(ev.dead_clicks)} / rage=${n(ev.rage_clicks)}` },
+    { area: 'forms', available: n(forms.c) > 0, detail: `form_interactions=${n(forms.c)}` },
+    { area: 'web_vitals', available: n(vitals.c) > 0, detail: `web_vitals=${n(vitals.c)}` },
+    { area: 'element_visibility', available: n(elements.c) > 0, detail: `element_visibility_v2=${n(elements.c)} (注: is_above_fold/is_cta/element_clicked は未計装=全0、可視位置 element_y で代替)` },
+    { area: 'images', available: n(images.c) > 0, detail: `image_visibility=${n(images.c)}` },
+    { area: 'video', available: n(videos.c) > 0, detail: `video_events=${n(videos.c)}` },
+    { area: 'frustration_signals', available: n(signalsTbl.c) > 0, detail: `behavior_signals=${n(signalsTbl.c)}` },
+    { area: 'search_console', available: n(gsc.c) > 0, detail: `gsc_data rows=${n(gsc.c)} (SEO検索データ)` },
+  ]
+
+  const capMap: Record<string, string> = {
+    pageviews: 'ページ/セッション/訪問者 (top_pages, metrics, timeseries, scroll_depth, attention, time_to_interaction)',
+    conversions: 'CV率・CVファネル (metrics cvr/conversions, funnel, contributors)',
+    multipage_journeys: '経路・次/前ページ・入口出口 (path, funnel)',
+    clicks_dead_zones: 'デッドゾーン/フラストレーション (dead_zones, frustration)',
+    forms: 'フォーム離脱分析 (form_analysis)',
+    web_vitals: 'Core Web Vitals (performance)',
+    element_visibility: 'CTA露出・ファーストビュー滞在 (cta_funnel, above_fold)',
+    images: '画像エンゲージメント (media_engagement)',
+    video: '動画エンゲージメント (media_engagement)',
+    frustration_signals: 'リバーサル/タブ離脱/ピンチズーム (frustration)',
+    search_console: 'SEO検索クエリ分析',
+  }
+  const capabilities = signals.filter((s) => s.available).map((s) => capMap[s.area] ?? s.area)
+  const blocked = signals.filter((s) => !s.available).map((s) => `${capMap[s.area] ?? s.area} — 未計測 (${s.detail})`)
+  if (n(ev.conversions) > 0 && n(ev.conv_value_events) === 0) {
+    blocked.push('売上"金額"分析 — conversion_value 未投入 (CVの有無は取れるが金額は不可)')
+  }
+
+  return {
+    signals,
+    capabilities,
+    blocked,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_exact',
+    note: 'このサイトで回答可能/不可能な領域の実測在庫です。blocked の項目は「未計測」と正直に伝え、断定数値を作らないこと。',
+  }
+}
+
+// ── analytics_time_to_interaction (TTFI) ─────────────────────────────
+
+/**
+ * 初回操作までの時間: per-session で pageview の最初の timestamp と
+ * 最初の click/dead_click/rage_click の timestamp 差 (秒)。1ページ流入でも有効な興味の proxy。
+ * timestamp は秒精度のため granularity は粗い (note 付与)。
+ */
+export interface TimeToInteractionResult {
+  sessions: number
+  sessions_with_entry: number
+  sessions_with_interaction: number
+  interaction_rate: number
+  median_sec: number
+  p25_sec: number
+  p75_sec: number
+  page_url: string | null
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeTimeToInteractionQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  pageUrl?: string
+}): Promise<TimeToInteractionResult> {
+  const urlFilter = params.pageUrl ? 'AND url = {page_url:String}' : ''
+  const sql = `
+WITH per_session AS (
+  SELECT
+    session_id,
+    minIf(timestamp, event_type = 'pageview') AS t_entry,
+    minIf(timestamp, event_type IN ('click', 'dead_click', 'rage_click')) AS t_click
+  FROM clickinsight.events
+  WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND is_agent = 0
+    ${urlFilter}
+    AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+    AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+  GROUP BY session_id
+)
+SELECT
+  count() AS sessions,
+  countIf(toUInt32(t_entry) > 0) AS sessions_with_entry,
+  countIf(toUInt32(t_entry) > 0 AND toUInt32(t_click) > 0 AND t_click >= t_entry) AS sessions_with_interaction,
+  round(quantileIf(0.5)(dateDiff('second', t_entry, t_click), toUInt32(t_entry) > 0 AND toUInt32(t_click) > 0 AND t_click >= t_entry), 1) AS median_sec,
+  round(quantileIf(0.25)(dateDiff('second', t_entry, t_click), toUInt32(t_entry) > 0 AND toUInt32(t_click) > 0 AND t_click >= t_entry), 1) AS p25_sec,
+  round(quantileIf(0.75)(dateDiff('second', t_entry, t_click), toUInt32(t_entry) > 0 AND toUInt32(t_click) > 0 AND t_click >= t_entry), 1) AS p75_sec
+FROM per_session
+SETTINGS max_execution_time = 30`.trim()
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({
+    query: sql,
+    query_params: {
+      tenant_id: params.tenantId,
+      site_id: params.siteId,
+      start: params.dateRange.start,
+      end: params.dateRange.end,
+      tz: params.timezone,
+      ...(params.pageUrl ? { page_url: params.pageUrl } : {}),
+    },
+    format: 'JSONEachRow',
+  })
+  const row = (await rs.json<{
+    sessions: number
+    sessions_with_entry: number
+    sessions_with_interaction: number
+    median_sec: number
+    p25_sec: number
+    p75_sec: number
+  }>())[0]
+
+  const withEntry = Number(row?.sessions_with_entry ?? 0)
+  const withInteraction = Number(row?.sessions_with_interaction ?? 0)
+  return {
+    sessions: Number(row?.sessions ?? 0),
+    sessions_with_entry: withEntry,
+    sessions_with_interaction: withInteraction,
+    interaction_rate: withEntry > 0 ? Number((withInteraction / withEntry).toFixed(4)) : 0,
+    median_sec: Number(row?.median_sec ?? 0),
+    p25_sec: Number(row?.p25_sec ?? 0),
+    p75_sec: Number(row?.p75_sec ?? 0),
+    page_url: params.pageUrl ?? null,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: '初回 click/dead_click/rage_click までの秒数 (timestamp は秒精度のため近似)。interaction_rate は操作有セッション/pageview有セッション。',
+  }
+}
+
+// ── analytics_dead_zones ─────────────────────────────────────────────
+
+/**
+ * 座標ビン別 dead_click + rage_click 密度。押せない/反応しない箇所の特定。
+ * click_x/click_y は本番で ~100% populated 確認済。座標は絶対pxのため viewport 差の caveat あり
+ * (device filter で緩和可能)。
+ */
+export interface DeadZoneRow {
+  url: string
+  x_start: number
+  x_end: number
+  y_start: number
+  y_end: number
+  dead_clicks: number
+  rage_clicks: number
+  total: number
+  sessions: number
+}
+export interface DeadZonesResult {
+  rows: DeadZoneRow[]
+  bin_px: number
+  page_url: string | null
+  device: string | null
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeDeadZonesQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  binPx: number
+  limit: number
+  pageUrl?: string
+  device?: string
+}): Promise<DeadZonesResult> {
+  const urlFilter = params.pageUrl ? 'AND url = {page_url:String}' : ''
+  const deviceFilter = params.device ? 'AND device_type = {device:String}' : ''
+  const sql = `
+SELECT
+  url,
+  intDiv(click_x, {bin:UInt32}) * {bin:UInt32} AS x_start,
+  intDiv(click_y, {bin:UInt32}) * {bin:UInt32} AS y_start,
+  countIf(event_type = 'dead_click') AS dead_clicks,
+  countIf(event_type = 'rage_click') AS rage_clicks,
+  count() AS total,
+  uniqExact(session_id) AS sessions
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND is_agent = 0
+  AND event_type IN ('dead_click', 'rage_click')
+  AND click_x > 0 AND click_y > 0
+  ${urlFilter}
+  ${deviceFilter}
+  AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+GROUP BY url, x_start, y_start
+ORDER BY total DESC
+LIMIT {limit:UInt32}
+SETTINGS max_execution_time = 30`.trim()
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({
+    query: sql,
+    query_params: {
+      tenant_id: params.tenantId,
+      site_id: params.siteId,
+      start: params.dateRange.start,
+      end: params.dateRange.end,
+      tz: params.timezone,
+      bin: String(params.binPx),
+      limit: String(params.limit),
+      ...(params.pageUrl ? { page_url: params.pageUrl } : {}),
+      ...(params.device ? { device: params.device } : {}),
+    },
+    format: 'JSONEachRow',
+  })
+  const raw = await rs.json<{
+    url: string
+    x_start: number
+    y_start: number
+    dead_clicks: number
+    rage_clicks: number
+    total: number
+    sessions: number
+  }>()
+  const rows: DeadZoneRow[] = raw.map((r) => ({
+    url: r.url,
+    x_start: Number(r.x_start),
+    x_end: Number(r.x_start) + params.binPx,
+    y_start: Number(r.y_start),
+    y_end: Number(r.y_start) + params.binPx,
+    dead_clicks: Number(r.dead_clicks),
+    rage_clicks: Number(r.rage_clicks),
+    total: Number(r.total),
+    sessions: Number(r.sessions),
+  }))
+
+  return {
+    rows,
+    bin_px: params.binPx,
+    page_url: params.pageUrl ?? null,
+    device: params.device ?? null,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: '座標は絶対px (viewport 幅でズレうるため device 指定で精度向上)。x_start..x_end / y_start..y_end が密集ビン。',
+  }
+}
+
+// ── analytics_retention ──────────────────────────────────────────────
+
+/**
+ * 再訪率・訪問回数分布。visitor_id (pageview) 単位で active_days / sessions を集計。
+ * visitor_id 安定性に依存する caveat あり。
+ */
+export interface RetentionResult {
+  visitors: number
+  returning_visitors: number
+  returning_rate: number
+  multi_session_visitors: number
+  avg_sessions_per_visitor: number
+  visitors_1: number
+  visitors_2: number
+  visitors_3: number
+  visitors_4plus: number
+  median_span_days: number
+  page_url: string | null
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeRetentionQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  pageUrl?: string
+}): Promise<RetentionResult> {
+  const urlFilter = params.pageUrl ? 'AND url = {page_url:String}' : ''
+  const sql = `
+WITH per_visitor AS (
+  SELECT
+    visitor_id,
+    uniqExact(session_id) AS sessions,
+    uniqExact(toDate(timestamp)) AS active_days,
+    min(timestamp) AS first_seen,
+    max(timestamp) AS last_seen
+  FROM clickinsight.events
+  WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND is_agent = 0
+    AND event_type = 'pageview'
+    ${urlFilter}
+    AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+    AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+  GROUP BY visitor_id
+)
+SELECT
+  count() AS visitors,
+  countIf(active_days > 1) AS returning_visitors,
+  countIf(sessions > 1) AS multi_session_visitors,
+  round(avg(sessions), 2) AS avg_sessions_per_visitor,
+  countIf(sessions = 1) AS visitors_1,
+  countIf(sessions = 2) AS visitors_2,
+  countIf(sessions = 3) AS visitors_3,
+  countIf(sessions >= 4) AS visitors_4plus,
+  round(quantile(0.5)(dateDiff('day', first_seen, last_seen)), 1) AS median_span_days
+FROM per_visitor
+SETTINGS max_execution_time = 30`.trim()
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({
+    query: sql,
+    query_params: {
+      tenant_id: params.tenantId,
+      site_id: params.siteId,
+      start: params.dateRange.start,
+      end: params.dateRange.end,
+      tz: params.timezone,
+      ...(params.pageUrl ? { page_url: params.pageUrl } : {}),
+    },
+    format: 'JSONEachRow',
+  })
+  const row = (await rs.json<Record<string, number>>())[0] ?? {}
+  const visitors = Number(row.visitors ?? 0)
+  const returning = Number(row.returning_visitors ?? 0)
+  return {
+    visitors,
+    returning_visitors: returning,
+    returning_rate: visitors > 0 ? Number((returning / visitors).toFixed(4)) : 0,
+    multi_session_visitors: Number(row.multi_session_visitors ?? 0),
+    avg_sessions_per_visitor: Number(row.avg_sessions_per_visitor ?? 0),
+    visitors_1: Number(row.visitors_1 ?? 0),
+    visitors_2: Number(row.visitors_2 ?? 0),
+    visitors_3: Number(row.visitors_3 ?? 0),
+    visitors_4plus: Number(row.visitors_4plus ?? 0),
+    median_span_days: Number(row.median_span_days ?? 0),
+    page_url: params.pageUrl ?? null,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: 're-visit は visitor_id の active_days>1 で判定。visitor_id 安定性 (cookie 等) に依存。',
+  }
+}
+
+// ── analytics_media_engagement ───────────────────────────────────────
+
+/**
+ * 動画 (video_events) + 画像 (image_visibility) のエンゲージメント。各テーブルに is_agent 列なし。
+ * 日付は created_at。video event_type: video_play/video_pause/video_milestone/video_complete/video_summary。
+ */
+export interface MediaTopVideo {
+  video_src: string
+  events: number
+  sessions: number
+}
+export interface MediaTopImage {
+  image_src: string
+  views: number
+  avg_visible_sec: number
+  avg_max_visible_ratio: number
+}
+export interface MediaEngagementResult {
+  video: {
+    sessions_with_video: number
+    plays: number
+    milestone_events: number
+    pauses: number
+    completes: number
+    completion_rate: number
+    top: MediaTopVideo[]
+  }
+  images: {
+    image_views: number
+    sessions_with_image: number
+    avg_max_visible_ratio: number
+    avg_visible_sec: number
+    top: MediaTopImage[]
+  }
+  page_url: string | null
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeMediaEngagementQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  limit: number
+  pageUrl?: string
+}): Promise<MediaEngagementResult> {
+  const client = getClickHouseClient('analytics_reader')
+  const qp = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+    limit: String(params.limit),
+    ...(params.pageUrl ? { page_url: params.pageUrl } : {}),
+  }
+  const urlV = params.pageUrl ? 'AND page_url = {page_url:String}' : ''
+  const cRange = `created_at >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND created_at < toDateTime(toDateTime({end:String}, {tz:String}))`
+
+  // 検証済 (2026-06-06): video_events の video_milestone/video_played_ms/video_completed 列は
+  //   ほぼ未投入のため、エンゲージは event_type 件数 (play/milestone/pause/complete) で測る。
+  const videoSql = `
+SELECT
+  uniqExact(session_id) AS sessions_with_video,
+  countIf(event_type = 'video_play') AS plays,
+  countIf(event_type = 'video_milestone') AS milestone_events,
+  countIf(event_type = 'video_pause') AS pauses,
+  countIf(event_type = 'video_complete') AS completes
+FROM clickinsight.video_events
+WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} ${urlV} AND ${cRange}
+SETTINGS max_execution_time = 30`.trim()
+  const videoTopSql = `
+SELECT video_src, count() AS events, uniqExact(session_id) AS sessions
+FROM clickinsight.video_events
+WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} ${urlV} AND ${cRange}
+GROUP BY video_src ORDER BY sessions DESC LIMIT {limit:UInt32}
+SETTINGS max_execution_time = 30`.trim()
+  const imageSql = `
+SELECT
+  count() AS image_views,
+  uniqExact(session_id) AS sessions_with_image,
+  round(avg(max_visible_ratio), 2) AS avg_max_visible_ratio,
+  round(avg(visible_duration_ms) / 1000, 1) AS avg_visible_sec
+FROM clickinsight.image_visibility
+WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} ${urlV} AND ${cRange}
+SETTINGS max_execution_time = 30`.trim()
+  const imageTopSql = `
+SELECT image_src, count() AS views,
+  round(avg(visible_duration_ms) / 1000, 1) AS avg_visible_sec,
+  round(avg(max_visible_ratio), 2) AS avg_max_visible_ratio
+FROM clickinsight.image_visibility
+WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} ${urlV} AND ${cRange}
+GROUP BY image_src ORDER BY views DESC LIMIT {limit:UInt32}
+SETTINGS max_execution_time = 30`.trim()
+
+  const j = async <T>(sql: string): Promise<T[]> => {
+    const rs = await client.query({ query: sql, query_params: qp, format: 'JSONEachRow' })
+    return rs.json<T>()
+  }
+  const [videoAgg, videoTop, imageAgg, imageTop] = await Promise.all([
+    j<Record<string, number>>(videoSql),
+    j<MediaTopVideo>(videoTopSql),
+    j<Record<string, number>>(imageSql),
+    j<MediaTopImage>(imageTopSql),
+  ])
+  const v = videoAgg[0] ?? {}
+  const im = imageAgg[0] ?? {}
+  const vPlays = Number(v.plays ?? 0)
+  const vCompletes = Number(v.completes ?? 0)
+
+  return {
+    video: {
+      sessions_with_video: Number(v.sessions_with_video ?? 0),
+      plays: vPlays,
+      milestone_events: Number(v.milestone_events ?? 0),
+      pauses: Number(v.pauses ?? 0),
+      completes: vCompletes,
+      completion_rate: vPlays > 0 ? Number((vCompletes / vPlays).toFixed(4)) : 0,
+      top: videoTop.map((r) => ({
+        video_src: r.video_src,
+        events: Number(r.events),
+        sessions: Number(r.sessions),
+      })),
+    },
+    images: {
+      image_views: Number(im.image_views ?? 0),
+      sessions_with_image: Number(im.sessions_with_image ?? 0),
+      avg_max_visible_ratio: Number(im.avg_max_visible_ratio ?? 0),
+      avg_visible_sec: Number(im.avg_visible_sec ?? 0),
+      top: imageTop.map((r) => ({
+        image_src: r.image_src,
+        views: Number(r.views),
+        avg_visible_sec: Number(r.avg_visible_sec),
+        avg_max_visible_ratio: Number(r.avg_max_visible_ratio),
+      })),
+    },
+    page_url: params.pageUrl ?? null,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: '動画は video_events の event_type 件数 (play/milestone/pause/complete)、画像は image_visibility 由来 (bot 除外列なし)。completion_rate=complete/play。',
+  }
+}
+
+// ── analytics_above_fold ─────────────────────────────────────────────
+
+/**
+ * ファーストビュー (画面上部) 要素の露出 vs 滞在。
+ * 検証済: is_above_fold/is_cta/element_clicked は未計装(全0)のため、
+ *   above-fold は element_y <= viewport_height で代替導出し、エンゲージは visible_duration_ms / max_visible_ratio で測る
+ *   (クリックは cta_funnel が担当)。
+ */
+export interface AboveFoldBucket {
+  fold: string
+  exposures: number
+  sessions: number
+  median_visible_sec: number
+}
+export interface AboveFoldElement {
+  element_selector: string
+  exposures: number
+  sessions: number
+  median_visible_sec: number
+}
+export interface AboveFoldResult {
+  folds: AboveFoldBucket[]
+  top_above_fold_elements: AboveFoldElement[]
+  page_url: string | null
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeAboveFoldQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  limit: number
+  pageUrl?: string
+}): Promise<AboveFoldResult> {
+  const client = getClickHouseClient('analytics_reader')
+  const qp = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+    limit: String(params.limit),
+    ...(params.pageUrl ? { page_url: params.pageUrl } : {}),
+  }
+  const urlV = params.pageUrl ? 'AND page_url = {page_url:String}' : ''
+  const cRange = `created_at >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND created_at < toDateTime(toDateTime({end:String}, {tz:String}))`
+
+  // 検証済 (2026-06-06): element_visibility_v2.max_visible_ratio は全0 (未投入) のため使わない。
+  //   visible_duration_ms は populated だが外れ値で平均が歪むため median を使う。
+  const foldSql = `
+SELECT
+  multiIf(viewport_height > 0 AND element_y <= viewport_height, 'above_fold',
+          viewport_height > 0, 'below_fold', 'unknown') AS fold,
+  count() AS exposures,
+  uniqExact(session_id) AS sessions,
+  round(quantile(0.5)(visible_duration_ms) / 1000, 1) AS median_visible_sec
+FROM clickinsight.element_visibility_v2
+WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} ${urlV} AND ${cRange}
+GROUP BY fold ORDER BY exposures DESC
+SETTINGS max_execution_time = 30`.trim()
+  const topSql = `
+SELECT element_selector,
+  count() AS exposures,
+  uniqExact(session_id) AS sessions,
+  round(quantile(0.5)(visible_duration_ms) / 1000, 1) AS median_visible_sec
+FROM clickinsight.element_visibility_v2
+WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} ${urlV}
+  AND viewport_height > 0 AND element_y <= viewport_height AND element_selector != ''
+  AND ${cRange}
+GROUP BY element_selector ORDER BY exposures DESC LIMIT {limit:UInt32}
+SETTINGS max_execution_time = 30`.trim()
+
+  const j = async <T>(sql: string): Promise<T[]> => {
+    const rs = await client.query({ query: sql, query_params: qp, format: 'JSONEachRow' })
+    return rs.json<T>()
+  }
+  const [foldRows, topRows] = await Promise.all([j<AboveFoldBucket>(foldSql), j<AboveFoldElement>(topSql)])
+
+  return {
+    folds: foldRows.map((r) => ({
+      fold: r.fold,
+      exposures: Number(r.exposures),
+      sessions: Number(r.sessions),
+      median_visible_sec: Number(r.median_visible_sec),
+    })),
+    top_above_fold_elements: topRows.map((r) => ({
+      element_selector: r.element_selector,
+      exposures: Number(r.exposures),
+      sessions: Number(r.sessions),
+      median_visible_sec: Number(r.median_visible_sec),
+    })),
+    page_url: params.pageUrl ?? null,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: 'above-fold は element_y<=viewport_height で導出 (is_above_fold/is_cta/element_clicked/max_visible_ratio は未計装=全0)。median_visible_sec が短く露出が多い要素は「見えてるが素通り」の候補。クリックは analytics_cta_funnel 参照。',
+  }
+}

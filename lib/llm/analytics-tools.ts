@@ -49,6 +49,12 @@ import {
   executePathQuery,
   executeFunnelQuery,
   executeCorrelationQuery,
+  executeDataReadinessQuery,
+  executeTimeToInteractionQuery,
+  executeDeadZonesQuery,
+  executeRetentionQuery,
+  executeMediaEngagementQuery,
+  executeAboveFoldQuery,
   getParentQuery,
   MAX_PERIOD_DAYS_ANALYTICS,
   registerParentQuery,
@@ -69,6 +75,12 @@ import {
   type PathResult,
   type FunnelResult,
   type CorrelationResult,
+  type DataReadinessResult,
+  type TimeToInteractionResult,
+  type DeadZonesResult,
+  type RetentionResult,
+  type MediaEngagementResult,
+  type AboveFoldResult,
   type FunnelStep,
 } from '@/lib/llm/hybrid-query'
 
@@ -572,6 +584,51 @@ export interface CorrelationToolResult {
   note: string
 }
 
+// ── Phase 1 単発ツール拡張 (2026-06-06): input schemas ───────────────
+
+const dateRangeShape = {
+  dateRange: z.object({ start: z.string().min(1), end: z.string().min(1) }),
+  timezone: z.string().default('Asia/Tokyo'),
+}
+
+export const dataReadinessInputSchema = z.object({ ...dateRangeShape })
+export type DataReadinessInput = z.infer<typeof dataReadinessInputSchema>
+
+export const timeToInteractionInputSchema = z.object({
+  ...dateRangeShape,
+  page_url: z.string().min(1).optional(),
+})
+export type TimeToInteractionInput = z.infer<typeof timeToInteractionInputSchema>
+
+export const deadZonesInputSchema = z.object({
+  ...dateRangeShape,
+  page_url: z.string().min(1).optional(),
+  device: z.enum(['mobile', 'desktop', 'tablet', 'unknown']).optional(),
+  binPx: z.number().int().min(50).max(500).default(100),
+  limit: z.number().int().min(5).max(50).default(15),
+})
+export type DeadZonesInput = z.infer<typeof deadZonesInputSchema>
+
+export const retentionInputSchema = z.object({
+  ...dateRangeShape,
+  page_url: z.string().min(1).optional(),
+})
+export type RetentionInput = z.infer<typeof retentionInputSchema>
+
+export const mediaEngagementInputSchema = z.object({
+  ...dateRangeShape,
+  page_url: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(20).default(5),
+})
+export type MediaEngagementInput = z.infer<typeof mediaEngagementInputSchema>
+
+export const aboveFoldInputSchema = z.object({
+  ...dateRangeShape,
+  page_url: z.string().min(1).optional(),
+  limit: z.number().int().min(5).max(50).default(15),
+})
+export type AboveFoldInput = z.infer<typeof aboveFoldInputSchema>
+
 // ── Tool registry (declarative + executor) ──────────────────────────
 
 export interface AnalyticsToolExecuteContext {
@@ -598,6 +655,12 @@ export type AnalyticsToolName =
   | 'analytics_path'
   | 'analytics_funnel'
   | 'analytics_correlation'
+  | 'analytics_data_readiness'
+  | 'analytics_time_to_interaction'
+  | 'analytics_dead_zones'
+  | 'analytics_retention'
+  | 'analytics_media_engagement'
+  | 'analytics_above_fold'
 
 export type AnalyticsToolResult =
   | { tool: 'analytics.overview'; result: OverviewResult }
@@ -617,6 +680,12 @@ export type AnalyticsToolResult =
   | { tool: 'analytics_path'; result: PathToolResult }
   | { tool: 'analytics_funnel'; result: FunnelToolResult }
   | { tool: 'analytics_correlation'; result: CorrelationToolResult }
+  | { tool: 'analytics_data_readiness'; result: DataReadinessResult }
+  | { tool: 'analytics_time_to_interaction'; result: TimeToInteractionResult }
+  | { tool: 'analytics_dead_zones'; result: DeadZonesResult }
+  | { tool: 'analytics_retention'; result: RetentionResult }
+  | { tool: 'analytics_media_engagement'; result: MediaEngagementResult }
+  | { tool: 'analytics_above_fold'; result: AboveFoldResult }
 
 /**
  * 公開 tool schema list (AI SDK v6 `tool()` 互換シェイプ)。
@@ -778,6 +847,68 @@ export const ANALYTICS_TOOL_SCHEMAS = [
       'Note: bihadashop has no conversion events so cvr=0 for all pages. ' +
       'Standalone — no parentQueryId required. siteId is server-controlled.',
     inputSchema: correlationInputSchema,
+  },
+  {
+    name: 'analytics_data_readiness' as const,
+    description:
+      'Data inventory / readiness census for the active site: which analyses are possible vs not-measured. ' +
+      'Returns per-area availability (pageviews, conversions, multipage journeys, dead-zones, forms, web_vitals, ' +
+      'element_visibility, images, video, frustration signals, search_console) with real counts, plus derived ' +
+      'capabilities (what you can answer) and blocked (what is NOT measured — say so honestly, do not fabricate numbers). ' +
+      'CALL THIS FIRST for "what can you tell me about this site?" or before deep analysis to know what data exists. ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: dataReadinessInputSchema,
+  },
+  {
+    name: 'analytics_time_to_interaction' as const,
+    description:
+      'Time-to-first-interaction (TTFI): seconds from page entry to first click/dead_click/rage_click, per session. ' +
+      'Returns median/p25/p75 seconds and interaction_rate (sessions that interacted / sessions with entry). ' +
+      'A proxy for how quickly users engage — works even on single-page SEO traffic. Optional page_url filter. ' +
+      'Use for "開いて何秒で操作するか", "離脱前にどれだけ反応しているか", "エンゲージの速さ". ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: timeToInteractionInputSchema,
+  },
+  {
+    name: 'analytics_dead_zones' as const,
+    description:
+      'Dead-zone detection: coordinate-binned dead_click + rage_click density (where users tap but nothing happens). ' +
+      'Returns top bins by frustration count with x_start..x_end / y_start..y_end (absolute px), dead/rage split, sessions. ' +
+      'Coordinates are absolute px so pass device (mobile/desktop/tablet) to reduce viewport variance. Optional page_url. ' +
+      'Use for "押せない場所", "デッドクリック/レイジクリックの位置", "UXバグの箇所". ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: deadZonesInputSchema,
+  },
+  {
+    name: 'analytics_retention' as const,
+    description:
+      'Returning-visitor retention: re-visit rate and visit-count distribution by visitor_id (pageview-based). ' +
+      'Returns visitors, returning_visitors (active on >1 day), returning_rate, avg_sessions_per_visitor, ' +
+      'visit-count buckets (1/2/3/4+), median span days. Depends on visitor_id stability. Optional page_url. ' +
+      'Use for "リピート率", "再訪", "新規 vs 再訪", "何回訪れているか". ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: retentionInputSchema,
+  },
+  {
+    name: 'analytics_media_engagement' as const,
+    description:
+      'Video + image engagement from video_events and image_visibility tables. ' +
+      'Video: sessions_with_video, plays, completes, milestone_50plus, avg_played_sec + top videos. ' +
+      'Images: image_views, sessions, avg_max_visible_ratio, avg_visible_sec + top images. Optional page_url. ' +
+      'Use for "動画は見られているか", "画像のエンゲージ", "メディアの視聴/閲覧". Empty if the site has no media tracking. ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: mediaEngagementInputSchema,
+  },
+  {
+    name: 'analytics_above_fold' as const,
+    description:
+      'Above-the-fold element exposure vs dwell from element_visibility_v2. above-fold is derived from element_y <= viewport_height ' +
+      '(the is_above_fold/is_cta/element_clicked flags are NOT instrumented = all 0; click is covered by analytics_cta_funnel). ' +
+      'Returns above_fold/below_fold buckets (exposures, sessions, avg_visible_ratio, avg_visible_sec) and top above-fold ' +
+      'elements (high exposure + short dwell = "seen but ignored"). Optional page_url. ' +
+      'Use for "ファーストビューは効いているか", "上部の要素は見られているか", "FVの滞在". ' +
+      'Standalone — no parentQueryId required. siteId is server-controlled.',
+    inputSchema: aboveFoldInputSchema,
   },
 ] as const
 
@@ -1299,6 +1430,88 @@ export async function executeAnalyticsTool(
           note: queryResult.note,
         },
       }
+    }
+
+    case 'analytics_data_readiness': {
+      const input = parseToolInput(dataReadinessInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeDataReadinessQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+      })
+      return { tool: 'analytics_data_readiness', result }
+    }
+
+    case 'analytics_time_to_interaction': {
+      const input = parseToolInput(timeToInteractionInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeTimeToInteractionQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        pageUrl: input.page_url,
+      })
+      return { tool: 'analytics_time_to_interaction', result }
+    }
+
+    case 'analytics_dead_zones': {
+      const input = parseToolInput(deadZonesInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeDeadZonesQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        binPx: input.binPx,
+        limit: input.limit,
+        pageUrl: input.page_url,
+        device: input.device,
+      })
+      return { tool: 'analytics_dead_zones', result }
+    }
+
+    case 'analytics_retention': {
+      const input = parseToolInput(retentionInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeRetentionQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        pageUrl: input.page_url,
+      })
+      return { tool: 'analytics_retention', result }
+    }
+
+    case 'analytics_media_engagement': {
+      const input = parseToolInput(mediaEngagementInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeMediaEngagementQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        limit: input.limit,
+        pageUrl: input.page_url,
+      })
+      return { tool: 'analytics_media_engagement', result }
+    }
+
+    case 'analytics_above_fold': {
+      const input = parseToolInput(aboveFoldInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeAboveFoldQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        limit: input.limit,
+        pageUrl: input.page_url,
+      })
+      return { tool: 'analytics_above_fold', result }
     }
 
     default: {
