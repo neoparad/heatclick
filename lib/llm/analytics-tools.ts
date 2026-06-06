@@ -58,6 +58,7 @@ import {
   executeCrosstabQuery,
   executeJourneysQuery,
   executeSegmentCompareQuery,
+  executeAnomalyQuery,
   CROSSTAB_DIMENSIONS,
   SEGMENT_COMPARE_METRICS,
   getParentQuery,
@@ -89,6 +90,7 @@ import {
   type CrosstabResult,
   type JourneysResult,
   type SegmentCompareResult,
+  type AnomalyResult,
   type FunnelStep,
 } from '@/lib/llm/hybrid-query'
 
@@ -678,6 +680,16 @@ export const segmentCompareInputSchema = z.object({
 })
 export type SegmentCompareInput = z.infer<typeof segmentCompareInputSchema>
 
+export const anomalyInputSchema = z.object({
+  ...dateRangeShape,
+  metric: z
+    .enum([...METRICS_METRICS] as [string, ...string[]])
+    .transform((v) => v as (typeof METRICS_METRICS)[number]),
+  window: z.number().int().min(3).max(30).default(7),
+  zThreshold: z.number().min(1).max(5).default(2),
+})
+export type AnomalyInput = z.infer<typeof anomalyInputSchema>
+
 // ── Tool registry (declarative + executor) ──────────────────────────
 
 export interface AnalyticsToolExecuteContext {
@@ -713,6 +725,7 @@ export type AnalyticsToolName =
   | 'analytics_crosstab'
   | 'analytics_journeys'
   | 'analytics_segment_compare'
+  | 'analytics_anomaly'
 
 export type AnalyticsToolResult =
   | { tool: 'analytics.overview'; result: OverviewResult }
@@ -741,6 +754,7 @@ export type AnalyticsToolResult =
   | { tool: 'analytics_crosstab'; result: CrosstabResult }
   | { tool: 'analytics_journeys'; result: JourneysResult }
   | { tool: 'analytics_segment_compare'; result: SegmentCompareResult }
+  | { tool: 'analytics_anomaly'; result: AnomalyResult }
 
 /**
  * 公開 tool schema list (AI SDK v6 `tool()` 互換シェイプ)。
@@ -995,6 +1009,17 @@ export const ANALYTICS_TOOL_SCHEMAS = [
       'Use to answer "差は本物か / 有意か" like "モバイルとPCでCVRに有意差があるか", "新規と再訪で直帰率は違うか". ' +
       'Counts are observed_exact; significance is a statistical inference (small samples = low power). Standalone — no parentQueryId. siteId server-controlled.',
     inputSchema: segmentCompareInputSchema,
+  },
+  {
+    name: 'analytics_anomaly' as const,
+    description:
+      'Anomaly / change-point detection on a daily metric using a trailing moving-average + z-score (no ML, no async). ' +
+      'For each day, computes the mean/stddev of the prior `window` days (default 7) and flags days where |z| >= zThreshold (default 2) as spike/drop. ' +
+      'metric: sessions/pageviews/visitors/cvr/conversions/clicks/dead_clicks/rage_clicks/avg_scroll_depth/bounce_rate etc. ' +
+      'Returns the full daily series (with rolling_mean and z) plus the flagged anomalies. ' +
+      'Use for "急に増えた/減った日はいつか", "異常な日", "変化点", "いつ何が急変したか", "スパイク/急落の検出". ' +
+      'Values are observed; the anomaly flag is a statistical inference. Standalone — no parentQueryId. siteId server-controlled.',
+    inputSchema: anomalyInputSchema,
   },
 ] as const
 
@@ -1648,6 +1673,21 @@ export async function executeAnalyticsTool(
         valueB: input.valueB,
       })
       return { tool: 'analytics_segment_compare', result }
+    }
+
+    case 'analytics_anomaly': {
+      const input = parseToolInput(anomalyInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeAnomalyQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        metric: input.metric,
+        window: input.window,
+        zThreshold: input.zThreshold,
+      })
+      return { tool: 'analytics_anomaly', result }
     }
 
     default: {

@@ -362,7 +362,7 @@ GROUP BY bucket_label
 SELECT
   formatDateTime(${tierBucketFn}(timestamp, {tz:String}), '%Y-%m-%dT%H:%M:%S') AS bucket_label,
   uniqExact(session_id) AS sessions,
-  uniqExactIf(session_id, event_type = 'conversion') AS conversions,
+  uniqExactIf(session_id, conversion_type IS NOT NULL AND conversion_type != '') AS conversions,
   countIf(event_type = 'pageview') AS page_views,
   uniqExactIf(
     session_id,
@@ -1369,10 +1369,11 @@ function buildTimeseriesMetricExpr(metric: TimeseriesMetric): string {
       return 'toFloat64(uniqExact(session_id))'
     case 'pageviews':
       return "toFloat64(countIf(event_type = 'pageview'))"
+    // 2026-06-06 修正: event_type='conversion' は本番に存在せず常に0。conversion_type 列ベースへ。
     case 'conversions':
-      return "toFloat64(uniqExactIf(session_id, event_type = 'conversion'))"
+      return "toFloat64(uniqExactIf(session_id, conversion_type IS NOT NULL AND conversion_type != ''))"
     case 'cvr':
-      return "if(uniqExact(session_id) > 0, toFloat64(uniqExactIf(session_id, event_type = 'conversion')) / toFloat64(uniqExact(session_id)), 0)"
+      return "if(uniqExact(session_id) > 0, toFloat64(uniqExactIf(session_id, conversion_type IS NOT NULL AND conversion_type != '')) / toFloat64(uniqExact(session_id)), 0)"
     case 'clicks':
       return "toFloat64(countIf(event_type = 'click'))"
   }
@@ -2669,7 +2670,7 @@ function buildCorrelationMetricExpr(metric: CorrelationMetric): string {
     case 'pageviews':
       return "toFloat64(countIf(event_type = 'pageview'))"
     case 'cvr':
-      return "if(uniqExact(session_id) > 0, toFloat64(uniqExactIf(session_id, event_type = 'conversion')) / toFloat64(uniqExact(session_id)), 0)"
+      return "if(uniqExact(session_id) > 0, toFloat64(uniqExactIf(session_id, conversion_type IS NOT NULL AND conversion_type != '')) / toFloat64(uniqExact(session_id)), 0)"
     case 'avg_scroll_depth':
       return "toFloat64(avgIf(scroll_percentage, event_type = 'scroll'))"
     case 'dead_click_rate':
@@ -2896,7 +2897,7 @@ export async function executeVerifyQuery(params: {
       case 'page_views':
         return 'toFloat64(countIf(event_type = \'pageview\'))'
       case 'cvr':
-        return 'if(uniqExact(session_id) > 0, uniqExactIf(session_id, event_type = \'conversion\') / uniqExact(session_id), 0)'
+        return "if(uniqExact(session_id) > 0, uniqExactIf(session_id, conversion_type IS NOT NULL AND conversion_type != '') / uniqExact(session_id), 0)"
       case 'bounce_rate':
         return (
           'if(uniqExact(session_id) > 0,' +
@@ -4008,5 +4009,120 @@ SETTINGS max_execution_time = 30`.trim()
     timezone: params.timezone,
     evidenceLevel: 'observed_approx',
     note: '2 比率の差を two-sided z 検定。significant=p<0.05。counts は observed_exact だが有意性は統計的推定。サンプルが小さいと検定力不足に注意。',
+  }
+}
+
+// ── analytics_anomaly (異常検知・変化点: 移動平均 + z-score) ──────────
+
+/**
+ * 日次メトリクスの異常検知。各日について「直前 window 日」の移動平均・標準偏差を取り、
+ * z=(value-mean)/std が閾値を超えた日を spike/drop として検出する。
+ * Deep Research / ML 不要の単発統計ツール (既存 events を日次集計するだけ)。
+ */
+export interface AnomalyPoint {
+  bucket: string
+  value: number
+  rolling_mean: number | null
+  z: number | null
+  is_anomaly: boolean
+  direction: 'spike' | 'drop' | 'normal'
+}
+export interface AnomalyResult {
+  metric: MetricsMetric
+  window: number
+  zThreshold: number
+  series: AnomalyPoint[]
+  anomalies: AnomalyPoint[]
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeAnomalyQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  metric: MetricsMetric
+  window: number
+  zThreshold: number
+}): Promise<AnomalyResult> {
+  const metricExpr = buildMetricExpr(params.metric)
+  const sql = `
+SELECT
+  toString(toStartOfDay(timestamp, {tz:String})) AS bucket,
+  ${metricExpr} AS value
+FROM clickinsight.events
+WHERE tenant_id = {tenant_id:String}
+  AND site_id = {site_id:String}
+  AND is_agent = 0
+  AND timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+  AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))
+GROUP BY bucket
+ORDER BY bucket
+SETTINGS max_execution_time = 30`.trim()
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({
+    query: sql,
+    query_params: {
+      tenant_id: params.tenantId,
+      site_id: params.siteId,
+      start: params.dateRange.start,
+      end: params.dateRange.end,
+      tz: params.timezone,
+    },
+    format: 'JSONEachRow',
+  })
+  const raw = await rs.json<{ bucket: string; value: number }>()
+  const values = raw.map((r) => ({ bucket: r.bucket, value: Number(r.value) }))
+
+  const MIN_PRIOR = 3
+  const series: AnomalyPoint[] = values.map((p, i) => {
+    const start = Math.max(0, i - params.window)
+    const prior = values.slice(start, i).map((x) => x.value)
+    if (prior.length < MIN_PRIOR) {
+      return { bucket: p.bucket, value: p.value, rolling_mean: null, z: null, is_anomaly: false, direction: 'normal' }
+    }
+    const mean = prior.reduce((a, b) => a + b, 0) / prior.length
+    const variance = prior.reduce((a, b) => a + (b - mean) ** 2, 0) / prior.length
+    const std = Math.sqrt(variance)
+    if (std <= 0) {
+      // 直前が全て同値: 値が変われば変化点
+      const changed = p.value !== mean
+      return {
+        bucket: p.bucket,
+        value: p.value,
+        rolling_mean: Number(mean.toFixed(4)),
+        z: changed ? null : 0,
+        is_anomaly: changed,
+        direction: changed ? (p.value > mean ? 'spike' : 'drop') : 'normal',
+      }
+    }
+    const z = (p.value - mean) / std
+    const isAnomaly = Math.abs(z) >= params.zThreshold
+    return {
+      bucket: p.bucket,
+      value: p.value,
+      rolling_mean: Number(mean.toFixed(4)),
+      z: Number(z.toFixed(3)),
+      is_anomaly: isAnomaly,
+      direction: isAnomaly ? (z > 0 ? 'spike' : 'drop') : 'normal',
+    }
+  })
+
+  return {
+    metric: params.metric,
+    window: params.window,
+    zThreshold: params.zThreshold,
+    series,
+    anomalies: series.filter((p) => p.is_anomaly),
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: '日次値に対し直前 window 日の移動平均・標準偏差で z-score を計算。|z|>=zThreshold を異常(spike/drop)として検出。値は observed_exact だが異常判定は統計的推定。最初の数日は履歴不足で判定なし。',
   }
 }

@@ -82,13 +82,18 @@ describe('Phase 1 (2026-06-06) 追加 6 ツール登録', () => {
   })
 })
 
-describe('Phase 1b (2026-06-06) クロス/経路/比較 3 ツール登録', () => {
-  const PHASE1B_TOOLS = ['analytics_crosstab', 'analytics_journeys', 'analytics_segment_compare'] as const
+describe('Phase 1b/1c (2026-06-06) クロス/経路/比較/異常検知 ツール登録', () => {
+  const NEW_TOOLS = [
+    'analytics_crosstab',
+    'analytics_journeys',
+    'analytics_segment_compare',
+    'analytics_anomaly',
+  ] as const
 
-  it('3 ツールが ANALYTICS_TOOL_SCHEMAS に存在し ToolSet に公開される', () => {
+  it('ツールが ANALYTICS_TOOL_SCHEMAS に存在し ToolSet に公開される', () => {
     const registered = new Set(ANALYTICS_TOOL_SCHEMAS.map((s) => s.name))
     const set = buildSet()
-    for (const name of PHASE1B_TOOLS) {
+    for (const name of NEW_TOOLS) {
       expect(registered.has(name)).toBe(true)
       expect(set[name]).toBeDefined()
     }
