@@ -8,6 +8,10 @@
     {
       "path": "/api/cron/deep-research",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/fusion-ingest",
+      "schedule": "0 */6 * * *"
     }
   ]
 }
