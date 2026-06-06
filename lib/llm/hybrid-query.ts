@@ -4126,3 +4126,251 @@ SETTINGS max_execution_time = 30`.trim()
     note: '日次値に対し直前 window 日の移動平均・標準偏差で z-score を計算。|z|>=zThreshold を異常(spike/drop)として検出。値は observed_exact だが異常判定は統計的推定。最初の数日は履歴不足で判定なし。',
   }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Phase 1d 拡張 (2026-06-06): 行動コホート / 要素タイプ別比較。
+//   「特定の行動をした人に絞った指標」「img vs table 等の要素種別比較」= 深堀りの核。
+// ════════════════════════════════════════════════════════════════════
+
+// ── analytics_action_cohort (行動コホート: 〜した人 vs しなかった人) ──
+
+/**
+ * 指定アクション (event_type + 任意 href/selector/url) を行ったセッション群 (cohort) と、
+ * それ以外 (rest) で、セッション指標 (滞在秒・PV数・最大スクロール) を比較する。
+ * 例: 「Amazonアフィリエイトをクリックした人の滞在時間」= eventType='click', hrefContains='amzn'。
+ *
+ * session_duration_sec / page_views_in_session は session_end 行にのみ入るため、
+ * 滞在系は dur>0 (=session_end 受信) のセッションに限定して集計し、coverage も返す。
+ */
+export interface ActionCohortSegment {
+  segment: 'cohort' | 'rest'
+  sessions: number
+  sessions_with_duration: number
+  avg_dur_sec: number
+  median_dur_sec: number
+  p25_dur_sec: number
+  p75_dur_sec: number
+  avg_pageviews: number
+  avg_max_scroll_pct: number
+}
+export interface ActionCohortResult {
+  action: { event_type: string; href_contains: string | null; selector_contains: string | null; url: string | null }
+  segments: ActionCohortSegment[]
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeActionCohortQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  eventType: string
+  hrefContains?: string
+  selectorContains?: string
+  actionUrl?: string
+}): Promise<ActionCohortResult> {
+  const qp: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+    event_type: params.eventType,
+  }
+  const cohortFilters: string[] = ['event_type = {event_type:String}']
+  if (params.hrefContains) {
+    cohortFilters.push('element_href ILIKE {href_pat:String}')
+    qp.href_pat = `%${params.hrefContains}%`
+  }
+  if (params.selectorContains) {
+    cohortFilters.push('element_selector ILIKE {sel_pat:String}')
+    qp.sel_pat = `%${params.selectorContains}%`
+  }
+  if (params.actionUrl) {
+    cohortFilters.push('url = {action_url:String}')
+    qp.action_url = params.actionUrl
+  }
+  const range = `timestamp >= toDateTime(toDateTime({start:String}, {tz:String}))
+    AND timestamp < toDateTime(toDateTime({end:String}, {tz:String}))`
+
+  const sql = `
+WITH cohort AS (
+  SELECT DISTINCT session_id
+  FROM clickinsight.events
+  WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND is_agent = 0
+    AND ${cohortFilters.join(' AND ')}
+    AND ${range}
+),
+ss AS (
+  SELECT
+    session_id,
+    max(session_duration_sec) AS dur,
+    max(page_views_in_session) AS pvs,
+    max(scroll_percentage) AS max_scroll
+  FROM clickinsight.events
+  WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND is_agent = 0
+    AND ${range}
+  GROUP BY session_id
+)
+SELECT
+  if(session_id IN (SELECT session_id FROM cohort), 'cohort', 'rest') AS segment,
+  count() AS sessions,
+  countIf(dur > 0) AS sessions_with_duration,
+  round(avgIf(dur, dur > 0), 1) AS avg_dur_sec,
+  round(quantileIf(0.5)(dur, dur > 0), 1) AS median_dur_sec,
+  round(quantileIf(0.25)(dur, dur > 0), 1) AS p25_dur_sec,
+  round(quantileIf(0.75)(dur, dur > 0), 1) AS p75_dur_sec,
+  round(avg(pvs), 2) AS avg_pageviews,
+  round(avg(max_scroll), 1) AS avg_max_scroll_pct
+FROM ss
+GROUP BY segment
+ORDER BY segment
+SETTINGS max_execution_time = 30`.trim()
+
+  const client = getClickHouseClient('analytics_reader')
+  const rs = await client.query({ query: sql, query_params: qp, format: 'JSONEachRow' })
+  const raw = await rs.json<Record<string, number | string>>()
+  const segments: ActionCohortSegment[] = raw.map((r) => ({
+    segment: String(r.segment) === 'cohort' ? 'cohort' : 'rest',
+    sessions: Number(r.sessions),
+    sessions_with_duration: Number(r.sessions_with_duration),
+    avg_dur_sec: Number(r.avg_dur_sec),
+    median_dur_sec: Number(r.median_dur_sec),
+    p25_dur_sec: Number(r.p25_dur_sec),
+    p75_dur_sec: Number(r.p75_dur_sec),
+    avg_pageviews: Number(r.avg_pageviews),
+    avg_max_scroll_pct: Number(r.avg_max_scroll_pct),
+  }))
+
+  return {
+    action: {
+      event_type: params.eventType,
+      href_contains: params.hrefContains ?? null,
+      selector_contains: params.selectorContains ?? null,
+      url: params.actionUrl ?? null,
+    },
+    segments,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: '滞在秒/PV数は session_end 受信セッションにのみ記録されるため、滞在系は dur>0 (sessions_with_duration) に限定集計。cohort=アクション実行セッション、rest=それ以外。',
+  }
+}
+
+// ── analytics_element_breakdown (要素タイプ/セレクタ別の閲覧比較) ─────
+
+/**
+ * element_visibility_v2 を element_tag または element_selector で集計し、露出/セッション/中央値滞在を返す。
+ * groupBy='element_tag' のときは image_visibility を 'img' 行として合成 (画像は別テーブルのため)。
+ * 例: 「画像と表どちらがよく見られているか」= groupBy='element_tag' → 'img' と 'table' を比較。
+ */
+export interface ElementBreakdownRow {
+  key: string
+  exposures: number
+  sessions: number
+  median_visible_sec: number
+  source: 'element_visibility_v2' | 'image_visibility'
+}
+export interface ElementBreakdownResult {
+  group_by: 'element_tag' | 'element_selector'
+  rows: ElementBreakdownRow[]
+  page_url: string | null
+  periodStart: string
+  periodEnd: string
+  timezone: string
+  evidenceLevel: EvidenceLevelV2
+  note: string
+}
+
+export async function executeElementBreakdownQuery(params: {
+  tenantId: string
+  siteId: string
+  dateRange: AnalyticsDateRange
+  timezone: string
+  groupBy: 'element_tag' | 'element_selector'
+  limit: number
+  pageUrl?: string
+  includeImages: boolean
+}): Promise<ElementBreakdownResult> {
+  const client = getClickHouseClient('analytics_reader')
+  const qp: Record<string, string> = {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    start: params.dateRange.start,
+    end: params.dateRange.end,
+    tz: params.timezone,
+    limit: String(params.limit),
+  }
+  const urlV = params.pageUrl ? 'AND page_url = {page_url:String}' : ''
+  if (params.pageUrl) qp.page_url = params.pageUrl
+  const cRange = `created_at >= toDateTime(toDateTime({start:String}, {tz:String}))
+    AND created_at < toDateTime(toDateTime({end:String}, {tz:String}))`
+  const groupExpr = params.groupBy === 'element_selector' ? 'element_selector' : 'element_tag'
+
+  const elemSql = `
+SELECT
+  ${groupExpr} AS key,
+  count() AS exposures,
+  uniqExact(session_id) AS sessions,
+  round(quantile(0.5)(visible_duration_ms) / 1000, 1) AS median_visible_sec
+FROM clickinsight.element_visibility_v2
+WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} ${urlV}
+  AND ${groupExpr} != ''
+  AND ${cRange}
+GROUP BY key
+ORDER BY exposures DESC
+LIMIT {limit:UInt32}
+SETTINGS max_execution_time = 30`.trim()
+
+  const elemRs = await client.query({ query: elemSql, query_params: qp, format: 'JSONEachRow' })
+  const elemRows = await elemRs.json<{ key: string; exposures: number; sessions: number; median_visible_sec: number }>()
+
+  const rows: ElementBreakdownRow[] = elemRows.map((r) => ({
+    key: r.key,
+    exposures: Number(r.exposures),
+    sessions: Number(r.sessions),
+    median_visible_sec: Number(r.median_visible_sec),
+    source: 'element_visibility_v2',
+  }))
+
+  // groupBy=element_tag のときは画像を image_visibility から 'img' 行として合成
+  if (params.groupBy === 'element_tag' && params.includeImages) {
+    const imgSql = `
+SELECT
+  count() AS exposures,
+  uniqExact(session_id) AS sessions,
+  round(quantile(0.5)(visible_duration_ms) / 1000, 1) AS median_visible_sec
+FROM clickinsight.image_visibility
+WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} ${urlV}
+  AND ${cRange}
+SETTINGS max_execution_time = 30`.trim()
+    const imgRs = await client.query({ query: imgSql, query_params: qp, format: 'JSONEachRow' })
+    const img = (await imgRs.json<{ exposures: number; sessions: number; median_visible_sec: number }>())[0]
+    if (img && Number(img.exposures) > 0) {
+      rows.push({
+        key: 'img',
+        exposures: Number(img.exposures),
+        sessions: Number(img.sessions),
+        median_visible_sec: Number(img.median_visible_sec),
+        source: 'image_visibility',
+      })
+    }
+    rows.sort((a, b) => b.exposures - a.exposures)
+  }
+
+  return {
+    group_by: params.groupBy,
+    rows,
+    page_url: params.pageUrl ?? null,
+    periodStart: params.dateRange.start,
+    periodEnd: params.dateRange.end,
+    timezone: params.timezone,
+    evidenceLevel: 'observed_approx',
+    note: '要素の露出回数・到達セッション・可視滞在の中央値。img は image_visibility テーブル由来 (element_visibility_v2 に img タグは無いため合成)。max_visible_ratio は未計装のため割合は出さない。',
+  }
+}

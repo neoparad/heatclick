@@ -59,6 +59,8 @@ import {
   executeJourneysQuery,
   executeSegmentCompareQuery,
   executeAnomalyQuery,
+  executeActionCohortQuery,
+  executeElementBreakdownQuery,
   CROSSTAB_DIMENSIONS,
   SEGMENT_COMPARE_METRICS,
   getParentQuery,
@@ -91,6 +93,8 @@ import {
   type JourneysResult,
   type SegmentCompareResult,
   type AnomalyResult,
+  type ActionCohortResult,
+  type ElementBreakdownResult,
   type FunnelStep,
 } from '@/lib/llm/hybrid-query'
 import {
@@ -697,6 +701,26 @@ export const anomalyInputSchema = z.object({
 })
 export type AnomalyInput = z.infer<typeof anomalyInputSchema>
 
+// ── Phase 1d (2026-06-06): action_cohort / element_breakdown ─────────
+
+export const actionCohortInputSchema = z.object({
+  ...dateRangeShape,
+  event_type: z.string().min(1).default('click'),
+  href_contains: z.string().min(1).optional(),
+  selector_contains: z.string().min(1).optional(),
+  url: z.string().min(1).optional(),
+})
+export type ActionCohortInput = z.infer<typeof actionCohortInputSchema>
+
+export const elementBreakdownInputSchema = z.object({
+  ...dateRangeShape,
+  group_by: z.enum(['element_tag', 'element_selector']).default('element_tag'),
+  page_url: z.string().min(1).optional(),
+  limit: z.number().int().min(5).max(50).default(15),
+  include_images: z.boolean().default(true),
+})
+export type ElementBreakdownInput = z.infer<typeof elementBreakdownInputSchema>
+
 // ── Deep Research 会話ツール (propose=読取 / enqueue=書込) ────────────
 
 export const deepResearchProposeInputSchema = z.object({ ...dateRangeShape })
@@ -753,6 +777,8 @@ export type AnalyticsToolName =
   | 'analytics_journeys'
   | 'analytics_segment_compare'
   | 'analytics_anomaly'
+  | 'analytics_action_cohort'
+  | 'analytics_element_breakdown'
   | 'deep_research_propose'
   | 'deep_research_enqueue'
 
@@ -784,6 +810,8 @@ export type AnalyticsToolResult =
   | { tool: 'analytics_journeys'; result: JourneysResult }
   | { tool: 'analytics_segment_compare'; result: SegmentCompareResult }
   | { tool: 'analytics_anomaly'; result: AnomalyResult }
+  | { tool: 'analytics_action_cohort'; result: ActionCohortResult }
+  | { tool: 'analytics_element_breakdown'; result: ElementBreakdownResult }
   | { tool: 'deep_research_propose'; result: DeepResearchOverview }
   | { tool: 'deep_research_enqueue'; result: DeepResearchEnqueueResult }
 
@@ -1051,6 +1079,26 @@ export const ANALYTICS_TOOL_SCHEMAS = [
       'Use for "急に増えた/減った日はいつか", "異常な日", "変化点", "いつ何が急変したか", "スパイク/急落の検出". ' +
       'Values are observed; the anomaly flag is a statistical inference. Standalone — no parentQueryId. siteId server-controlled.',
     inputSchema: anomalyInputSchema,
+  },
+  {
+    name: 'analytics_action_cohort' as const,
+    description:
+      'Behavioral cohort analysis: compare sessions that DID a specific action vs those that did NOT, on session metrics. ' +
+      'Define the action by event_type (default "click") + optional href_contains (e.g. "amzn"/"amazon" for affiliate links), selector_contains, or url. ' +
+      'Returns for cohort vs rest: sessions, sessions_with_duration, avg/median/p25/p75 dwell seconds, avg pageviews, avg max scroll %. ' +
+      'Use for "Xした人の滞在時間/行動", "Amazonクリックした人だけの平均滞在", "フォーム送信した人の回遊", "クリックした人としない人の違い". ' +
+      'Dwell is computed only over sessions with a session_end (sessions_with_duration). Standalone — no parentQueryId. siteId server-controlled.',
+    inputSchema: actionCohortInputSchema,
+  },
+  {
+    name: 'analytics_element_breakdown' as const,
+    description:
+      'Element visibility by TYPE or selector from element_visibility_v2 (+ images from image_visibility merged as "img" when group_by=element_tag). ' +
+      'Returns per key: exposures, sessions reached, median visible seconds. ' +
+      'Use for "画像と表どちらがよく見られているか", "要素タイプ別の閲覧/滞在", "どの要素が一番見られている". ' +
+      'group_by: element_tag (img/table/h2/div/form...) or element_selector. Optional page_url. ' +
+      'Note: element_visibility_v2 has no img tag (images live in image_visibility) so img is synthesized. Standalone — no parentQueryId. siteId server-controlled.',
+    inputSchema: elementBreakdownInputSchema,
   },
   {
     name: 'deep_research_propose' as const,
@@ -1737,6 +1785,38 @@ export async function executeAnalyticsTool(
         zThreshold: input.zThreshold,
       })
       return { tool: 'analytics_anomaly', result }
+    }
+
+    case 'analytics_action_cohort': {
+      const input = parseToolInput(actionCohortInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeActionCohortQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        eventType: input.event_type,
+        hrefContains: input.href_contains,
+        selectorContains: input.selector_contains,
+        actionUrl: input.url,
+      })
+      return { tool: 'analytics_action_cohort', result }
+    }
+
+    case 'analytics_element_breakdown': {
+      const input = parseToolInput(elementBreakdownInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await executeElementBreakdownQuery({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+        groupBy: input.group_by,
+        limit: input.limit,
+        pageUrl: input.page_url,
+        includeImages: input.include_images,
+      })
+      return { tool: 'analytics_element_breakdown', result }
     }
 
     case 'deep_research_propose': {

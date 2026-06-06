@@ -88,6 +88,8 @@ describe('Phase 1b/1c (2026-06-06) クロス/経路/比較/異常検知 ツー�
     'analytics_journeys',
     'analytics_segment_compare',
     'analytics_anomaly',
+    'analytics_action_cohort',
+    'analytics_element_breakdown',
     'deep_research_propose',
     'deep_research_enqueue',
   ] as const

@@ -400,6 +400,9 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
 - 「差は本物か」「有意差はあるか」「モバイルとPCでCVRは違うか」等は analytics_segment_compare を使う (2比率 z 検定、metric=cvr/bounce_rate、parentQueryId 不要)。significant=p<0.05。サンプルが小さいと検定力不足なので断定しすぎないこと。
 - 「急に増えた/減った日」「異常な日」「変化点」「いつ何が急変したか」「スパイク/急落」には analytics_anomaly を使う (日次の移動平均+z-score、parentQueryId 不要)。anomalies に検出日が入る。判定は統計的推定なので断定しすぎないこと。
 - analytics_crosstab / analytics_journeys / analytics_segment_compare / analytics_anomaly も standalone tool (parentQueryId 不要)。
+- 「〜した人(だけ)の指標」「Amazonクリックした人の滞在時間」「フォーム送信した人の回遊」「クリックした人としない人の違い」等の行動コホート絞り込みには analytics_action_cohort を使う (event_type + href_contains/selector_contains/url でコホート定義、cohort vs rest で滞在秒/PV/スクロールを比較、parentQueryId 不要)。アフィリエイトは href_contains='amzn' 等。
+- 「画像と表どちらがよく見られているか」「要素タイプ別の閲覧/滞在」「どの要素が一番見られている」には analytics_element_breakdown を使う (group_by=element_tag で img/table/h2... を比較、parentQueryId 不要)。img は image_visibility 由来。
+- analytics_action_cohort / analytics_element_breakdown も standalone tool (parentQueryId 不要)。
 - 「このサイトの全体像を知りたい」「色々教えて」等の漠然とした依頼では、まず analytics_data_readiness で在庫を見て、点灯している領域から代表ツールを2〜3個呼んで統合すること。
 - 「深く調べて」「時間をかけて分析して」「何を深掘りできる?」や過去の Deep Research 結果確認では deep_research_propose を呼ぶ (読取専用)。available=true のプランをユーザーに提示し、どれを実行するか確認すること。recent_jobs で進行状況、latest_tickets で直近完了レポートを提示できる。
 - deep_research_enqueue は副作用(ジョブ作成)。ユーザーが実行するレポートを明示的に選んでから のみ呼ぶこと。実行後は「バックグラウンドで数分かかる、後で deep_research_propose で結果を見られる」と伝える。即時にチケットは返らない。
@@ -694,6 +697,10 @@ function freeformResultLabel(result: AnalyticsToolResult): string {
       return `segment_compare ${result.result.metric} ${result.result.segmentA.value} vs ${result.result.segmentB.value} sig=${result.result.significant} p=${result.result.pValue ?? 'null'}`
     case 'analytics_anomaly':
       return `anomaly ${result.result.metric} days=${result.result.series.length} anomalies=${result.result.anomalies.length}`
+    case 'analytics_action_cohort':
+      return `action_cohort ${result.result.action.event_type}${result.result.action.href_contains ? `(${result.result.action.href_contains})` : ''} segs=${result.result.segments.length}`
+    case 'analytics_element_breakdown':
+      return `element_breakdown by=${result.result.group_by} rows=${result.result.rows.length}`
     case 'deep_research_propose':
       return `dr_propose plans=${result.result.plans.filter((p) => p.available).length}/${result.result.plans.length} jobs=${result.result.recent_jobs.length} tickets=${result.result.latest_tickets.length}`
     case 'deep_research_enqueue':
