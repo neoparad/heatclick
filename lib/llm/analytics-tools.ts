@@ -93,6 +93,13 @@ import {
   type AnomalyResult,
   type FunnelStep,
 } from '@/lib/llm/hybrid-query'
+import {
+  enqueueDeepResearchJob,
+  getDeepResearchOverview,
+  DEEP_RESEARCH_REPORT_TYPES,
+  type DeepResearchReportType,
+  type DeepResearchOverview,
+} from '@/lib/llm/deep-research'
 
 // ── Tool 1: analytics.overview ──────────────────────────────────────
 
@@ -690,6 +697,26 @@ export const anomalyInputSchema = z.object({
 })
 export type AnomalyInput = z.infer<typeof anomalyInputSchema>
 
+// ── Deep Research 会話ツール (propose=読取 / enqueue=書込) ────────────
+
+export const deepResearchProposeInputSchema = z.object({ ...dateRangeShape })
+export type DeepResearchProposeInput = z.infer<typeof deepResearchProposeInputSchema>
+
+export const deepResearchEnqueueInputSchema = z.object({
+  ...dateRangeShape,
+  report_type: z
+    .enum([...DEEP_RESEARCH_REPORT_TYPES] as [string, ...string[]])
+    .transform((v) => v as DeepResearchReportType),
+})
+export type DeepResearchEnqueueInput = z.infer<typeof deepResearchEnqueueInputSchema>
+
+export interface DeepResearchEnqueueResult {
+  jobId: string
+  reportType: DeepResearchReportType
+  status: 'pending'
+  message: string
+}
+
 // ── Tool registry (declarative + executor) ──────────────────────────
 
 export interface AnalyticsToolExecuteContext {
@@ -726,6 +753,8 @@ export type AnalyticsToolName =
   | 'analytics_journeys'
   | 'analytics_segment_compare'
   | 'analytics_anomaly'
+  | 'deep_research_propose'
+  | 'deep_research_enqueue'
 
 export type AnalyticsToolResult =
   | { tool: 'analytics.overview'; result: OverviewResult }
@@ -755,6 +784,8 @@ export type AnalyticsToolResult =
   | { tool: 'analytics_journeys'; result: JourneysResult }
   | { tool: 'analytics_segment_compare'; result: SegmentCompareResult }
   | { tool: 'analytics_anomaly'; result: AnomalyResult }
+  | { tool: 'deep_research_propose'; result: DeepResearchOverview }
+  | { tool: 'deep_research_enqueue'; result: DeepResearchEnqueueResult }
 
 /**
  * 公開 tool schema list (AI SDK v6 `tool()` 互換シェイプ)。
@@ -1020,6 +1051,24 @@ export const ANALYTICS_TOOL_SCHEMAS = [
       'Use for "急に増えた/減った日はいつか", "異常な日", "変化点", "いつ何が急変したか", "スパイク/急落の検出". ' +
       'Values are observed; the anomaly flag is a statistical inference. Standalone — no parentQueryId. siteId server-controlled.',
     inputSchema: anomalyInputSchema,
+  },
+  {
+    name: 'deep_research_propose' as const,
+    description:
+      'Deep Research SCOPING (read-only): inspect what time-consuming async reports can be run for this site, plus recent job status and the latest completed report tickets. ' +
+      'Returns plans[] (report_type / label / available / reason based on data readiness), recent_jobs[] (status), latest_tickets[]. ' +
+      'CALL THIS when the user says "深く調べて"/"時間をかけて分析して"/"何を深掘りできる?" or wants to see prior Deep Research results. ' +
+      'Then present the AVAILABLE plans and ask the user which to run before calling deep_research_enqueue. No side effects. siteId server-controlled.',
+    inputSchema: deepResearchProposeInputSchema,
+  },
+  {
+    name: 'deep_research_enqueue' as const,
+    description:
+      'Deep Research START (WRITE/side-effecting): enqueue an async job that generates a report + improvement tickets in the background (minutes). ' +
+      'report_type must be one of the AVAILABLE plans from deep_research_propose (uiux_audit | cta_form_tickets | attention_action_gap). ' +
+      'ONLY call this AFTER the user has explicitly chosen which report to run. Returns the jobId (status pending). ' +
+      'Tell the user it runs in the background and results will appear via deep_research_propose shortly. siteId/userId server-controlled.',
+    inputSchema: deepResearchEnqueueInputSchema,
   },
 ] as const
 
@@ -1688,6 +1737,40 @@ export async function executeAnalyticsTool(
         zThreshold: input.zThreshold,
       })
       return { tool: 'analytics_anomaly', result }
+    }
+
+    case 'deep_research_propose': {
+      const input = parseToolInput(deepResearchProposeInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const result = await getDeepResearchOverview({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+      })
+      return { tool: 'deep_research_propose', result }
+    }
+
+    case 'deep_research_enqueue': {
+      const input = parseToolInput(deepResearchEnqueueInputSchema, rawLlmInput, toolName)
+      enforcePeriodDays(input.dateRange, toolName)
+      const { jobId } = await enqueueDeepResearchJob({
+        tenantId: execCtx.ctx.tenant_id,
+        siteId: execCtx.requestSiteId,
+        userId: execCtx.ctx.user_id,
+        reportType: input.report_type,
+        dateRange: input.dateRange,
+        timezone: input.timezone,
+      })
+      return {
+        tool: 'deep_research_enqueue',
+        result: {
+          jobId,
+          reportType: input.report_type,
+          status: 'pending',
+          message: 'Deep Research ジョブを受け付けました。バックグラウンドで実行され、数分後に deep_research_propose で結果(recent_jobs / latest_tickets)を確認できます。',
+        },
+      }
     }
 
     default: {

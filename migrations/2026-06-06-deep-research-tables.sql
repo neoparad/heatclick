@@ -43,11 +43,14 @@ CREATE TABLE IF NOT EXISTS clickinsight.analysis_jobs
 )
 ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(created_at)
-ORDER BY (tenant_id, site_id, created_at)
+-- dedup キーは id (job 更新 = 同 id を新 updated_at で再 INSERT して置換)。
+-- created_at をキーにすると同秒の別ジョブが衝突し、更新も困難になるため id を採用。
+ORDER BY (tenant_id, site_id, id)
 TTL created_at + INTERVAL 180 DAY;
 
 -- Deep Research が生成する改善提案チケット (M Agent 配下で表示・介入の入口)。
--- 冪等キー: (tenant_id, site_id, week, report_type, version) — 同週・同種・同版は dedup。
+-- dedup キーは id (1 チケット = 1 行)。レポートの「最新版」は job_id (最新 completed job) で取得する
+-- ことで実現 (古い週のチケットは job_id で区別)。week/report_type/version は属性列として保持。
 CREATE TABLE IF NOT EXISTS clickinsight.proposal_tickets
 (
   id                UUID DEFAULT generateUUIDv4(),
@@ -72,7 +75,7 @@ CREATE TABLE IF NOT EXISTS clickinsight.proposal_tickets
 )
 ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(created_at)
-ORDER BY (tenant_id, site_id, week, report_type, version)
+ORDER BY (tenant_id, site_id, id)
 TTL created_at + INTERVAL 365 DAY;
 
 -- 確認:

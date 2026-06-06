@@ -401,6 +401,9 @@ async function runFreeform(params: RunFreeformParams): Promise<OrchestratorOutpu
 - 「急に増えた/減った日」「異常な日」「変化点」「いつ何が急変したか」「スパイク/急落」には analytics_anomaly を使う (日次の移動平均+z-score、parentQueryId 不要)。anomalies に検出日が入る。判定は統計的推定なので断定しすぎないこと。
 - analytics_crosstab / analytics_journeys / analytics_segment_compare / analytics_anomaly も standalone tool (parentQueryId 不要)。
 - 「このサイトの全体像を知りたい」「色々教えて」等の漠然とした依頼では、まず analytics_data_readiness で在庫を見て、点灯している領域から代表ツールを2〜3個呼んで統合すること。
+- 「深く調べて」「時間をかけて分析して」「何を深掘りできる?」や過去の Deep Research 結果確認では deep_research_propose を呼ぶ (読取専用)。available=true のプランをユーザーに提示し、どれを実行するか確認すること。recent_jobs で進行状況、latest_tickets で直近完了レポートを提示できる。
+- deep_research_enqueue は副作用(ジョブ作成)。ユーザーが実行するレポートを明示的に選んでから のみ呼ぶこと。実行後は「バックグラウンドで数分かかる、後で deep_research_propose で結果を見られる」と伝える。即時にチケットは返らない。
+- deep_research_propose / deep_research_enqueue も standalone tool (parentQueryId 不要)。
 - 最終回答は markdown-lite (番号付きリスト可)。簡潔に、根拠 (tool 結果) に基づいて述べること。`,
       prompt: input.message,
       tools,
@@ -691,6 +694,10 @@ function freeformResultLabel(result: AnalyticsToolResult): string {
       return `segment_compare ${result.result.metric} ${result.result.segmentA.value} vs ${result.result.segmentB.value} sig=${result.result.significant} p=${result.result.pValue ?? 'null'}`
     case 'analytics_anomaly':
       return `anomaly ${result.result.metric} days=${result.result.series.length} anomalies=${result.result.anomalies.length}`
+    case 'deep_research_propose':
+      return `dr_propose plans=${result.result.plans.filter((p) => p.available).length}/${result.result.plans.length} jobs=${result.result.recent_jobs.length} tickets=${result.result.latest_tickets.length}`
+    case 'deep_research_enqueue':
+      return `dr_enqueue ${result.result.reportType} job=${result.result.jobId.slice(0, 8)} status=${result.result.status}`
   }
 }
 

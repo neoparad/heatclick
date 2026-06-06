@@ -88,6 +88,8 @@ describe('Phase 1b/1c (2026-06-06) クロス/経路/比較/異常検知 ツー�
     'analytics_journeys',
     'analytics_segment_compare',
     'analytics_anomaly',
+    'deep_research_propose',
+    'deep_research_enqueue',
   ] as const
 
   it('ツールが ANALYTICS_TOOL_SCHEMAS に存在し ToolSet に公開される', () => {
