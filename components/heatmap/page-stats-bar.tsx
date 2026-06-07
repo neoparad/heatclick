@@ -1,5 +1,5 @@
 /**
- * PageStatsBar — heatmap canvas 上端の URL バー + PV / sessions / CTR / 貼擯路 stats
+ * PageStatsBar — heatmap canvas 上端の URL バー + PV / sessions / CTR / 到達率 stats
  *
  * 親 SSOT Part V §5.5.1 P-04 / mockup `mockup/01_heatmap_canvas.html` (.hm-canvas-top .url-bar)
  * 続 82 Frontend Sprint 4 W1 handoff §2.2
@@ -8,9 +8,9 @@
  * Tenant 認可は middleware + route で行う (本コンポーネントは fetch のみ)。
  *
  * 表示ルール:
- *   - page_views = 0 → 「直近 N 日のデータなし」を 1 行で表示 (CTR / 貼擯路 は出さない)
+ *   - page_views = 0 → 「直近 N 日のデータなし」を 1 行で表示 (CTR / 到達率 は出さない)
  *   - ctr = null     → CTR 行を非表示
- *   - scroll_path_rate = null → 貼擯路 行を非表示 (scroll event 未配備 tenant)
+ *   - scroll_path_rate = null → 到達率 行を非表示 (scroll event 未配備 tenant)
  *
  * EvidenceBadge は API meta の evidence_level を 5-tier の levelV2 prop に渡す。
  */
@@ -138,7 +138,7 @@ export function PageStatsBar({ siteId, pageUrl, dateRange, deviceType }: PageSta
               <Stat label="CTR" value={`${(data.ctr * 100).toFixed(1)}%`} />
             ) : null}
             {data.scroll_path_rate !== null ? (
-              <Stat label="貼擯路" value={`${(data.scroll_path_rate * 100).toFixed(1)}%`} />
+              <Stat label="到達率" value={`${(data.scroll_path_rate * 100).toFixed(1)}%`} />
             ) : null}
           </div>
           <EvidenceBadge

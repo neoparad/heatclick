@@ -189,7 +189,7 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
 
       {/*
         2026-05-29 (続 115) Phase 2 / B 改修:
-          旧段 2 `PageStatsBar` (URL + PV/sessions/CTR/貼擯路) を撤去。
+          旧段 2 `PageStatsBar` (URL + PV/sessions/CTR/到達率) を撤去。
           canvas-top (HeatmapToolbar) の URL bar + stat 領域に値を集約表示する。
           fetch 仕様は不変 (usePageStats hook で抽出)。
       */}

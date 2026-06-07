@@ -30,7 +30,7 @@ describe('pageStatsToLabels', () => {
     expect(pageStatsToLabels(state)).toEqual({})
   })
 
-  it('formats PV / CTR / 貼擯路 with 1 decimal % and locale string', () => {
+  it('formats PV / CTR / 到達率 with 1 decimal % and locale string', () => {
     const state: PageStatsState = {
       kind: 'ready',
       data: {

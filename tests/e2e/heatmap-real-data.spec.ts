@@ -71,7 +71,9 @@ test.describe('P-04 heatmap 続 82 Sprint 4 W1 (real-data + stats bar + chips)',
     await expect(page.getByTestId('heatmap-dummy-banner')).toContainText('dummy data fallback')
   })
 
-  test('PageStatsBar displays PV / sessions / CTR from /api/heatmap/page-stats', async ({ page }) => {
+  // 続 115 Phase 2 / B 改修: 段 2 PageStatsBar 撤去、PV/CTR/到達率 は canvas-top に集約。
+  // page-stats-bar testid は廃止、`canvas-stat-*` testid を使う。
+  test('canvas-top displays PV / CTR / 到達率 from /api/heatmap/page-stats', async ({ page }) => {
     await mockHeatmapApi(page, { dataSource: 'clickhouse_events' })
     await mockPageStatsApi(page, {
       pageViews: 6210,
@@ -81,20 +83,22 @@ test.describe('P-04 heatmap 続 82 Sprint 4 W1 (real-data + stats bar + chips)',
     })
 
     await page.goto('/heatmap')
-    const bar = page.getByTestId('page-stats-bar')
-    await expect(bar).toBeVisible()
-    await expect(bar).toContainText('6,210')
-    await expect(bar).toContainText('2,841')
-    await expect(bar).toContainText('26.5%')
-    await expect(bar).toContainText('48.2%')
+    const toolbar = page.getByTestId('heatmap-toolbar')
+    await expect(toolbar).toBeVisible()
+    await expect(page.getByTestId('canvas-stat-pv')).toContainText('6,210')
+    await expect(page.getByTestId('canvas-stat-ctr')).toContainText('26.5%')
+    await expect(page.getByTestId('canvas-stat-scroll')).toContainText('48.2%')
   })
 
-  test('PageStatsBar shows empty-period message when PV=0', async ({ page }) => {
+  test('canvas-top hides PV/CTR/到達率 when PV=0 (no spurious metrics)', async ({ page }) => {
     await mockHeatmapApi(page, { dataSource: 'clickhouse_events' })
     await mockPageStatsApi(page, { pageViews: 0, sessions: 0, ctr: null, scrollPathRate: null })
 
     await page.goto('/heatmap')
-    await expect(page.getByTestId('page-stats-bar')).toContainText('集計データはありません')
+    await page.getByTestId('heatmap-toolbar').waitFor()
+    await expect(page.getByTestId('canvas-stat-pv')).toHaveCount(0)
+    await expect(page.getByTestId('canvas-stat-ctr')).toHaveCount(0)
+    await expect(page.getByTestId('canvas-stat-scroll')).toHaveCount(0)
   })
 
   test('SegmentChip (device + period) triggers heatmap refetch', async ({ page }) => {

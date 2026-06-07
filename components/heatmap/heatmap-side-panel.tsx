@@ -186,6 +186,9 @@ function HotspotsView({
 function HotspotCardRow({ card, onClick }: { card: HotspotCard; onClick?: () => void }) {
   const intentBorder =
     card.intent === 'warn' ? '#d64545' : card.intent === 'win' ? '#39a169' : 'transparent'
+  // emotion 未推論 (real mode Phase 1) では emotion badge / bar を出さない。
+  // emotionPercents の有無で判定する (fixture は必ず複数 entry を持つ)。
+  const emotionInferred = card.emotionPercents.length > 0
   return (
     <button
       type="button"
@@ -212,18 +215,20 @@ function HotspotCardRow({ card, onClick }: { card: HotspotCard; onClick?: () => 
         <span className="text-[12.5px] font-semibold text-[var(--ug-text)] tracking-tight">
           {card.name}
         </span>
-        <EmotionTag emotion={card.emotionLabel} />
+        {emotionInferred ? <EmotionTag emotion={card.emotionLabel} /> : null}
       </div>
       <div className="font-mono text-[10.5px] text-[var(--ug-text-3)]">{card.selector}</div>
-      <div className="mt-1.5 flex h-1 overflow-hidden rounded bg-[var(--ug-bg-2,#f4f5f7)]">
-        {card.emotionPercents.map((e) => (
-          <i
-            key={e.key}
-            style={{ width: `${e.pct}%`, background: EMOTION_BAR_BG[e.key] }}
-            aria-hidden
-          />
-        ))}
-      </div>
+      {emotionInferred ? (
+        <div className="mt-1.5 flex h-1 overflow-hidden rounded bg-[var(--ug-bg-2,#f4f5f7)]">
+          {card.emotionPercents.map((e) => (
+            <i
+              key={e.key}
+              style={{ width: `${e.pct}%`, background: EMOTION_BAR_BG[e.key] }}
+              aria-hidden
+            />
+          ))}
+        </div>
+      ) : null}
       <div className="mt-2 flex gap-2.5 border-t border-dashed border-[var(--ug-border-2,#eef0f3)] pt-2 font-mono text-[10.5px] text-[var(--ug-text-3)]">
         {card.stats.map((s, i) => (
           <span key={i}>

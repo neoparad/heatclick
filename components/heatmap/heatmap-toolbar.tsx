@@ -2,13 +2,17 @@
  * HeatmapToolbar — canvas 上端 (mockup `.hm-canvas-top`)
  *
  * 親 SSOT Part V §5.5.1 P-04 / mockup `01_heatmap_canvas.html` `.hm-canvas-top`
- * Dispatch: 2026-05-29 frontend mockup parity rebuild §4 Step 7
+ * Dispatch:
+ *   - mockup parity rebuild §4 Step 7 (2026-05-29)
+ *   - 続 115 (controls 4→3段化) で `scrollLabel` 追加
+ *   - 続 116 (stage-fix + D 改修) で URL bar 撤去、stats 表示領域拡大
+ *     (URL は段 1 PAGE select で確認可能、canvas-top では metric 視認性を優先)
  *
- * 構成:
+ * 構成 (続 116 以降):
  *   - device tabs (PC / SP / TAB)
- *   - URL bar
- *   - stats (PV / CTR / 滞留)
+ *   - stats (PV / CTR / 到達率 / 滞留) — 大きめ font + ゆとり間隔
  *   - action buttons (filter 表示/非表示 / side panel / 全画面)
+ *   ❌ URL bar (続 116 撤去)
  */
 
 import type { DeviceKind } from '@/lib/heatmap/types'
@@ -16,10 +20,15 @@ import type { DeviceKind } from '@/lib/heatmap/types'
 interface HeatmapToolbarProps {
   device: DeviceKind
   onDeviceChange: (d: DeviceKind) => void
-  pageUrl: string
   pvLabel?: string
   ctrLabel?: string
+  /** 滞在時間 (legacy label、Phase 2 では未配線・将来 hook で実値) */
   dwellLabel?: string
+  /**
+   * Phase 2 (B 改修): scroll>50% 到達率。段 2 page-stats-bar 撤去に伴い canvas-top に集約。
+   * 集計データ無 / scroll event 未配備 tenant では undefined。
+   */
+  scrollLabel?: string
   controlsVisible: boolean
   onToggleControls: () => void
   sideVisible: boolean
@@ -62,10 +71,10 @@ const DEVICES: ReadonlyArray<{ key: DeviceKind; label: string; icon: JSX.Element
 export function HeatmapToolbar({
   device,
   onDeviceChange,
-  pageUrl,
   pvLabel,
   ctrLabel,
   dwellLabel,
+  scrollLabel,
   controlsVisible,
   onToggleControls,
   sideVisible,
@@ -107,39 +116,42 @@ export function HeatmapToolbar({
         })}
       </div>
 
+      {/*
+        続 116 D 改修: canvas-top URL bar を撤去。
+        URL は段 1 (heatmap-page-filter-bar) の PAGE select で確認可能。
+        URL bar が占めていた空 space を stats 領域に振り、PV/CTR/到達率/滞留 を見やすく表示。
+        pageUrl prop 自体は heatmap-canvas からの aria-label 用に保持 (削除しない)。
+      */}
       <div
-        className="flex max-w-[460px] flex-1 items-center gap-1.5 overflow-hidden rounded-md border border-[var(--ug-border)] bg-[var(--ug-bg-2)] px-2.5 py-1.5 font-mono text-[11.5px] text-[var(--ug-text-2)]"
-        data-testid="heatmap-url-bar"
+        className="ml-auto flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-[11.5px] text-[var(--ug-text-2)]"
+        data-testid="canvas-stats-group"
       >
-        <svg
-          viewBox="0 0 24 24"
-          width="11"
-          height="11"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          className="shrink-0 text-[var(--ug-green)]"
-        >
-          <rect x="3" y="11" width="18" height="11" rx="2" />
-          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-        </svg>
-        <span className="overflow-hidden text-ellipsis whitespace-nowrap">{pageUrl}</span>
-      </div>
-
-      <div className="ml-auto flex items-center gap-3 font-mono text-[10.5px] text-[var(--ug-text-3)]">
         {pvLabel ? (
-          <span data-testid="canvas-stat-pv">
-            PV <b className="text-[var(--ug-text-1)]">{pvLabel}</b>
+          <span data-testid="canvas-stat-pv" className="inline-flex items-baseline gap-1">
+            <span className="text-[10.5px] uppercase tracking-[0.06em] text-[var(--ug-text-3)]">PV</span>
+            <b className="text-[13px] font-semibold text-[var(--ug-text-1)]">{pvLabel}</b>
           </span>
         ) : null}
         {ctrLabel ? (
-          <span data-testid="canvas-stat-ctr">
-            CTR <b className="text-[var(--ug-text-1)]">{ctrLabel}</b>
+          <span data-testid="canvas-stat-ctr" className="inline-flex items-baseline gap-1">
+            <span className="text-[10.5px] uppercase tracking-[0.06em] text-[var(--ug-text-3)]">CTR</span>
+            <b className="text-[13px] font-semibold text-[var(--ug-text-1)]">{ctrLabel}</b>
+          </span>
+        ) : null}
+        {scrollLabel ? (
+          <span
+            data-testid="canvas-stat-scroll"
+            title="scroll>50% 到達率"
+            className="inline-flex items-baseline gap-1"
+          >
+            <span className="text-[10.5px] tracking-[0.04em] text-[var(--ug-text-3)]">到達率</span>
+            <b className="text-[13px] font-semibold text-[var(--ug-text-1)]">{scrollLabel}</b>
           </span>
         ) : null}
         {dwellLabel ? (
-          <span data-testid="canvas-stat-dwell">
-            滞留 <b className="text-[var(--ug-text-1)]">{dwellLabel}</b>
+          <span data-testid="canvas-stat-dwell" className="inline-flex items-baseline gap-1">
+            <span className="text-[10.5px] tracking-[0.04em] text-[var(--ug-text-3)]">滞留</span>
+            <b className="text-[13px] font-semibold text-[var(--ug-text-1)]">{dwellLabel}</b>
           </span>
         ) : null}
       </div>

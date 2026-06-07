@@ -15,7 +15,7 @@
  *   - sessions = uniqExact(session_id)
  *   - clicks   = count(event_type = 'click')
  *   - CTR      = clicks / page_views (page_views > 0 のときのみ)
- *   - 貼擯路   = scroll_y > 50% session 数 / 全 session
+ *   - 到達率   = scroll_y > 50% session 数 / 全 session
  *               (scroll event が無い tenant では null 返却、PageStatsBar 側で表示抑止)
  *
  * 続 82 Infra deploy 待ち状態でも本 route は動作する (旧 v1 event のみで PV/sessions/CTR 算出可能)。

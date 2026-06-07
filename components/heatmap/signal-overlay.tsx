@@ -19,6 +19,8 @@ interface SignalOverlayProps {
   signals: SignalMarker[]
   signalsOn: boolean
   enabledSignals: ReadonlySet<SignalKey>
+  /** 続 117 v2: capture CSS px → 実表示 px の縮小率 (heat-overlay と同じ)。fixture は 1。 */
+  displayScale?: number
 }
 
 // `prefers-reduced-motion` で animation を抑制 (a11y、Codex review MEDIUM fix)
@@ -33,7 +35,12 @@ const RAGE_KEYFRAMES = `
 }
 `
 
-export function SignalOverlay({ signals, signalsOn, enabledSignals }: SignalOverlayProps) {
+export function SignalOverlay({
+  signals,
+  signalsOn,
+  enabledSignals,
+  displayScale = 1,
+}: SignalOverlayProps) {
   if (!signalsOn) return null
   return (
     <>
@@ -46,18 +53,18 @@ export function SignalOverlay({ signals, signalsOn, enabledSignals }: SignalOver
         {signals
           .filter((s) => enabledSignals.has(s.type))
           .map((s) => (
-            <SigMarker key={s.id} signal={s} />
+            <SigMarker key={s.id} signal={s} displayScale={displayScale} />
           ))}
       </div>
     </>
   )
 }
 
-function SigMarker({ signal }: { signal: SignalMarker }) {
+function SigMarker({ signal, displayScale }: { signal: SignalMarker; displayScale: number }) {
   const common = {
     position: 'absolute' as const,
-    left: signal.x,
-    top: signal.y,
+    left: signal.x * displayScale,
+    top: signal.y * displayScale,
     pointerEvents: 'auto' as const,
     cursor: 'pointer' as const,
   }
