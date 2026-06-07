@@ -20,13 +20,20 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ConditionVisualBuilder } from './condition-visual-builder'
+import { DryRunPreviewPanel } from './dry-run-preview-panel'
 import { NlConditionInput, type NlGenerationMeta } from './nl-condition-input'
 import { emptyConditionAst } from '@/lib/scenarios/condition-ast-ops'
 import { validateConditionAst, type ConditionNode } from '@/lib/scenarios/types'
 
-export function ScenarioNewView() {
+interface ScenarioNewViewProps {
+  /** JWT 由来の許可済 site_ids (server component から注入)。空配列 = 利用可能サイトなし。 */
+  availableSiteIds: ReadonlyArray<string>
+}
+
+export function ScenarioNewView({ availableSiteIds }: ScenarioNewViewProps) {
   const [ast, setAst] = useState<ConditionNode>(emptyConditionAst())
   const [name, setName] = useState('')
+  const [siteId, setSiteId] = useState<string>(availableSiteIds[0] ?? '')
   const [nlMeta, setNlMeta] = useState<NlGenerationMeta | null>(null)
 
   const validationErrors = validateConditionAst(ast)
@@ -65,16 +72,35 @@ export function ScenarioNewView() {
           </div>
         </div>
 
-        {/* Name */}
-        <div className="mb-3 flex items-center gap-2">
+        {/* Name + Site selector */}
+        <div className="mb-3 flex items-center gap-2 flex-wrap">
           <span className="text-xs font-medium text-slate-600 shrink-0">名前</span>
           <Input
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="例: 初回訪問者向けクーポン"
             maxLength={255}
-            className="h-9 text-xs max-w-md"
+            className="h-9 text-xs max-w-xs"
           />
+          <span className="text-xs font-medium text-slate-600 shrink-0">対象サイト</span>
+          {availableSiteIds.length === 0 ? (
+            <Badge variant="outline" className="text-[10px] bg-rose-50 text-rose-700 border-rose-300">
+              利用可能サイトなし
+            </Badge>
+          ) : (
+            <select
+              value={siteId}
+              onChange={(e) => setSiteId(e.target.value)}
+              className="h-9 px-2.5 text-xs font-mono border border-slate-200 rounded bg-white focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400"
+              aria-label="対象サイト"
+            >
+              {availableSiteIds.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
 
         {/* Disclaimer */}
@@ -125,6 +151,17 @@ export function ScenarioNewView() {
                 </ul>
               ) : null}
             </div>
+
+            {/* Dry-run preview */}
+            {siteId ? (
+              <div className="px-4 py-3 border-t border-slate-100 bg-slate-50/50">
+                <DryRunPreviewPanel
+                  conditionAst={ast}
+                  siteId={siteId}
+                  hasValidationErrors={validationErrors.length > 0}
+                />
+              </div>
+            ) : null}
           </div>
 
           {/* RIGHT: variant skeleton (Phase 2.1) */}
