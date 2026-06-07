@@ -7,7 +7,7 @@
  * 構成 (mockup parity):
  *   1. 上段: PageSelector + EvidenceBadge
  *   2. SegmentChip 群: PC+SP / PC / SP, 直近 7/14/30 日 (集計フィルタ、page-level)
- *   3. PageStatsBar (URL + PV/sessions/CTR/滞留)
+ *   3. (旧 PageStatsBar は続116で撤去 → PV/CTR/到達率/滞留 は HeatmapCanvas の canvas-top に集約)
  *   4. HeatmapCanvas: mockup の `.hm-controls` + `.hm-main` (canvas + side) 全部を内包
  *   5. HotspotDetail (slide-in、legacy)
  *
