@@ -28,7 +28,14 @@ import {
   createScenarioRepository,
 } from '@/lib/scenarios/repository'
 import { CloudflareKvError } from '@/lib/scenarios/kv-storage'
-import { ConditionNodeSchema, VariantsSchema, SCENARIO_STATUSES, EVIDENCE_LEVELS } from '@/lib/scenarios/types'
+import {
+  ConditionNodeSchema,
+  EVIDENCE_LEVELS,
+  FrequencyCapSchema,
+  ScheduleSchema,
+  SCENARIO_STATUSES,
+  VariantsSchema,
+} from '@/lib/scenarios/types'
 import {
   type ScenarioTenantContext,
   isTenantContext,
@@ -53,6 +60,9 @@ const UpdateBodySchema = z
     status: z.enum(SCENARIO_STATUSES).optional(),
     evidence_level: z.enum(EVIDENCE_LEVELS).optional(),
     evidence_data: z.record(z.unknown()).optional(),
+    // Phase 2.1 additive fields (Codex T2 dual review 指摘 A 反映)
+    frequency_cap: FrequencyCapSchema.nullable().optional(),
+    schedule: ScheduleSchema.nullable().optional(),
   })
   .refine((v) => Object.keys(v).length > 0, { message: 'body must contain at least one field' })
 

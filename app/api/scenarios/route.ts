@@ -28,7 +28,13 @@ import {
   createScenarioRepository,
 } from '@/lib/scenarios/repository'
 import { CloudflareKvError } from '@/lib/scenarios/kv-storage'
-import { ConditionNodeSchema, VariantsSchema, EVIDENCE_LEVELS } from '@/lib/scenarios/types'
+import {
+  ConditionNodeSchema,
+  EVIDENCE_LEVELS,
+  FrequencyCapSchema,
+  ScheduleSchema,
+  VariantsSchema,
+} from '@/lib/scenarios/types'
 import { isTenantContext, resolveScenarioTenantContext } from '@/lib/scenarios/tenant-context'
 
 export const runtime = 'nodejs'
@@ -51,6 +57,9 @@ const CreateBodySchema = z.object({
   status: z.literal('draft').optional().default('draft'),
   evidence_level: z.enum(EVIDENCE_LEVELS).optional(),
   evidence_data: z.record(z.unknown()).optional(),
+  // Phase 2.1 additive fields
+  frequency_cap: FrequencyCapSchema.nullable().optional(),
+  schedule: ScheduleSchema.nullable().optional(),
 })
 
 function handleError(err: unknown): NextResponse {
@@ -140,6 +149,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       status: 'draft',
       evidence_level: parsed.data.evidence_level,
       evidence_data: parsed.data.evidence_data,
+      frequency_cap: parsed.data.frequency_cap,
+      schedule: parsed.data.schedule,
       tenant_id: ctx.tenantId,
       site_id: ctx.siteId,
       created_by: ctx.userId,

@@ -220,6 +220,56 @@ export const VariantsSchema = z
 export type Variants = z.infer<typeof VariantsSchema>
 
 // ────────────────────────────────────────────────────────────────────────────
+// Frequency cap & Schedule (Phase 2.1、2026-06-07)
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Frequency cap: 同じ visitor に何回まで表示するかを制限。
+//   - 'session' = 1 session 内で max_impressions 回まで (既存の per-session dedup と整合)
+//   - 'day'     = 1 UTC 日内で max_impressions 回まで
+//   - 'week'    = 1 ISO 週 (Mon 始まり) で max_impressions 回まで
+//   未設定時は per-session dedup のみ (既存挙動)。
+//
+// Schedule: scenario の配信期間 (開始 / 終了)。
+//   - start_at: この時刻より前は配信しない (null/省略 = 即時開始)
+//   - end_at:   この時刻以降は配信しない (null/省略 = 終了なし)
+//   server が現在時刻外の scenario を payload から落とす + scenario-runtime.js が
+//   ±5min clock skew 内で再チェック (端末時計ずれ耐性)。
+
+export const FREQUENCY_CAP_PERIODS = ['session', 'day', 'week'] as const
+export type FrequencyCapPeriod = (typeof FREQUENCY_CAP_PERIODS)[number]
+
+export const FrequencyCapSchema = z
+  .object({
+    per_period: z.enum(FREQUENCY_CAP_PERIODS),
+    max_impressions: z.number().int().min(1).max(100),
+  })
+  .strict()
+
+export type FrequencyCap = z.infer<typeof FrequencyCapSchema>
+
+export const ScheduleSchema = z
+  .object({
+    start_at: z.string().datetime().nullable().optional(),
+    end_at: z.string().datetime().nullable().optional(),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if (!v.start_at || !v.end_at) return
+    // 文字列比較は fractional seconds 等で順序がズレる (例: '...00.500Z' < '...00Z')。
+    // ms 数値比較で順序を確定する (Codex T2 dual review 指摘 A 反映)。
+    const startMs = Date.parse(v.start_at)
+    const endMs = Date.parse(v.end_at)
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs >= endMs) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'start_at must be earlier than end_at',
+      })
+    }
+  })
+
+export type Schedule = z.infer<typeof ScheduleSchema>
+
+// ────────────────────────────────────────────────────────────────────────────
 // Scenario row (Phase 1 in-memory, Phase 2 PostgreSQL row)
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -240,6 +290,9 @@ export const ScenarioSchema = z.object({
   status: z.enum(SCENARIO_STATUSES).default('live'),
   evidence_level: z.enum(EVIDENCE_LEVELS).default('planned'),
   evidence_data: z.record(z.unknown()).default({}),
+  // Phase 2.1 additions (additive、既存 row は省略可で読込)
+  frequency_cap: FrequencyCapSchema.nullable().optional(),
+  schedule: ScheduleSchema.nullable().optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime(),
   created_by: z.string().min(1).max(255),
@@ -249,12 +302,15 @@ export const ScenarioSchema = z.object({
 export type Scenario = z.infer<typeof ScenarioSchema>
 
 // Runtime payload served to scenario_runtime.js (subset of Scenario, no audit columns)
+// frequency_cap / schedule は browser side 二重チェックのため runtime payload に含める。
 export const ScenarioRuntimeSchema = z.object({
   id: z.string().uuid(),
   condition_ast: ConditionNodeSchema,
   variants: VariantsSchema,
   status: z.enum(SCENARIO_STATUSES),
   matched_condition_hash: z.string().length(64).optional(),
+  frequency_cap: FrequencyCapSchema.nullable().optional(),
+  schedule: ScheduleSchema.nullable().optional(),
 })
 
 export type ScenarioRuntime = z.infer<typeof ScenarioRuntimeSchema>

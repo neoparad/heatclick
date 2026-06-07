@@ -27,6 +27,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ConditionVisualBuilder } from './condition-visual-builder'
 import { DryRunPreviewPanel } from './dry-run-preview-panel'
+import { FrequencyScheduleCard } from './frequency-schedule-card'
 import { NlConditionInput, type NlGenerationMeta } from './nl-condition-input'
 import {
   VariantSetEditor,
@@ -34,7 +35,13 @@ import {
   validateVariantsForSubmit,
 } from './variant-set-editor'
 import { emptyConditionAst } from '@/lib/scenarios/condition-ast-ops'
-import { validateConditionAst, type ConditionNode, type Variant } from '@/lib/scenarios/types'
+import {
+  validateConditionAst,
+  type ConditionNode,
+  type FrequencyCap,
+  type Schedule,
+  type Variant,
+} from '@/lib/scenarios/types'
 
 interface ScenarioNewViewProps {
   /** JWT 由来の許可済 site_ids (server component から注入)。空配列 = 利用可能サイトなし。 */
@@ -50,6 +57,8 @@ export function ScenarioNewView({ availableSiteIds }: ScenarioNewViewProps) {
   const [description, setDescription] = useState('')
   const [siteId, setSiteId] = useState<string>(availableSiteIds[0] ?? '')
   const [nlMeta, setNlMeta] = useState<NlGenerationMeta | null>(null)
+  const [frequencyCap, setFrequencyCap] = useState<FrequencyCap | null>(null)
+  const [schedule, setSchedule] = useState<Schedule | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
 
@@ -84,6 +93,8 @@ export function ScenarioNewView({ availableSiteIds }: ScenarioNewViewProps) {
         // 新規作成は常に draft で開始 (Owner が編集画面で live に昇格)
         status: 'draft' as const,
         evidence_level: 'planned' as const,
+        frequency_cap: frequencyCap,
+        schedule,
       }
       const res = await fetch('/api/scenarios', {
         method: 'POST',
@@ -280,6 +291,15 @@ export function ScenarioNewView({ availableSiteIds }: ScenarioNewViewProps) {
             <div className="px-4 py-2.5 border-t border-slate-100 bg-slate-50 text-[10.5px] text-slate-500 leading-relaxed">
               💡 画像の <b>R2 アップロード</b> は保存後の編集画面 (/scenarios/[id]) で行います。
               ここでは画像 URL を直接入力するか、HTML バリアントを使ってください。
+            </div>
+
+            <div className="px-4 py-3 border-t border-slate-100">
+              <FrequencyScheduleCard
+                frequencyCap={frequencyCap}
+                schedule={schedule}
+                onFrequencyCapChange={setFrequencyCap}
+                onScheduleChange={setSchedule}
+              />
             </div>
           </div>
         </div>
