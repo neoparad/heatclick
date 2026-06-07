@@ -20,7 +20,6 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import dynamic from 'next/dynamic'
 import { ChevronDown } from 'lucide-react'
 
 import { SegmentChip } from '@/components/ui/segment-chip'
@@ -29,13 +28,10 @@ import { useHeatmapTiles } from '@/hooks/use-heatmap-tiles'
 import { pageStatsToLabels, usePageStats } from '@/hooks/use-page-stats'
 import type { HeatmapLayer, HeatmapPoint, HeatmapTile } from '@/lib/api/heatmap'
 
+// 直接 import (旧: dynamic({ssr:false}))。本コンポーネントは route 側で既に ssr:false の
+// 配下にあり、二重 dynamic は client チャンクの待ちを増やすだけで利点が無いため統合。
+import { HeatmapCanvas } from './heatmap-canvas'
 import { HotspotDetail } from './hotspot-detail'
-
-/** HeatmapCanvas を chunk 分離 (mockup overlays 群を含むため bundle 数十 KB) */
-const HeatmapCanvas = dynamic(
-  () => import('./heatmap-canvas').then((m) => ({ default: m.HeatmapCanvas })),
-  { ssr: false, loading: () => <HeatmapCanvasFallback /> },
-)
 
 interface HeatmapPageProps {
   siteId: string
@@ -220,19 +216,6 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
         pageUrl={pageUrl}
         onClose={() => setSelected(null)}
       />
-    </div>
-  )
-}
-
-function HeatmapCanvasFallback() {
-  return (
-    <div
-      className="flex h-[600px] w-full items-center justify-center rounded-md border border-[var(--ug-border)] bg-white text-xs text-[var(--ug-text-3)]"
-      role="status"
-      aria-live="polite"
-      data-testid="heatmap-canvas-fallback"
-    >
-      ヒートマップを準備中…
     </div>
   )
 }

@@ -49,8 +49,10 @@ export function RealPageScreenshotUnderlay({
           height: 'auto',
         }}
         // perf: async decode。eager (lazy だと scroll するまで描画されず overlay と乖離) 。
+        // fetchPriority=high: underlay は最重要ピクセル。既定優先度だと他リクエストに負ける。
         loading="eager"
         decoding="async"
+        fetchPriority="high"
         referrerPolicy="no-referrer"
         onError={onImageError}
         data-testid="real-page-screenshot-img"

@@ -141,15 +141,18 @@ export async function getHeatmapUnderlayWithR2Cache(
 ): Promise<HeatmapUnderlayWithR2> {
   const now = hooks.now ?? (() => Date.now())
   const cacheKey = buildCacheKey(input)
+  const r2 = resolveR2Config(hooks.r2Config)
 
   // ── L1: in-memory ────────────────────────────────────────────────────────
   const l1 = getMemoryCachedUnderlay(cacheKey)
   if (l1) {
-    return { capture: { ...l1, cached: true }, tier: 'l1' }
+    // 署名 GET URL は短命 (5min) だが L1 TTL はそれより長い。失効した署名URLを配らない
+    // よう、R2 由来 capture は毎ヒットで鍵から再署名する (CDN/data URL の degrade 分は据置)。
+    const served = await reSignR2Url(input, l1, r2)
+    return { capture: { ...served, cached: true }, tier: 'l1' }
   }
 
   // R2 未設定なら L2 を skip して degrade (L1-only capture)
-  const r2 = resolveR2Config(hooks.r2Config)
   if (!r2) {
     const capture = await captureAndCacheL1Only(input, cacheKey, hooks)
     return { capture, tier: 'degraded' }
@@ -381,6 +384,33 @@ async function toR2ServedCapture(
     config: r2,
   })
   return { ...capture, imageUrl: imageSigned.downloadUrl }
+}
+
+/**
+ * L1 capture を serve する際の imageUrl 再署名。
+ * 短命署名URL (5min) を長命 L1 (>=1h) が抱えると失効 URL を配ってしまうため、R2 由来
+ * (署名URL ホスト一致) の capture は鍵から都度再署名する。
+ * R2 未設定、または CDN / data: URL (degrade / R2 書込失敗フォールバック) はそのまま返す。
+ */
+async function reSignR2Url(
+  input: { tenantId: string; siteId: string; pageUrl: string; device: HeatmapDevice },
+  capture: HeatmapUnderlayCapture,
+  r2: R2Config | null,
+): Promise<HeatmapUnderlayCapture> {
+  if (!r2) return capture
+  const r2Host = `${r2.accountId}.r2.cloudflarestorage.com`
+  if (!capture.imageUrl.includes(r2Host)) return capture
+  try {
+    const keys = buildR2Keys(input)
+    const signed = await signR2GetUrl({
+      key: keys.imageKey,
+      ttlSec: SIGNED_GET_TTL_SEC,
+      config: r2,
+    })
+    return { ...capture, imageUrl: signed.downloadUrl }
+  } catch {
+    return capture
+  }
 }
 
 // ── R2 key schema ─────────────────────────────────────────────────────────────

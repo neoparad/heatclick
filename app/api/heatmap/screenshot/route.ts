@@ -39,6 +39,9 @@ import {
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+// コールド capture が platform 既定 timeout で 504 になるのを防ぐ。
+// provider 側 timeout (60s) より長くし、route 側が制御された応答を返せるようにする。
+export const maxDuration = 90
 
 const querySchema = z.object({
   site_id: z.string().min(1).max(128),
@@ -177,10 +180,15 @@ export async function GET(request: Request) {
       pageUrl: canonicalUrl,
       device: params.device,
     })
-    return NextResponse.json({
-      success: true,
-      data: capture,
-    })
+    return NextResponse.json(
+      { success: true, data: capture },
+      {
+        // capture.imageUrl は 5min の署名URL。warm 再ナビで function + ClickHouse を
+        // 再実行しないよう、署名寿命より短い max-age でブラウザにのみ (private) キャッシュ。
+        // SWR は付けない (失効した署名URL を配らないため)。
+        headers: { 'Cache-Control': 'private, max-age=240' },
+      },
+    )
   } catch (err) {
     if (err instanceof ScreenshotProviderError) {
       const status =
