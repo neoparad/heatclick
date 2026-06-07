@@ -28,7 +28,7 @@ import {
   createScenarioRepository,
 } from '@/lib/scenarios/repository'
 import { CloudflareKvError } from '@/lib/scenarios/kv-storage'
-import { ConditionNodeSchema, VariantsSchema, SCENARIO_STATUSES, EVIDENCE_LEVELS } from '@/lib/scenarios/types'
+import { ConditionNodeSchema, VariantsSchema, EVIDENCE_LEVELS } from '@/lib/scenarios/types'
 import { isTenantContext, resolveScenarioTenantContext } from '@/lib/scenarios/tenant-context'
 
 export const runtime = 'nodejs'
@@ -38,13 +38,17 @@ const SiteIdSchema = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/)
 
 // tenant_id is NOT accepted from the body — it is derived from the JWT. site_id is validated
 // against the JWT's site_ids in resolveScenarioTenantContext (here it is only shape-checked).
+//
+// Phase 2.1 (2026-06-07): 新規作成は常に status='draft' 固定。live への昇格は編集画面 (PUT
+// /api/scenarios/[id]) で Owner が明示的に行う。これにより UI を迂回した POST で 'live' を
+// 直接作成される経路を server boundary で塞ぐ (Codex T2 dual review 指摘 A 反映)。
 const CreateBodySchema = z.object({
   site_id: SiteIdSchema,
   name: z.string().min(1).max(255),
   description: z.string().max(2000).optional(),
   condition_ast: ConditionNodeSchema,
   variants: VariantsSchema,
-  status: z.enum(SCENARIO_STATUSES).optional(),
+  status: z.literal('draft').optional().default('draft'),
   evidence_level: z.enum(EVIDENCE_LEVELS).optional(),
   evidence_data: z.record(z.unknown()).optional(),
 })
@@ -131,7 +135,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       description: parsed.data.description,
       condition_ast: parsed.data.condition_ast,
       variants: parsed.data.variants,
-      status: parsed.data.status,
+      // Phase 2.1: 新規は常に 'draft'。CreateBodySchema が z.literal('draft') で強制済だが
+      // 二重防御として明示的に上書き。
+      status: 'draft',
       evidence_level: parsed.data.evidence_level,
       evidence_data: parsed.data.evidence_data,
       tenant_id: ctx.tenantId,

@@ -1,25 +1,25 @@
 /**
- * /scenarios/new — 新規シナリオ作成 Phase 2 partial (M-Director、2026-06-07)
+ * /scenarios/new — 新規シナリオ作成 (Phase 2.1 完成版、M-Director、2026-06-07)
  *
- * Server component で middleware 注入 `x-site-ids` を読み、client view に渡す。
- * 条件 (NL→AST + Visual Builder + dry-run preview) は実機能、バリアント + 保存は Phase 2.1。
+ * Server component で getServerSession() を呼び、JWT 由来の site_ids を client view に渡す。
+ * middleware は tenant-protected region で header inject しないため、headers() 直読不可。
+ * getServerSession() (cookie/JWT) が SSOT (Codex T2 dual review フォローアップ反映)。
  *
  * 親 SSOT: linkscrawl/docs/fusion/team/m-director/prd.md §6 (Phase 2 機能要件)
  */
 
-import { headers } from 'next/headers'
+import { redirect } from 'next/navigation'
 
 import { ScenarioNewView } from '@/components/scenarios/scenario-new-view'
+import { getServerSession } from '@/lib/auth/server-session'
 
 export const dynamic = 'force-dynamic'
 
 export default async function ScenarioNewPage() {
-  const h = await headers()
-  const raw = h.get('x-site-ids') ?? ''
-  const availableSiteIds = raw
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
-
+  const session = await getServerSession()
+  if (!session) {
+    redirect('/auth/sign-in?next=/scenarios/new')
+  }
+  const availableSiteIds = session.user.site_ids ?? []
   return <ScenarioNewView availableSiteIds={availableSiteIds} />
 }
