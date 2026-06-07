@@ -547,7 +547,9 @@ export function HeatmapCanvas({
                   <div
                     ref={hmPageRef}
                     data-testid="hm-page"
-                    data-underlay={cap ? 'screenshot' : 'mock'}
+                    data-underlay={
+                      cap ? 'screenshot' : captureState.kind === 'error' ? 'mock' : 'skeleton'
+                    }
                     data-capture-natural-width={cap?.naturalWidth ?? ''}
                     data-capture-natural-height={cap?.naturalHeight ?? ''}
                     data-reference-width={referenceWidth}
@@ -569,24 +571,37 @@ export function HeatmapCanvas({
                           })
                         }
                       />
-                    ) : (
+                    ) : captureState.kind === 'error' ? (
+                      // 実 screenshot 取得不可: 仮 underlay にフォールバック (overlay は displayScale=1)
                       <MockProductPageUnderlay />
+                    ) : (
+                      // idle / loading: ダミーは出さず中立のスケルトン。
+                      // 実座標が無いため overlay も ready/error まで描画しない (差し替えチラつき防止)。
+                      <div
+                        data-testid="heatmap-canvas-skeleton"
+                        aria-hidden
+                        className="absolute inset-0 animate-pulse bg-gradient-to-b from-[#f4f5f7] to-[#eceef1]"
+                      />
                     )}
-                    <HeatOverlay
-                      vm={vm}
-                      layers={activeLayers}
-                      activeEmotions={activeEmotions}
-                      highlightedTagId={highlightedTagId}
-                      tagRefs={tagRefs}
-                      displayScale={displayScale}
-                    />
-                    <SignalOverlay
-                      signals={vm.signals}
-                      signalsOn={signalsOn}
-                      enabledSignals={activeSignals}
-                      displayScale={displayScale}
-                    />
-                    <HeatmapLegend layers={activeLayers} />
+                    {cap || captureState.kind === 'error' ? (
+                      <>
+                        <HeatOverlay
+                          vm={vm}
+                          layers={activeLayers}
+                          activeEmotions={activeEmotions}
+                          highlightedTagId={highlightedTagId}
+                          tagRefs={tagRefs}
+                          displayScale={displayScale}
+                        />
+                        <SignalOverlay
+                          signals={vm.signals}
+                          signalsOn={signalsOn}
+                          enabledSignals={activeSignals}
+                          displayScale={displayScale}
+                        />
+                        <HeatmapLegend layers={activeLayers} />
+                      </>
+                    ) : null}
                     {captureState.kind === 'loading' ? (
                       <div
                         role="status"
