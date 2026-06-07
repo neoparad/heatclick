@@ -25,7 +25,15 @@ function getJwtSecret(): Uint8Array {
   return _jwtSecret
 }
 
-const JWT_EXPIRY = process.env.JWT_EXPIRES_IN ?? '4h'
+// 続 118 (2026-05-30 Owner 承認): dogfood 中の「操作していたら sign-in に飛ばされる」を
+// 抑えるため、セッション既定を 4h → 30d に延長。招待 email allowlist 制の社内 dogfood では
+// 30d は許容範囲 (本番一般公開時に短縮を再検討)。JWT exp と cookie maxAge を drift させない
+// ため秒数 SESSION_MAX_AGE_SECONDS を単一ソースとし、verify route の cookie もこれを使う。
+const JWT_EXPIRY = process.env.JWT_EXPIRES_IN ?? '30d'
+
+/** セッション有効期限 (秒)。verify route の cookie maxAge と JWT exp を一致させる単一ソース。 */
+export const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60 // 30d
+
 const TOKEN_COOKIE_NAME = 'ugokimap_saas_token'
 
 export type Plan = 'free' | 'starter' | 'growth' | 'agency' | 'enterprise'
