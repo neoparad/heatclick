@@ -25,6 +25,7 @@
 import type { HeatmapTile, HeatmapTileMeta } from '@/lib/api/heatmap'
 import { MOCKUP_VIEW_MODEL } from '@/lib/fixtures/heatmap-mockup'
 import { MOCK_PAGE_HEIGHT, PAGE_WIDTH } from '@/lib/heatmap/mockup-spec'
+import { logNormalize } from '@/lib/heatmap/normalize'
 import type {
   EmotionDistribution,
   HeatBlob,
@@ -161,7 +162,8 @@ function clusterTop(points: RawPoint[], topN: number): RawPoint[] {
 function buildRealClickBlobs(clusters: RawPoint[], maxCount: number): HeatBlob[] {
   const safeMax = maxCount > 0 ? maxCount : 1
   return clusters.map((p, i) => {
-    const ratio = Math.min(1, p.count / safeMax)
+    // logNormalize: 外れ値1点で max が跳ね他が潰れるのを防ぐ対数正規化 (順序は保持)
+    const ratio = logNormalize(p.count, safeMax)
     const diameter = Math.round(Math.max(72, Math.min(240, 72 + Math.sqrt(ratio) * 168)))
     return {
       id: `real-click-${i + 1}`,
@@ -291,7 +293,8 @@ function buildReadBands(
       height: Math.max(4, Math.round(displayBinHeight)),
       sessions,
       count,
-      intensity: count / safeMax,
+      // logNormalize: 外れ値で washed out しない対数正規化 (帯の色強度)
+      intensity: logNormalize(count, safeMax),
     }))
 }
 
