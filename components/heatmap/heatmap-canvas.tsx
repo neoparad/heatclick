@@ -56,6 +56,7 @@ import type {
 import { FullscreenToolbar } from './fullscreen-toolbar'
 import { HeatOverlay } from './heat-overlay'
 import { HeatmapAccessibleTable } from './heatmap-accessible-table'
+import { HeatmapLegend } from './heatmap-legend'
 import { HeatmapSidePanel } from './heatmap-side-panel'
 import { HeatmapToolbar } from './heatmap-toolbar'
 import { MockProductPageUnderlay } from './mock-product-page-underlay'
@@ -585,6 +586,7 @@ export function HeatmapCanvas({
                       enabledSignals={activeSignals}
                       displayScale={displayScale}
                     />
+                    <HeatmapLegend layers={activeLayers} />
                     {captureState.kind === 'loading' ? (
                       <div
                         role="status"
