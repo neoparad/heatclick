@@ -193,8 +193,13 @@ export async function GET(request: Request) {
     yStart = cur.y_start
   }
 
-  const tileEnd = Math.min(yStart + params.tile_size, PAGE_HEIGHT_ESTIMATE + params.tile_size)
-  const isLast = tileEnd >= PAGE_HEIGHT_ESTIMATE
+  // scroll / exit は scroll_percentage(0-100) ベースの band 集計 = ページ全体を1タイルで返す
+  // (px window 不要、PAGE_HEIGHT_ESTIMATE まで一括)。click / read は従来の px window 分割。
+  const isSingleTileLayer = params.heatmap_type === 'scroll' || params.heatmap_type === 'exit'
+  const tileEnd = isSingleTileLayer
+    ? PAGE_HEIGHT_ESTIMATE
+    : Math.min(yStart + params.tile_size, PAGE_HEIGHT_ESTIMATE + params.tile_size)
+  const isLast = isSingleTileLayer || tileEnd >= PAGE_HEIGHT_ESTIMATE
 
   // 続 82 Phase 2: default = 実 ClickHouse query。失敗時のみ dummy fallback。
   // 緊急 rollback は HEATMAP_DUMMY_ONLY=1 で常時 dummy mode。
@@ -364,21 +369,19 @@ async function fetchRealHeatmapPoints(input: {
     `
   } else if (input.heatmapType === 'scroll') {
     // ── SCROLL (スクロール到達率) ────────────────────────────────────────
-    // scroll events: session ごとの max(scroll_y) を求め、各 200px band に
-    // 「その深度まで到達した」セッション数を集計する (reach curve)。
-    // count = そのバンドへ到達したセッション数 (y 座標以上に到達した session 数)。
-    // 実装: per-session max_scroll を先に集計し、band ごとにカウントする。
-    // tile y_start..y_end はスクロール深度の窓 (scroll_y フィルタ)。
+    // 続121 fix: 生 scroll_y(px) は visitor の viewport 幅依存で、固定幅 screenshot に重ねると
+    // 下方が画面外に落ちて「途中で途切れる」。viewport 非依存の scroll_percentage(0-100) を使う。
+    // session ごとの max(scroll_percentage) を 5% bin に集計。y = 深度%(0-100)。
+    // count/sessions = その最深%バケットのセッション数。view-model が累積到達率に変換する。
     sql = `
       WITH per_session AS (
         SELECT
           session_id,
-          max(scroll_y) AS max_scroll_y
+          max(scroll_percentage) AS max_pct
         FROM clickinsight.events
         WHERE tenant_id = {tenant_id:String}
           AND site_id = {site_id:String}
           AND url = {page_url:String}
-          AND event_type = 'scroll'
           AND is_agent = 0
           AND timestamp >= toDateTime({start:String})
           AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
@@ -387,34 +390,30 @@ async function fetchRealHeatmapPoints(input: {
       )
       SELECT
         0 AS x,
-        toUInt32(intDiv(max_scroll_y, 200) * 200) AS y,
+        toUInt32(least(95, intDiv(max_pct, 5) * 5)) AS y,
         count() AS count,
         count() AS sessions
       FROM per_session
-      WHERE max_scroll_y >= {y_start:UInt32}
-        AND max_scroll_y < {y_end:UInt32}
       GROUP BY y
       HAVING count >= 1
       ORDER BY y ASC
-      LIMIT 500
+      LIMIT 100
     `
   } else {
     // ── EXIT (終了 / 離脱) ────────────────────────────────────────────────
-    // 続120 fix: 本番検証で session_end events は scroll_y を一切持たない (全行 0) ことが
-    // 判明した。そのため「離脱深度 = そのセッションが到達した最深部 (max scroll_y)」と定義し、
-    // scroll events の per-session max(scroll_y) を 200px band に集計する (scroll 層と同じ
-    // proven データ源)。各 band の count = その深度で離脱した (それ以上進まなかった) セッション数。
-    // view-model は scroll(到達率=累積) とは別に、本 band 単位の dropoff として描画する。
+    // 続121 fix: scroll と同じく scroll_percentage(0-100) ベース (viewport 非依存)。
+    // 「離脱深度 = そのセッションが到達した最深%」。各 % バケットの count = その深度で
+    // 離脱した (それ以上進まなかった) セッション数。view-model は band 単位の dropoff として描画。
+    // 分母はページに来た全セッション (event_type 不問 = scroll を吐かず離脱した bouncer も 0% に計上)。
     sql = `
       WITH per_session AS (
         SELECT
           session_id,
-          max(scroll_y) AS max_scroll_y
+          max(scroll_percentage) AS max_pct
         FROM clickinsight.events
         WHERE tenant_id = {tenant_id:String}
           AND site_id = {site_id:String}
           AND url = {page_url:String}
-          AND event_type = 'scroll'
           AND is_agent = 0
           AND timestamp >= toDateTime({start:String})
           AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
@@ -423,16 +422,14 @@ async function fetchRealHeatmapPoints(input: {
       )
       SELECT
         0 AS x,
-        toUInt32(intDiv(max_scroll_y, 200) * 200) AS y,
+        toUInt32(least(95, intDiv(max_pct, 5) * 5)) AS y,
         count() AS count,
         count() AS sessions
       FROM per_session
-      WHERE max_scroll_y >= {y_start:UInt32}
-        AND max_scroll_y < {y_end:UInt32}
       GROUP BY y
       HAVING count >= 1
       ORDER BY y ASC
-      LIMIT 500
+      LIMIT 100
     `
   }
 

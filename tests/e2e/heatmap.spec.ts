@@ -42,10 +42,11 @@ test.describe('P-04 heatmap (mockup parity)', () => {
       }
     })
 
-    test('layer toggle group has 6 layers (mockup parity)', async ({ page }) => {
+    test('layer toggle group has the expected layers (mockup parity)', async ({ page }) => {
       await mockHeatmapApi(page)
       await page.goto('/heatmap')
-      for (const key of ['click', 'end', 'attention', 'exit', 'move', 'emo']) {
+      // 続121: dead 'end' トグル撤去。click/熟読/スクロール/離脱/マウス/感情。
+      for (const key of ['click', 'attention', 'scroll', 'exit', 'move', 'emo']) {
         await expect(page.getByTestId(`layer-toggle-${key}`)).toBeVisible()
       }
     })

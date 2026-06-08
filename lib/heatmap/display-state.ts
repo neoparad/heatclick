@@ -34,6 +34,12 @@ export interface HeatmapDisplayStateInput {
   blobCount: number
   /** view-model の tag 数 */
   tagCount: number
+  /**
+   * 現在の active layer の band 数 (read/scroll/exit など非クリック層)。
+   * 続121: クリック以外の層は blob/tag を持たず band で描画するため、これが 0 の時も
+   * real-empty として「データなし」を出す (従来は band 層で無言の白紙になっていた)。
+   */
+  bandCount?: number
   /** 取得済 tile 数 (初回 loading 判定用) */
   tileCount: number
   /** tile fetch 中か */
@@ -58,7 +64,13 @@ export function resolveHeatmapDisplayState(
   if (input.loading && input.tileCount === 0) return 'loading'
 
   const isRealSource = input.dataSource === 'clickhouse_events'
-  if (isRealSource && input.blobCount === 0 && input.tagCount === 0 && !input.loading) {
+  if (
+    isRealSource &&
+    input.blobCount === 0 &&
+    input.tagCount === 0 &&
+    (input.bandCount ?? 0) === 0 &&
+    !input.loading
+  ) {
     return 'real-empty'
   }
 

@@ -90,7 +90,7 @@ export function HeatmapToolbar({
       <div
         role="radiogroup"
         aria-label="デバイス選択"
-        className="inline-flex overflow-hidden rounded-md border border-[var(--ug-border)] bg-white"
+        className="inline-flex shrink-0 overflow-hidden rounded-md border border-[var(--ug-border)] bg-white"
       >
         {DEVICES.map((d) => {
           const active = device === d.key
@@ -123,7 +123,7 @@ export function HeatmapToolbar({
         pageUrl prop 自体は heatmap-canvas からの aria-label 用に保持 (削除しない)。
       */}
       <div
-        className="ml-auto flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-[11.5px] text-[var(--ug-text-2)]"
+        className="ml-auto flex min-w-0 items-center gap-x-4 overflow-x-auto whitespace-nowrap font-mono text-[11.5px] text-[var(--ug-text-2)] [scrollbar-width:none]"
         data-testid="canvas-stats-group"
       >
         {pvLabel ? (
@@ -156,7 +156,7 @@ export function HeatmapToolbar({
         ) : null}
       </div>
 
-      <div className="ml-1 flex gap-1 border-l border-[var(--ug-border)] pl-1.5">
+      <div className="ml-1 flex shrink-0 gap-1 border-l border-[var(--ug-border)] pl-1.5">
         <ToolbarIconBtn
           testid="toggle-controls-btn"
           active={controlsVisible}

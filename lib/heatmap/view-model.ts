@@ -301,111 +301,98 @@ function buildReadBands(
 // ── SCROLL (スクロール到達率) layer builders ───────────────────────────────
 
 /**
- * scroll tile points (y = max_scroll_y の 200px bin、count = そのバンドへ到達したセッション数)
- * から ScrollReachBand 配列を生成する。
+ * scroll tile points (続121: y = max_scroll_percentage の 5% bin (0..100)、
+ * count = その最深%バケットのセッション数) から ScrollReachBand 配列を生成する。
  *
- * reach(D) = sessions_reaching_depth_D / total_sessions_on_page。
- * total_sessions はタイル全体の count 合計から推定 (最浅バンドが最大 = 100%)。
+ * reach(D) = sessions_reaching_at_least_D / total_sessions (累積生存曲線)。
+ *   各バケット d の到達率 = (深度 d 以上に到達したセッション = d 以深バケットの合計) / 全セッション。
+ * top/height は深度% を screenshot 高 (ctx.pageHeight、無ければ MOCK_PAGE_HEIGHT) にマップ。
+ *   → viewport 非依存。生 px の truncation (続120 以前) を解消。
  */
+const SCROLL_BIN_PCT = 5
+
 function buildScrollReachBands(
   tiles: HeatmapTile[],
-  pageY: number,
+  _pageY: number,
   ctx?: HeatmapCoordinateContext,
 ): ScrollReachBand[] {
   if (tiles.length === 0) return []
 
-  const BIN_HEIGHT = 200
+  const targetHeight = ctx ? ctx.pageHeight : MOCK_PAGE_HEIGHT
 
-  // y bin → セッション数
+  // 深度%バケット (0..100) → セッション数
   const bins = new Map<number, number>()
   for (const tile of tiles) {
     for (const p of tile.points) {
-      let yScaled: number
-      if (ctx) {
-        yScaled = p.y
-      } else {
-        yScaled = pageY > 0 ? (p.y / pageY) * MOCK_PAGE_HEIGHT : p.y
-      }
-      if (yScaled < 0) continue
-      const key = Math.round(yScaled)
-      bins.set(key, (bins.get(key) ?? 0) + p.count)
+      const pct = Math.max(0, Math.min(100, Math.round(p.y)))
+      bins.set(pct, (bins.get(pct) ?? 0) + p.count)
     }
   }
-
   if (bins.size === 0) return []
 
-  // 最大セッション数 (= 最浅バンドが "100%" の基準)
-  const totalSessions = Math.max(...Array.from(bins.values()))
+  const total = Array.from(bins.values()).reduce((s, v) => s + v, 0)
+  if (total <= 0) return []
 
-  const displayBinHeight = ctx
-    ? BIN_HEIGHT
-    : (BIN_HEIGHT * MOCK_PAGE_HEIGHT) / (pageY || MOCK_PAGE_HEIGHT)
-
-  return Array.from(bins.entries())
-    .sort(([a], [b]) => a - b)
-    .map(([top, sessions]) => {
-      const reach = totalSessions > 0 ? sessions / totalSessions : 0
-      return {
-        top,
-        height: Math.max(4, Math.round(displayBinHeight)),
-        reach,
-        reachLabel: `${Math.round(reach * 100)}%`,
-      }
+  // 連続バンド (0,5,…,95)。疎なバケットで帯が抜けないよう各深度の到達率を必ず算出する。
+  // reach(s) = (最深 % が s 以上のセッション = key>=s の合計) / 全セッション。単調減少。
+  const bands: ScrollReachBand[] = []
+  for (let s = 0; s < 100; s += SCROLL_BIN_PCT) {
+    let reachingAtLeast = 0
+    for (const [pct, sessions] of bins) {
+      if (pct >= s) reachingAtLeast += sessions
+    }
+    const reach = reachingAtLeast / total
+    bands.push({
+      top: Math.round((s / 100) * targetHeight),
+      height: Math.max(4, Math.round((SCROLL_BIN_PCT / 100) * targetHeight)),
+      reach,
+      reachLabel: `${Math.round(reach * 100)}%`,
     })
+  }
+  return bands
 }
 
 // ── EXIT (終了 / 離脱) layer builders ─────────────────────────────────────
 
 /**
- * session_end tile points (y = scroll_y の 200px bin) から ExitRow 配列を生成する。
- * dropoff % = そのバンドで終了したセッション数 / 全終了セッション数。
+ * exit tile points (続121: y = max_scroll_percentage の 5% bin (0..100)) から ExitRow 配列を生成する。
+ * dropoff % = その深度で離脱した (それ以上進まなかった) セッション数 / 全セッション数。
+ * top/height は深度% を screenshot 高にマップ (viewport 非依存、truncation 解消)。
  * level は dropoff 率で 4 段階。
  */
 function buildExitRows(
   tiles: HeatmapTile[],
-  pageY: number,
+  _pageY: number,
   ctx?: HeatmapCoordinateContext,
 ): import('@/lib/heatmap/types').ExitRow[] {
   if (tiles.length === 0) return []
 
-  const BIN_HEIGHT = 200
+  const targetHeight = ctx ? ctx.pageHeight : MOCK_PAGE_HEIGHT
 
-  // y bin → セッション数 (dropoff count)
+  // 深度%バケット (0..100) → セッション数 (dropoff count)
   const bins = new Map<number, number>()
   let totalSessions = 0
   for (const tile of tiles) {
     for (const p of tile.points) {
-      let yScaled: number
-      if (ctx) {
-        yScaled = p.y
-      } else {
-        yScaled = pageY > 0 ? (p.y / pageY) * MOCK_PAGE_HEIGHT : p.y
-      }
-      if (yScaled < 0) continue
-      const key = Math.round(yScaled)
-      bins.set(key, (bins.get(key) ?? 0) + p.sessions)
+      const pct = Math.max(0, Math.min(100, Math.round(p.y)))
+      bins.set(pct, (bins.get(pct) ?? 0) + p.sessions)
       totalSessions += p.sessions
     }
   }
 
   if (bins.size === 0 || totalSessions === 0) return []
 
-  const displayBinHeight = ctx
-    ? BIN_HEIGHT
-    : (BIN_HEIGHT * MOCK_PAGE_HEIGHT) / (pageY || MOCK_PAGE_HEIGHT)
-
   return Array.from(bins.entries())
     .sort(([a], [b]) => a - b)
-    .map(([top, sessions]) => {
-      const pct = sessions / totalSessions
+    .map(([pct, sessions]) => {
+      const dropoff = sessions / totalSessions
       const level: import('@/lib/heatmap/types').ExitRow['level'] =
-        pct >= 0.3 ? 'hi' : pct >= 0.15 ? 'mid' : pct >= 0.05 ? 'lo' : 'ok'
-      const depthLabel = `${Math.round(top)}px〜`
+        dropoff >= 0.3 ? 'hi' : dropoff >= 0.15 ? 'mid' : dropoff >= 0.05 ? 'lo' : 'ok'
       return {
-        top,
-        height: Math.max(4, Math.round(displayBinHeight)),
-        sectionLabel: depthLabel,
-        exitPct: `${Math.round(pct * 100)}%`,
+        top: Math.round((pct / 100) * targetHeight),
+        height: Math.max(4, Math.round((SCROLL_BIN_PCT / 100) * targetHeight)),
+        sectionLabel: `${pct}%`,
+        exitPct: `${Math.round(dropoff * 100)}%`,
         level,
       }
     })

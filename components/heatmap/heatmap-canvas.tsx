@@ -377,10 +377,24 @@ export function HeatmapCanvas({
   //   GTM が v1 tracking (tenant_id='__legacy__') を fire していると tenant-scoped query が空 row を
   //   返し、data_source='clickhouse_events' のまま blob/tag 0 になる。従来は underlay のみ描画して
   //   無言の白紙になっていた。informative な empty-state を出すための flag。
+  // 続121: 現在の active data layer の band 数。click 以外 (read/scroll/exit) は blob/tag を
+  // 持たず band で描画するため、これも 0 の時に real-empty にして無言の白紙を防ぐ。
+  const activeDataLayer = Array.from(activeLayers)
+    .map(layerKeyToHeatmapLayer)
+    .find((l): l is HeatmapLayer => l !== null)
+  const activeBandCount =
+    activeDataLayer === 'read'
+      ? vm.readBands.length
+      : activeDataLayer === 'scroll'
+        ? vm.scrollReachBands.length
+        : activeDataLayer === 'exit'
+          ? vm.exitRows.length
+          : 0
   const realEmpty = isRealEmptyHeatmap({
     dataSource: meta?.data_source,
     blobCount: vm.blobs.length,
     tagCount: vm.tags.length,
+    bandCount: activeBandCount,
     tileCount: tiles.length,
     loading,
     error,

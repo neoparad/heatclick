@@ -36,7 +36,8 @@ export const LAYERS: ReadonlyArray<{
   disabledTooltip?: string
 }> = [
   { key: 'click', label: 'クリック', defaultActive: true },
-  { key: 'end', label: '終了', defaultActive: false },
+  // 続121: '終了'(end) は実データ層にマップされない死んだトグルだった。深度/到達は
+  // 'scroll'(スクロール到達率) が担うため重複。混乱を避けるため layer 一覧から撤去。
   { key: 'attention', label: '熟読', defaultActive: false },
   { key: 'scroll', label: 'スクロール', defaultActive: false },
   { key: 'exit', label: '離脱', defaultActive: false },
