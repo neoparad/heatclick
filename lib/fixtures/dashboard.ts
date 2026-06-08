@@ -17,6 +17,13 @@
  * dummy data。Sprint 2 で実流入切替」バナーを必ず表示する。
  */
 
+/**
+ * EvidenceLevel — D-07 SSOT (4-tier V1)
+ *
+ * 5-tier V2 (`EvidenceLevelV2`) は `types/evidence.ts` に独立配備 (続 68 W2-A)。
+ * V1 ⇄ V2 変換は `toEvidenceLevelV1()` / `toEvidenceLevelV2()` 経由。
+ * 既存 UI / fixture / ChatReply 経路は V1 維持で破壊なし。
+ */
 export type EvidenceLevel = 'proven' | 'observed' | 'inferred' | 'planned'
 
 export interface EvidenceMeta {
