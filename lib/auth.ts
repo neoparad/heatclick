@@ -90,7 +90,9 @@ export async function logout(): Promise<void> {
     /* silent */
   }
   clearSession()
-  window.location.href = '/'
+  // Director 続 74 Task E: ログアウト後 404 解消 (旧 `/` 遷移 →
+  // `/auth/sign-in` に変更、サインアウト直後の再ログイン導線を維持)
+  window.location.href = '/auth/sign-in?signed-out=1'
 }
 
 function clearSession(): void {

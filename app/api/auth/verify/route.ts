@@ -17,7 +17,7 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
 import { redis } from '@/lib/redis'
-import { signToken, TOKEN_COOKIE_NAME, type Plan } from '@/lib/jwt'
+import { signToken, TOKEN_COOKIE_NAME, SESSION_MAX_AGE_SECONDS, type Plan } from '@/lib/jwt'
 import { verifyMagicLinkToken } from '@/lib/auth/magic-link'
 import { lookupDogfoodUser } from '@/lib/auth/dogfood-users'
 
@@ -74,7 +74,7 @@ export async function GET(request: Request) {
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
     path: '/',
-    maxAge: 4 * 60 * 60, // 4h (JWT_EXPIRES_IN 既定と一致)
+    maxAge: SESSION_MAX_AGE_SECONDS, // 続 118: JWT exp と単一ソースで一致 (既定 30d)
   })
   return response
 }

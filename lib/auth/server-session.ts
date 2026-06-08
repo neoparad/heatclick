@@ -17,7 +17,7 @@
  */
 
 import { cookies, headers } from 'next/headers'
-import { TOKEN_COOKIE_NAME, verifyToken, type JWTPayload } from '@/lib/jwt'
+import { TOKEN_COOKIE_NAME, verifyToken, resolveRole, type JWTPayload, type Role } from '@/lib/jwt'
 
 export interface ServerSession {
   /** JWT verified payload (sub / email / name / tenant_id / plan / site_ids / role) */
@@ -26,6 +26,12 @@ export interface ServerSession {
   tenant_id: string
   /** middleware が header inject した user_id (JWT sub) */
   user_id: string
+  /**
+   * REQ-SEC-112 / -113: 認可判定に使う role。**検証済み JWT のみ**を source とし
+   * (middleware は x-role を inject しない = spoof 経路が無い)、未設定/不正は viewer に倒す。
+   * route ACL / UI gating は `headers().get('x-role')` ではなく**必ず本フィールド**を参照する。
+   */
+  role: Role
 }
 
 /**
@@ -68,6 +74,7 @@ export async function getServerSession(): Promise<ServerSession | null> {
       user,
       tenant_id: user.tenant_id,
       user_id: user.sub,
+      role: resolveRole(user.role),
     }
   }
 
@@ -84,6 +91,7 @@ export async function getServerSession(): Promise<ServerSession | null> {
     user,
     tenant_id: headerTenantId,
     user_id: headerUserId,
+    role: resolveRole(user.role),
   }
 }
 

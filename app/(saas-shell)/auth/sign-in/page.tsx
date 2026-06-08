@@ -25,16 +25,37 @@ const ERROR_MESSAGES: Record<string, string> = {
     'このメールアドレスは現在ご利用いただけません。dogfood 招待後にお試しください。',
 }
 
+// 続 118: middleware が bounce 時に付与する ?reason=... の人間向けメッセージ。
+// 「なぜ sign-in に飛ばされたか」を可視化し、謎 bounce の切り分けを容易にする。
+//   - session_expired: 期限切れ → 再ログインで解消するはず (rolling refresh 導入後は稀)
+//   - no_token: 未ログイン or cookie 消失 → 通常のサインイン導線
+//   - invalid_token: 署名不一致等 → 再発するなら JWT_SECRET 不整合を疑う
+const REASON_MESSAGES: Record<string, string> = {
+  session_expired:
+    'セッションの有効期限が切れました。お手数ですが、もう一度サインインしてください。',
+  no_token: 'サインインが必要です。メールアドレスを入力してください。',
+  invalid_token:
+    'サインイン情報を確認できませんでした。もう一度サインインしてください。',
+}
+
 interface SignInPageProps {
-  searchParams: { error?: string; redirect?: string }
+  searchParams: { error?: string; redirect?: string; reason?: string; 'signed-out'?: string }
 }
 
 export default function SignInPage({ searchParams }: SignInPageProps) {
-  const error =
+  // error (magic-link verify 失敗) を優先、無ければ reason (middleware bounce) を表示
+  const errorMessage =
     searchParams.error && ERROR_MESSAGES[searchParams.error]
       ? ERROR_MESSAGES[searchParams.error]
       : null
+  const reasonMessage =
+    searchParams.reason && REASON_MESSAGES[searchParams.reason]
+      ? REASON_MESSAGES[searchParams.reason]
+      : null
+  const error = errorMessage ?? reasonMessage
   const redirect = typeof searchParams.redirect === 'string' ? searchParams.redirect : undefined
+  // Director 続 74 Task E: logout 後の遷移先で「ログアウトしました」通知
+  const signedOut = searchParams['signed-out'] === '1'
 
   return (
     <main className="grid min-h-screen lg:grid-cols-2">
@@ -100,6 +121,16 @@ export default function SignInPage({ searchParams }: SignInPageProps) {
           <p className="mt-2 text-sm text-text-2">
             メールアドレスを入力すると、ワンタイムのサインインリンクをお送りします。
           </p>
+
+          {signedOut ? (
+            <div
+              role="status"
+              aria-live="polite"
+              className="mt-4 rounded-md border border-success/30 bg-success/10 p-3 text-xs text-foreground"
+            >
+              ログアウトしました。再度サインインするにはメールアドレスを入力してください。
+            </div>
+          ) : null}
 
           <SignInForm error={error} redirect={redirect} />
 

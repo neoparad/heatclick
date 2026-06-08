@@ -38,6 +38,23 @@ const TOKEN_COOKIE_NAME = 'ugokimap_saas_token'
 
 export type Plan = 'free' | 'starter' | 'growth' | 'agency' | 'enterprise'
 
+export type Role = 'owner' | 'admin' | 'member' | 'viewer'
+
+/**
+ * REQ-SEC-113 (フェイルセーフ): role 不明 / 解決失敗時は最小権限 (viewer) に倒す。
+ * 「未設定 → owner/full のような昇格」を構造的に作らない単一ソース。
+ * route ACL / UI gating は必ずこの resolveRole() を経由して role を解決する。
+ */
+export const DEFAULT_ROLE: Role = 'viewer'
+
+const ROLE_VALUES: readonly Role[] = ['owner', 'admin', 'member', 'viewer']
+
+export function resolveRole(role: unknown): Role {
+  return typeof role === 'string' && (ROLE_VALUES as readonly string[]).includes(role)
+    ? (role as Role)
+    : DEFAULT_ROLE
+}
+
 export interface JWTPayload {
   sub: string                  // user id
   email: string
@@ -45,7 +62,16 @@ export interface JWTPayload {
   tenant_id: string            // multi-tenant isolation (§3.8.1)
   plan: Plan
   site_ids: string[]           // tenant 内でアクセス可能な site_id 一覧
-  role?: 'owner' | 'admin' | 'member' | 'viewer'
+  role?: Role
+  /**
+   * REQ-SEC-101 (セッション失効): 失効判定用の世代番号。
+   *   - session_version    : user 単位 (パスワード相当イベント / 全セッション失効)
+   *   - membership_version : 現在 active な membership 単位 (role 剥奪 / 退会 / テナント停止)
+   * middleware が DB の現行 version と照合し、古い JWT を即時無効化する (P1 で DB 経路を有効化)。
+   * 旧 token (version 未設定) は移行猶予として 0 とみなす。
+   */
+  session_version?: number
+  membership_version?: number
 }
 
 export async function signToken(payload: JWTPayload): Promise<string> {
@@ -66,7 +92,10 @@ export async function verifyToken(token: string): Promise<JWTPayload | null> {
       tenant_id: payload.tenant_id as string,
       plan: (payload.plan as Plan) ?? 'free',
       site_ids: (payload.site_ids as string[]) ?? [],
-      role: payload.role as JWTPayload['role'],
+      role: payload.role as Role | undefined,
+      session_version: typeof payload.session_version === 'number' ? payload.session_version : 0,
+      membership_version:
+        typeof payload.membership_version === 'number' ? payload.membership_version : 0,
     }
   } catch {
     return null
