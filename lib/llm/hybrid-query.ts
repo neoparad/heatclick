@@ -4591,14 +4591,15 @@ FROM clickinsight.section_behavior_summary FINAL
 WHERE tenant_id={tenant_id:String} AND site_id={site_id:String} AND page_url={page_url:String}
   AND section_selector_hash={sh:String}
   AND window_start >= toDate(toDateTime({start:String},{tz:String}))
-  AND window_start < toDate(toDateTime({end:String},{tz:String}))
+  AND window_start <= toDate(toDateTime({end:String},{tz:String}))
 SETTINGS max_execution_time=30`.trim()))[0]
 
+    // issues はクローラ由来でページ単位 (section_selector_hash 無し) のため、区間ハッシュで
+    // 絞らずこのページの issue を出す (区間に紐付く問題分類は将来 a11y selector 突合で精緻化)。
     const issues = await j<{ issue_category: string; issue_type: string; severity: string; recommendation: string }>(`
 SELECT issue_category, issue_type, severity, any(recommendation) AS recommendation
 FROM clickinsight.page_issues
 WHERE tenant_id={tenant_id:String} AND site_id={site_id:String} AND page_url={page_url:String}
-  AND section_selector_hash={sh:String}
 GROUP BY issue_category, issue_type, severity
 ORDER BY severity LIMIT 20
 SETTINGS max_execution_time=30`.trim())
