@@ -190,6 +190,23 @@ CREATE TABLE invitations (
 | **REQ-SEC-124** | レジストリ抽象の統一。`dev-login` が `lookupDogfoodUser()` を直接呼ぶ経路を `USER_REGISTRY` 抽象に寄せ、DB 切替を1箇所に。 |
 | **REQ-SEC-125** | Postgres 接続情報は env のみ（コミット禁止）。接続失敗時 fail-closed（認証を通さない）。 |
 
+## 13.6 実装メモ: REQ-SEC-101 失効の二層化（middleware は edge 制約）
+
+**制約**: `middleware.ts` は Next.js のデフォルト = **edge runtime**（`jose`/WebCrypto で JWT 署名検証）。
+`pg`（TCP socket）は edge で動かない → **DB の version 照合を middleware に直書きできない**。
+
+**P1 の決定（二層）**:
+- **Layer 1（gate / edge / 既存）**: middleware は従来どおり JWT **署名＋exp** 検証＋tenant header inject。高速・無 DB。
+- **Layer 2（authoritative / node）**: `getServerSession()`（node runtime）と verify/switch 経路で
+  **DB の現行 `session_version`/`membership_version` と `tenants.status` を照合**。乖離/suspended は session を null（REQ-SEC-101/102）。
+  データ取得は全て tenant-scoped クエリ＝ getServerSession を要するため、**失効は実データ層で即時に効く**。
+
+**P2 へ持ち越し（gate-level 失効）**: 取り消し済 JWT で保護ページ shell が一瞬描画される隙を塞ぐため、
+PG の version を **KV（Upstash REST = edge 読取可）にミラー**し middleware で照合する read-through cache を追加。
+P1 ではデータ層失効で実害（他テナント閲覧）は防げるため、gate-level は P2。
+
+実装フラグ: `USER_REGISTRY=hardcode|db`。`db` 時のみ Layer 2 の DB 照合を有効化。`hardcode` 既定で現行挙動を保持。
+
 ## 14. Owner 決定事項
 1. **登録簿の保存先**: Postgres 導入で良いか（推奨）／ KV で通すか。
    - 補足: Vercel では従来の Vercel Postgres は廃止 → **Marketplace の Neon/Supabase** を採用（managed, additive）。
