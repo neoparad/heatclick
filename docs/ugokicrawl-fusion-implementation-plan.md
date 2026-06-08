@@ -63,3 +63,31 @@ ugokicrawl `generate_proposals`(Ollama) → export → proposal_tickets(原案) 
 
 ## 11. Owner/Infra 依存
 6表DDL適用(CH5+PG1)+grants / 48hクロール+日次ETL scheduler(GHA or Owner機)+Ollama / 本番デプロイ。
+
+## 12. 実測検証ログ (2026-06-07, wakegai job 2d79f951)
+実データ(ClickHouse events × Postgres page_content_map)で突合書式を確認した結果。
+
+### 12.1 セレクタ突合は現状書式では発火しない（構造的不一致・確定）
+- **tracker `element_selector`**: `>` 区切り(空白なし) / `:nth-child(N)` / タグのみ(class なし) / `#id` アンカー / 末尾数セグメントに切詰。
+  例 `div>div:nth-child(1)>article>div:nth-child(5)>h3:nth-child(8)`、`#wrapper>div>main>div:nth-child(2)`。
+- **crawler `section_selector`** (`content_map.py` cssPath): ` > ` 区切り(空白あり) / `:nth-of-type(N)` / class 込み。
+  例 `#wrapper > main:nth-of-type(1) > div.c-section:nth-of-type(2) > div.container.px-4:nth-of-type(1) > ...`。
+- 不一致は4点 + α: ①区切り ②`nth-child`↔`nth-of-type`(実DOMなしで変換不能) ③class 有無 ④切詰位置。
+  さらに観測DOM自体が食い違う(tracker `#wrapper>div>main` vs crawler `#wrapper>main`)= 実ユーザーのブラウザは
+  consent/広告等の注入要素で nth-child 序数がずれる。→ **文字列包含での突合は原理的に不可**。
+  `_selector_match_confidence` は現状 graceful に None を返すのみ(実害なし、y にフォールバック)。
+
+### 12.2 v1 突合 = viewport-aware y-range が実働 (実測 25/25 = 100%)
+- 同 `viewport_class` 内でのみ y 突合 → 「y は多viewportで壊れる」懸念を分割で緩和。
+- wakegai はコラム/記事系で本文が固定幅カラム(`col-lg-8`/`container`)に入り、desktop 幅差(1280↔1528)でも縦位置が安定。
+- **結論**: v1 はセレクタ昇格を待たず y-range(viewport別)を主突合にして良い。低 confidence 行は「裏取り済」表示しない(ガードレール踏襲)。
+
+### 12.3 新発見: 集客LPは URL の utm/fragment で突合から漏れる（要対応）
+- events.url は `https://wakegai.jp/akiya2/?utm_source=...#top` のようにフルURL、page_content_map.url はクリーン。
+- 最高トラフィック(akiya2 243k / akiya5 213k / lp/kaitori 133k events)が **url 完全一致の突合から脱落**。
+- → **突合側で URL 正規化(query/fragment 除去, 末尾スラッシュ統一)** が必須。`element_matcher.load_events_with_y` の
+  `url = {page_url}` 比較と URL別グループ化を正規化キーに変更する(次フェーズ・additive)。LP融合の前提条件。
+
+### 12.4 耐久的なセレクタ修正案 (defer)
+(a) tracker 側を安定書式へ(nearest id-anchor + heading 等) か (b) crawler が tracker互換 nth-child タグパスも併出力。
+ただし注入要素で positional はずれるため限界 → 最有望は **URL正規化 + viewport-aware y を主**、セレクタは tracker 改修後に昇格。
