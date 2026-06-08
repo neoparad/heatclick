@@ -104,6 +104,10 @@ export interface CreateScenarioInput {
   status?: Scenario['status']
   evidence_level?: Scenario['evidence_level']
   evidence_data?: Scenario['evidence_data']
+  /** Phase 2.1 additive */
+  frequency_cap?: Scenario['frequency_cap']
+  /** Phase 2.1 additive */
+  schedule?: Scenario['schedule']
   created_by: string
 }
 
@@ -115,6 +119,10 @@ export interface UpdateScenarioInput {
   status?: Scenario['status']
   evidence_level?: Scenario['evidence_level']
   evidence_data?: Scenario['evidence_data']
+  /** Phase 2.1 additive */
+  frequency_cap?: Scenario['frequency_cap']
+  /** Phase 2.1 additive */
+  schedule?: Scenario['schedule']
 }
 
 // ── CRUD ops ────────────────────────────────────────────────────────────────
@@ -190,6 +198,8 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
       status: input.status ?? 'draft',
       evidence_level: input.evidence_level ?? 'planned',
       evidence_data: input.evidence_data ?? {},
+      frequency_cap: input.frequency_cap ?? null,
+      schedule: input.schedule ?? null,
       created_at: ts,
       updated_at: ts,
       created_by: input.created_by,
@@ -236,6 +246,8 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
       ...(patch.status !== undefined ? { status: patch.status } : {}),
       ...(patch.evidence_level !== undefined ? { evidence_level: patch.evidence_level } : {}),
       ...(patch.evidence_data !== undefined ? { evidence_data: patch.evidence_data } : {}),
+      ...(patch.frequency_cap !== undefined ? { frequency_cap: patch.frequency_cap } : {}),
+      ...(patch.schedule !== undefined ? { schedule: patch.schedule } : {}),
       updated_at: now(),
     }
     const parsed = ScenarioSchema.safeParse(merged)

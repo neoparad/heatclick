@@ -27,6 +27,12 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { canonicalizeAst } from '@/lib/scenarios/evaluator'
+import {
+  canTransitionToStatus,
+  isPublishStatus,
+  normalizeRole,
+  type ScenarioRole,
+} from '@/lib/scenarios/publish-rbac'
 import type { ConditionNode, Scenario, Variant } from '@/lib/scenarios/types'
 import { SCENARIO_STATUSES, VARIANT_POSITIONS } from '@/lib/scenarios/types'
 
@@ -37,10 +43,13 @@ import { VariantImageUpload } from './variant-image-upload'
 
 interface ScenarioEditorViewProps {
   scenario: Scenario
+  /** Phase 2.1 RBAC: JWT 由来の role を server component から渡す。未指定時は 'member' fail-safe。 */
+  viewerRole?: ScenarioRole
 }
 
-export function ScenarioEditorView({ scenario }: ScenarioEditorViewProps) {
+export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewProps) {
   const editor = useScenarioEditor({ scenario })
+  const role: ScenarioRole = normalizeRole(viewerRole)
   const [activeVariantId, setActiveVariantId] = useState<string>(editor.draft.variants[0]?.id ?? 'A')
   const activeVariant =
     editor.draft.variants.find((v) => v.id === activeVariantId) ?? editor.draft.variants[0]
@@ -256,28 +265,50 @@ export function ScenarioEditorView({ scenario }: ScenarioEditorViewProps) {
                 <Check className="h-3.5 w-3.5 text-slate-400" /> 配信ステータス
               </div>
               <div className="flex gap-1.5 flex-wrap">
-                {SCENARIO_STATUSES.filter((s) => s !== 'archived').map((s) => (
-                  <label
-                    key={s}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 border rounded text-[11.5px] cursor-pointer ${
-                      editor.draft.status === s
-                        ? 'bg-indigo-50 border-indigo-300 text-indigo-700 font-semibold'
-                        : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="status"
-                      checked={editor.draft.status === s}
-                      onChange={() => editor.setStatus(s)}
-                      className="m-0"
-                    />
-                    {s}
-                  </label>
-                ))}
+                {SCENARIO_STATUSES.filter((s) => s !== 'archived').map((s) => {
+                  const allowed = canTransitionToStatus(role, s)
+                  const isCurrentlyPublish = isPublishStatus(s)
+                  return (
+                    <label
+                      key={s}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 border rounded text-[11.5px] ${
+                        allowed ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+                      } ${
+                        editor.draft.status === s
+                          ? 'bg-indigo-50 border-indigo-300 text-indigo-700 font-semibold'
+                          : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'
+                      }`}
+                      title={
+                        !allowed && isCurrentlyPublish
+                          ? `Owner / Admin のみ ${s} に切替可能`
+                          : !allowed
+                          ? '権限がありません'
+                          : ''
+                      }
+                    >
+                      <input
+                        type="radio"
+                        name="status"
+                        checked={editor.draft.status === s}
+                        onChange={() => editor.setStatus(s)}
+                        disabled={!allowed}
+                        className="m-0"
+                      />
+                      {s}
+                      {isCurrentlyPublish ? (
+                        <span className="font-mono text-[8.5px] text-amber-600 ml-0.5">owner</span>
+                      ) : null}
+                    </label>
+                  )
+                })}
               </div>
               <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
                 live = 配信開始、preview = 内部のみ、measure_only = 計測のみで配信しない、paused = 停止、draft = 未完成。
+                <br />
+                <span className="text-[10.5px] text-amber-700">
+                  live / preview への切替は <b>Owner / Admin role</b> のみ (REQ-SEC-010)。
+                  現在の role: <code className="font-mono">{role}</code>
+                </span>
               </p>
             </div>
           </div>

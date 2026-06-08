@@ -28,7 +28,22 @@ import {
   createScenarioRepository,
 } from '@/lib/scenarios/repository'
 import { CloudflareKvError } from '@/lib/scenarios/kv-storage'
-import { ConditionNodeSchema, VariantsSchema, SCENARIO_STATUSES, EVIDENCE_LEVELS } from '@/lib/scenarios/types'
+import { getServerSession } from '@/lib/auth/server-session'
+import {
+  canDeleteExistingScenario,
+  canPatchExistingScenario,
+  canTransitionToStatus,
+  canWriteScenario,
+  normalizeRole,
+} from '@/lib/scenarios/publish-rbac'
+import {
+  ConditionNodeSchema,
+  EVIDENCE_LEVELS,
+  FrequencyCapSchema,
+  ScheduleSchema,
+  SCENARIO_STATUSES,
+  VariantsSchema,
+} from '@/lib/scenarios/types'
 import {
   type ScenarioTenantContext,
   isTenantContext,
@@ -53,6 +68,9 @@ const UpdateBodySchema = z
     status: z.enum(SCENARIO_STATUSES).optional(),
     evidence_level: z.enum(EVIDENCE_LEVELS).optional(),
     evidence_data: z.record(z.unknown()).optional(),
+    // Phase 2.1 additive fields (Codex T2 dual review 指摘 A 反映)
+    frequency_cap: FrequencyCapSchema.nullable().optional(),
+    schedule: ScheduleSchema.nullable().optional(),
   })
   .refine((v) => Object.keys(v).length > 0, { message: 'body must contain at least one field' })
 
@@ -149,8 +167,57 @@ export async function PUT(
     )
   }
 
+  // REQ-SEC-010 (HIGH): publish RBAC。
+  // JWT cookie 由来の role でガードする (middleware は x-user-role を inject しないため、
+  // server-session 経由が SSOT)。session 不在 → 401 (Codex 指摘 B 反映)。
+  // viewer は書込み不可、member は publish 系遷移不可。
+  const session = await getServerSession()
+  if (!session) {
+    return NextResponse.json(
+      { error: 'unauthorized', message: 'session required' },
+      { status: 401 },
+    )
+  }
+  const role = normalizeRole(session.user.role)
+  if (!canWriteScenario(role)) {
+    return NextResponse.json(
+      { error: 'forbidden', message: 'viewer は scenario を更新できません' },
+      { status: 403 },
+    )
+  }
+  if (bodyParsed.data.status !== undefined && !canTransitionToStatus(role, bodyParsed.data.status)) {
+    return NextResponse.json(
+      {
+        error: 'forbidden',
+        message: `role=${role} は status='${bodyParsed.data.status}' への遷移権限がありません (Owner / Admin が必要)`,
+      },
+      { status: 403 },
+    )
+  }
+
+  // REQ-SEC-010 (HIGH): 既存 scenario の現在 status に基づく authoritative check。
+  // body だけ見て認可していた boundary 漏れ (Codex T1 HIGH 1) を塞ぐ。
+  //   - 公開中 (live / preview) scenario への non-publish role による content patch を拒否
+  //   - 「status 単独降格 patch」だけは member にも許可 (公開停止運用のため)
+  const repo = createScenarioRepository()
+  let current
   try {
-    const repo = createScenarioRepository()
+    current = await repo.getScenario(ctx.tenantId, ctx.siteId, paramsParsed.data.id)
+  } catch (err) {
+    return handleError(err)
+  }
+  if (!current) {
+    return NextResponse.json({ error: 'not_found' }, { status: 404 })
+  }
+  const patchVerdict = canPatchExistingScenario(role, current.status, bodyParsed.data)
+  if (!patchVerdict.allowed) {
+    return NextResponse.json(
+      { error: 'forbidden', message: patchVerdict.reason },
+      { status: 403 },
+    )
+  }
+
+  try {
     const updated = await repo.updateScenario(ctx.tenantId, ctx.siteId, paramsParsed.data.id, bodyParsed.data)
     return NextResponse.json(updated, { status: 200, headers: { 'Cache-Control': 'no-store' } })
   } catch (err) {
@@ -169,8 +236,45 @@ export async function DELETE(
   const ctx = resolveContext(request)
   if (!isTenantContext(ctx)) return ctx
 
+  // REQ-SEC-010 (HIGH): publish RBAC。session 不在 → 401。viewer は削除不可 (403)。
+  // member / admin / owner は自テナント内の scenario を削除可。
+  const session = await getServerSession()
+  if (!session) {
+    return NextResponse.json(
+      { error: 'unauthorized', message: 'session required' },
+      { status: 401 },
+    )
+  }
+  const role = normalizeRole(session.user.role)
+  if (!canWriteScenario(role)) {
+    return NextResponse.json(
+      { error: 'forbidden', message: 'viewer は scenario を削除できません' },
+      { status: 403 },
+    )
+  }
+
+  // REQ-SEC-010 (HIGH): 公開中 (live / preview) scenario の削除は publish RBAC 迂回。
+  // 既存 status を取得して、non-publish role はそれを削除できないようガード
+  // (Codex T1 HIGH 2 反映)。
+  const repo = createScenarioRepository()
+  let current
   try {
-    const repo = createScenarioRepository()
+    current = await repo.getScenario(ctx.tenantId, ctx.siteId, paramsParsed.data.id)
+  } catch (err) {
+    return handleError(err)
+  }
+  if (!current) {
+    return NextResponse.json({ error: 'not_found' }, { status: 404 })
+  }
+  const delVerdict = canDeleteExistingScenario(role, current.status)
+  if (!delVerdict.allowed) {
+    return NextResponse.json(
+      { error: 'forbidden', message: delVerdict.reason },
+      { status: 403 },
+    )
+  }
+
+  try {
     const removed = await repo.deleteScenario(ctx.tenantId, ctx.siteId, paramsParsed.data.id)
     if (!removed) {
       return NextResponse.json({ error: 'not_found' }, { status: 404 })
