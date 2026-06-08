@@ -4438,8 +4438,9 @@ export async function executeRankBehaviorValidatedFixesQuery(params: {
   const urlFilter = params.pageUrl ? 'AND i.page_url = {page_url:String}' : ''
   if (params.pageUrl) qp.page_url = params.pageUrl
 
-  // 最新 completed crawl の issues を、section の行動集計(同 selector_hash)と突合し、
+  // 最新 completed crawl の issues を、ページ単位の行動集計(page_url)と突合し、
   // behavioral_cost = severity重み × (1+friction) × log(1+到達) でランク。
+  // クローラ issues はページ単位(section_selector_hash 無し)なので section ではなく page_url で結合する。
   const sql = `
 SELECT
   i.page_url AS page_url,
@@ -4462,16 +4463,16 @@ LEFT JOIN clickinsight.page_content_sections s
   ON s.tenant_id = i.tenant_id AND s.site_id = i.site_id AND s.page_url = i.page_url
   AND s.crawl_id = i.crawl_id AND s.section_selector_hash = i.section_selector_hash
 LEFT JOIN (
-  SELECT section_selector_hash,
+  SELECT page_url,
     sum(reached_sessions) AS reached_sessions, sum(rage_clicks) AS rage_clicks,
     sum(dead_clicks) AS dead_clicks, sum(exits) AS exits,
     avg(friction_score) AS friction_score, avg(match_confidence) AS match_confidence
   FROM clickinsight.section_behavior_summary FINAL
   WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
     AND window_start >= toDate(toDateTime({start:String}, {tz:String}))
-    AND window_start < toDate(toDateTime({end:String}, {tz:String}))
-  GROUP BY section_selector_hash
-) b ON b.section_selector_hash = i.section_selector_hash
+    AND window_start <= toDate(toDateTime({end:String}, {tz:String}))
+  GROUP BY page_url
+) b ON b.page_url = i.page_url
 WHERE i.tenant_id = {tenant_id:String} AND i.site_id = {site_id:String}
   AND i.crawl_id IN (
     SELECT argMax(crawl_id, crawled_at) FROM clickinsight.crawl_runs
@@ -4494,7 +4495,7 @@ SETTINGS max_execution_time = 30`.trim()
       periodEnd: params.dateRange.end,
       timezone: params.timezone,
       evidenceLevel: 'observed_approx',
-      note: 'クロール由来の問題(SEO/a11y/perf/content)を、同区間の実ユーザー行動(到達/rage/dead/離脱/摩擦)で裏取りし behavioral_cost 順に提示。match_confidence>=閾値の区間のみ。相関であり因果ではない。',
+      note: 'クロール由来の問題(SEO/a11y/perf/content)を、同ページの実ユーザー行動(到達/rage/dead/離脱/摩擦)で裏取りし behavioral_cost 順に提示。match_confidence>=閾値のページのみ。相関であり因果ではない。',
     }
   } catch (err: unknown) {
     if (isCrawlDataUnavailable(err)) {
