@@ -10,14 +10,16 @@
 ## 2. 現状（9割は完成済み・足りない1割）
 | 要素 | 状態 |
 |---|---|
-| JWT（`sub`=user_id / `email` / `tenant_id` / `plan` / `site_ids[]`） | ✅ multi-tenant aware（`role` 追加が必要） |
+| JWT（`sub`=user_id / `email` / `tenant_id` / `plan` / `site_ids[]` / **`role`**） | ✅ multi-tenant aware。`role` は**既に実装済み**（`lib/jwt.ts:48` JWTPayload、verify route line 67 で発行、dogfood-users が保持）。**追加不要** |
 | middleware（JWT検証＋テナント分離＋route ACL＋audit） | ✅ |
 | `lib/tenant.ts`＋`canAccessSite()` / 全クエリ `tenant_id` 強制 | ✅ |
 | magic-link メール認証 + owner-login + rate-limit + audit | ✅ |
 | **user→tenant→site→role 登録簿** | 🔴 `lib/auth/dogfood-users.ts` に**ハードコード**（単一 `linkth_internal`+5 sites） |
 | トランザクションDB | ⚠ **無し**（KV/Redis + ClickHouse のみ。Postgres は未導入） |
+| **セッション寿命の一貫性** | 🔴 **不整合**: `verify/route.ts:77` は **4h** cookie、`lib/jwt.ts`/dev-login は **30d** (`SESSION_MAX_AGE_SECONDS`)。経路で寿命が割れている → `SESSION_MAX_AGE_SECONDS` に統一必須 |
+| **セッション失効の手段** | 🔴 **無し**: 30d JWT + rolling refresh は失効パスが無い。role 剥奪/退会/テナント停止が**最大30日反映されない** |
 
-→ 足りないのは「**登録簿の永続化 + プロビジョニング**」。認証メカニズムは作り直さない。
+→ 足りないのは「**登録簿の永続化 + プロビジョニング + セッション失効**」。認証メカニズムは作り直さない。
 
 ## 3. 最初の分岐: 登録簿の保存先
 | 案 | 内容 | 評価 |
@@ -66,12 +68,14 @@ CREATE TABLE invitations (
 - **1ユーザーが複数テナントに所属可**（agency が複数クライアント管理）。セッションは**1つの active tenant** にスコープ（tenant switcher）。
 
 ## 5. 認証フロー（既存を最小改修）
-1. **magic-link verify**: email で magic-link → verify 時に **DB lookup**（users→memberships）。所属テナントを取得。複数なら最後に使った/既定の active tenant を選択。
-2. **JWT 署名**: `tenant_id`(active) / `site_ids`(その tenant の tenant_sites) / **`role`(追加)** / sub / email を載せる（lib/jwt.ts に `role` 追加）。
-3. **招待**: admin が email+tenant+role で `invitations` 発行 → 招待メール → 受諾で users+memberships 作成 → 以後 magic-link 成立。
+1. **magic-link verify**: email で magic-link → verify 時に **DB lookup**（users→memberships）。所属テナントを取得。
+   - 複数所属なら「最後に使った」hint は**クライアント値を信用せず**、サーバが membership を再検証して active tenant を確定（REQ-SEC-103）。
+   - cookie 寿命は `SESSION_MAX_AGE_SECONDS` に**統一**（現状 4h → 30d。`verify/route.ts:77` の `maxAge` 修正）。
+2. **JWT 署名**: `tenant_id`(active) / `site_ids`(その tenant の tenant_sites) / `role` / sub / email を載せる。**`role` は既に JWTPayload にあり追加不要**。新たに `session_version` / `membership_version` を載せて失効に使う（§13.5 REQ-SEC-101）。
+3. **招待**: admin+ が email+tenant+role で `invitations` 発行 → 招待メール → 受諾で users+memberships 作成 → 以後 magic-link 成立。**招待 role ≤ 招待者 role**、owner 付与は owner のみ、招待者は対象テナントで admin+ 必須（REQ-SEC-106）。受諾は `invitations.email` と magic-link の email が**一致**する場合のみ（REQ-SEC-107）。
 4. **未招待 email**: magic-link は送るが verify で「所属なし」→ 案内ページ（情報漏洩しないエラー）。
 5. **owner-login**: 既存維持（運用/障害時の back door、監査付き）。
-6. **tenant 切替**: active tenant 変更 = JWT 再発行（`/api/auth/switch-tenant`、membership 検証必須）。
+6. **tenant 切替**: active tenant 変更 = JWT 再発行（`/api/auth/switch-tenant`）。membership を**アトミックに検証**し、role/site_ids/plan を**切替先から再導出**（旧テナントの値を持ち越さない、REQ-SEC-115）。クライアント側の `sessionStorage`（`lib/auth.ts:25`）も切替時にクリア。
 
 ## 6. ロールとパーミッション
 | role | 閲覧(dashboard/heatmap/fusion) | M-Agent介入/公開 | ユーザー招待/site管理 | 課金 |
@@ -93,14 +97,35 @@ CREATE TABLE invitations (
 - プロビジョニング時に「テナント専用スニペット」を発行する画面/API（P2）。
 
 ## 9. wakegai 移行 runbook（P3・既存データの re-tenant）
-1. `tenants` に `tnt_wakegai` ＋ `tenant_sites(tnt_wakegai, CIP_QWaPiks5krukJ6NM)`
-2. **events 再タグ**（ClickHouse mutation・Owner/Infra 実行、AIはGRANT/破壊系外）:
-   `ALTER TABLE events UPDATE tenant_id='tnt_wakegai' WHERE site_id='CIP_QWaPiks5krukJ6NM'`
-   （`web_vitals` 等 site_id を持つ他表も同様に。`tenant_id` を持つ全表を棚卸し）
-3. **融合5表 re-ingest**（新 tenant_id で build_crawl_export→ingest。私が一括実行可）＋旧 linkth_internal 分を削除 or 放置判断
-4. **トラッカー snippet** を `tnt_wakegai` に更新（今後のデータが正しく入る）
-5. wakegai 担当者を `users`＋`memberships(role=admin or viewer)` で招待
+
+**順序が安全性を決める**。レビュー指摘により次の固定手順に統一（REQ-SEC-117 / -118 / -119）。
+
+### 9.0 事前: tenant_id を持つ全表の棚卸し（REQ-SEC-119）
+移行前に「`tenant_id` 列を持つ全 ClickHouse 表」を機械的に列挙（`system.columns WHERE name='tenant_id'`）。
+**最低でも次を含む**（migrations から確認済み）:
+- RUM/行動系: `events`, `sessions`, `behavior_signals`, `web_vitals`, `scroll_timeline`, `element_visibility_v2`, `image_visibility`, `form_interactions`, `video_events`
+- 予測/ML系: `prediction_log`, `ml_session_outcome`, `user_outcomes`, `banner_decisions`, `persona_sessions`
+- 融合5表: `crawl_runs`, `page_content_sections`, `page_performance`, `page_issues`, `section_behavior_summary`
+- メタ/運用: `sites`, `audit_events`, `analysis_jobs`, `proposal_tickets`
+- 棚卸し結果は移行チケットに添付。**1表でも漏らすと cross-tenant 残留**になる。
+
+### 9.1 手順（順序厳守）
+1. **アクセス遮断を先に**（REQ-SEC-117）: 旧 `linkth_internal` 側から当該 `site_id` への参照を**先に剥がす**
+   （`tenant_sites` から該当 site を外す／seed を更新）。**mutation より前**に行い、移行中の二重所属＝
+   cross-tenant 閲覧ウィンドウを作らない。
+2. `tenants` に `tnt_wakegai` ＋ `tenant_sites(tnt_wakegai, CIP_QWaPiks5krukJ6NM)`
+3. **全表 mutation**（ClickHouse・Owner/Infra 実行、AI は GRANT/破壊系外）。9.0 で棚卸しした
+   **全表**に対し `site_id` 基準で `tenant_id` を更新:
+   `ALTER TABLE <each> UPDATE tenant_id='tnt_wakegai' WHERE site_id='CIP_QWaPiks5krukJ6NM' SETTINGS mutations_sync=2`
+4. **完了ゲート**（REQ-SEC-118）: `mutations_sync=2` で同期 or `system.mutations` を
+   `is_done=1 AND latest_fail_reason=''` までポーリング。**全 mutation 完了を確認するまで次工程に進まない**。
+   未完了のまま JWT を切替えると、行が二重テナントで見える。
+5. **融合5表 re-ingest**（新 tenant_id で build_crawl_export→ingest。私が一括実行可）＋旧 linkth_internal 分を削除 or 放置判断
+6. **トラッカー snippet** を `tnt_wakegai` に更新（今後のデータが正しく入る）
+7. wakegai 担当者を `users`＋`memberships(role=admin or viewer)` で招待
 - ⚠ mutation 中は二重テナントで一時的に件数が割れる→**メンテ枠 or 低トラフィック時**に。順序厳守。
+- 検証: 移行後 `SELECT count() ... WHERE tenant_id='linkth_internal' AND site_id='CIP_QWaPiks5krukJ6NM'` が
+  **全表で 0** であること（残留ゼロの証明）。
 
 ## 10. 後方互換 / 無停止移行
 - P1 で **既存 dogfood-users を DB に seed**（linkth_internal + 5 sites + 既存 email）→ 現行ログインは無停止で DB 経路へ。
@@ -128,8 +153,52 @@ CREATE TABLE invitations (
 - **DoS**: magic-link/invite に rate-limit（既存パターン流用）。
 - **Elevation**: role 昇格は admin+ のみ・サーバ検証。membership 無いテナントの JWT 発行不可。
 
+## 13.5 セキュリティ要件（受け入れ基準・dual review 統合）
+
+> threat-modeler(STRIDE, 27脅威/6 CRITICAL) ＋ Codex review を統合した**ハード受け入れ基準**。
+> P1〜P3 の各 PR は該当 REQ を満たすまでマージ不可（T1 dual review ゲート）。
+
+### CRITICAL（実装前提・これが無いと「DB が真実」が虚構になる）
+| ID | 要件 | 根拠/対象 |
+|---|---|---|
+| **REQ-SEC-101** | **セッション失効の確立**。JWT に `session_version`(user単位) ＋ `membership_version`(membership単位) を載せ、middleware が DB の現行 version と照合。role 剥奪/退会/テナント停止/パスワード相当イベントで version を増分 → 既存 JWT を即時無効化。30d JWT + rolling refresh のままでは失効不能（最大30日タイムラグ）。 | 30d JWT, lib/jwt.ts, middleware |
+| **REQ-SEC-103** | **active tenant はサーバ検証**。verify/switch 時に「最後に使った」等クライアント hint を信用せず、membership を再検証して確定。 | verify route, switch-tenant |
+| **REQ-SEC-106** | **招待の権限境界**。招待 role ≤ 招待者 role。owner 付与は owner のみ。招待者は対象テナントで admin+ 必須。サーバ検証。 | invitations API |
+| **REQ-SEC-107** | **招待受諾の email 一致**。受諾時の認証 email が `invitations.email` と一致する場合のみ membership 作成。トークン奪取で別 email が昇格しない。 | invite accept |
+| **REQ-SEC-115** | **テナント切替のアトミック再導出**。membership 検証と role/site_ids/plan の再導出を1トランザクションで。旧テナントの権限を**持ち越さない**。 | switch-tenant |
+| **REQ-SEC-117** | **移行は遮断を先に**。wakegai 移行で旧 linkth_internal 側の site アクセスを mutation **前**に剥がす（cross-tenant 閲覧ウィンドウ防止）。 | §9.1 step1 |
+
+### HIGH
+| ID | 要件 | 根拠/対象 |
+|---|---|---|
+| **REQ-SEC-102** | `tenants.status='suspended'` を**認証時に強制**。停止テナントへの JWT 発行・既存 JWT 受理を拒否。 | verify, middleware |
+| **REQ-SEC-104** | **Postgres も tenant スコープ強制**。auth ドメインの全クエリに `WHERE tenant_id=`（§3.8.1 を新ストアにも適用）。クロステナント read/write をコードで不能に。 | 新 Postgres 層 |
+| **REQ-SEC-105** | **cookie 寿命の統一**。`verify/route.ts:77` の 4h を `SESSION_MAX_AGE_SECONDS` に統一。全発行経路（verify/dev-login/owner-login）で同一値。 | verify route |
+| **REQ-SEC-112** | **role は検証済み JWT のみ由来**。`x-role` 等の注入ヘッダを信用しない。server-session.ts は tenant_id/user_id に加え **role も** 注入ヘッダ vs 検証 JWT を相互照合（現状 role 未照合）。 | server-session.ts:75 |
+| **REQ-SEC-113** | **フェイルセーフな role 既定**。role 不明/解決失敗時は最小権限（viewer 相当）に倒す。未設定→owner のような昇格を作らない。 | jwt, route ACL |
+| **REQ-SEC-116** | **owner-login back door の制限**。allowlist + 監査 + 短寿命。外部クライアント本番では env フラグで無効化可能に。 | owner-login |
+| **REQ-SEC-118** | **移行完了ゲート**。`mutations_sync=2` or `system.mutations.is_done=1 AND latest_fail_reason=''` を確認するまで JWT 切替に進まない。 | §9.1 step4 |
+| **REQ-SEC-119** | **tenant_id 全表棚卸し**。`system.columns WHERE name='tenant_id'` で機械列挙し移行対象を網羅（§9.0 リスト最低限）。 | §9.0 |
+| **REQ-SEC-123** | **ハードコード default テナントの撤去**。外部クライアント投入前に保護パスの埋め込み default を除去: `app/api/scenarios/[id]/stats/route.ts:28`、AISEO fixtures、その他 `linkth_internal`/`wakegai`/`bihadashop` のフォールバック。seed のロールバック＝認可のロールバックである点を明記。 | scenarios stats, fixtures |
+
+### MEDIUM
+| ID | 要件 |
+|---|---|
+| **REQ-SEC-120** | invitations は token_hash 保存・短寿命・1回限り・use 時 DEL（magic-link と同パターン）。 |
+| **REQ-SEC-121** | 招待/ログイン/tenant切替/role変更/移行 mutation を `audit_events` に記録（誰が・いつ・対象 tenant/user/role）。 |
+| **REQ-SEC-122** | magic-link/invite に rate-limit（既存パターン流用）。email enumeration を返さない（未招待でも一律応答）。 |
+| **REQ-SEC-124** | レジストリ抽象の統一。`dev-login` が `lookupDogfoodUser()` を直接呼ぶ経路を `USER_REGISTRY` 抽象に寄せ、DB 切替を1箇所に。 |
+| **REQ-SEC-125** | Postgres 接続情報は env のみ（コミット禁止）。接続失敗時 fail-closed（認証を通さない）。 |
+
 ## 14. Owner 決定事項
 1. **登録簿の保存先**: Postgres 導入で良いか（推奨）／ KV で通すか。
-2. **wakegai 移行のメンテ枠**（events 再タグ実行タイミング）。
+   - 補足: Vercel では従来の Vercel Postgres は廃止 → **Marketplace の Neon/Supabase** を採用（managed, additive）。
+2. **wakegai 移行のメンテ枠**（events 再タグ実行タイミング、§9 runbook）。低トラフィック枠で順序厳守。
 3. role の初期マトリクス（§6）で良いか。
-4. P1 から着手して良いか（設計承認）。
+4. **P1 着手承認**。P1 の受け入れ基準に **REQ-SEC-101/103/105/112/113** を含める（セッション失効＋cookie統一＋role検証）。
+5. **wakegai 本番投入の前提**として REQ-SEC-123（ハードコード default 撤去）を完了させる方針で良いか。
+
+---
+### 付録: dual review 統合サマリ（2026-06-08）
+- **threat-modeler**: 27脅威（CRITICAL 6 = REQ-SEC-101/103/106/107/115/117）。キーストーン = 「30d JWT + rolling refresh は失効不能 → DB が真実という前提が虚構」。
+- **Codex**: Postgres 採用は妥当（KV 前例の scenarios は手動スコープ・制約なしで認証には脆い）。**role は既に実装済**（doc §2/§5 の「追加が必要」は誤り→修正済）。cookie が verify=4h / jwt=30d で割れている→統一必須。session/membership version で失効を、移行は `mutations_sync=2`＋全表棚卸しで安全に。外部投入前にハードコード default を撤去。
