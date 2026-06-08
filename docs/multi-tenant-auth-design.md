@@ -207,13 +207,29 @@ CREATE TABLE invitations (
 - **Layer 1（gate / edge / 既存）**: middleware は従来どおり JWT **署名＋exp** 検証＋tenant header inject。高速・無 DB。
 - **Layer 2（authoritative / node）**: `getServerSession()`（node runtime）と verify/switch 経路で
   **DB の現行 `session_version`/`membership_version` と `tenants.status` を照合**。乖離/suspended は session を null（REQ-SEC-101/102）。
-  データ取得は全て tenant-scoped クエリ＝ getServerSession を要するため、**失効は実データ層で即時に効く**。
 
-**P2 へ持ち越し（gate-level 失効）**: 取り消し済 JWT で保護ページ shell が一瞬描画される隙を塞ぐため、
-PG の version を **KV（Upstash REST = edge 読取可）にミラー**し middleware で照合する read-through cache を追加。
-P1 ではデータ層失効で実害（他テナント閲覧）は防げるため、gate-level は P2。
+⚠ **Codex T1 で判明した限界（正確な現状）**: 失効が即時に効くのは **`getServerSession()` を呼ぶ経路だけ**。
+実際には `lib/tenant.ts` 経由で **middleware 注入ヘッダ（x-tenant-id 等）から tenant context を取る
+データ route（`app/api/pages`・`app/api/heatmap`・`app/api/chat` 等）が存在**し、これらは署名検証のみで
+通過する＝**失効済み JWT でもデータを返しうる**。さらに middleware の rolling refresh は stale claim を
+再署名して延命する。→ 「実データ層で即時に効く」は **getServerSession 経路に限る**（旧記述を訂正）。
 
 実装フラグ: `USER_REGISTRY=hardcode|db`。`db` 時のみ Layer 2 の DB 照合を有効化。`hardcode` 既定で現行挙動を保持。
+
+## 13.7 db モード本番投入ゲート（P1.5・Codex T1 で確定した必須前提）
+
+P1 は **`USER_REGISTRY=hardcode` 既定＝本番無変更**でコミット済（Codex GO）。だが **`db` モードを本番で
+有効化する前に**、以下を全て満たすこと（NO-GO 条件）。dogfood/ローカル検証は db モードで可。
+
+| ID | ブロッカー | 対応 |
+|---|---|---|
+| **REQ-SEC-126** | **header-route 失効バイパス**（最重要）: ヘッダ注入で tenant context を取る route は Layer 2 を通らず失効が効かない | (a) これら route を `getServerSession()` 経由に寄せる、**または** (b) PG version を **KV(Upstash REST=edge可) にミラー**し middleware 注入前に照合（read-through cache）。**db 本番化の絶対条件** |
+| **REQ-SEC-127** | **middleware rolling refresh が stale claim を延命**（`middleware.ts:573-598`） | db モードでは refresh を無効化、または node route で getServerSession 通過後に限定 |
+| **REQ-SEC-128** | **旧トークン移行**: 切替時、version=0 の旧 JWT（古い site_ids/role 保持）が Layer 2 を通過 | 切替時に **`JWT_SECRET` ローテーション**で全旧トークン失効（最も確実）、または seed version を非0で発行し再ログイン強制 |
+| **REQ-SEC-129** | **version bump 強制**: role/site 付与変更時に `membership_version` を必ず増分（seed/admin API/手動更新の全経路） | DB トリガ（role 変更→bump、`migrations/2026-06-08-auth-postgres-p1b-version-triggers.sql`）＋ P2 admin API で site 変更時に当該テナント全 membership を bump |
+| **REQ-SEC-130** | **TLS CA pin**: `AUTH_DATABASE_CA_CERT` を設定し `rejectUnauthorized:true`（未設定だと暗号化のみ＝MITM 余地） | Supabase の CA を env 投入。`lib/db/postgres.ts` は CA 提供時に厳格検証へ自動切替（実装済）、本番 db モードで未設定なら警告ログ |
+
+→ **P1.5 = 上記 5 件を満たして初めて `USER_REGISTRY=db` を本番投入**。それまで本番は hardcode 固定。
 
 ## 14. Owner 決定事項
 1. **登録簿の保存先**: ✅ **決定 = Supabase**（Owner 既存利用）。§3.1 の必須ガード（pooler/direct 二系統・専用プロジェクト隔離・常時稼働・secret env-only）を遵守。

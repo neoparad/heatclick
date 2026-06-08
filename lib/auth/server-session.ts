@@ -18,6 +18,7 @@
 
 import { cookies, headers } from 'next/headers'
 import { TOKEN_COOKIE_NAME, verifyToken, resolveRole, type JWTPayload, type Role } from '@/lib/jwt'
+import { getCurrentVersions } from '@/lib/auth/user-registry'
 
 export interface ServerSession {
   /** JWT verified payload (sub / email / name / tenant_id / plan / site_ids / role) */
@@ -60,6 +61,19 @@ export async function getServerSession(): Promise<ServerSession | null> {
 
   const user = await verifyToken(token)
   if (!user) return null
+
+  // REQ-SEC-101/102 Layer 2 (authoritative・node runtime): DB の現行 version / tenant.status と照合。
+  // middleware は edge で DB 照合できないため、失効 (role 剥奪 / 退会 / テナント停止 / 全失効) は
+  // ここで即時に効く。USER_REGISTRY=db のときのみ DB 照合 (hardcode は常に {0,0} で一致 = no-op)。
+  // DB 障害時は fail-closed (session を返さない = データアクセス不可)。
+  try {
+    const current = await getCurrentVersions(user.sub, user.tenant_id)
+    if (!current) return null // user/membership 消失 or tenant suspended = 失効
+    if ((user.session_version ?? 0) !== current.session_version) return null
+    if ((user.membership_version ?? 0) !== current.membership_version) return null
+  } catch {
+    return null
+  }
 
   // middleware が inject した header を必須化 (x-tenant-id / x-user-id 不在は middleware
   // 経路を通っていない = 直接 fetch / static export 等の経路、本 module 適用外)

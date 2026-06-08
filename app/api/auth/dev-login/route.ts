@@ -28,7 +28,7 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 
 import { redis } from '@/lib/redis'
 import { signToken, TOKEN_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from '@/lib/jwt'
-import { lookupDogfoodUser } from '@/lib/auth/dogfood-users'
+import { lookupUserByEmail } from '@/lib/auth/user-registry'
 import { getOwnerLoginSecret } from '@/lib/auth/owner-login'
 import { isSafeLocalRedirect, SAFE_REDIRECT_MAX_LENGTH } from '@/lib/auth/safe-redirect'
 
@@ -177,7 +177,19 @@ export async function POST(request: Request) {
   // 貼り付け時に紛れ込む前後の空白/改行での不一致を防ぐ。期待値 (getOwnerLoginSecret) も
   // trim 済なので対称。secret は hex 乱数想定のため前後 trim は安全 (内部空白は両側で保持)。
   const secretOk = secretsMatch(parsed.data.secret.trim(), ownerSecret)
-  const user = lookupDogfoodUser(email)
+  // REQ-SEC-124: 登録簿は USER_REGISTRY 抽象経由 (hardcode 既定 / db で Supabase)。
+  // enumeration 対策 (Codex T1): secret 不一致では registry lookup を**行わない**。
+  // db モードでは「存在する email = 3クエリ / 不在 = 1クエリ」の I/O タイミング差が
+  // email 列挙チャネルになるため、secret を持たない攻撃者には常に lookup 無しの経路を返す。
+  // DB 障害は user=null 扱い (fail-closed)。
+  let user = null
+  if (secretOk) {
+    try {
+      user = await lookupUserByEmail(email)
+    } catch {
+      user = null
+    }
+  }
 
   // secret 不一致 と 未招待 email を区別しない (enumeration 防止)。
   // secret 検証は user 有無に関わらず常に実行済 (上で timingSafeEqual) のため
@@ -199,6 +211,8 @@ export async function POST(request: Request) {
       plan: user.plan,
       site_ids: user.site_ids,
       role: user.role,
+      session_version: user.session_version,
+      membership_version: user.membership_version,
     })
   } catch {
     // JWT secret 未設定など。内部理由は漏らさず汎用 500。

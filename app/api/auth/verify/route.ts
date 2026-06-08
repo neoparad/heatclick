@@ -17,9 +17,9 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
 import { redis } from '@/lib/redis'
-import { signToken, TOKEN_COOKIE_NAME, SESSION_MAX_AGE_SECONDS, type Plan } from '@/lib/jwt'
+import { signToken, TOKEN_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from '@/lib/jwt'
 import { verifyMagicLinkToken } from '@/lib/auth/magic-link'
-import { lookupDogfoodUser } from '@/lib/auth/dogfood-users'
+import { lookupUserByEmail } from '@/lib/auth/user-registry'
 
 export const runtime = 'nodejs'
 
@@ -52,7 +52,15 @@ export async function GET(request: Request) {
     // Redis 不通時は fail-open (Sprint 1 dogfood 規模では許容、Sentry で検知)
   }
 
-  const user = lookupDogfoodUser(payload.email)
+  // REQ-SEC-124: 登録簿は USER_REGISTRY 抽象経由 (hardcode 既定 / db で Supabase)。
+  // REQ-SEC-102/103: db モードでは active tenant をサーバ決定・suspended テナントは除外。
+  let user
+  try {
+    user = await lookupUserByEmail(payload.email)
+  } catch {
+    // DB 経路の障害は内部理由を漏らさず汎用エラーへ (fail-closed: ログインさせない)
+    return redirectToSignIn(url.origin, 'invalid-token')
+  }
   if (!user) {
     return redirectToSignIn(url.origin, 'not-invited')
   }
@@ -62,9 +70,11 @@ export async function GET(request: Request) {
     email: user.email,
     name: user.name,
     tenant_id: user.tenant_id,
-    plan: user.plan as Plan,
+    plan: user.plan,
     site_ids: user.site_ids,
     role: user.role,
+    session_version: user.session_version,
+    membership_version: user.membership_version,
   })
 
   const redirectPath = sanitizeRedirect(payload.redirect) ?? '/dashboard'
