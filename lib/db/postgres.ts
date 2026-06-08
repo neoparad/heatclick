@@ -16,25 +16,20 @@
 
 import { Pool, type PoolClient, type QueryResultRow } from 'pg'
 
+import { SUPABASE_ROOT_2021_CA } from '@/lib/db/supabase-ca'
+
 let _pool: Pool | null = null
 
 /**
- * TLS 設定 (Codex T1 HIGH への対応)。
- *   - `AUTH_DATABASE_CA_CERT` 提供時: **厳格検証** (rejectUnauthorized:true + CA pin) = MITM 防御。
- *   - 未提供時: 暗号化のみ (検証なし)。**db モード本番投入の前に CA 設定必須** (§13.7 P1.5 gate)。
- *     本番 (NODE_ENV=production) で db モードかつ CA 未設定なら警告ログを出す。
+ * TLS 設定 (REQ-SEC-130)。既定で **strict 検証** (rejectUnauthorized:true + CA pin) = MITM 防御。
+ *   1. `AUTH_DATABASE_CA_CERT` 提供時: その CA で strict (別 DB / CA ローテーション用の上書き)。
+ *   2. 未提供時: **bundled Supabase Root 2021 CA** で strict (Supabase pooler の既定経路、env 不要)。
+ * いずれも `rejectUnauthorized: true`。検証なし接続は既定では行わない。
  */
-function buildAuthDbSsl(): { rejectUnauthorized: boolean; ca?: string } {
-  const ca = process.env.AUTH_DATABASE_CA_CERT
-  if (ca && ca.trim().length > 0) {
-    return { rejectUnauthorized: true, ca: ca.replace(/\\n/g, '\n') }
-  }
-  if (process.env.NODE_ENV === 'production' && process.env.USER_REGISTRY === 'db') {
-    console.error(
-      '[auth-db] WARNING: AUTH_DATABASE_CA_CERT unset in production db mode — TLS without cert verification (MITM risk). Set CA before cutover (§13.7).',
-    )
-  }
-  return { rejectUnauthorized: false }
+function buildAuthDbSsl(): { rejectUnauthorized: boolean; ca: string } {
+  const envCa = process.env.AUTH_DATABASE_CA_CERT
+  const ca = envCa && envCa.trim().length > 0 ? envCa.replace(/\\n/g, '\n') : SUPABASE_ROOT_2021_CA
+  return { rejectUnauthorized: true, ca }
 }
 
 export function isAuthDbConfigured(): boolean {

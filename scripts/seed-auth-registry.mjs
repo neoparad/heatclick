@@ -46,11 +46,22 @@ const MEMBERSHIPS = [
 ]
 // ---------------------------------------------------------------------------
 
-function buildSsl() {
-  const ca = process.env.AUTH_DATABASE_CA_CERT
-  if (ca && ca.trim().length > 0) {
-    return { rejectUnauthorized: true, ca: ca.replace(/\\n/g, '\n') }
+function bundledSupabaseCa() {
+  // 単一ソース: lib/db/supabase-ca.ts に埋め込んだ公開 CA を読む (アプリと同じ)。
+  try {
+    const ts = readFileSync(new URL('../lib/db/supabase-ca.ts', import.meta.url), 'utf8')
+    const m = ts.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)
+    return m ? m[0] + '\n' : null
+  } catch {
+    return null
   }
+}
+
+function buildSsl() {
+  // REQ-SEC-130: strict TLS 既定。env CA 優先、無ければ bundled Supabase CA。
+  const envCa = process.env.AUTH_DATABASE_CA_CERT
+  const ca = envCa && envCa.trim().length > 0 ? envCa.replace(/\\n/g, '\n') : bundledSupabaseCa()
+  if (ca) return { rejectUnauthorized: true, ca }
   return { rejectUnauthorized: false }
 }
 

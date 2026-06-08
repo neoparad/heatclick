@@ -227,9 +227,9 @@ P1 は **`USER_REGISTRY=hardcode` 既定＝本番無変更**でコミット済�
 | **REQ-SEC-127** | **middleware rolling refresh が stale claim を延命**（`middleware.ts`） | ✅ **CLOSED (P1.5)**: refresh を `USER_REGISTRY!=='db'` で gate＝db モードで無効化（Codex 検証済 CLOSED）。KV ミラー実装後（P2）に revalidation 付きで復活 |
 | **REQ-SEC-128** | **旧トークン移行**: 切替時、version=0 の旧 JWT（古い site_ids/role 保持）が Layer 2 を通過 | ⏳ **cutover 手順**: `USER_REGISTRY=db` 切替と同時に **`JWT_SECRET` ローテーション**で全旧トークン失効（最も確実）。runbook 化 |
 | **REQ-SEC-129** | **version bump 強制**: role/site 付与変更時に `membership_version` を必ず増分 | 🔧 **一部**: role 変更トリガ提供済（`...-p1b-version-triggers.sql`、cutover で適用）。site 付与変更（tenant_sites）時の当該テナント全 membership bump は **P2 admin API** で実装 |
-| **REQ-SEC-130** | **TLS CA pin**: `AUTH_DATABASE_CA_CERT` 設定で `rejectUnauthorized:true` | 🔧 **コード済・env 待ち**: `lib/db/postgres.ts` は CA 提供時に厳格検証へ自動切替・本番 db モードで未設定なら警告ログ。cutover 前に Supabase CA を env 投入 |
+| **REQ-SEC-130** | **TLS CA pin**: strict 検証で MITM 防御 | ✅ **CLOSED**: 公開 **Supabase Root 2021 CA** を `lib/db/supabase-ca.ts` に bundle し、`lib/db/postgres.ts` は既定で `rejectUnauthorized:true`＋CA pin（env 不要、実機で strict 接続 OK 確認済）。`AUTH_DATABASE_CA_CERT` は上書き用に残置 |
 
-→ **P1.5 で REQ-SEC-126/127 を CLOSE**（コード対応完了）。残る **128/129(site)/130 は cutover 手順 / env / P2**。
+→ **P1.5 で REQ-SEC-126/127/130 を CLOSE**（コード対応完了）。残る **128（JWT_SECRET ローテ＝cutover 手順）/ 129-site（P2 admin API）**。
 これらを満たして初めて `USER_REGISTRY=db` を本番投入。それまで本番は hardcode 固定（実害なし）。
 
 ## 14. Owner 決定事項
