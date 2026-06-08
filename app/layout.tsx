@@ -42,6 +42,12 @@ export const metadata: Metadata = {
     index: process.env.NODE_ENV === 'production',
     follow: process.env.NODE_ENV === 'production',
   },
+  // 続 117 v4: Chrome/Google 翻訳に「このページは翻訳しない」と最上位で宣言する
+  // (<meta name="google" content="notranslate">)。翻訳プロンプト自体を抑止し、
+  // 翻訳由来の <font> ラップ → React hydration #418/#423 → 白画面 を入口で防ぐ。
+  other: {
+    google: 'notranslate',
+  },
 }
 
 export default function RootLayout({
@@ -61,9 +67,28 @@ export default function RootLayout({
         <body> の suppressHydrationWarning で拡張由来の属性差分を hydration mismatch 扱いしない
         (= 白画面化を防ぐ防御層)。<html> 側 suppression は 1 階層しか及ばないため <body> にも明示。
       */}
+      {/*
+        続 117 v4 white-screen root-fix (2026-05-30 chrome-devtools 実機再現で確定):
+        clean browser では sign-in が完全描画・React #418/#423 ゼロ。一方「ページ内テキストを
+        <font> で包み直す DOM mutation」を hydration 前に注入すると Owner と同一の
+        React #418 (×9) + #423 を 100% 再現できた。<font> ラップは Chrome 内蔵「このページを翻訳」
+        (Google 翻訳) の署名そのもので、拡張機能 OFF でも動き・シークレットでは既定 OFF という
+        Owner 観測 (拡張 OFF でも白 / incognito は平気) と完全一致する。翻訳や Grammarly 系が
+        React 管理下の DOM を継続的に書き換えると、React の hydration recovery と無限に競合し
+        白画面化する。これを根本から断つため、アプリ UI は翻訳・校正ツールの DOM 改変対象から外す:
+          - translate="no" + class="notranslate": Google 翻訳に「この subtree を翻訳するな」と宣言
+            (= <font> ラップ自体が起きないので hydration mismatch の発生源が消える)
+          - data-gramm* / data-enable-grammarly: Grammarly に編集 overlay 注入を抑止
+        suppressHydrationWarning / error boundary (error.tsx, global-error.tsx) / chunk-recovery は
+        残置の防御層 (万一の mismatch でも白画面にせず復旧 UI を出す)。
+      */}
       <body
         suppressHydrationWarning
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        translate="no"
+        data-gramm="false"
+        data-gramm_editor="false"
+        data-enable-grammarly="false"
+        className={`notranslate ${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         {children}
       </body>
