@@ -221,15 +221,16 @@ CREATE TABLE invitations (
 P1 は **`USER_REGISTRY=hardcode` 既定＝本番無変更**でコミット済（Codex GO）。だが **`db` モードを本番で
 有効化する前に**、以下を全て満たすこと（NO-GO 条件）。dogfood/ローカル検証は db モードで可。
 
-| ID | ブロッカー | 対応 |
+| ID | ブロッカー | 状態 / 対応 |
 |---|---|---|
-| **REQ-SEC-126** | **header-route 失効バイパス**（最重要）: ヘッダ注入で tenant context を取る route は Layer 2 を通らず失効が効かない | (a) これら route を `getServerSession()` 経由に寄せる、**または** (b) PG version を **KV(Upstash REST=edge可) にミラー**し middleware 注入前に照合（read-through cache）。**db 本番化の絶対条件** |
-| **REQ-SEC-127** | **middleware rolling refresh が stale claim を延命**（`middleware.ts:573-598`） | db モードでは refresh を無効化、または node route で getServerSession 通過後に限定 |
-| **REQ-SEC-128** | **旧トークン移行**: 切替時、version=0 の旧 JWT（古い site_ids/role 保持）が Layer 2 を通過 | 切替時に **`JWT_SECRET` ローテーション**で全旧トークン失効（最も確実）、または seed version を非0で発行し再ログイン強制 |
-| **REQ-SEC-129** | **version bump 強制**: role/site 付与変更時に `membership_version` を必ず増分（seed/admin API/手動更新の全経路） | DB トリガ（role 変更→bump、`migrations/2026-06-08-auth-postgres-p1b-version-triggers.sql`）＋ P2 admin API で site 変更時に当該テナント全 membership を bump |
-| **REQ-SEC-130** | **TLS CA pin**: `AUTH_DATABASE_CA_CERT` を設定し `rejectUnauthorized:true`（未設定だと暗号化のみ＝MITM 余地） | Supabase の CA を env 投入。`lib/db/postgres.ts` は CA 提供時に厳格検証へ自動切替（実装済）、本番 db モードで未設定なら警告ログ |
+| **REQ-SEC-126** | **header-route 失効バイパス**（最重要）: ヘッダ注入で tenant context を取る route が Layer 2 を通らない | ✅ **CLOSED (P1.5)**: `getTenantContext()`＋heatmap 3 route＋scenarios resolver を全て `getServerSession()` 経由に統一（Codex 検証済 CLOSED）。`getServerSession` に Bearer fallback も復元（operator curl 互換） |
+| **REQ-SEC-127** | **middleware rolling refresh が stale claim を延命**（`middleware.ts`） | ✅ **CLOSED (P1.5)**: refresh を `USER_REGISTRY!=='db'` で gate＝db モードで無効化（Codex 検証済 CLOSED）。KV ミラー実装後（P2）に revalidation 付きで復活 |
+| **REQ-SEC-128** | **旧トークン移行**: 切替時、version=0 の旧 JWT（古い site_ids/role 保持）が Layer 2 を通過 | ⏳ **cutover 手順**: `USER_REGISTRY=db` 切替と同時に **`JWT_SECRET` ローテーション**で全旧トークン失効（最も確実）。runbook 化 |
+| **REQ-SEC-129** | **version bump 強制**: role/site 付与変更時に `membership_version` を必ず増分 | 🔧 **一部**: role 変更トリガ提供済（`...-p1b-version-triggers.sql`、cutover で適用）。site 付与変更（tenant_sites）時の当該テナント全 membership bump は **P2 admin API** で実装 |
+| **REQ-SEC-130** | **TLS CA pin**: `AUTH_DATABASE_CA_CERT` 設定で `rejectUnauthorized:true` | 🔧 **コード済・env 待ち**: `lib/db/postgres.ts` は CA 提供時に厳格検証へ自動切替・本番 db モードで未設定なら警告ログ。cutover 前に Supabase CA を env 投入 |
 
-→ **P1.5 = 上記 5 件を満たして初めて `USER_REGISTRY=db` を本番投入**。それまで本番は hardcode 固定。
+→ **P1.5 で REQ-SEC-126/127 を CLOSE**（コード対応完了）。残る **128/129(site)/130 は cutover 手順 / env / P2**。
+これらを満たして初めて `USER_REGISTRY=db` を本番投入。それまで本番は hardcode 固定（実害なし）。
 
 ## 14. Owner 決定事項
 1. **登録簿の保存先**: ✅ **決定 = Supabase**（Owner 既存利用）。§3.1 の必須ガード（pooler/direct 二系統・専用プロジェクト隔離・常時稼働・secret env-only）を遵守。

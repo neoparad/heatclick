@@ -574,9 +574,16 @@ export async function middleware(request: NextRequest) {
     // 残存期間が閾値 (25d) を切ったら、このページ遷移のついでに 30d 新 cookie を再発行。
     // アクティブユーザーは触り続ける限りログイン維持され、突然 sign-in に飛ばされない。
     // 失敗 (再署名エラー等) は致命的でないため握りつぶして通常 next() を返す (既存 token は有効)。
+    //
+    // REQ-SEC-127 (Codex T1 / §13.7): **db モードでは refresh を無効化**。
+    // middleware は edge で DB 失効照合できないため、refresh は stale claim (剥奪済み role /
+    // 退会済み membership / 古い site_ids) を再署名して延命してしまう。db モードでは refresh を
+    // 止め、token は自然失効 → 再ログインで最新 claim を再導出させる。失効の gate-level 反映 (KV
+    // ミラー) 実装後 (P2) に refresh を revalidation 付きで復活させる。hardcode は従来通り refresh ON。
     const res = NextResponse.next()
     const nowSec = Math.floor(Date.now() / 1000)
-    if (shouldRefreshSession(payload.exp, nowSec)) {
+    const refreshEnabled = process.env.USER_REGISTRY !== 'db'
+    if (refreshEnabled && shouldRefreshSession(payload.exp, nowSec)) {
       try {
         // exp/iat/nbf は再発行で setIssuedAt / setExpirationTime が付け直すため除去。
         // strict (noUnusedLocals) 回避のため destructure-omit ではなく spread + delete。

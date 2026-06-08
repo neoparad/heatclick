@@ -10,7 +10,7 @@
  * - cross-tenant アクセス試行は 403 + audit_events 記録
  */
 
-import { headers } from 'next/headers'
+import { getServerSession } from '@/lib/auth/server-session'
 
 export interface TenantContext {
   tenant_id: string
@@ -26,29 +26,29 @@ export interface TenantContext {
 }
 
 /**
- * Server Component / API Route で tenant context を取得。
- * middleware が x-tenant-id / x-plan / x-user-id / x-site-ids ヘッダーを注入している前提。
- * 認証されていない場合は null を返す。
+ * Server Component / API Route で tenant context を取得。認証されていない場合は null。
  *
- * S1-09 変更: x-user-email 依存を撤廃。tenant_id / plan / user_id / site_ids のみで判定。
- * email を取得したい callsite は `getServerSession()` / `getUserEmail()` 使用。
+ * REQ-SEC-126 (Codex T1 / §13.7): **middleware 注入ヘッダの直読みをやめ、`getServerSession()`
+ * 経由で導出**する。これにより全データ route が:
+ *   - JWT 署名を再検証 (header 偽装に依存しない)
+ *   - Layer 2 失効照合 (session_version / membership_version / tenants.status) を通る
+ *     → role 剥奪 / 退会 / テナント停止が **これらの route でも即時に効く** (db モード)
+ *   - header vs JWT cross-check (server-session 内)
+ * hardcode モードでは Layer 2 が no-op ({0,0}) のため、JWT 検証コストのみ増 (DB アクセス無し)。
+ *
+ * tenant_id / plan / user_id / site_ids は **検証済み JWT (session.user)** から取る
+ * (注入ヘッダ x-plan / x-site-ids の値ではない = spoof 不可)。
  */
 export async function getTenantContext(): Promise<TenantContext | null> {
-  const h = await headers()
-  const tenant_id = h.get('x-tenant-id')
-  const plan = h.get('x-plan') as TenantContext['plan'] | null
-  const user_id = h.get('x-user-id')
-  const site_ids_raw = h.get('x-site-ids')
-
-  if (!tenant_id || !plan || !user_id) {
-    return null
-  }
+  const session = await getServerSession()
+  if (!session) return null
 
   return {
-    tenant_id,
-    plan,
-    user_id,
-    site_ids: site_ids_raw ? site_ids_raw.split(',') : [],
+    tenant_id: session.tenant_id,
+    plan: session.user.plan,
+    user_id: session.user_id,
+    site_ids: session.user.site_ids,
+    email: session.user.email,
   }
 }
 

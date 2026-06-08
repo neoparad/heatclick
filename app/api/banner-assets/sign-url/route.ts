@@ -111,8 +111,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     )
   }
 
-  // REQ-SEC-004: tenant_id from JWT header; body site_id must be in JWT site_ids.
-  const ctx = resolveScenarioTenantContext(request, parsed.data.site_id)
+  // REQ-SEC-004/126: tenant_id from JWT (getServerSession); body site_id must be in JWT site_ids.
+  const ctx = await resolveScenarioTenantContext(request, parsed.data.site_id)
   if (!isTenantContext(ctx)) return ctx
   const tenantId = ctx.tenantId
 

@@ -56,7 +56,18 @@ export interface ServerSession {
  */
 export async function getServerSession(): Promise<ServerSession | null> {
   const cookieStore = await cookies()
-  const token = cookieStore.get(TOKEN_COOKIE_NAME)?.value
+  let token = cookieStore.get(TOKEN_COOKIE_NAME)?.value
+
+  // Bearer fallback (Codex T1 regression fix): cookie が無い場合は Authorization: Bearer を許容。
+  // middleware は API 経路で Bearer を受理して header 注入するため、cookie を持たない
+  // operator/programmatic な `curl -H "Authorization: Bearer <JWT>"` 経路を壊さない。
+  if (!token) {
+    const hAuth = await headers()
+    const authHeader = hAuth.get('authorization')
+    if (authHeader?.startsWith('Bearer ')) {
+      token = authHeader.slice(7)
+    }
+  }
   if (!token) return null
 
   const user = await verifyToken(token)

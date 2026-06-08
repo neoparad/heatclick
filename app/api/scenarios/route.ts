@@ -100,8 +100,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'invalid_query', message: 'site_id required' }, { status: 400 })
   }
 
-  // tenant_id from JWT header; site_id must be in JWT site_ids (REQ-SEC-004).
-  const ctx = resolveScenarioTenantContext(request, siteParse.data)
+  // tenant_id from JWT (getServerSession); site_id must be in JWT site_ids (REQ-SEC-004/126).
+  const ctx = await resolveScenarioTenantContext(request, siteParse.data)
   if (!isTenantContext(ctx)) return ctx
 
   try {
@@ -135,8 +135,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     )
   }
 
-  // tenant_id from JWT header; body site_id must be in JWT site_ids (REQ-SEC-004).
-  const ctx = resolveScenarioTenantContext(request, parsed.data.site_id)
+  // tenant_id from JWT (getServerSession); body site_id must be in JWT site_ids (REQ-SEC-004/126).
+  const ctx = await resolveScenarioTenantContext(request, parsed.data.site_id)
   if (!isTenantContext(ctx)) return ctx
 
   // REQ-SEC-010 (HIGH): publish RBAC。session 不在は 401 (Codex 指摘 B 反映)、

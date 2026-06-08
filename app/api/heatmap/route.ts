@@ -21,7 +21,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
-import { headers } from 'next/headers'
+import { getServerSession } from '@/lib/auth/server-session'
 
 import { getClickHouseClient } from '@/lib/clickhouse'
 
@@ -148,10 +148,11 @@ export async function GET(request: Request) {
 
   const params = parsed.data
 
-  // tenant 検証 — middleware が x-tenant-id / x-site-ids を inject 済
-  const h = await headers()
-  const tenantId = h.get('x-tenant-id')
-  const siteIds = h.get('x-site-ids')
+  // tenant 検証 — REQ-SEC-126 (§13.7): header 直読みをやめ getServerSession 経由で
+  // Layer 2 失効照合 (session/membership version + tenant.status) を通す。失効済みは null。
+  const session = await getServerSession()
+  const tenantId = session?.tenant_id ?? null
+  const siteIds = session ? session.user.site_ids.join(',') : null
   if (!tenantId) {
     return NextResponse.json(
       { success: false, error: { code: 'UNAUTHORIZED', message: 'tenant context missing' } },
