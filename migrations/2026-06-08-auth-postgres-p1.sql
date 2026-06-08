@@ -4,9 +4,11 @@
 --
 -- 作成日: 2026-06-08
 -- 起草: Director (docs/multi-tenant-auth-design.md §4 / §13.5 dual-review 統合)
--- 適用先: **新規 Managed Postgres** (Vercel Marketplace の Neon / Supabase)
+-- 適用先: **新規 Managed Postgres = Supabase** (2026-06-08 Owner 決定、専用プロジェクト推奨)
 --          ※ linkscrawl Hetzner PG (159.69.95.59:5433) とは別インスタンス。
 --             認証は全リクエストで参照するため Vercel 近接・低レイテンシの managed PG に置く。
+--          ※ 本 DDL の実行は **Direct connection (port 5432)** を使う (pooler 6543 は DDL 非推奨)。
+--             アプリ実行時の接続は Pooler / Transaction mode (port 6543) を使う。
 --
 -- 目的: ハードコード登録簿 (lib/auth/dogfood-users.ts) を関係DBに永続化し、
 --       外部クライアント (wakegai 等) を独立テナント (B) で運用できる足場を作る。
@@ -23,10 +25,11 @@
 --   - REQ-SEC-106/107 招待権限境界・email 一致 (アプリ層で強制、schema は素材を保持)
 --   - REQ-SEC-120 invitations は token_hash 保存・短寿命・1回限り (生 token は保存しない)
 --
--- 実行方法 (managed PG = Neon/Supabase):
---   方法A (psql):   psql "$DATABASE_URL" -f migrations/2026-06-08-auth-postgres-p1.sql
---   方法B (UI):     Neon/Supabase の SQL Editor に本ファイルを貼り付けて実行
+-- 実行方法 (Supabase):
+--   方法A (psql):   psql "<Direct connection string :5432>" -f migrations/2026-06-08-auth-postgres-p1.sql
+--   方法B (UI):     Supabase Dashboard → SQL Editor に本ファイルを貼り付けて実行 (最も簡単)
 --   ※ DDL 適用は Owner/Infra が実行 (AI は実行しない、既存ルール)。
+--   ※ Supabase の `citext` は標準で利用可。失敗する場合は Dashboard → Database → Extensions で有効化。
 --
 -- ロールバック: 末尾の `-- ROLLBACK:` セクション参照。
 -- =============================================================================

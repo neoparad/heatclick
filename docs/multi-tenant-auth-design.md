@@ -22,10 +22,18 @@
 → 足りないのは「**登録簿の永続化 + プロビジョニング + セッション失効**」。認証メカニズムは作り直さない。
 
 ## 3. 最初の分岐: 登録簿の保存先
+**決定 (2026-06-08 Owner)**: **Managed Postgres = Supabase**（Owner が既に利用・運用の慣れを優先）。
 | 案 | 内容 | 評価 |
 |---|---|---|
-| **(推奨) Managed Postgres** 導入（Neon/Supabase via Vercel Marketplace） | users/tenants/memberships/invitations を関係DBに | unique email・参照整合・トランザクション招待・関係クエリ・将来の課金/組織に最適。新インフラ1個 |
-| KV-backed（scenarios と同じ） | KV キー設計＋手動 index | 新インフラ不要・一貫。だが unique制約/join/トランザクションを手で実装＝認証ドメインには脆い |
+| **(採用) Managed Postgres = Supabase** | users/tenants/memberships/invitations を関係DBに。`citext` 拡張あり、将来 RLS で tenant 隔離を DB 層二重化可 | unique email・参照整合・トランザクション招待・関係クエリ・将来の課金/組織に最適。Owner 既存利用で学習コスト0 |
+| KV-backed（scenarios と同じ） | KV キー設計＋手動 index | 新インフラ不要・一貫。だが unique制約/join/トランザクションを手で実装＝認証ドメインには脆い（不採用） |
+
+### 3.1 Supabase 採用時の必須ガード（認証特有）
+- **接続文字列の二系統**: アプリ(Vercel)→ **Pooler / Transaction mode (port 6543)**（サーバーレスは接続増減＝直結だと枯渇）。
+  DDL/移行SQL → **Direct (port 5432)**。`lib/db` は pooler 前提で実装。
+- **隔離**: 認証名簿は**専用 Supabase プロジェクト（or 専用スキーマ）**に置き爆発半径を分離。
+- **常時稼働**: 無料枠の自動停止＝認証DB停止＝全ログイン不能（fail-closed）。wakegai 本番投入時は Pro 等で常時稼働。
+- **secret**: `DATABASE_URL` は env のみ、コミット禁止（REQ-SEC-125）。接続失敗時 fail-closed。
 
 **推奨 = Postgres**（認証/組織/課金は関係データが本質。KV は rate-limit/session cache/scenarios の高頻度 ephemeral に残す）。Owner 承認事項。
 
@@ -208,8 +216,7 @@ P1 ではデータ層失効で実害（他テナント閲覧）は防げるた�
 実装フラグ: `USER_REGISTRY=hardcode|db`。`db` 時のみ Layer 2 の DB 照合を有効化。`hardcode` 既定で現行挙動を保持。
 
 ## 14. Owner 決定事項
-1. **登録簿の保存先**: Postgres 導入で良いか（推奨）／ KV で通すか。
-   - 補足: Vercel では従来の Vercel Postgres は廃止 → **Marketplace の Neon/Supabase** を採用（managed, additive）。
+1. **登録簿の保存先**: ✅ **決定 = Supabase**（Owner 既存利用）。§3.1 の必須ガード（pooler/direct 二系統・専用プロジェクト隔離・常時稼働・secret env-only）を遵守。
 2. **wakegai 移行のメンテ枠**（events 再タグ実行タイミング、§9 runbook）。低トラフィック枠で順序厳守。
 3. role の初期マトリクス（§6）で良いか。
 4. **P1 着手承認**。P1 の受け入れ基準に **REQ-SEC-101/103/105/112/113** を含める（セッション失効＋cookie統一＋role検証）。
