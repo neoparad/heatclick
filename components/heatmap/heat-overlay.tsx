@@ -176,6 +176,15 @@ export function HeatOverlay({
  * 全幅の帯を intensity に応じた warm-to-cool gradient で描画。
  * intensity = count / maxCount (0..1)。強い帯ほど赤寄り・不透明。
  */
+/** intensity [0,1] → warm rgba (low=yellow-green, high=red)。 */
+function readHeatColor(intensity: number): string {
+  const r = Math.round(50 + intensity * 165)
+  const g = Math.round(161 - intensity * 130)
+  const b = Math.round(80 - intensity * 70)
+  const alpha = 0.16 + intensity * 0.44
+  return `rgba(${r},${g},${b},${alpha.toFixed(2)})`
+}
+
 function ReadBandOverlay({
   bands,
   displayScale,
@@ -183,40 +192,66 @@ function ReadBandOverlay({
   bands: ReadBand[]
   displayScale: number
 }) {
+  // 続124 ④ (Owner: 「グラデーションのはずがセクションで切れている」):
+  // 帯ごとのベタ塗り (200px 階段) をやめ、バンド中心を color stop にした
+  // **連続 linear-gradient 1 枚**で描く。隣接バンド間は CSS が線形補間 = 滑らかな熱表現。
+  // データの無いギャップ (バンド間隔 > 2×bin) には透明 stop を挟み、
+  // 「計測していない場所に熱がある」嘘の絵は作らない (D-07)。
+  const sorted = [...bands].sort((a, b) => a.top - b.top)
+  const maxBottom = sorted.reduce((m, b) => Math.max(m, b.top + b.height), 0)
+
+  const stops: string[] = []
+  if (maxBottom > 0) {
+    stops.push('rgba(80,161,80,0) 0%')
+    for (let i = 0; i < sorted.length; i++) {
+      const band = sorted[i]
+      const prev = sorted[i - 1]
+      // ギャップ検出: 前バンドの下端から 2 bin 以上離れていたら透明で区切る
+      if (prev && band.top - (prev.top + prev.height) > prev.height * 2) {
+        const prevEndPct = (((prev.top + prev.height) / maxBottom) * 100).toFixed(2)
+        const curStartPct = ((band.top / maxBottom) * 100).toFixed(2)
+        stops.push(`rgba(80,161,80,0) ${prevEndPct}%`, `rgba(80,161,80,0) ${curStartPct}%`)
+      }
+      const centerPct = (((band.top + band.height / 2) / maxBottom) * 100).toFixed(2)
+      stops.push(`${readHeatColor(band.intensity)} ${centerPct}%`)
+    }
+    stops.push('rgba(80,161,80,0) 100%')
+  }
+
   return (
     <div
       className="read-band-overlay pointer-events-none absolute inset-0"
       data-testid="read-band-overlay"
     >
-      {bands.map((band, i) => {
-        // intensity → warm color: low=yellow-green, high=red
-        const r = Math.round(50 + band.intensity * 165)
-        const g = Math.round(161 - band.intensity * 130)
-        const b = Math.round(80 - band.intensity * 70)
-        const alpha = 0.18 + band.intensity * 0.42
-        return (
+      {maxBottom > 0 ? (
+        <div
+          className="absolute left-0 right-0"
+          style={{
+            top: 0,
+            height: maxBottom * displayScale,
+            background: `linear-gradient(180deg, ${stops.join(', ')})`,
+            mixBlendMode: 'multiply',
+          }}
+          aria-hidden
+        />
+      ) : null}
+      {/* 熟読の強いゾーンのみ session 数ラベルを表示 (clutter 回避) */}
+      {sorted
+        .filter((b) => b.intensity > 0.55)
+        .map((band, i) => (
           <div
-            key={`read-${i}`}
-            className="read-band absolute left-0 right-0 flex items-center justify-end px-[10px] font-mono text-[10px] font-semibold"
+            key={`read-label-${i}`}
+            className="absolute right-[10px] font-mono text-[10px] font-semibold"
             style={{
-              top: band.top * displayScale,
-              height: Math.max(2, band.height * displayScale),
-              background: `rgba(${r},${g},${b},${alpha.toFixed(2)})`,
-              mixBlendMode: 'multiply',
-              borderBottom: band.intensity > 0.5 ? '1px solid rgba(214,69,69,.25)' : 'none',
-              color: 'rgba(100,20,20,.8)',
+              top: (band.top + band.height / 2) * displayScale - 7,
+              color: 'rgba(100,20,20,.75)',
+              textShadow: '0 1px 1px rgba(255,255,255,.7)',
             }}
-            data-testid={`read-band-${i}`}
             aria-hidden
           >
-            {band.intensity > 0.3 ? (
-              <span style={{ textShadow: '0 1px 1px rgba(255,255,255,.7)' }}>
-                {band.sessions.toLocaleString()} sessions
-              </span>
-            ) : null}
+            {band.sessions.toLocaleString()} sessions
           </div>
-        )
-      })}
+        ))}
     </div>
   )
 }

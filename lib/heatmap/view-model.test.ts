@@ -497,7 +497,7 @@ describe('buildHeatmapViewModel', () => {
       expect(vm.signalCards).toHaveLength(0)
     })
 
-    it('attaches signal cards to non-click layers too (read)', () => {
+    it('attaches signal cards AND hotspot cards to non-click layers too (read)', () => {
       const readMeta: HeatmapTileMeta = {
         ...metaWith('clickhouse_events'),
         heatmap_type: 'read',
@@ -508,7 +508,45 @@ describe('buildHeatmapViewModel', () => {
         elements: elementsData,
       })
       expect(vm.signalCards).toHaveLength(1)
+      // 続124 ⑨: 右パネルは layer 非依存 — read 層でも要素カードが出る
+      expect(vm.hotspotCards.length).toBeGreaterThan(0)
+      expect(vm.hotspotCards[0].name).toContain('カバー力比較')
       expect(vm.readBands.length).toBeGreaterThan(0)
+    })
+
+    it('marks dead-clicked elements as negative spots (warn intent + デッド stat)', () => {
+      const data: HeatmapElementsData = {
+        elements: [
+          {
+            selector: '#cta-cart',
+            text: 'カートに追加',
+            tag: 'button',
+            href: '',
+            clicks: 30,
+            sessions: 25,
+            x: 640,
+            y: 700,
+          },
+        ],
+        signals: [
+          {
+            type: 'dead',
+            count: 12,
+            sessions: 10,
+            top: [{ selector: '#cta-cart', text: 'カートに追加', count: 12, x: 640, y: 700 }],
+          },
+        ],
+      }
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: data,
+      })
+      expect(vm.hotspotCards[0].intent).toBe('warn')
+      expect(
+        vm.hotspotCards[0].stats.some((s) => s.label === 'デッド' && s.tone === 'neg'),
+      ).toBe(true)
+      expect(vm.tags[0].intent).toBe('warn')
     })
   })
 })

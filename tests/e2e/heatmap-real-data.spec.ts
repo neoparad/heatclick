@@ -101,7 +101,7 @@ test.describe('P-04 heatmap 続 82 Sprint 4 W1 (real-data + stats bar + chips)',
     await expect(page.getByTestId('canvas-stat-scroll')).toHaveCount(0)
   })
 
-  test('SegmentChip (device + period) triggers heatmap refetch', async ({ page }) => {
+  test('device tab + period chip triggers heatmap refetch', async ({ page }) => {
     const calls: Array<{ deviceType: string | null; periodHint: string | null }> = []
     await mockHeatmapApi(page, { dataSource: 'clickhouse_events', calls })
     await mockPageStatsApi(page, { pageViews: 100, sessions: 50, ctr: 0.1 })
@@ -110,13 +110,15 @@ test.describe('P-04 heatmap 続 82 Sprint 4 W1 (real-data + stats bar + chips)',
     await page.getByTestId('heatmap-canvas').waitFor()
     const initialCalls = calls.length
     expect(initialCalls).toBeGreaterThanOrEqual(1)
+    // 続124: 既定 PC タブ = desktop イベントで取得 (デバイス座標系の統一)
+    expect(calls[calls.length - 1].deviceType).toBe('desktop')
 
-    // device=PC でフィルタ
-    await page.getByTestId('segment-chip-device-desktop').click()
+    // 続124: device chips 撤去 → canvas の SP タブが screenshot + データ両方を切替える
+    await page.getByTestId('device-tab-sp').click()
     await page.waitForTimeout(200)
     const afterDevice = calls.length
     expect(afterDevice).toBeGreaterThan(initialCalls)
-    expect(calls[calls.length - 1].deviceType).toBe('desktop')
+    expect(calls[calls.length - 1].deviceType).toBe('mobile')
 
     // 期間 30 日切替
     await page.getByTestId('segment-chip-period-30').click()

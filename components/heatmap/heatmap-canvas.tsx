@@ -99,6 +99,12 @@ export interface HeatmapCanvasProps {
    * null でも cluster fallback で描画は継続する (非致命の強化データ)。
    */
   elements?: HeatmapElementsData | null
+  /**
+   * 続124: デバイスタブ (PC/SP/TAB) の controlled prop。親が screenshot とデータの
+   * 両方を同じデバイスに揃えるために own する。未指定なら内部 state (legacy 互換)。
+   */
+  device?: DeviceKind
+  onDeviceChange?: (d: DeviceKind) => void
 }
 
 /** view-model に渡す sourceWidth: ClickHouse 正規化済 click_x の最大幅 */
@@ -173,6 +179,8 @@ export function HeatmapCanvas({
   dwellLabel,
   scrollLabel,
   elements,
+  device: deviceProp,
+  onDeviceChange,
 }: HeatmapCanvasProps) {
   // pageHeightEstimate は legacy 契約。mockup parity rebuild では 720px 固定 underlay
   // のため canvas 高さ計算には使わない。Phase 2 (実 screenshot underlay) で復活予定。
@@ -195,7 +203,11 @@ export function HeatmapCanvas({
   const [controlsVisible, setControlsVisible] = useState(true)
   const [sideVisible, setSideVisible] = useState(true)
   const [fullscreen, setFullscreen] = useState(false)
-  const [device, setDevice] = useState<DeviceKind>('pc')
+  // 続124: device は親 (HeatmapPage) が own できる controlled prop (screenshot + データを
+  // 同時切替するため)。未指定 (legacy 呼出 / test) は内部 state fallback。
+  const [internalDevice, setInternalDevice] = useState<DeviceKind>('pc')
+  const device = deviceProp ?? internalDevice
+  const setDevice = onDeviceChange ?? setInternalDevice
   const [highlightedTagId, setHighlightedTagId] = useState<string | null>(null)
 
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -261,6 +273,9 @@ export function HeatmapCanvas({
   //   ready でない (mock fallback) 時は 1 (mockup 720/860 空間そのまま)。
   const displayScale = cap ? computeDisplayScale(actualOuterWidth, referenceWidth) : 1
 
+  // 続124 ⑥: 他デバイス screenshot の先読み済み key (siteId|pageUrl|device)。重複発火防止。
+  const prefetchedRef = useRef<Set<string>>(new Set())
+
   useEffect(() => {
     if (!pageUrl || !siteId) return
     const ctrl = new AbortController()
@@ -275,6 +290,21 @@ export function HeatmapCanvas({
         if (ctrl.signal.aborted) return
         if (res.success) {
           setCaptureState({ kind: 'ready', capture: res.data })
+          // 続124 ⑥ (Owner: 「タブを合わせてから取得は遅い、裏で先に」): 現在デバイスの
+          // capture が確定したら、残り 2 デバイスをバックグラウンドで先読みして server 側
+          // R2 cache を温める。タブ切替時は warm hit で即表示になる。失敗は無視 (非致命)。
+          const others = (['pc', 'sp', 'tab'] as const).filter((d) => d !== screenshotDevice)
+          others.forEach((d, i) => {
+            const key = `${siteId}|${pageUrl}|${d}`
+            if (prefetchedRef.current.has(key)) return
+            prefetchedRef.current.add(key)
+            setTimeout(
+              () => {
+                fetchHeatmapUnderlay({ siteId, pageUrl, device: d }).catch(() => {})
+              },
+              4000 * (i + 1),
+            )
+          })
         } else {
           setCaptureState({
             kind: 'error',

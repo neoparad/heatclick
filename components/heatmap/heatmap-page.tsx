@@ -40,8 +40,20 @@ interface HeatmapPageProps {
   pageOptions: Array<{ url: string; label: string }>
 }
 
-type DeviceFilter = 'all' | 'desktop' | 'mobile'
 type PeriodDays = 7 | 14 | 30
+
+/**
+ * 続124: デバイス座標系の統一。
+ * PC のページと SP のページは縦の長さ・レイアウトが別物 (座標系が別)。混ぜて 1 枚の
+ * screenshot に重ねると「途中で切れる / ズレる / 空白」になる (Owner 報告 ①④⑦)。
+ * 業界標準 (Hotjar 等) と同じく **デバイス別ヒートマップ** とし、canvas の PC/SP/TAB
+ * タブが screenshot と行動データの両方を同時に切替える。
+ */
+export type CanvasDevice = 'pc' | 'sp' | 'tab'
+
+function deviceToEventFilter(d: CanvasDevice): 'desktop' | 'mobile' | 'tablet' {
+  return d === 'pc' ? 'desktop' : d === 'sp' ? 'mobile' : 'tablet'
+}
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10)
@@ -58,18 +70,20 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
   // 変更時に heatmapQuery が変わり useHeatmapTiles が再 fetch する。
   const [layer, setLayer] = useState<HeatmapLayer>('click')
   const [pageUrl, setPageUrl] = useState(initialPageUrl)
-  const [deviceFilter, setDeviceFilter] = useState<DeviceFilter>('all')
+  // 続124: device は canvas の PC/SP/TAB タブと同一 state (screenshot + データ両方を切替)
+  const [device, setDevice] = useState<CanvasDevice>('pc')
   const [periodDays, setPeriodDays] = useState<PeriodDays>(7)
   const [selected, setSelected] = useState<{ point: HeatmapPoint; tile: HeatmapTile } | null>(null)
 
   const dateRange = useMemo(() => periodToRange(periodDays), [periodDays])
+  const deviceFilter = deviceToEventFilter(device)
 
   const heatmapQuery = useMemo(
     () => ({
       site_id: siteId,
       page_url: pageUrl,
       layer,
-      device_type: deviceFilter === 'all' ? undefined : (deviceFilter as 'desktop' | 'mobile'),
+      device_type: deviceFilter,
       start_date: dateRange.start,
       end_date: dateRange.end,
       // 続 117 v2: tile_size = 1 tile がカバーする縦 y-px 窓 (800-6000, 既定 2400)。最大の 6000 に
@@ -117,37 +131,9 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
       >
         <PageSelector value={pageUrl} options={pageOptions} onChange={setPageUrl} />
 
-        <span className="hidden h-4 w-px bg-[var(--ug-border)] md:block" aria-hidden />
-
-        <div role="radiogroup" aria-label="デバイス絞り込み" className="flex items-center gap-1.5">
-          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
-            Device
-          </span>
-          <SegmentChip
-            asRadio
-            active={deviceFilter === 'all'}
-            onClick={() => setDeviceFilter('all')}
-            data-testid="segment-chip-device-all"
-          >
-            PC + SP
-          </SegmentChip>
-          <SegmentChip
-            asRadio
-            active={deviceFilter === 'desktop'}
-            onClick={() => setDeviceFilter('desktop')}
-            data-testid="segment-chip-device-desktop"
-          >
-            PC
-          </SegmentChip>
-          <SegmentChip
-            asRadio
-            active={deviceFilter === 'mobile'}
-            onClick={() => setDeviceFilter('mobile')}
-            data-testid="segment-chip-device-mobile"
-          >
-            SP
-          </SegmentChip>
-        </div>
+        {/* 続124: Device chips は撤去。デバイスは canvas の PC/SP/TAB タブに一本化
+            (screenshot とデータの座標系を常に一致させるため。混在表示は座標が合わず
+            「切れる/ズレる/空白」の原因だった = Owner 報告 ①④⑦)。 */}
 
         <span className="hidden h-4 w-px bg-[var(--ug-border)] md:block" aria-hidden />
 
@@ -217,6 +203,8 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
         ctrLabel={statsLabels.ctrLabel}
         scrollLabel={statsLabels.scrollLabel}
         elements={elements}
+        device={device}
+        onDeviceChange={setDevice}
         onHotspotSelect={(point, tile) => setSelected({ point, tile })}
       />
 

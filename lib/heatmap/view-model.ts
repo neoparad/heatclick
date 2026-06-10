@@ -463,7 +463,8 @@ export function deriveElementName(el: {
 function buildElementTags(
   els: HeatmapElementStat[],
   pageY: number,
-  ctx?: HeatmapCoordinateContext,
+  ctx: HeatmapCoordinateContext | undefined,
+  deadCounts: ReadonlyMap<string, number>,
 ): HeatTag[] {
   const out: HeatTag[] = []
   for (const el of els) {
@@ -476,28 +477,55 @@ function buildElementTags(
       count: el.clicks,
       x: Math.max(0, Math.round(p.x - 28)),
       y: Math.max(0, Math.round(p.y - 28)),
-      intent: 'neutral',
+      // 続124 ⑨: dead_click が出ている要素は「ネガティブスポット」= warn (赤)
+      intent: (deadCounts.get(el.selector) ?? 0) > 0 ? 'warn' : 'neutral',
     })
     if (out.length >= MAX_HOTSPOTS) break
   }
   return out
 }
 
-/** 要素集計 → 右パネルの本物ホットスポットカード。 */
-function buildElementHotspotCards(els: HeatmapElementStat[]): HotspotCard[] {
-  return els.slice(0, MAX_HOTSPOTS).map((el, i) => ({
-    id: `el-hs-${i + 1}`,
-    rank: i + 1,
-    intent: 'neutral' as const,
-    name: deriveElementName(el),
-    selector: el.selector,
-    emotionLabel: 'cmp' as const,
-    emotionPercents: [],
-    stats: [
+/**
+ * 要素集計 → 右パネルの本物ホットスポットカード。
+ * 続124 ⑨ (Owner: 「ネガティブスポットもあるべき」): dead_click が観測された要素は
+ * intent='warn' (赤枠) + デッド回数を stats に出す = ネガティブスポットの可視化。
+ */
+function buildElementHotspotCards(
+  els: HeatmapElementStat[],
+  deadCounts: ReadonlyMap<string, number>,
+): HotspotCard[] {
+  return els.slice(0, MAX_HOTSPOTS).map((el, i) => {
+    const dead = deadCounts.get(el.selector) ?? 0
+    const stats: HotspotCard['stats'] = [
       { label: 'クリック', value: el.clicks.toLocaleString() },
       { label: 'セッション', value: el.sessions.toLocaleString() },
-    ],
-  }))
+    ]
+    if (dead > 0) {
+      stats.push({ label: 'デッド', value: dead.toLocaleString(), tone: 'neg' })
+    }
+    return {
+      id: `el-hs-${i + 1}`,
+      rank: i + 1,
+      intent: dead > 0 ? ('warn' as const) : ('neutral' as const),
+      name: deriveElementName(el),
+      selector: el.selector,
+      emotionLabel: 'cmp' as const,
+      emotionPercents: [],
+      stats,
+    }
+  })
+}
+
+/** dead_click の selector → 回数 map (ネガティブスポット判定用)。 */
+function buildDeadCountMap(
+  elements: HeatmapElementsData | null | undefined,
+): ReadonlyMap<string, number> {
+  const map = new Map<string, number>()
+  const dead = elements?.signals.find((s) => s.type === 'dead')
+  for (const t of dead?.top ?? []) {
+    map.set(t.selector, (map.get(t.selector) ?? 0) + t.count)
+  }
+  return map
 }
 
 /** rage/dead シグナル → canvas marker + 右パネル card。データが無い type は出さない。 */
@@ -570,13 +598,23 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
   // (シグナルタブは layer に依らず実データを表示する)。
   const signalExtras = buildSignalExtras(opts.elements, pageY, opts.coordinateContext)
 
+  // 続124 ⑨: 要素ホットスポットカードも全 real layer に同梱 (右パネルは layer 非依存)。
+  // Codex T1 MEDIUM fix: 座標 outlier guard で弾かれた要素が tag に出ない一方 card に
+  // 残ると rank がズレるため、**同一の filter 済みリスト**を tag / card 両方に使う。
+  const els = (opts.elements?.elements ?? []).filter(
+    (el) => scaleElementPoint(el.x, el.y, pageY, opts.coordinateContext) !== null,
+  )
+  const deadCounts = buildDeadCountMap(opts.elements)
+  const elementCards = els.length > 0 ? buildElementHotspotCards(els, deadCounts) : []
+  const elementExtras = { ...signalExtras, hotspotCards: elementCards }
+
   // ── read (熟読 / attention) ─────────────────────────────────────────────
   if (heatmapType === 'read') {
     const readBands = buildReadBands(opts.tiles, pageY, opts.coordinateContext)
-    if (readBands.length === 0) return { ...emptyViewModel(), ...signalExtras }
+    if (readBands.length === 0) return { ...emptyViewModel(), ...elementExtras }
     return {
       ...emptyViewModel(),
-      ...signalExtras,
+      ...elementExtras,
       readBands,
     }
   }
@@ -584,10 +622,10 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
   // ── scroll (スクロール到達率) ────────────────────────────────────────────
   if (heatmapType === 'scroll') {
     const scrollReachBands = buildScrollReachBands(opts.tiles, pageY, opts.coordinateContext)
-    if (scrollReachBands.length === 0) return { ...emptyViewModel(), ...signalExtras }
+    if (scrollReachBands.length === 0) return { ...emptyViewModel(), ...elementExtras }
     return {
       ...emptyViewModel(),
-      ...signalExtras,
+      ...elementExtras,
       scrollReachBands,
     }
   }
@@ -595,10 +633,10 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
   // ── exit (終了 / 離脱) ──────────────────────────────────────────────────
   if (heatmapType === 'exit') {
     const exitRows = buildExitRows(opts.tiles, pageY, opts.coordinateContext)
-    if (exitRows.length === 0) return { ...emptyViewModel(), ...signalExtras }
+    if (exitRows.length === 0) return { ...emptyViewModel(), ...elementExtras }
     return {
       ...emptyViewModel(),
-      ...signalExtras,
+      ...elementExtras,
       exitRows,
     }
   }
@@ -609,7 +647,7 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
   const hasRealClickData = flat.length >= 1
   if (!hasRealClickData) {
     // 実 data 0 点 — empty state (dummy fixture には戻さない、DoD)
-    return { ...emptyViewModel(), ...signalExtras }
+    return { ...emptyViewModel(), ...elementExtras }
   }
 
   // density field: 上位 MAX_DENSITY_BLOBS cluster を blob 化 (連続的な heat 表現)。
@@ -618,12 +656,8 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
 
   // 続123: 要素集計があれば tag / card を「本物の要素名 + selector」で出す。
   // 無ければ従来の cluster ベース placeholder (クリック密集 #N) に fallback。
-  // Codex T1 MEDIUM fix: 座標 outlier guard で弾かれた要素が tag に出ない一方 card に
-  // 残ると rank がズレるため、**同一の filter 済みリスト**を tag / card 両方に使う。
-  const els = (opts.elements?.elements ?? []).filter(
-    (el) => scaleElementPoint(el.x, el.y, pageY, opts.coordinateContext) !== null,
-  )
-  const elementTags = els.length > 0 ? buildElementTags(els, pageY, opts.coordinateContext) : []
+  const elementTags =
+    els.length > 0 ? buildElementTags(els, pageY, opts.coordinateContext, deadCounts) : []
   const useElements = elementTags.length > 0
   // cluster fallback 用: 上位 MAX_HOTSPOTS (clusters は count 降順)。
   const hotspots = clusters.slice(0, MAX_HOTSPOTS)
@@ -637,7 +671,7 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
     readBands: [],
     scrollReachBands: [],
     emotionSummary: EMPTY_EMOTION_SUMMARY,
-    hotspotCards: useElements ? buildElementHotspotCards(els) : buildRealHotspotCards(hotspots),
+    hotspotCards: useElements ? elementCards : buildRealHotspotCards(hotspots),
     signalCards: signalExtras.signalCards,
   }
 }

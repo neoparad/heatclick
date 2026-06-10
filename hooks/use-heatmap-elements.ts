@@ -24,7 +24,7 @@ export function useHeatmapElements(query: {
   siteId: string
   pageUrl: string
   dateRange: { start: string; end: string }
-  deviceType: 'all' | 'desktop' | 'mobile'
+  deviceType: 'all' | 'desktop' | 'mobile' | 'tablet'
 }): UseHeatmapElementsResult {
   const [elements, setElements] = useState<HeatmapElementsData | null>(null)
   const [loading, setLoading] = useState(false)
