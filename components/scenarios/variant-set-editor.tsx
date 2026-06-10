@@ -19,60 +19,66 @@
  * Validation surface: Zod (VariantsSchema) を server 側に任せ、本 UI は緩い hint だけ出す。
  */
 
-import { useMemo } from 'react'
-import { Code2, ImageIcon, Plus, Trash2 } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { Code2, Eye, ImageIcon, Plus, Trash2 } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { VARIANT_POSITIONS, type Variant } from '@/lib/scenarios/types'
+
+import { VariantImageUpload } from './variant-image-upload'
 
 export interface VariantSetEditorProps {
   variants: Variant[]
   onChange: (next: Variant[]) => void
   disabled?: boolean
+  /** 指定時、画像 variant で R2 アップロード (VariantImageUpload) を表示 (保存済 scenario の edit view 用)。 */
+  scenarioId?: string
+  siteId?: string
+  tenantId?: string
+  /** 指定時、編集中 variant に「プレビュー」ボタンを出す (C: エディタ内ビジュアルプレビュー)。 */
+  onPreview?: (variant: Variant) => void
 }
 
-const NEXT_ID: Record<string, 'A' | 'B' | 'C'> = { A: 'B', B: 'C' }
-
-export function VariantSetEditor({ variants, onChange, disabled = false }: VariantSetEditorProps) {
-  const activeIdx = 0 // フォーカス vc は parent で管理しないシンプル版 (Phase 2.2 で tab focus state 化)
-  const activeId = variants[activeIdx]?.id ?? 'A'
+export function VariantSetEditor({
+  variants,
+  onChange,
+  disabled = false,
+  scenarioId,
+  siteId,
+  tenantId,
+  onPreview,
+}: VariantSetEditorProps) {
+  const [activeId, setActiveId] = useState<string>(variants[0]?.id ?? 'A')
+  // 外部で variants が変わり activeId が消えたら先頭に戻す
+  const effectiveActiveId = variants.some((v) => v.id === activeId)
+    ? activeId
+    : variants[0]?.id ?? 'A'
   const trafficSum = useMemo(() => variants.reduce((s, v) => s + v.traffic_split, 0), [variants])
 
   function patchVariant(id: string, patch: Partial<Variant>): void {
     if (disabled) return
-    onChange(
-      variants.map((v) => (v.id === id ? ({ ...v, ...patch } as Variant) : v)),
-    )
+    onChange(variants.map((v) => (v.id === id ? ({ ...v, ...patch } as Variant) : v)))
+  }
+
+  function replaceVariant(id: string, next: Variant): void {
+    if (disabled) return
+    onChange(variants.map((v) => (v.id === id ? next : v)))
   }
 
   function addVariant(): void {
     if (disabled || variants.length >= 3) return
-    const lastId = variants[variants.length - 1]?.id ?? 'A'
-    const nextId = NEXT_ID[lastId] ?? 'C'
-    // rebalance: equal split across all variants
-    const newCount = variants.length + 1
-    const baseSplit = Math.floor(100 / newCount)
-    const remainder = 100 - baseSplit * newCount
-    const rebalanced = variants.map((v, i) => ({
-      ...v,
-      traffic_split: baseSplit + (i === 0 ? remainder : 0),
-    }))
-    const newVariant = makeDefaultVariant(nextId, baseSplit)
-    onChange([...rebalanced, newVariant])
+    const next = addVariantToSet(variants)
+    onChange(next)
+    setActiveId(next[next.length - 1]?.id ?? effectiveActiveId)
   }
 
   function removeVariant(id: string): void {
     if (disabled || variants.length <= 1) return
-    const remaining = variants.filter((v) => v.id !== id)
-    // rebalance equally
-    const baseSplit = Math.floor(100 / remaining.length)
-    const remainder = 100 - baseSplit * remaining.length
-    const rebalanced = remaining.map((v, i) => ({
-      ...v,
-      traffic_split: baseSplit + (i === 0 ? remainder : 0),
-    }))
-    onChange(rebalanced)
+    const next = removeVariantFromSet(variants, id)
+    onChange(next)
+    if (id === effectiveActiveId) setActiveId(next[0]?.id ?? 'A')
   }
 
   return (
@@ -82,10 +88,20 @@ export function VariantSetEditor({ variants, onChange, disabled = false }: Varia
         {variants.map((v) => (
           <div
             key={v.id}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-t-md border-2 ${
-              v.id === activeId
+            role="tab"
+            tabIndex={0}
+            aria-selected={v.id === effectiveActiveId}
+            onClick={() => setActiveId(v.id)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                setActiveId(v.id)
+              }
+            }}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-t-md border-2 cursor-pointer ${
+              v.id === effectiveActiveId
                 ? 'bg-white border-indigo-300 text-indigo-700'
-                : 'bg-slate-100 border-slate-200 text-slate-500'
+                : 'bg-slate-100 border-slate-200 text-slate-500 hover:bg-slate-50'
             } flex items-center gap-1.5`}
           >
             <span className={`w-4 h-4 rounded-full flex items-center justify-center font-mono text-[10px] font-bold ${variantBadgeColor(v.id)} text-white`}>
@@ -95,7 +111,10 @@ export function VariantSetEditor({ variants, onChange, disabled = false }: Varia
             {variants.length > 1 ? (
               <button
                 type="button"
-                onClick={() => removeVariant(v.id)}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  removeVariant(v.id)
+                }}
                 disabled={disabled}
                 className="text-slate-400 hover:text-rose-500 disabled:opacity-30"
                 title={`variant ${v.id} を削除`}
@@ -123,12 +142,17 @@ export function VariantSetEditor({ variants, onChange, disabled = false }: Varia
 
       {/* Active variant editor */}
       {variants.map((v) =>
-        v.id === activeId ? (
+        v.id === effectiveActiveId ? (
           <SingleVariantEditor
             key={v.id}
             variant={v}
             disabled={disabled}
             onChange={(patch) => patchVariant(v.id, patch)}
+            onSwitchType={(nextType) => replaceVariant(v.id, switchVariantType(v, nextType))}
+            onPreview={onPreview}
+            scenarioId={scenarioId}
+            siteId={siteId}
+            tenantId={tenantId}
           />
         ) : null,
       )}
@@ -181,28 +205,41 @@ interface SingleVariantEditorProps {
   variant: Variant
   disabled: boolean
   onChange: (patch: Partial<Variant>) => void
+  /** content_type 切替 (shape ごと作り直すため parent が switchVariantType で処理)。 */
+  onSwitchType: (nextType: 'image' | 'html') => void
+  onPreview?: (variant: Variant) => void
+  scenarioId?: string
+  siteId?: string
+  tenantId?: string
 }
 
-function SingleVariantEditor({ variant, disabled, onChange }: SingleVariantEditorProps) {
-  function switchType(nextType: 'image' | 'html'): void {
-    if (disabled || nextType === variant.content_type) return
-    // 切替時にデフォルト値を埋める (Zod 必須 field の維持)
-    if (nextType === 'image') {
-      onChange({
-        content_type: 'image',
-        image_url: 'https://',
-        image_alt: '',
-      } as Partial<Variant>)
-    } else {
-      onChange({
-        content_type: 'html',
-        html: '<div>サンプル HTML</div>',
-      } as Partial<Variant>)
-    }
-  }
-
+function SingleVariantEditor({
+  variant,
+  disabled,
+  onChange,
+  onSwitchType,
+  onPreview,
+  scenarioId,
+  siteId,
+  tenantId,
+}: SingleVariantEditorProps) {
   return (
     <div className="bg-white border border-slate-200 rounded-md p-3 space-y-3">
+      {onPreview ? (
+        <div className="flex justify-end -mb-1">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => onPreview(variant)}
+            className="h-7 text-[11px]"
+            title={`variant ${variant.id} の見た目をプレビュー`}
+          >
+            <Eye className="mr-1.5 h-3 w-3" /> プレビュー
+          </Button>
+        </div>
+      ) : null}
+
       {/* Content type toggle */}
       <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-md">
         <label
@@ -214,7 +251,7 @@ function SingleVariantEditor({ variant, disabled, onChange }: SingleVariantEdito
             type="radio"
             name={`vtype-${variant.id}`}
             checked={variant.content_type === 'image'}
-            onChange={() => switchType('image')}
+            onChange={() => onSwitchType('image')}
             disabled={disabled}
           />
           <div
@@ -240,7 +277,7 @@ function SingleVariantEditor({ variant, disabled, onChange }: SingleVariantEdito
             type="radio"
             name={`vtype-${variant.id}`}
             checked={variant.content_type === 'html'}
-            onChange={() => switchType('html')}
+            onChange={() => onSwitchType('html')}
             disabled={disabled}
           />
           <div
@@ -261,7 +298,14 @@ function SingleVariantEditor({ variant, disabled, onChange }: SingleVariantEdito
 
       {/* Type-specific editor */}
       {variant.content_type === 'image' ? (
-        <ImageVariantFields variant={variant} disabled={disabled} onChange={onChange} />
+        <ImageVariantFields
+          variant={variant}
+          disabled={disabled}
+          onChange={onChange}
+          scenarioId={scenarioId}
+          siteId={siteId}
+          tenantId={tenantId}
+        />
       ) : (
         <HtmlVariantFields variant={variant} disabled={disabled} onChange={onChange} />
       )}
@@ -306,9 +350,25 @@ interface VariantFieldsProps {
   onChange: (patch: Partial<Variant>) => void
 }
 
-function ImageVariantFields({ variant, disabled, onChange }: VariantFieldsProps) {
+interface ImageVariantFieldsProps extends VariantFieldsProps {
+  scenarioId?: string
+  siteId?: string
+  tenantId?: string
+}
+
+function ImageVariantFields({
+  variant,
+  disabled,
+  onChange,
+  scenarioId,
+  siteId,
+  tenantId,
+}: ImageVariantFieldsProps) {
   if (variant.content_type !== 'image') return null
-  const isHttps = variant.image_url.startsWith('https://')
+  // 'https://' のままの placeholder は「未入力」として扱う (warning 表示 + preview 抑止)。
+  const hasRealImage =
+    variant.image_url.startsWith('https://') && variant.image_url !== 'https://'
+  const canUpload = !disabled && Boolean(scenarioId && siteId)
   return (
     <div className="space-y-2">
       <div className="grid grid-cols-[110px_1fr] gap-2.5 items-center">
@@ -322,9 +382,9 @@ function ImageVariantFields({ variant, disabled, onChange }: VariantFieldsProps)
             disabled={disabled}
             className="h-9 text-xs"
           />
-          {!isHttps ? (
+          {!hasRealImage ? (
             <div className="text-[10.5px] text-amber-700 mt-0.5">
-              ⚠️ https:// 必須 (REQ-SEC-003)。保存後の編集画面で R2 にアップロードできます。
+              ⚠️ 実際の https:// 画像 URL を入力してください (REQ-SEC-003)。下の「R2 へ upload」からアップロードもできます。
             </div>
           ) : null}
         </div>
@@ -371,10 +431,24 @@ function ImageVariantFields({ variant, disabled, onChange }: VariantFieldsProps)
           />
           <span className="text-[10.5px] text-slate-400 ml-1.5">省略可</span>
         </div>
+
+        {canUpload ? (
+          <>
+            <span className="text-[11.5px] text-slate-500 font-medium">R2 へ upload</span>
+            <VariantImageUpload
+              scenarioId={scenarioId as string}
+              siteId={siteId as string}
+              tenantId={tenantId}
+              currentUrl={variant.image_url}
+              onUploaded={({ publicUrl }) => onChange({ image_url: publicUrl } as Partial<Variant>)}
+              disabled={disabled}
+            />
+          </>
+        ) : null}
       </div>
 
       {/* Preview */}
-      {isHttps ? (
+      {hasRealImage ? (
         <div className="border border-slate-200 rounded overflow-hidden">
           <div className="bg-slate-100 px-2 py-1 text-[10px] text-slate-500 font-mono">プレビュー</div>
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -475,6 +549,50 @@ export function makeDefaultVariant(id: 'A' | 'B' | 'C', traffic_split: number): 
     position: 'center',
     traffic_split,
   } as Variant
+}
+
+const VARIANT_ID_ORDER = ['A', 'B', 'C'] as const
+
+/** equal split (端数は先頭 variant に寄せる) で traffic_split を 100 に再配分。 */
+function rebalanceEqually(variants: Variant[]): Variant[] {
+  if (variants.length === 0) return variants
+  const base = Math.floor(100 / variants.length)
+  const remainder = 100 - base * variants.length
+  return variants.map((v, i) => ({ ...v, traffic_split: base + (i === 0 ? remainder : 0) }))
+}
+
+/** variant を 1 つ追加 (最大 3)。未使用の最小 ID を採番し、新 variant 込みで equal split 再配分。 */
+export function addVariantToSet(variants: Variant[]): Variant[] {
+  if (variants.length >= 3) return variants
+  const used = new Set(variants.map((v) => v.id))
+  const nextId = VARIANT_ID_ORDER.find((id) => !used.has(id)) ?? 'C'
+  // 新 variant を加えた「全体」を再配分する (旧セットだけ 100 にしてから足すと合計が 100 を超える)。
+  return rebalanceEqually([...variants, makeDefaultVariant(nextId, 0)])
+}
+
+/** variant を 1 つ削除 (最低 1 は残す)。残りを equal split に再配分。ID は安定 (re-label しない)。 */
+export function removeVariantFromSet(variants: Variant[], id: string): Variant[] {
+  if (variants.length <= 1) return variants
+  return rebalanceEqually(variants.filter((v) => v.id !== id))
+}
+
+/**
+ * content_type を切替え、新しい型の必須 field を埋めた **新しい variant** を返す
+ * (partial patch だと旧型の field が残り Zod 的に不整合になるため shape ごと作り直す)。
+ * id / position / traffic_split / cta_url は維持する。
+ */
+export function switchVariantType(variant: Variant, nextType: 'image' | 'html'): Variant {
+  if (nextType === variant.content_type) return variant
+  const common = {
+    id: variant.id,
+    position: variant.position,
+    traffic_split: variant.traffic_split,
+    ...(variant.cta_url ? { cta_url: variant.cta_url } : {}),
+  }
+  if (nextType === 'image') {
+    return { ...common, content_type: 'image', image_url: 'https://', image_alt: '' } as Variant
+  }
+  return { ...common, content_type: 'html', html: '<div>サンプル HTML</div>' } as Variant
 }
 
 /** 新規 scenario 用の初期 variants (A のみ、100%)。 */
