@@ -40,6 +40,7 @@ import { ConditionVisualBuilder } from './condition-visual-builder'
 import { ScenarioStatsPanel } from './scenario-stats-panel'
 import { useScenarioEditor } from './use-scenario-editor'
 import { VariantImageUpload } from './variant-image-upload'
+import { VariantPreview } from './variant-preview'
 
 interface ScenarioEditorViewProps {
   scenario: Scenario
@@ -53,6 +54,8 @@ export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewP
   const [activeVariantId, setActiveVariantId] = useState<string>(editor.draft.variants[0]?.id ?? 'A')
   const activeVariant =
     editor.draft.variants.find((v) => v.id === activeVariantId) ?? editor.draft.variants[0]
+  // C: エディタ内ビジュアルプレビュー。preview 対象 variant (null = 非表示)。
+  const [previewVariant, setPreviewVariant] = useState<Variant | null>(null)
 
   return (
     <>
@@ -95,7 +98,13 @@ export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewP
             >
               <ArrowLeft className="h-3 w-3" /> 一覧へ
             </Link>
-            <Button variant="outline" size="sm" disabled title="Stage 4 (visual builder) で実装">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPreviewVariant(activeVariant ?? null)}
+              disabled={!activeVariant}
+              title={activeVariant ? `variant ${activeVariant.id} の見た目をプレビュー` : 'variant がありません'}
+            >
               <Eye className="mr-1.5 h-3 w-3" /> プレビュー
             </Button>
             {editor.isDirty ? (
@@ -314,6 +323,10 @@ export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewP
           </div>
         </div>
       </div>
+
+      {previewVariant ? (
+        <VariantPreview variant={previewVariant} onClose={() => setPreviewVariant(null)} />
+      ) : null}
     </>
   )
 }
