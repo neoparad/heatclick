@@ -116,6 +116,11 @@ function isStatic(pathname: string): boolean {
  * route 自身が site_id/tenant_id query を Zod validate し、`live` status のみを
  * 返す (preview/draft/cross-tenant は gate 済み、REQ-SEC-006 no-store + kill-switch)。
  * 他の /api/scenarios/* (list / CRUD / stats) は api-tenant に留まり JWT 必須。
+ *
+ * /api/experiments/assign も同型の公開エンドポイント (宝プロジェクト M2b、続126)。
+ * customer タグが visitor_id 付きで叩き、running+window 内の実験の **server-arm** を返す。
+ * route 自身が tenant_id/site_id/visitor_id を Zod validate、no-store、PII なし、
+ * cross-tenant probe は 404。他の /api/experiments/* (CRUD 等) は api-tenant で JWT 必須。
  */
 const API_PUBLIC_PATHS: ReadonlyArray<string> = [
   '/api/track',
@@ -123,6 +128,7 @@ const API_PUBLIC_PATHS: ReadonlyArray<string> = [
   '/api/inngest',
   '/api/billing/webhook',
   '/api/scenarios/runtime',
+  '/api/experiments/assign',
 ]
 
 /**

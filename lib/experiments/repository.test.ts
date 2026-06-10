@@ -7,7 +7,7 @@ import {
   type CreateExperimentInput,
   type ExperimentRepository,
 } from '@/lib/experiments/repository'
-import type { LockedTaxonomy } from '@/lib/experiments/types'
+import { ExperimentSchema, type LockedTaxonomy } from '@/lib/experiments/types'
 
 const TAXONOMY: LockedTaxonomy = {
   intervention_type: 'cta_placement',
@@ -200,5 +200,67 @@ describe('experiments/repository — immutability (Codex MEDIUM)', () => {
     const refetched = await repo.get('tnt_a', 'CIP_a', created.id)
     expect(refetched?.taxonomy.device).toBe('mobile') // store は汚れない
     expect(refetched?.name).toBe('mobile CTA placement')
+  })
+})
+
+describe('experiments/repository — listActiveForAssignment (Codex M2b)', () => {
+  it('running + window 内のみ返す', async () => {
+    const repo = makeRepo()
+    const c = await repo.create(draftInput())
+    await repo.start('tnt_a', 'CIP_a', c.id, '2026-06-10T00:00:00.000Z') // window 6/10..7/8
+    const active = await repo.listActiveForAssignment('tnt_a', 'CIP_a', '2026-06-15T00:00:00.000Z')
+    expect(active).toHaveLength(1)
+    expect(active[0].id).toBe(c.id)
+  })
+
+  it('draft / stopped は除外', async () => {
+    const repo = makeRepo()
+    await repo.create(draftInput()) // draft のまま
+    const running = await repo.create(draftInput())
+    await repo.start('tnt_a', 'CIP_a', running.id, '2026-06-10T00:00:00.000Z')
+    await repo.stop('tnt_a', 'CIP_a', running.id) // stopped
+    const active = await repo.listActiveForAssignment('tnt_a', 'CIP_a', '2026-06-15T00:00:00.000Z')
+    expect(active).toHaveLength(0)
+  })
+
+  it('window 前 / end ちょうど / 後は除外', async () => {
+    const repo = makeRepo()
+    const c = await repo.create(draftInput())
+    await repo.start('tnt_a', 'CIP_a', c.id, '2026-06-10T00:00:00.000Z') // 6/10..7/8
+    expect(await repo.listActiveForAssignment('tnt_a', 'CIP_a', '2026-06-09T00:00:00.000Z')).toHaveLength(0)
+    expect(await repo.listActiveForAssignment('tnt_a', 'CIP_a', '2026-07-08T00:00:00.000Z')).toHaveLength(0) // end 排他
+    expect(await repo.listActiveForAssignment('tnt_a', 'CIP_a', '2026-07-09T00:00:00.000Z')).toHaveLength(0)
+  })
+
+  it('別テナントは除外 (§3.8.1)', async () => {
+    const repo = makeRepo()
+    const c = await repo.create(draftInput())
+    await repo.start('tnt_a', 'CIP_a', c.id, '2026-06-10T00:00:00.000Z')
+    expect(await repo.listActiveForAssignment('tnt_b', 'CIP_a', '2026-06-15T00:00:00.000Z')).toHaveLength(0)
+  })
+
+  it('running でも null 日付は除外 (fail-closed、スキーマは null を許すため)', async () => {
+    const store = new InMemoryExperimentStore()
+    // start() を経由せず running + null 日付の不正行を直接挿入
+    const bad = ExperimentSchema.parse({
+      id: '00000000-0000-4000-8000-0000000000aa',
+      tenant_id: 'tnt_a',
+      site_id: 'CIP_a',
+      name: 'bad import',
+      url_pattern: '/products',
+      taxonomy: TAXONOMY,
+      status: 'running',
+      dates: { start_at: null, end_at: null },
+      salt_version: 1,
+      consent: { pool_opt_in: false, k_anonymity_min: 50 },
+      created_at: '2026-06-10T00:00:00.000Z',
+      updated_at: '2026-06-10T00:00:00.000Z',
+      created_by: 'owner@ugokimap.com',
+      locked_at: '2026-06-10T00:00:00.000Z',
+      stopped_at: null,
+      archived_at: null,
+    })
+    await store.insert(bad)
+    expect(await store.listActiveForAssignment('tnt_a', 'CIP_a', '2026-06-15T00:00:00.000Z')).toHaveLength(0)
   })
 })

@@ -69,3 +69,25 @@ describe('middleware classify() — scenario route access control (Stage 2)', ()
     expect(classify('/api/heatmap/page-stats')).toBe('api-tenant')
   })
 })
+
+describe('middleware classify() — experiments assign access control (宝 M2b)', () => {
+  // ── The ONE public experiments route ────────────────────────────────────
+  it('classifies /api/experiments/assign as api-public (anon visitors, server-arm 配信)', () => {
+    expect(classify('/api/experiments/assign')).toBe('api-public')
+  })
+
+  // ── ALL OTHER experiments routes must stay tenant-guarded (CRUD は JWT 必須) ──
+  it('classifies /api/experiments (future list) as api-tenant', () => {
+    expect(classify('/api/experiments')).toBe('api-tenant')
+  })
+
+  it('classifies /api/experiments/[id] as api-tenant', () => {
+    expect(classify('/api/experiments/00000000-0000-4000-8000-000000000001')).toBe('api-tenant')
+  })
+
+  it('classifies /api/experiments/assign/extra (deeper) as api-public — inherits prefix (no subroute today)', () => {
+    // scenarios/runtime と同方針: prefix 継承は forward-compatible で安全 (現状 subroute なし)。
+    // 将来 private な subroute を足すなら length-exact override を入れる。
+    expect(classify('/api/experiments/assign/extra')).toBe('api-public')
+  })
+})

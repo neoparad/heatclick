@@ -56,6 +56,11 @@ export interface ExperimentStore {
   getById(tenantId: string, siteId: string, id: string): Promise<Experiment | null>
   listByTenantSite(tenantId: string, siteId: string): Promise<Experiment[]>
   update(row: Experiment): Promise<void>
+  /**
+   * assignment 配信用: running かつ [start_at, end_at) (両端 non-null) の実験のみを SQL 側で絞る。
+   * 公開 endpoint の per-request の作業量を有界化し、null 日付を fail-closed で除外 (Codex M2b)。
+   */
+  listActiveForAssignment(tenantId: string, siteId: string, nowIso: string): Promise<Experiment[]>
 }
 
 // ── In-memory store (test / dev) ───────────────────────────────────────────────
@@ -80,6 +85,21 @@ export class InMemoryExperimentStore implements ExperimentStore {
   }
   async update(row: Experiment): Promise<void> {
     this.rows.set(row.id, structuredClone(row))
+  }
+  async listActiveForAssignment(tenantId: string, siteId: string, nowIso: string): Promise<Experiment[]> {
+    const nowMs = Date.parse(nowIso)
+    return [...this.rows.values()]
+      .filter(
+        (r) =>
+          r.tenant_id === tenantId &&
+          r.site_id === siteId &&
+          r.status === 'running' &&
+          r.dates.start_at !== null &&
+          r.dates.end_at !== null &&
+          Date.parse(r.dates.start_at) <= nowMs &&
+          nowMs < Date.parse(r.dates.end_at),
+      )
+      .map((r) => structuredClone(r))
   }
 }
 
@@ -156,6 +176,15 @@ export function createExperimentRepository(opts: ExperimentRepositoryOptions = {
 
   async function list(tenantId: string, siteId: string): Promise<Experiment[]> {
     return store.listByTenantSite(tenantId, siteId)
+  }
+
+  /** assignment 配信用 (running + 有界 window のみ)。public endpoint の作業量を有界化。 */
+  async function listActiveForAssignment(
+    tenantId: string,
+    siteId: string,
+    nowIso: string,
+  ): Promise<Experiment[]> {
+    return store.listActiveForAssignment(tenantId, siteId, nowIso)
   }
 
   async function update(
@@ -242,7 +271,7 @@ export function createExperimentRepository(opts: ExperimentRepositoryOptions = {
     return parsed
   }
 
-  return { create, get, list, update, start, stop, archive }
+  return { create, get, list, listActiveForAssignment, update, start, stop, archive }
 }
 
 export type ExperimentRepository = ReturnType<typeof createExperimentRepository>

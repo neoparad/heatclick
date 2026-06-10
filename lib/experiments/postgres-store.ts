@@ -78,6 +78,20 @@ export class PostgresExperimentStore implements ExperimentStore {
     return rows.map(rowToExperiment)
   }
 
+  // assignment 配信用: running + 有界 [start_at, end_at) を SQL 側で絞る (Codex M2b: 作業量有界化 +
+  // null 日付 fail-closed)。tenant+site scoped (§3.8.1)。$3 は nowIso (timestamptz 比較)。
+  async listActiveForAssignment(tenantId: string, siteId: string, nowIso: string): Promise<Experiment[]> {
+    const rows = await experimentsQuery<ExperimentRow>(
+      `SELECT ${SELECT_COLS} FROM experiments
+        WHERE tenant_id = $1 AND site_id = $2 AND status = 'running'
+          AND start_at IS NOT NULL AND end_at IS NOT NULL
+          AND start_at <= $3 AND end_at > $3
+        ORDER BY created_at DESC`,
+      [tenantId, siteId, nowIso],
+    )
+    return rows.map(rowToExperiment)
+  }
+
   async update(row: Experiment): Promise<void> {
     // id / tenant_id / site_id / created_by / created_at は不変。tenant+site スコープで UPDATE。
     await experimentsQuery(
