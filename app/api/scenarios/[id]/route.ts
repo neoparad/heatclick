@@ -113,7 +113,9 @@ function handleError(err: unknown): NextResponse {
  * Resolve tenant context for an [id] request: site_id from query, validated against the
  * JWT's site_ids; tenant_id from the JWT header (REQ-SEC-004).
  */
-function resolveContext(request: NextRequest): ScenarioTenantContext | NextResponse {
+async function resolveContext(
+  request: NextRequest,
+): Promise<ScenarioTenantContext | NextResponse> {
   const { searchParams } = new URL(request.url)
   const siteParse = SiteIdSchema.safeParse(searchParams.get('site_id') ?? undefined)
   if (!siteParse.success) {
@@ -130,7 +132,7 @@ export async function GET(
   if (!paramsParsed.success) {
     return NextResponse.json({ error: 'invalid_id' }, { status: 400 })
   }
-  const ctx = resolveContext(request)
+  const ctx = await resolveContext(request)
   if (!isTenantContext(ctx)) return ctx
 
   try {
@@ -153,7 +155,7 @@ export async function PUT(
   if (!paramsParsed.success) {
     return NextResponse.json({ error: 'invalid_id' }, { status: 400 })
   }
-  const ctx = resolveContext(request)
+  const ctx = await resolveContext(request)
   if (!isTenantContext(ctx)) return ctx
 
   // REQ-SEC-010 (HIGH): publish RBAC。
@@ -267,7 +269,7 @@ export async function DELETE(
   if (!paramsParsed.success) {
     return NextResponse.json({ error: 'invalid_id' }, { status: 400 })
   }
-  const ctx = resolveContext(request)
+  const ctx = await resolveContext(request)
   if (!isTenantContext(ctx)) return ctx
 
   // REQ-SEC-010 (HIGH): publish RBAC。session 不在 → 401。viewer は削除不可 (403)。
