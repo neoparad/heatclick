@@ -54,7 +54,9 @@ const KEY_PREFIX = 'heatmap-screenshots'
 //   変わったため v5。旧 v4 (lazy 画像が依然空) を全 cache miss にして再撮影させる。
 // fix/login-bounce-whitescreen-117: Puppeteer Worker (autoScroll + waitForNetworkIdle) 移行で v6。
 //   旧 v5 (CF REST で lazy 画像が依然空になりうる) を全 cache miss にして再撮影させる。
-const CAPTURE_VERSION = 'v6'
+// 続121: SCREENSHOT_WORKER_URL を本番投入。Microlink 時代の空画像キャッシュ (v6) を全 miss に
+//   して Worker 経由で再撮影させるため v7。provider は cache key に含まれないため version bump で flush。
+const CAPTURE_VERSION = 'v7'
 
 /** TTL (capturedAt 比較) */
 const FRESH_TTL_MS = 24 * 60 * 60 * 1000 // 24h: これ以内なら即返す

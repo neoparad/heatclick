@@ -944,19 +944,45 @@ export async function captureScreenshot(input: {
     input.screenshotWorkerConfig !== undefined
       ? input.screenshotWorkerConfig
       : getScreenshotWorkerConfig()
+  // 続122 (Owner 2026-06-10「実 page 未取得に張り付く」): 上位 provider の失敗で全体を
+  // 落とさず、次の provider に **degrade** する。旧実装は Worker env を設定した瞬間
+  // Worker 一本勝負になり、token 不一致 / cold start / 巨大ページ timeout のどれか 1 つで
+  // capture 全体が throw → route 502/504 → 仮 underlay 固定、という単一障害点だった。
+  let lastError: unknown = null
   if (sw) {
-    return captureViaScreenshotWorker({ ...input, config: sw })
+    try {
+      return await captureViaScreenshotWorker({ ...input, config: sw })
+    } catch (err) {
+      lastError = err
+      console.error(
+        '[screenshot] worker capture failed, degrading to next provider:',
+        err instanceof Error ? `${err.name}: ${err.message}` : err,
+      )
+    }
   }
 
   // 2. Cloudflare Browser Rendering REST
   const cf =
     input.cloudflareConfig !== undefined ? input.cloudflareConfig : getCloudflareBRConfig()
   if (cf) {
-    return captureViaCloudflareBR({ ...input, config: cf })
+    try {
+      return await captureViaCloudflareBR({ ...input, config: cf })
+    } catch (err) {
+      lastError = err
+      console.error(
+        '[screenshot] cloudflare BR capture failed, degrading to microlink:',
+        err instanceof Error ? `${err.name}: ${err.message}` : err,
+      )
+    }
   }
 
-  // 3. Microlink fallback
-  return captureViaMicrolink(input)
+  // 3. Microlink fallback (最終段。ここで失敗したら初めて呼び元へ throw)
+  try {
+    return await captureViaMicrolink(input)
+  } catch (err) {
+    // Microlink も失敗: 上位 provider のエラーの方が診断価値が高ければそちらを投げる
+    throw lastError instanceof ScreenshotProviderError ? lastError : err
+  }
 }
 
 /**
