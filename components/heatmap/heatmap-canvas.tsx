@@ -31,6 +31,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { HeatmapLayer, HeatmapPoint, HeatmapTile, HeatmapTileMeta } from '@/lib/api/heatmap'
+import type { HeatmapElementsData } from '@/lib/api/heatmap-elements'
 import { fetchHeatmapUnderlay } from '@/lib/api/heatmap-screenshot'
 import { isRealEmptyHeatmap } from '@/lib/heatmap/display-state'
 import { computeDisplayScale, computePageCssHeight } from '@/lib/heatmap/stage-layout'
@@ -92,6 +93,12 @@ export interface HeatmapCanvasProps {
   ctrLabel?: string
   dwellLabel?: string
   scrollLabel?: string
+  /**
+   * 続123: `/api/heatmap/elements` の要素単位集計 (heatmap-page の useHeatmapElements が own)。
+   * 提供時、hotspot card / tag が本物の要素名 + selector になり、rage/dead シグナルが実データ化。
+   * null でも cluster fallback で描画は継続する (非致命の強化データ)。
+   */
+  elements?: HeatmapElementsData | null
 }
 
 /** view-model に渡す sourceWidth: ClickHouse 正規化済 click_x の最大幅 */
@@ -165,6 +172,7 @@ export function HeatmapCanvas({
   ctrLabel,
   dwellLabel,
   scrollLabel,
+  elements,
 }: HeatmapCanvasProps) {
   // pageHeightEstimate は legacy 契約。mockup parity rebuild では 720px 固定 underlay
   // のため canvas 高さ計算には使わない。Phase 2 (実 screenshot underlay) で復活予定。
@@ -298,9 +306,9 @@ export function HeatmapCanvas({
   // coordinateContext を primitive 依存に分解 (object 参照で useMemo が毎回 invalidate しないよう)
   const ctxSig = cap ? `${SOURCE_WIDTH}|${referenceWidth}|${pageCssHeight}` : ''
   const vm = useMemo(
-    () => buildHeatmapViewModel({ tiles, meta, coordinateContext }),
+    () => buildHeatmapViewModel({ tiles, meta, coordinateContext, elements }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tiles, meta, ctxSig],
+    [tiles, meta, ctxSig, elements],
   )
 
   // signal overlay は signals tab を開くと自動 ON (mockup 同等)

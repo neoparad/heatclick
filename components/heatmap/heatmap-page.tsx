@@ -24,6 +24,7 @@ import { ChevronDown } from 'lucide-react'
 
 import { SegmentChip } from '@/components/ui/segment-chip'
 import { EvidenceBadge } from '@/components/dashboard/evidence-badge'
+import { useHeatmapElements } from '@/hooks/use-heatmap-elements'
 import { useHeatmapTiles } from '@/hooks/use-heatmap-tiles'
 import { pageStatsToLabels, usePageStats } from '@/hooks/use-page-stats'
 import type { HeatmapLayer, HeatmapPoint, HeatmapTile } from '@/lib/api/heatmap'
@@ -91,6 +92,15 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
     deviceType: deviceFilter,
   })
   const statsLabels = pageStatsToLabels(pageStats)
+
+  // 続123: 要素単位クリック集計 + rage/dead シグナル (本物のホットスポットカード用)。
+  // tiles と独立 fetch。失敗時 null = cluster fallback で描画継続 (非致命)。
+  const { elements } = useHeatmapElements({
+    siteId,
+    pageUrl,
+    dateRange,
+    deviceType: deviceFilter,
+  })
 
   return (
     <div className="relative space-y-3">
@@ -206,6 +216,7 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
         pvLabel={statsLabels.pvLabel}
         ctrLabel={statsLabels.ctrLabel}
         scrollLabel={statsLabels.scrollLabel}
+        elements={elements}
         onHotspotSelect={(point, tile) => setSelected({ point, tile })}
       />
 

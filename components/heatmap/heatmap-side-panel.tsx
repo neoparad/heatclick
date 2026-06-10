@@ -427,6 +427,21 @@ function EmotionSummary({ summary }: { summary: EmotionDistribution }) {
     { key: 'anx', label: 'anxiety' },
     { key: 'conf', label: 'confidence' },
   ]
+  // 続123: real mode は感情推論 (ML) 未実装で全 0。空バー + 0% の羅列は「壊れて見える」
+  // ため、正直に「準備中」を表示する (D-07: 無いデータを有るように見せない)。
+  const total = order.reduce((s, o) => s + summary[o.key], 0)
+  if (total === 0) {
+    return (
+      <div data-testid="emotion-summary">
+        <div className="mb-2 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
+          このページの感情分布
+        </div>
+        <div className="rounded-md border border-dashed border-[var(--ug-border)] bg-[var(--ug-panel-2,#fbfbfc)] px-3 py-2.5 text-[11px] leading-snug text-[var(--ug-text-3)]">
+          感情推論 (ML) は準備中です。現在は観測ベースの指標 — クリック / シグナル / 到達率 — をご利用ください。
+        </div>
+      </div>
+    )
+  }
   return (
     <div data-testid="emotion-summary">
       <div className="mb-2 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ug-text-3)]">

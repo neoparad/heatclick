@@ -14,6 +14,7 @@
  */
 
 import type { HeatmapTile, HeatmapTileMeta } from '@/lib/api/heatmap'
+import type { HeatmapElementsData } from '@/lib/api/heatmap-elements'
 import { MOCKUP_VIEW_MODEL } from '@/lib/fixtures/heatmap-mockup'
 import { MOCK_PAGE_HEIGHT, PAGE_WIDTH } from '@/lib/heatmap/mockup-spec'
 import { buildHeatmapViewModel } from './view-model'
@@ -403,6 +404,111 @@ describe('buildHeatmapViewModel', () => {
       // y = 2049/30000 * 860 = 58.7、tag offset -28 → 31
       expect(t.y).toBeGreaterThanOrEqual(29)
       expect(t.y).toBeLessThanOrEqual(33)
+    })
+  })
+
+  // ── 続123: element-level (本物のホットスポット / シグナル) ───────────────
+  describe('element-level hotspots / signals (続123)', () => {
+    const elementsData: HeatmapElementsData = {
+      elements: [
+        {
+          selector: '#bihadashop-toc-container>div>nav>ul>li:nth-child(2)>a',
+          text: '【カバー力比較】カバー力が高いのはどれ？長いテキストは省略される想定の文章です',
+          tag: 'a',
+          href: '/entry/x',
+          clicks: 91,
+          sessions: 87,
+          x: 640,
+          y: 2404,
+        },
+        {
+          selector: '#nocopy>div>label',
+          text: '',
+          tag: 'label',
+          href: '',
+          clicks: 50,
+          sessions: 40,
+          x: 320,
+          y: 600,
+        },
+      ],
+      signals: [
+        {
+          type: 'dead',
+          count: 561,
+          sessions: 333,
+          top: [{ selector: '#dead-zone', text: '反応しない領域', count: 200, x: 100, y: 500 }],
+        },
+        { type: 'rage', count: 0, sessions: 0, top: [] },
+      ],
+    }
+    const clickTiles = [tileWith([{ x: 100, y: 200, count: 10, sessions: 5 }])]
+
+    it('uses real element names + selectors for hotspot cards and tags', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+      })
+      expect(vm.hotspotCards[0].selector).toBe(
+        '#bihadashop-toc-container>div>nav>ul>li:nth-child(2)>a',
+      )
+      expect(vm.hotspotCards[0].name).toContain('カバー力比較')
+      // 26 字 + '…' = 27 字以内に省略
+      expect(vm.hotspotCards[0].name.length).toBeLessThanOrEqual(27)
+      expect(vm.hotspotCards[0].name.endsWith('…')).toBe(true)
+      expect(vm.hotspotCards[0].stats[0]).toEqual({ label: 'クリック', value: '91' })
+      // canvas 常時ラベル (tag) も要素名 + 実クリック数
+      expect(vm.tags[0].label).toContain('カバー力比較')
+      expect(vm.tags[0].count).toBe(91)
+    })
+
+    it('falls back to tag-type label when element_text is empty', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+      })
+      // text 空 + tag=label → 「選択肢 <selector末尾>」
+      expect(vm.hotspotCards[1].name.startsWith('選択肢')).toBe(true)
+    })
+
+    it('builds real signal cards + markers, skipping zero-count types', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+      })
+      // rage は count=0 → card/marker を出さない
+      expect(vm.signalCards).toHaveLength(1)
+      expect(vm.signalCards[0]).toMatchObject({ type: 'dead', count: 561 })
+      expect(vm.signalCards[0].whereLabel).toContain('反応しない領域')
+      expect(vm.signals).toHaveLength(1)
+      expect(vm.signals[0]).toMatchObject({ type: 'dead', count: 200 })
+    })
+
+    it('falls back to cluster placeholder cards when elements is null', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: null,
+      })
+      expect(vm.hotspotCards[0].selector).toBe('DOM selector 未取得')
+      expect(vm.signalCards).toHaveLength(0)
+    })
+
+    it('attaches signal cards to non-click layers too (read)', () => {
+      const readMeta: HeatmapTileMeta = {
+        ...metaWith('clickhouse_events'),
+        heatmap_type: 'read',
+      }
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([{ x: 0, y: 200, count: 5, sessions: 5 }])],
+        meta: readMeta,
+        elements: elementsData,
+      })
+      expect(vm.signalCards).toHaveLength(1)
+      expect(vm.readBands.length).toBeGreaterThan(0)
     })
   })
 })

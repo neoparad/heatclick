@@ -60,14 +60,30 @@ export function SignalOverlay({
   )
 }
 
+const SIGNAL_NAME: Record<SignalKey, string> = {
+  rage: 'レイジクリック',
+  dead: 'デッドクリック',
+  hover: 'ホバー迷い',
+  copy: 'コピー',
+  backscroll: '逆スクロール',
+  hesitation: '滞留',
+}
+
 function SigMarker({ signal, displayScale }: { signal: SignalMarker; displayScale: number }) {
   const common = {
     position: 'absolute' as const,
     left: signal.x * displayScale,
     top: signal.y * displayScale,
+    // 続123: 実データ marker は avg 座標 = 点。中心合わせで img とピクセル一致させる。
+    transform: 'translate(-50%, -50%)',
     pointerEvents: 'auto' as const,
     cursor: 'pointer' as const,
   }
+
+  // 続123: 実データ (label/count 付き) は tooltip で「何がどれだけ起きたか」を読める。
+  const title = `${SIGNAL_NAME[signal.type]}${signal.label ? `: ${signal.label}` : ''}${
+    signal.count ? ` (${signal.count}回)` : ''
+  }`
 
   const testid = `sig-marker-${signal.type}-${signal.id}`
 
@@ -76,6 +92,7 @@ function SigMarker({ signal, displayScale }: { signal: SignalMarker; displayScal
       return (
         <div
           data-testid={testid}
+          title={title}
           className="uh-sig-rage sig-marker rage"
           style={{
             ...common,
@@ -93,6 +110,7 @@ function SigMarker({ signal, displayScale }: { signal: SignalMarker; displayScal
       return (
         <div
           data-testid={testid}
+          title={title}
           className="sig-marker dead"
           style={{
             ...common,
@@ -108,6 +126,7 @@ function SigMarker({ signal, displayScale }: { signal: SignalMarker; displayScal
       return (
         <div
           data-testid={testid}
+          title={title}
           className="sig-marker hover"
           style={{
             ...common,
@@ -123,6 +142,7 @@ function SigMarker({ signal, displayScale }: { signal: SignalMarker; displayScal
       return (
         <div
           data-testid={testid}
+          title={title}
           className="sig-marker copy"
           style={{
             ...common,
@@ -138,6 +158,7 @@ function SigMarker({ signal, displayScale }: { signal: SignalMarker; displayScal
       return (
         <div
           data-testid={testid}
+          title={title}
           className="sig-marker backscroll"
           style={{
             ...common,
@@ -158,6 +179,7 @@ function SigMarker({ signal, displayScale }: { signal: SignalMarker; displayScal
       return (
         <div
           data-testid={testid}
+          title={title}
           className="sig-marker hesitation"
           style={{
             ...common,

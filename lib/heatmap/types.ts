@@ -55,6 +55,10 @@ export interface SignalMarker {
   type: SignalKey
   x: number
   y: number
+  /** 続123: 実データ marker 用 — その selector での発生回数 (tooltip 表示) */
+  count?: number
+  /** 続123: 実データ marker 用 — 要素テキスト等の人間可読ラベル (tooltip 表示) */
+  label?: string
 }
 
 export interface EndBand {
