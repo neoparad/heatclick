@@ -20,12 +20,17 @@ export type ScenarioAuditAction =
   | 'scenario.deleted'
   | 'scenario.published'
   | 'scenario.archived'
+  // §3.8.1: cross-tenant アクセス試行 (site_id が JWT の範囲外) の拒否記録。
+  | 'scenario.access_denied'
 
 export interface ScenarioAuditEvent {
   action: ScenarioAuditAction
   tenant_id: string
+  /** アクセス対象 resource。CRUD では scenario_id、access_denied では試行された site_id。 */
   scenario_id: string
   user_id?: string // 'system' if not authenticated yet (Phase 1)
+  /** HTTP 応答ステータス。既定 200。拒否系 (access_denied) では 403 を渡す。 */
+  response_status?: number
   metadata?: Record<string, unknown>
 }
 
@@ -40,7 +45,8 @@ export async function emitScenarioAudit(event: ScenarioAuditEvent): Promise<bool
     // dev / test mode: log only
     // eslint-disable-next-line no-console
     console.info(
-      `[audit no-op] action=${event.action} tenant=${event.tenant_id} scenario=${event.scenario_id}`,
+      `[audit no-op] action=${event.action} tenant=${event.tenant_id} ` +
+        `resource=${event.scenario_id} status=${event.response_status ?? 200}`,
     )
     return true
   }
@@ -55,7 +61,7 @@ export async function emitScenarioAudit(event: ScenarioAuditEvent): Promise<bool
       ip_anonymized: '',
       user_agent: 'm-director-scenarios-api/0.1.0',
       request_id: '',
-      response_status: 200,
+      response_status: event.response_status ?? 200,
       plan_tier: 'Growth',
       metadata: JSON.stringify({
         ...(event.metadata ?? {}),
