@@ -26,10 +26,9 @@
  */
 
 import { NextResponse } from 'next/server'
-import { unstable_cache } from 'next/cache'
 import { z } from 'zod'
 
-import { getClickHouseClient } from '@/lib/clickhouse'
+import { fetchPagesCached } from '@/lib/pages/fetch-pages'
 import { requireTenantContext, canAccessSite } from '@/lib/tenant'
 import { checkRateLimit } from '@/lib/rate-limit'
 import type { Plan } from '@/lib/jwt'
@@ -37,89 +36,14 @@ import type { Plan } from '@/lib/jwt'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
+// 続122: クエリ本体 (fetchPagesUncached/Cached/deriveLabelFromUrl) は
+// lib/pages/fetch-pages.ts に抽出。(proof)/heatmap の Server Component が
+// HTTP 自己 fetch せず直接呼べるようにするため (失敗バナー誤表示の根治)。
+
 const QuerySchema = z.object({
   site_id: z.string().min(1).max(128),
   limit: z.coerce.number().int().min(1).max(50).default(20),
 })
-
-interface PageRow {
-  url: string
-  events: number
-}
-
-interface PageOption {
-  url: string
-  label: string
-}
-
-/**
- * URL から人間可読ラベルを派生させる。
- *   '/'                    → 'トップ'
- *   '/column/acne/'        → 'column/acne'
- *   '/products/foo/bar/'   → 'foo/bar' (末尾 2 セグメント)
- *   parse 失敗時            → URL そのまま
- */
-function deriveLabelFromUrl(url: string): string {
-  try {
-    const path = new URL(url).pathname
-    if (path === '/' || path === '') return 'トップ'
-    const segments = path.split('/').filter(Boolean)
-    if (segments.length === 0) return 'トップ'
-    return segments.slice(-2).join('/')
-  } catch {
-    return url
-  }
-}
-
-/**
- * ClickHouse からページ候補を取得。tenant_id + site_id で絞り込み、過去 7 日間集計。
- *
- * 注: cache key は tenant_id + site_id + limit。tenant_id を必ず含めることで
- *     cache 経由の cross-tenant 漏洩を防ぐ (§3.8.1 multi-tenant isolation)。
- */
-async function fetchPagesUncached(
-  tenantId: string,
-  siteId: string,
-  limit: number,
-): Promise<PageOption[]> {
-  const ch = getClickHouseClient()
-  // tenant_id parameter binding は必須 (§3.8.1)。文字列連結は禁止 (Codex Round 8 Fix 5)。
-  const result = await ch.query({
-    query: `
-      SELECT url, count() AS events
-      FROM clickinsight.events
-      WHERE tenant_id = {tenant_id:String}
-        AND site_id = {site_id:String}
-        AND timestamp >= now() - INTERVAL 7 DAY
-        AND url != ''
-      GROUP BY url
-      ORDER BY events DESC
-      LIMIT {limit:UInt32}
-    `,
-    query_params: {
-      tenant_id: tenantId,
-      site_id: siteId,
-      limit,
-    },
-    format: 'JSONEachRow',
-  })
-  const rows = await result.json<PageRow>()
-  return rows.map((r) => ({ url: r.url, label: deriveLabelFromUrl(r.url) }))
-}
-
-function fetchPagesCached(tenantId: string, siteId: string, limit: number): Promise<PageOption[]> {
-  // unstable_cache の key は引数全体 + tags。tenant_id を tag 化しておけば将来 revalidateTag で
-  // tenant 単位 cache 破棄が可能 (Phase 5 deletion request 対応)。
-  const cached = unstable_cache(
-    async () => fetchPagesUncached(tenantId, siteId, limit),
-    ['api-pages', tenantId, siteId, String(limit)],
-    {
-      revalidate: 300, // 5 分 stale-while-revalidate
-      tags: [`tenant:${tenantId}`, `pages:${tenantId}:${siteId}`],
-    },
-  )
-  return cached()
-}
 
 export async function GET(request: Request): Promise<NextResponse> {
   // 1. tenant context — middleware が注入済、なければ 401

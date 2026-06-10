@@ -12,9 +12,10 @@
  */
 
 import type { Metadata } from 'next'
-import { cookies, headers } from 'next/headers'
 import dynamic from 'next/dynamic'
 
+import { getServerSession } from '@/lib/auth/server-session'
+import { fetchPagesCached, type PageOption } from '@/lib/pages/fetch-pages'
 import { PageMeta } from '@/components/layout/page-meta'
 
 const HeatmapPageClient = dynamic(
@@ -27,11 +28,6 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 }
 
-interface PageOption {
-  url: string
-  label: string
-}
-
 interface HeatmapPageProps {
   searchParams: { site_id?: string; page_url?: string }
 }
@@ -39,27 +35,20 @@ interface HeatmapPageProps {
 /** 5 sites (続 39) の既定値 (bihadashop.jp)。 */
 const DEFAULT_SITE_ID = 'CIP_EcwUTHEZdIOAUqum'
 
+/**
+ * 続122: 旧実装は `${NEXT_PUBLIC_APP_URL}/api/pages` への **HTTP 自己 fetch** だった。
+ * Vercel 関数 → alias → 自分自身という外回り往復は、デプロイ直後の alias 切替や
+ * cookie 転送に弱く、失敗すると catch → [] → 「イベントがまだ集まっていません」の
+ * **誤バナー**になる (Owner 報告: API 直叩きは success なのにページ表示が空)。
+ * 共有クエリ (lib/pages/fetch-pages) を in-process で直接呼ぶ構成に変更 (往復ゼロ・高速化)。
+ * 認可は getServerSession (JWT 検証 + Layer 2 失効照合) + site_ids 包含チェックで同等を維持。
+ */
 async function fetchPages(siteId: string): Promise<PageOption[]> {
-  const h = await headers()
-  const host = h.get('host')
-  const proto = h.get('x-forwarded-proto') ?? 'http'
-  const base =
-    process.env.NEXT_PUBLIC_APP_URL ?? (host ? `${proto}://${host}` : 'http://localhost:3000')
-
-  const cookieJar = await cookies()
-  const cookieHeader = cookieJar
-    .getAll()
-    .map((c) => `${c.name}=${c.value}`)
-    .join('; ')
-
   try {
-    const res = await fetch(`${base}/api/pages?site_id=${encodeURIComponent(siteId)}`, {
-      cache: 'no-store',
-      headers: cookieHeader ? { cookie: cookieHeader } : {},
-    })
-    if (!res.ok) return []
-    const json = (await res.json()) as { success: boolean; data?: PageOption[] }
-    return json.success && Array.isArray(json.data) ? json.data : []
+    const session = await getServerSession()
+    if (!session) return [] // middleware が先に弾くが defense-in-depth
+    if (!session.user.site_ids.includes(siteId)) return [] // cross-tenant site 指定は空扱い
+    return await fetchPagesCached(session.tenant_id, siteId, 20)
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'unknown'
     console.error(`[heatmap/page] fetchPages failed: ${msg}`)
