@@ -618,7 +618,11 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
 
   // 続123: 要素集計があれば tag / card を「本物の要素名 + selector」で出す。
   // 無ければ従来の cluster ベース placeholder (クリック密集 #N) に fallback。
-  const els = opts.elements?.elements ?? []
+  // Codex T1 MEDIUM fix: 座標 outlier guard で弾かれた要素が tag に出ない一方 card に
+  // 残ると rank がズレるため、**同一の filter 済みリスト**を tag / card 両方に使う。
+  const els = (opts.elements?.elements ?? []).filter(
+    (el) => scaleElementPoint(el.x, el.y, pageY, opts.coordinateContext) !== null,
+  )
   const elementTags = els.length > 0 ? buildElementTags(els, pageY, opts.coordinateContext) : []
   const useElements = elementTags.length > 0
   // cluster fallback 用: 上位 MAX_HOTSPOTS (clusters は count 降順)。
