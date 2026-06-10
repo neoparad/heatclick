@@ -51,6 +51,17 @@ export class ScenarioNotFoundError extends Error {
   }
 }
 
+/**
+ * 認可拒否 (REQ-SEC-010)。updateScenario の `authorize` フックが、書込みに使う authoritative
+ * な既存 row を見て拒否したいときに throw する。API route 側は 403 にマップする。
+ */
+export class ScenarioForbiddenError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ScenarioForbiddenError'
+  }
+}
+
 // Re-export so API routes can catch sanitizer rejections without importing the sanitizer module.
 export { HtmlSanitizationError } from './html-sanitizer'
 
@@ -123,6 +134,15 @@ export interface UpdateScenarioInput {
   frequency_cap?: Scenario['frequency_cap']
   /** Phase 2.1 additive */
   schedule?: Scenario['schedule']
+}
+
+export interface UpdateScenarioOptions {
+  /**
+   * REQ-SEC-010 (HIGH): 書込み前の認可フック。updateScenario が書込みに使うのと同じ
+   * authoritative read (`existing`) に対して呼ばれるため、route の preflight 後に状態が
+   * 変わる TOCTOU を塞げる。拒否したい場合は ScenarioForbiddenError を throw する。
+   */
+  authorize?: (existing: Scenario, patch: UpdateScenarioInput) => void
 }
 
 // ── CRUD ops ────────────────────────────────────────────────────────────────
@@ -229,9 +249,13 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
     siteId: string,
     scenarioId: string,
     patch: UpdateScenarioInput,
+    options: UpdateScenarioOptions = {},
   ): Promise<Scenario> {
     const existing = await getScenario(tenantId, siteId, scenarioId)
     if (!existing) throw new ScenarioNotFoundError(scenarioId)
+    // REQ-SEC-010 (HIGH): 書込みに使う authoritative read で認可判定する。route の preflight
+    // 後に owner が publish する TOCTOU でも、ここで最新の `existing.status` を見て弾く。
+    options.authorize?.(existing, patch)
     if (patch.condition_ast !== undefined) validateAstOrThrow(patch.condition_ast)
     // REQ-SEC-001/002: re-sanitize inline HTML on every variant update.
     const safeVariants =

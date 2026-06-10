@@ -96,85 +96,36 @@ export function isPublishStatus(status: ScenarioStatus): boolean {
 }
 
 /**
- * publish中 (live / preview) scenario への non-publish role による「status 単独降格 patch」か。
- *
- * 中庸ポリシー (Codex T1 dual review 指摘 HIGH 1 反映、2026-06-07):
- *   member 等 publish 権限を持たない role でも、公開中 scenario を「停止する」運用は
- *   できるべき。よって patch が `{ status: <非publish系> }` 1 key のみのとき *だけ* 許す。
- *   他 field を同時に変える patch は拒否 (内容書き換えを伴う公開停止は owner/admin に依頼)。
+ * publish 権限 (owner / admin) を持つ role か。
+ * 以下の両方を司る:
+ *   - live / preview への昇格 (canTransitionToStatus 経由)
+ *   - 配信中 (live / preview) scenario の「配信内容」改変 (REQ-SEC-010 HIGH)
  */
-export function isStatusOnlyDemotePatch(patch: Record<string, unknown>): boolean {
-  const keys = Object.keys(patch)
-  if (keys.length !== 1 || keys[0] !== 'status') return false
-  const next = patch.status as ScenarioStatus
-  return NON_PUBLISH_STATUSES.has(next)
-}
-
-export type RbacVerdict = { allowed: true } | { allowed: false; reason: string }
-
-/**
- * 既存 scenario への PUT patch が role 的に許可されるか。
- *
- *   1. viewer        → 不可 (canWriteScenario が落とす)
- *   2. owner / admin → 可 (status 遷移先は別途 canTransitionToStatus でチェック)
- *   3. member / role 不明:
- *      - 既存 status が非 publish (draft/measure_only/paused/archived) → 可
- *      - 既存 status が publish (live/preview) → status 単独降格 patch のみ可
- *
- * REQ-SEC-010 (HIGH): 既存 status を見ずに body だけで認可していた boundary 漏れを塞ぐ
- * (Codex T1 dual review HIGH 1 反映)。
- */
-export function canPatchExistingScenario(
-  role: ScenarioRole,
-  currentStatus: ScenarioStatus,
-  patch: Record<string, unknown>,
-): RbacVerdict {
-  if (!canWriteScenario(role)) {
-    return { allowed: false, reason: 'viewer は scenario を更新できません' }
-  }
-  if (PUBLISH_ROLES.has(role)) {
-    return { allowed: true }
-  }
-  if (!isPublishStatus(currentStatus)) {
-    return { allowed: true }
-  }
-  if (isStatusOnlyDemotePatch(patch)) {
-    return { allowed: true }
-  }
-  return {
-    allowed: false,
-    reason: `role=${role} は公開中 scenario (status='${currentStatus}') の内容編集ができません。Owner / Admin に依頼するか、status を非公開系に下げる単独 patch を送ってください。`,
-  }
+export function canPublish(role: ScenarioRole): boolean {
+  return PUBLISH_ROLES.has(role)
 }
 
 /**
- * 既存 scenario の DELETE が role 的に許可されるか。
+ * 配信に直接影響するフィールド = runtime payload に乗り visitor の挙動を変えるもの。
+ * name / description / evidence_* は admin metadata で配信に影響しないため意図的に除外
+ * (配信中 scenario でも member が typo 修正などはできる)。
  *
- *   1. viewer        → 不可
- *   2. owner / admin → 可
- *   3. member / role 不明:
- *      - 既存 status が非 publish → 可
- *      - 既存 status が publish → 不可 (削除は実質公開停止 = publish RBAC 迂回になるため)
- *
- * REQ-SEC-010 (HIGH): Codex T1 dual review 指摘 HIGH 2 反映。
+ * REQ-SEC-010 (HIGH, Codex dual review): status を変えずに live バナーの中身だけ差し替える
+ * 「実質 publish」経路を塞ぐためのフィールド集合。
  */
-export function canDeleteExistingScenario(
-  role: ScenarioRole,
-  currentStatus: ScenarioStatus,
-): RbacVerdict {
-  if (!canWriteScenario(role)) {
-    return { allowed: false, reason: 'viewer は scenario を削除できません' }
-  }
-  if (PUBLISH_ROLES.has(role)) {
-    return { allowed: true }
-  }
-  if (isPublishStatus(currentStatus)) {
-    return {
-      allowed: false,
-      reason: `role=${role} は公開中 scenario (status='${currentStatus}') を削除できません。先に status を非公開系に降格するか、Owner / Admin に依頼してください。`,
-    }
-  }
-  return { allowed: true }
+export const DELIVERY_IMPACTING_FIELDS = [
+  'variants',
+  'condition_ast',
+  'frequency_cap',
+  'schedule',
+] as const
+
+/**
+ * 更新 patch が「配信内容」を変えるか。配信中 scenario の改変ガード判定に使う。
+ * `undefined` でないキーが 1 つでもあれば true (null = 明示的クリアも配信変更とみなす)。
+ */
+export function patchMutatesDelivery(patch: Record<string, unknown>): boolean {
+  return DELIVERY_IMPACTING_FIELDS.some((f) => patch[f] !== undefined)
 }
 
 export const __test__ = {

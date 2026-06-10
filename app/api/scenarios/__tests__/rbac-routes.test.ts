@@ -41,6 +41,9 @@ jest.mock('@/lib/scenarios/repository', () => {
     ScenarioNotFoundError: class extends Error {
       constructor(msg: string) { super(msg) }
     },
+    ScenarioForbiddenError: class extends Error {
+      constructor(msg: string) { super(msg); this.name = 'ScenarioForbiddenError' }
+    },
     HtmlSanitizationError: class extends Error {
       reason: string
       constructor(msg: string) { super(msg); this.reason = 'mock' }
@@ -139,8 +142,6 @@ describe('PUT /api/scenarios/[id] — publish RBAC', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockUpdateScenario.mockResolvedValue({ id })
-    // default: 既存は非 publish (draft)。publish中ガード検証は describe 内で上書きする。
-    mockGetScenario.mockResolvedValue({ id, tenant_id: 'tenant_a', site_id: 'CIP_site_a', status: 'draft' })
   })
 
   it('returns 401 when session is missing', async () => {
@@ -223,61 +224,90 @@ describe('PUT /api/scenarios/[id] — publish RBAC', () => {
     expect(mockUpdateScenario).not.toHaveBeenCalled()
   })
 
-  // ── Codex HIGH 1 regression: existing publish-system scenario guards ────
-  describe('既存 status が publish 系の場合 (Codex HIGH 1)', () => {
-    beforeEach(() => {
-      mockGetScenario.mockResolvedValue({ id, tenant_id: 'tenant_a', site_id: 'CIP_site_a', status: 'live' })
-    })
+  // REQ-SEC-010 (HIGH, Codex dual review): 配信中 (live/preview) コンテンツ改変ガード
+  const liveVariants = [
+    {
+      id: 'A',
+      content_type: 'image',
+      image_url: 'https://cdn.example.com/x.png',
+      image_alt: '',
+      position: 'center',
+      traffic_split: 100,
+    },
+  ]
 
-    it('returns 403 when role=member sends status-omitted content patch on live scenario', async () => {
-      mockGetServerSession.mockResolvedValue(makeSession('member'))
-      const res = await PutScenario(
-        makeRequest(URL_PUT, 'PUT', { name: 'new name' }),
-        { params: { id } },
-      )
-      expect(res.status).toBe(403)
-      expect(mockUpdateScenario).not.toHaveBeenCalled()
-    })
+  it('returns 403 when role=member mutates variants of a LIVE scenario (no status field)', async () => {
+    mockGetServerSession.mockResolvedValue(makeSession('member'))
+    mockGetScenario.mockResolvedValue({ status: 'live' })
+    const res = await PutScenario(
+      makeRequest(URL_PUT, 'PUT', { variants: liveVariants }),
+      { params: { id } },
+    )
+    expect(res.status).toBe(403)
+    const json = await res.json()
+    expect(json.message).toMatch(/配信中/)
+    expect(mockUpdateScenario).not.toHaveBeenCalled()
+  })
 
-    it('returns 200 when role=member demotes live scenario via single-key status patch', async () => {
-      mockGetServerSession.mockResolvedValue(makeSession('member'))
-      const res = await PutScenario(
-        makeRequest(URL_PUT, 'PUT', { status: 'paused' }),
-        { params: { id } },
-      )
-      expect(res.status).toBe(200)
-      expect(mockUpdateScenario).toHaveBeenCalledTimes(1)
-    })
+  it('returns 200 when role=member mutates variants of a DRAFT scenario (not yet delivered)', async () => {
+    mockGetServerSession.mockResolvedValue(makeSession('member'))
+    mockGetScenario.mockResolvedValue({ status: 'draft' })
+    const res = await PutScenario(
+      makeRequest(URL_PUT, 'PUT', { variants: liveVariants }),
+      { params: { id } },
+    )
+    expect(res.status).toBe(200)
+    expect(mockUpdateScenario).toHaveBeenCalledTimes(1)
+  })
 
-    it('returns 403 when role=member mixes status demote with name change on live scenario', async () => {
-      mockGetServerSession.mockResolvedValue(makeSession('member'))
-      const res = await PutScenario(
-        makeRequest(URL_PUT, 'PUT', { status: 'paused', name: 'rename' }),
-        { params: { id } },
-      )
-      expect(res.status).toBe(403)
-      expect(mockUpdateScenario).not.toHaveBeenCalled()
-    })
+  it('returns 200 when role=owner mutates variants of a LIVE scenario (publisher)', async () => {
+    mockGetServerSession.mockResolvedValue(makeSession('owner'))
+    mockGetScenario.mockResolvedValue({ status: 'live' })
+    const res = await PutScenario(
+      makeRequest(URL_PUT, 'PUT', { variants: liveVariants }),
+      { params: { id } },
+    )
+    expect(res.status).toBe(200)
+    expect(mockUpdateScenario).toHaveBeenCalledTimes(1)
+  })
 
-    it('returns 200 when role=owner edits live scenario content', async () => {
-      mockGetServerSession.mockResolvedValue(makeSession('owner'))
-      const res = await PutScenario(
-        makeRequest(URL_PUT, 'PUT', { name: 'owner rename' }),
-        { params: { id } },
-      )
-      expect(res.status).toBe(200)
-    })
+  it('returns 200 when role=member edits only name of a LIVE scenario (name is not delivery-impacting)', async () => {
+    mockGetServerSession.mockResolvedValue(makeSession('member'))
+    mockGetScenario.mockResolvedValue({ status: 'live' })
+    const res = await PutScenario(
+      makeRequest(URL_PUT, 'PUT', { name: 'typo fix only' }),
+      { params: { id } },
+    )
+    expect(res.status).toBe(200)
+    // name-only patch は delivery guard を通らない → getScenario は呼ばれない
+    expect(mockGetScenario).not.toHaveBeenCalled()
+    expect(mockUpdateScenario).toHaveBeenCalledTimes(1)
+  })
 
-    it('returns 404 when scenario does not exist', async () => {
-      mockGetScenario.mockResolvedValue(null)
-      mockGetServerSession.mockResolvedValue(makeSession('owner'))
-      const res = await PutScenario(
-        makeRequest(URL_PUT, 'PUT', { name: 'x' }),
-        { params: { id } },
-      )
-      expect(res.status).toBe(404)
-      expect(mockUpdateScenario).not.toHaveBeenCalled()
-    })
+  it('returns 403 when updateScenario authorize rejects a now-live row (TOCTOU close, route maps ScenarioForbiddenError→403)', async () => {
+    mockGetServerSession.mockResolvedValue(makeSession('member'))
+    // preflight は draft を見て通過する
+    mockGetScenario.mockResolvedValue({ status: 'draft' })
+    // updateScenario の authoritative read 時点では owner が publish 済 (live) になっていた状況を再現
+    mockUpdateScenario.mockImplementation(
+      async (
+        _t: string,
+        _s: string,
+        _id: string,
+        patch: unknown,
+        opts?: { authorize?: (existing: { status: string }, patch: unknown) => void },
+      ) => {
+        opts?.authorize?.({ status: 'live' }, patch)
+        return { id }
+      },
+    )
+    const res = await PutScenario(
+      makeRequest(URL_PUT, 'PUT', { variants: liveVariants }),
+      { params: { id } },
+    )
+    expect(res.status).toBe(403)
+    const json = await res.json()
+    expect(json.message).toMatch(/配信中/)
   })
 })
 
@@ -286,8 +316,6 @@ describe('DELETE /api/scenarios/[id] — publish RBAC', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockDeleteScenario.mockResolvedValue(true)
-    // default: 既存は非 publish (draft)。publish中削除ガードは describe 内で上書きする。
-    mockGetScenario.mockResolvedValue({ id, tenant_id: 'tenant_a', site_id: 'CIP_site_a', status: 'draft' })
   })
 
   it('returns 401 when session is missing', async () => {
@@ -327,53 +355,5 @@ describe('DELETE /api/scenarios/[id] — publish RBAC', () => {
       { params: { id } },
     )
     expect(res.status).toBe(204)
-  })
-
-  // ── Codex HIGH 2 regression: existing publish-system scenario delete guard ──
-  describe('既存 status が publish 系の場合 (Codex HIGH 2)', () => {
-    beforeEach(() => {
-      mockGetScenario.mockResolvedValue({ id, tenant_id: 'tenant_a', site_id: 'CIP_site_a', status: 'live' })
-    })
-
-    it('returns 403 when role=member tries to delete live scenario', async () => {
-      mockGetServerSession.mockResolvedValue(makeSession('member'))
-      const res = await DeleteScenario(
-        makeRequest(URL_DELETE, 'DELETE', undefined),
-        { params: { id } },
-      )
-      expect(res.status).toBe(403)
-      expect(mockDeleteScenario).not.toHaveBeenCalled()
-    })
-
-    it('returns 403 when role=member tries to delete preview scenario', async () => {
-      mockGetScenario.mockResolvedValue({ id, tenant_id: 'tenant_a', site_id: 'CIP_site_a', status: 'preview' })
-      mockGetServerSession.mockResolvedValue(makeSession('member'))
-      const res = await DeleteScenario(
-        makeRequest(URL_DELETE, 'DELETE', undefined),
-        { params: { id } },
-      )
-      expect(res.status).toBe(403)
-      expect(mockDeleteScenario).not.toHaveBeenCalled()
-    })
-
-    it('returns 204 when role=owner deletes live scenario', async () => {
-      mockGetServerSession.mockResolvedValue(makeSession('owner'))
-      const res = await DeleteScenario(
-        makeRequest(URL_DELETE, 'DELETE', undefined),
-        { params: { id } },
-      )
-      expect(res.status).toBe(204)
-    })
-
-    it('returns 404 when scenario does not exist (member trying)', async () => {
-      mockGetScenario.mockResolvedValue(null)
-      mockGetServerSession.mockResolvedValue(makeSession('member'))
-      const res = await DeleteScenario(
-        makeRequest(URL_DELETE, 'DELETE', undefined),
-        { params: { id } },
-      )
-      expect(res.status).toBe(404)
-      expect(mockDeleteScenario).not.toHaveBeenCalled()
-    })
   })
 })

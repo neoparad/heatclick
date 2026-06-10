@@ -23,6 +23,7 @@ import { z } from 'zod'
 
 import {
   HtmlSanitizationError,
+  ScenarioForbiddenError,
   ScenarioNotFoundError,
   ScenarioValidationError,
   createScenarioRepository,
@@ -30,11 +31,12 @@ import {
 import { CloudflareKvError } from '@/lib/scenarios/kv-storage'
 import { getServerSession } from '@/lib/auth/server-session'
 import {
-  canDeleteExistingScenario,
-  canPatchExistingScenario,
+  canPublish,
   canTransitionToStatus,
   canWriteScenario,
+  isPublishStatus,
   normalizeRole,
+  patchMutatesDelivery,
 } from '@/lib/scenarios/publish-rbac'
 import {
   ConditionNodeSchema,
@@ -87,6 +89,10 @@ function handleError(err: unknown): NextResponse {
       { status: 400 },
     )
   }
+  if (err instanceof ScenarioForbiddenError) {
+    // REQ-SEC-010: authoritative authorize フックによる拒否 (TOCTOU close)。
+    return NextResponse.json({ error: 'forbidden', message: err.message }, { status: 403 })
+  }
   if (err instanceof ScenarioNotFoundError) {
     return NextResponse.json({ error: 'not_found', message: err.message }, { status: 404 })
   }
@@ -107,9 +113,7 @@ function handleError(err: unknown): NextResponse {
  * Resolve tenant context for an [id] request: site_id from query, validated against the
  * JWT's site_ids; tenant_id from the JWT header (REQ-SEC-004).
  */
-async function resolveContext(
-  request: NextRequest,
-): Promise<ScenarioTenantContext | NextResponse> {
+function resolveContext(request: NextRequest): ScenarioTenantContext | NextResponse {
   const { searchParams } = new URL(request.url)
   const siteParse = SiteIdSchema.safeParse(searchParams.get('site_id') ?? undefined)
   if (!siteParse.success) {
@@ -126,7 +130,7 @@ export async function GET(
   if (!paramsParsed.success) {
     return NextResponse.json({ error: 'invalid_id' }, { status: 400 })
   }
-  const ctx = await resolveContext(request)
+  const ctx = resolveContext(request)
   if (!isTenantContext(ctx)) return ctx
 
   try {
@@ -149,8 +153,27 @@ export async function PUT(
   if (!paramsParsed.success) {
     return NextResponse.json({ error: 'invalid_id' }, { status: 400 })
   }
-  const ctx = await resolveContext(request)
+  const ctx = resolveContext(request)
   if (!isTenantContext(ctx)) return ctx
+
+  // REQ-SEC-010 (HIGH): publish RBAC。
+  // role は JWT cookie 由来 (middleware は x-user-role を inject しないため server-session が SSOT)。
+  // session / 書込み権限は body を読む前に判定する (Codex dual review LOW#3: 未認可 writer が
+  // body validation の差 (400) で scenario の素性を推し量れないよう、403 を先に返す)。
+  const session = await getServerSession()
+  if (!session) {
+    return NextResponse.json(
+      { error: 'unauthorized', message: 'session required' },
+      { status: 401 },
+    )
+  }
+  const role = normalizeRole(session.user.role)
+  if (!canWriteScenario(role)) {
+    return NextResponse.json(
+      { error: 'forbidden', message: 'viewer は scenario を更新できません' },
+      { status: 403 },
+    )
+  }
 
   let raw: unknown
   try {
@@ -169,24 +192,7 @@ export async function PUT(
     )
   }
 
-  // REQ-SEC-010 (HIGH): publish RBAC。
-  // JWT cookie 由来の role でガードする (middleware は x-user-role を inject しないため、
-  // server-session 経由が SSOT)。session 不在 → 401 (Codex 指摘 B 反映)。
-  // viewer は書込み不可、member は publish 系遷移不可。
-  const session = await getServerSession()
-  if (!session) {
-    return NextResponse.json(
-      { error: 'unauthorized', message: 'session required' },
-      { status: 401 },
-    )
-  }
-  const role = normalizeRole(session.user.role)
-  if (!canWriteScenario(role)) {
-    return NextResponse.json(
-      { error: 'forbidden', message: 'viewer は scenario を更新できません' },
-      { status: 403 },
-    )
-  }
+  // publish 系 status (live / preview) への遷移は Owner / Admin のみ。
   if (bodyParsed.data.status !== undefined && !canTransitionToStatus(role, bodyParsed.data.status)) {
     return NextResponse.json(
       {
@@ -197,34 +203,60 @@ export async function PUT(
     )
   }
 
-  // REQ-SEC-010 (HIGH): 既存 scenario の現在 status に基づく authoritative check。
-  // body だけ見て認可していた boundary 漏れ (Codex T1 HIGH 1) を塞ぐ。
-  //   - 公開中 (live / preview) scenario への non-publish role による content patch を拒否
-  //   - 「status 単独降格 patch」だけは member にも許可 (公開停止運用のため)
-  const repo = createScenarioRepository()
-  let current
-  try {
-    current = await repo.getScenario(ctx.tenantId, ctx.siteId, paramsParsed.data.id)
-  } catch (err) {
-    return handleError(err)
-  }
-  if (!current) {
-    return NextResponse.json({ error: 'not_found' }, { status: 404 })
-  }
-  const patchVerdict = canPatchExistingScenario(role, current.status, bodyParsed.data)
-  if (!patchVerdict.allowed) {
-    return NextResponse.json(
-      { error: 'forbidden', message: patchVerdict.reason },
-      { status: 403 },
-    )
-  }
+  // REQ-SEC-010 (HIGH, Codex dual review): 非 publisher (member) は配信中 (live / preview)
+  // scenario の「配信内容」(variants / condition_ast / frequency_cap / schedule) を改変できない。
+  // status を変えずに live バナーの中身だけ差し替える「実質 publish」経路を server 境界で塞ぐ。
+  // 編集するには先に Owner / Admin が pause / draft へ落とす必要がある。
+  const guardsDelivery =
+    !canPublish(role) && patchMutatesDelivery(bodyParsed.data as Record<string, unknown>)
 
+  const repo = createScenarioRepository()
   try {
-    const updated = await repo.updateScenario(ctx.tenantId, ctx.siteId, paramsParsed.data.id, bodyParsed.data)
+    // (1) fast-path: 編集開始時点で既に配信中なら早期 403 (UX)。
+    if (guardsDelivery) {
+      const current = await repo.getScenario(ctx.tenantId, ctx.siteId, paramsParsed.data.id)
+      if (!current) {
+        return NextResponse.json({ error: 'not_found' }, { status: 404 })
+      }
+      if (isPublishStatus(current.status)) {
+        return NextResponse.json(
+          { error: 'forbidden', message: liveContentForbiddenMessage(role, current.status) },
+          { status: 403 },
+        )
+      }
+    }
+
+    // (2) authoritative: updateScenario が書込みに使う read と同じ row で再判定し、preflight
+    // 通過後に Owner が publish する TOCTOU を塞ぐ (Codex 再レビュー指摘)。
+    const updated = await repo.updateScenario(
+      ctx.tenantId,
+      ctx.siteId,
+      paramsParsed.data.id,
+      bodyParsed.data,
+      guardsDelivery
+        ? {
+            authorize: (existing) => {
+              if (isPublishStatus(existing.status)) {
+                throw new ScenarioForbiddenError(liveContentForbiddenMessage(role, existing.status))
+              }
+            },
+          }
+        : {},
+    )
     return NextResponse.json(updated, { status: 200, headers: { 'Cache-Control': 'no-store' } })
   } catch (err) {
     return handleError(err)
   }
+}
+
+/**
+ * REQ-SEC-010: 配信中 scenario のコンテンツ改変拒否メッセージ (preflight と authorize で共有)。
+ */
+function liveContentForbiddenMessage(role: string, status: string): string {
+  return (
+    `role=${role} は配信中 (status='${status}') の scenario の配信内容を変更できません。` +
+    `先に Owner / Admin が pause してから編集してください`
+  )
 }
 
 export async function DELETE(
@@ -235,7 +267,7 @@ export async function DELETE(
   if (!paramsParsed.success) {
     return NextResponse.json({ error: 'invalid_id' }, { status: 400 })
   }
-  const ctx = await resolveContext(request)
+  const ctx = resolveContext(request)
   if (!isTenantContext(ctx)) return ctx
 
   // REQ-SEC-010 (HIGH): publish RBAC。session 不在 → 401。viewer は削除不可 (403)。
@@ -255,28 +287,8 @@ export async function DELETE(
     )
   }
 
-  // REQ-SEC-010 (HIGH): 公開中 (live / preview) scenario の削除は publish RBAC 迂回。
-  // 既存 status を取得して、non-publish role はそれを削除できないようガード
-  // (Codex T1 HIGH 2 反映)。
-  const repo = createScenarioRepository()
-  let current
   try {
-    current = await repo.getScenario(ctx.tenantId, ctx.siteId, paramsParsed.data.id)
-  } catch (err) {
-    return handleError(err)
-  }
-  if (!current) {
-    return NextResponse.json({ error: 'not_found' }, { status: 404 })
-  }
-  const delVerdict = canDeleteExistingScenario(role, current.status)
-  if (!delVerdict.allowed) {
-    return NextResponse.json(
-      { error: 'forbidden', message: delVerdict.reason },
-      { status: 403 },
-    )
-  }
-
-  try {
+    const repo = createScenarioRepository()
     const removed = await repo.deleteScenario(ctx.tenantId, ctx.siteId, paramsParsed.data.id)
     if (!removed) {
       return NextResponse.json({ error: 'not_found' }, { status: 404 })
