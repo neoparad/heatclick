@@ -622,6 +622,21 @@
     } catch (e) { /* noop */ }
   }
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // Dispatch decision (§1.7.1 Path 区分): status → { measure, render }
+  //   live         : 計測 + 描画
+  //   measure_only : 計測のみ (描画しない = variant execution しない。§1.7.1 準拠の
+  //                  「実行せず計測」パス)。従来 client が status!=='live' で measure_only を
+  //                  素通りしていたため計測ゼロだったバグを修正 (match イベントは送る)。
+  //   その他        : 何もしない (draft / paused / archived、及び万一届いた preview)。
+  //                  preview は server が public payload から除外済 (REQ-SEC-006)。
+  // ──────────────────────────────────────────────────────────────────────────
+  function _dispatchDecision(status) {
+    if (status === 'live') return { measure: true, render: true }
+    if (status === 'measure_only') return { measure: true, render: false }
+    return { measure: false, render: false }
+  }
+
   function evaluateAll(scenarios) {
     // REQ-SEC-013: fail-closed consent gate — no consent → no evaluation, no render, no events.
     if (!_consentAllowsRender()) return
@@ -630,9 +645,9 @@
     var nowMs = Date.now()
     for (var i = 0; i < scenarios.length; i++) {
       var sc = scenarios[i]
-      // Only 'live' is rendered. The server gates 'preview' out of the public payload
-      // (REQ-SEC-006), so it should never reach here; defensively render 'live' only.
-      if (sc.status !== 'live') continue
+      // §1.7.1: live=計測+描画 / measure_only=計測のみ / その他=無視。
+      var disp = _dispatchDecision(sc.status)
+      if (!disp.measure) continue
       // Phase 2.1: schedule (clock skew tolerance ±5min)。server-side でも除外済だが
       // payload を改ざんされたりキャッシュ差分があった場合の defense-in-depth。
       if (!_isScenarioInSchedule(sc, nowMs)) continue
@@ -650,7 +665,8 @@
         _bumpFrequencyCap(sc, nowMs)
         var variant = pickVariant(sc, ctx.visitor_id)
         sendMatchEvent(sc, variant, 'match', Math.round(t1 - t0))
-        if (variant) {
+        // measure_only は disp.render=false: match イベントだけ送り DOM 描画はしない。
+        if (disp.render && variant) {
           renderVariant(sc, variant)
         }
       }
@@ -690,18 +706,24 @@
       }, 10000)
     })
   }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init)
-  } else {
-    init()
+  // window.UGOKI_SCENARIO_DISABLE_AUTOINIT=true で自動 init を抑止できる (unit test 用に
+  // 実ファイルを副作用なしでロードして内部関数を検証するためのフック)。
+  if (!window.UGOKI_SCENARIO_DISABLE_AUTOINIT) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init)
+    } else {
+      init()
+    }
   }
 
-  // Expose minimal API for debugging
+  // Expose minimal API for debugging / unit tests
   window.UGOKI_SCENARIO_RUNTIME = {
     evaluate: evaluate,
+    evaluateAll: evaluateAll,
     buildCtx: buildCtx,
     pickVariant: pickVariant,
+    _dispatch: _dispatchDecision,
     _hash: _hash,
-    version: '0.2.0+phase1',
+    version: '0.3.0+measure-only',
   }
 })()
