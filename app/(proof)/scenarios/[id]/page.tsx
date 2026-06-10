@@ -87,5 +87,6 @@ export default async function ScenarioEditorPage({ params, searchParams }: PageP
   const scenario = await loadScenarioOrNull(tenantId, siteId, params.id)
   if (!scenario) notFound()
 
-  return <ScenarioEditorView scenario={scenario} />
+  // Phase 2.1 RBAC: JWT 由来 role を editor に渡す (publish status の UI ガード用)。
+  return <ScenarioEditorView scenario={scenario} viewerRole={session.user.role} />
 }

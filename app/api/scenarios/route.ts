@@ -28,6 +28,8 @@ import {
   createScenarioRepository,
 } from '@/lib/scenarios/repository'
 import { CloudflareKvError } from '@/lib/scenarios/kv-storage'
+import { getServerSession } from '@/lib/auth/server-session'
+import { canWriteScenario, normalizeRole } from '@/lib/scenarios/publish-rbac'
 import {
   ConditionNodeSchema,
   EVIDENCE_LEVELS,
@@ -136,6 +138,23 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // tenant_id from JWT header; body site_id must be in JWT site_ids (REQ-SEC-004).
   const ctx = resolveScenarioTenantContext(request, parsed.data.site_id)
   if (!isTenantContext(ctx)) return ctx
+
+  // REQ-SEC-010 (HIGH): publish RBAC。session 不在は 401 (Codex 指摘 B 反映)、
+  // viewer は新規作成不可 (403)。
+  const session = await getServerSession()
+  if (!session) {
+    return NextResponse.json(
+      { error: 'unauthorized', message: 'session required' },
+      { status: 401 },
+    )
+  }
+  const role = normalizeRole(session.user.role)
+  if (!canWriteScenario(role)) {
+    return NextResponse.json(
+      { error: 'forbidden', message: 'viewer は scenario を作成できません' },
+      { status: 403 },
+    )
+  }
 
   try {
     const repo = createScenarioRepository()
