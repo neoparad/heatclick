@@ -57,6 +57,7 @@ const LINKTH_INTERNAL_SITE_IDS: ReadonlyArray<string> = [
   'CIP_6r2WofQDSKrOwxmM',
   'CIP_8eN7xgfBtDAnzE26',
   'CIP_QWaPiks5krukJ6NM',
+  'CIP_E3xzSWfXcXx6GaTL', // link-th.co.jp コーポレート (続127 provision)
 ]
 
 const SEED: DogfoodUser[] = [
