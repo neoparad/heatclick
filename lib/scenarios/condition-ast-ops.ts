@@ -83,9 +83,85 @@ export function valueKindFor(op: LeafOperator): ValueKind {
   return OP_VALUE_KIND[op] ?? 'string'
 }
 
-// ── group operators (Phase 2 = AND/OR、Phase 3 で NOT UI 化) ───────────────
+/**
+ * field の実型も考慮した value 入力 kind (E)。
+ * EQ/NEQ は field の型 (boolean/number/string) に合わせる。これがないと
+ * 例: `is_first_visit EQ` が string 入力になり、runtime の厳密等価で `"true" !== true` となり
+ * 永久に不一致になる (Codex review 指摘)。GT 系は常に number、IN は number field なら number_list。
+ */
+export function valueKindForLeaf(field: string, op: LeafOperator): ValueKind {
+  const opKind = valueKindFor(op)
+  if (opKind === 'none' || opKind === 'number' || opKind === 'number_list') return opKind
+  if (opKind === 'string_list') {
+    return fieldValueType(field) === 'number' ? 'number_list' : 'string_list'
+  }
+  if (op === 'EQ' || op === 'NEQ') {
+    const t = fieldValueType(field)
+    return t === 'boolean' ? 'boolean' : t === 'number' ? 'number' : 'string'
+  }
+  // CONTAINS / STARTS_WITH / ENDS_WITH / MATCHES_REGEX / VISITED / NOT_VISITED は文字列演算。
+  return 'string'
+}
+
+// ── field メタ情報 (UI: 日本語ラベル / 値ヒント) ───────────────────────────
+
+export type FieldValueType = 'string' | 'number' | 'boolean'
+
+export interface FieldMeta {
+  label: string
+  hint: string
+  /** EQ/NEQ で入力 UI を出し分けるための field の実型 (runtime ctx の型に一致させる)。 */
+  valueType: FieldValueType
+}
+
+export const FIELD_META: Record<AllowedField, FieldMeta> = {
+  tenant_id: { label: 'テナントID', hint: '内部識別子', valueType: 'string' },
+  site_id: { label: 'サイトID', hint: '計測対象サイト', valueType: 'string' },
+  visitor_id: { label: '訪問者ID', hint: 'Cookie ベースの匿名ID', valueType: 'string' },
+  session_id: { label: 'セッションID', hint: '1 回の訪問', valueType: 'string' },
+  is_first_visit: { label: '初回訪問か', hint: 'true / false', valueType: 'boolean' },
+  session_duration_sec: { label: '滞在秒数', hint: '例: 60 (秒)', valueType: 'number' },
+  page_views_in_session: { label: 'PV数(セッション)', hint: '例: 3', valueType: 'number' },
+  url_path: { label: 'URLパス', hint: '例: /entry/foo', valueType: 'string' },
+  url_query: { label: 'URLクエリ', hint: '例: utm_source=google', valueType: 'string' },
+  referrer_host: { label: '参照元ホスト', hint: '例: google.com', valueType: 'string' },
+  utm_source: { label: '流入元 (utm_source)', hint: '例: google, newsletter', valueType: 'string' },
+  utm_medium: { label: '流入媒体 (utm_medium)', hint: '例: organic, cpc', valueType: 'string' },
+  utm_campaign: { label: 'キャンペーン (utm_campaign)', hint: '例: spring_sale', valueType: 'string' },
+  device_type: { label: 'デバイス種別', hint: 'desktop / mobile / tablet', valueType: 'string' },
+  visited_paths: { label: '訪問済パス一覧', hint: 'VISITED/NOT_VISITED で使用', valueType: 'string' },
+  scroll_depth_max_pct: { label: '最大スクロール率(%)', hint: '例: 80', valueType: 'number' },
+  cart_value: { label: 'カート金額', hint: '例: 5000', valueType: 'number' },
+  language: { label: '言語', hint: '例: ja, en', valueType: 'string' },
+  hour_of_day: { label: '時刻 (0-23)', hint: '例: 13', valueType: 'number' },
+  is_agent: { label: 'エージェント経由か', hint: 'true / false', valueType: 'boolean' },
+  persona_label: { label: 'ペルソナ (ML推定)', hint: '推定セグメント', valueType: 'string' },
+  predicted_intent: { label: '推定インテント (ML)', hint: '推定購買意欲', valueType: 'string' },
+}
+
+export function fieldMeta(field: string): FieldMeta {
+  return (
+    (FIELD_META as Record<string, FieldMeta>)[field] ?? {
+      label: field,
+      hint: 'カスタム field',
+      valueType: 'string',
+    }
+  )
+}
+
+export function fieldValueType(field: string): FieldValueType {
+  return fieldMeta(field).valueType
+}
+
+// ── group operators (Phase 2 = AND/OR。E で NOT を children=1 のとき有効化) ──
 
 export const GROUP_OPERATORS_UI: readonly CompositeOperator[] = ['AND', 'OR'] as const
+export const GROUP_OPERATORS_ALL: readonly CompositeOperator[] = ['AND', 'OR', 'NOT'] as const
+
+/** NOT は children=1 のときのみ妥当 (types.ts の Zod superRefine 制約)。 */
+export function canUseNot(root: CompositeNode): boolean {
+  return root.children.length === 1
+}
 
 // ── leaf mutation helpers (immutable) ─────────────────────────────────────
 
@@ -143,41 +219,96 @@ export function setGroupOp(root: CompositeNode, newOp: CompositeOperator): Compo
  * leaf の op を変えたとき、value の型を新 op に合わせて変換する。
  * UI 側から「op だけ変えた」場合に呼ぶと、value が不正な型のまま残らない。
  */
-export function castLeafValueForOp(current: LeafComparison, newOp: LeafOperator): LeafComparison {
-  const kind = valueKindFor(newOp)
-  let nextValue: LeafComparison['value']
+/** value を指定 kind に合わせて coerce (op / field 変更時の共通処理)。 */
+export function coerceValueForKind(
+  value: LeafComparison['value'],
+  kind: ValueKind,
+): LeafComparison['value'] {
   switch (kind) {
     case 'number':
-      nextValue = typeof current.value === 'number' ? current.value : Number(current.value) || 0
-      break
+      return typeof value === 'number' ? value : Number(value) || 0
     case 'boolean':
-      nextValue = typeof current.value === 'boolean' ? current.value : false
-      break
+      return typeof value === 'boolean' ? value : false
     case 'string_list':
-      nextValue = Array.isArray(current.value)
-        ? (current.value as string[]).map(String)
-        : typeof current.value === 'string' && current.value.length > 0
-          ? current.value.split(',').map((s) => s.trim())
+      return Array.isArray(value)
+        ? (value as Array<string | number>).map(String)
+        : typeof value === 'string' && value.length > 0
+          ? value.split(',').map((s) => s.trim())
           : []
-      break
     case 'number_list':
-      nextValue = Array.isArray(current.value)
-        ? (current.value as Array<string | number>).map((v) => Number(v) || 0)
-        : []
-      break
+      return Array.isArray(value)
+        ? (value as Array<string | number>).map((v) => Number(v) || 0)
+        : typeof value === 'string' && value.length > 0
+          ? value.split(',').map((s) => Number(s.trim()) || 0)
+          : []
     case 'none':
-      // EXISTS / NOT_EXISTS は value 不要
-      nextValue = undefined
-      break
+      return undefined
     case 'string':
     default:
-      nextValue = typeof current.value === 'string' ? current.value : String(current.value ?? '')
+      return typeof value === 'string' ? value : String(value ?? '')
   }
+}
+
+/** leaf の op を変えたとき、value を新 op (+ field 型) の kind に合わせて変換する。 */
+export function castLeafValueForOp(current: LeafComparison, newOp: LeafOperator): LeafComparison {
   return {
     op: newOp,
     field: current.field,
-    value: nextValue,
+    value: coerceValueForKind(current.value, valueKindForLeaf(current.field, newOp)),
   }
+}
+
+/**
+ * leaf の field を変えたとき、value を新 field (+ 現 op) の kind に合わせて変換する。
+ * boolean/number field に切替えた際に string 値が残り、runtime で永久に不一致になるのを防ぐ (E)。
+ */
+export function castLeafForField(current: LeafComparison, newField: string): LeafComparison {
+  return {
+    op: current.op,
+    field: newField,
+    value: coerceValueForKind(current.value, valueKindForLeaf(newField, current.op)),
+  }
+}
+
+/**
+ * op を newOp に変えると value が「型変換 / クリア」されるか。
+ * UI 側で「演算子を変えると今の値が失われます」と警告するために使う
+ * (従来は無言で cast されデータが消えていた)。
+ */
+export function opChangeAltersValue(current: LeafComparison, newOp: LeafOperator): boolean {
+  if (current.op === newOp) return false
+  const casted = castLeafValueForOp(current, newOp)
+  const before = current.value === undefined ? null : current.value
+  const after = casted.value === undefined ? null : casted.value
+  return JSON.stringify(before) !== JSON.stringify(after)
+}
+
+// ── nested group helpers (E: 1 段ネスト編集) ───────────────────────────────
+
+/** 新規ネストグループ (既定 OR + leaf 1)。 */
+export function makeDefaultGroup(): CompositeNode {
+  return { op: 'OR', children: [makeDefaultLeaf()] }
+}
+
+/** root に composite 子 (ネストグループ) を 1 つ追加。 */
+export function addGroupAt(root: CompositeNode, group: CompositeNode): CompositeNode {
+  return { op: root.op, children: [...root.children, group] }
+}
+
+/** index の子 (leaf / group どちらでも) を置換。ネストグループの編集結果を書き戻す。 */
+export function updateChildAt(
+  root: CompositeNode,
+  index: number,
+  child: ConditionNode,
+): CompositeNode {
+  if (index < 0 || index >= root.children.length) return root
+  return { op: root.op, children: root.children.map((c, i) => (i === index ? child : c)) }
+}
+
+/** AST 全体の leaf 総数 (ネスト含む)。条件追加の上限 (<=30) 判定用。 */
+export function totalLeafCount(node: ConditionNode): number {
+  if (isLeaf(node)) return 1
+  return node.children.reduce((acc, c) => acc + totalLeafCount(c), 0)
 }
 
 // ── normalize: flatten root if not composite (legacy AST 互換) ─────────────
