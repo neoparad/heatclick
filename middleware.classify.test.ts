@@ -85,6 +85,10 @@ describe('middleware classify() — experiments assign access control (宝 M2b)'
     expect(classify('/api/experiments/00000000-0000-4000-8000-000000000001')).toBe('api-tenant')
   })
 
+  it('classifies /api/experiments/[id]/result as api-tenant (顧客結果は JWT 必須、M4b)', () => {
+    expect(classify('/api/experiments/00000000-0000-4000-8000-000000000001/result')).toBe('api-tenant')
+  })
+
   it('classifies /api/experiments/assign/extra (deeper) as api-public — inherits prefix (no subroute today)', () => {
     // scenarios/runtime と同方針: prefix 継承は forward-compatible で安全 (現状 subroute なし)。
     // 将来 private な subroute を足すなら length-exact override を入れる。
