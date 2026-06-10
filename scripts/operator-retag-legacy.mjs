@@ -55,16 +55,22 @@ async function main() {
   console.log(`mode: ${EXECUTE ? 'EXECUTE' : 'DRY-RUN (安全・変更なし)'}`)
   console.log(`retag: tenant_id '${FROM_TENANT}' -> '${TO_TENANT}' (site_id ${SITE_IDS.length} 件)\n`)
 
-  // 1) tenant_id + site_id を両方持つテーブルを動的発見 (REQ-SEC-119 と同じ方式)
+  // 1) tenant_id + site_id を両方持つ **実テーブル** を動的発見 (REQ-SEC-119 と同じ方式)。
+  //    MaterializedView オブジェクトは mutation 不可のため除外する (集計 MV のデータは
+  //    TO 先の実テーブル (events_daily_by_dim 等) 側で再タグされる。TO 無し MV の内部
+  //    `.inner.%` は派生集計なので対象外 — 今後のデータは正しい tenant で再生成される)。
   const tables = await rows(`
-    SELECT table FROM system.columns
-    WHERE database = 'clickinsight' AND name = 'tenant_id'
-      AND table IN (SELECT table FROM system.columns WHERE database='clickinsight' AND name='site_id')
-      AND table NOT LIKE '.%'
-    GROUP BY table ORDER BY table
+    SELECT name AS table FROM system.tables
+    WHERE database = 'clickinsight'
+      AND engine NOT IN ('MaterializedView', 'View')
+      AND name NOT LIKE '.%'
+      AND name IN (SELECT table FROM system.columns WHERE database='clickinsight' AND name='tenant_id')
+      AND name IN (SELECT table FROM system.columns WHERE database='clickinsight' AND name='site_id')
+    ORDER BY name
   `)
 
   let totalAffected = 0
+  const failures = []
   for (const { table } of tables) {
     const cnt = await rows(
       `SELECT count() AS n FROM clickinsight.{table:Identifier}
@@ -83,14 +89,20 @@ async function main() {
     }
     process.stdout.write(`  * ${table}: ${n.toLocaleString()} 行を再タグ中...`)
     const t0 = Date.now()
-    await client.command({
-      query: `ALTER TABLE clickinsight.{table:Identifier}
-                UPDATE tenant_id = {to:String}
-                WHERE tenant_id = {from:String} AND site_id IN ({sites:Array(String)})`,
-      query_params: { table, to: TO_TENANT, from: FROM_TENANT, sites: SITE_IDS },
-      clickhouse_settings: { mutations_sync: '2' },
-    })
-    console.log(` 完了 (${Math.round((Date.now() - t0) / 1000)}s)`)
+    try {
+      await client.command({
+        query: `ALTER TABLE clickinsight.{table:Identifier}
+                  UPDATE tenant_id = {to:String}
+                  WHERE tenant_id = {from:String} AND site_id IN ({sites:Array(String)})`,
+        query_params: { table, to: TO_TENANT, from: FROM_TENANT, sites: SITE_IDS },
+        clickhouse_settings: { mutations_sync: '2' },
+      })
+      console.log(` 完了 (${Math.round((Date.now() - t0) / 1000)}s)`)
+    } catch (e) {
+      // テーブル単位で失敗しても続行 (部分完了 → 再実行で残りだけ対象になる = 冪等)
+      console.log(` ✗ 失敗: ${e.message?.split('\n')[0]?.slice(0, 120)}`)
+      failures.push(table)
+    }
   }
 
   console.log(`\n合計対象: ${totalAffected.toLocaleString()} 行`)
@@ -110,6 +122,9 @@ async function main() {
         leftover += n
         console.log(`  ! ${table}: ${n} 行 残留`)
       }
+    }
+    if (failures.length > 0) {
+      console.log(`  ! 失敗テーブル: ${failures.join(', ')} — 再実行 (--execute) で残りだけ再試行できます`)
     }
     console.log(leftover === 0 ? '  ✓ 全テーブル残留ゼロ — 再タグ完了' : `  ✗ 残留 ${leftover} 行 — mutation を確認してください`)
   } else {
