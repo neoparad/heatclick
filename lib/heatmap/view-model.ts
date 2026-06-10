@@ -241,6 +241,7 @@ function emptyViewModel(): HeatmapViewModel {
     emotionSummary: EMPTY_EMOTION_SUMMARY,
     hotspotCards: [],
     signalCards: [],
+    negativeSpots: [],
   }
 }
 
@@ -392,20 +393,25 @@ function buildExitRows(
 
   if (bins.size === 0 || totalSessions === 0) return []
 
-  return Array.from(bins.entries())
-    .sort(([a], [b]) => a - b)
-    .map(([pct, sessions]) => {
-      const dropoff = sessions / totalSessions
-      const level: import('@/lib/heatmap/types').ExitRow['level'] =
-        dropoff >= 0.3 ? 'hi' : dropoff >= 0.15 ? 'mid' : dropoff >= 0.05 ? 'lo' : 'ok'
-      return {
-        top: Math.round((pct / 100) * targetHeight),
-        height: Math.max(4, Math.round((SCROLL_BIN_PCT / 100) * targetHeight)),
-        sectionLabel: `${pct}%`,
-        exitPct: `${Math.round(dropoff * 100)}%`,
-        level,
-      }
+  // 続125 ② (Owner: 「途中で切れる」): 観測バケットだけでなく **0..95% の全スロット**を
+  // 連続で出す (データ無しスロットは dropoff=0)。描画が構造的に全高をカバーし、
+  // 「切れて見える」状態を作れなくする。
+  const rows: import('@/lib/heatmap/types').ExitRow[] = []
+  for (let s = 0; s < 100; s += SCROLL_BIN_PCT) {
+    const sessions = bins.get(s) ?? 0
+    const dropoff = sessions / totalSessions
+    const level: import('@/lib/heatmap/types').ExitRow['level'] =
+      dropoff >= 0.3 ? 'hi' : dropoff >= 0.15 ? 'mid' : dropoff >= 0.05 ? 'lo' : 'ok'
+    rows.push({
+      top: Math.round((s / 100) * targetHeight),
+      height: Math.max(4, Math.round((SCROLL_BIN_PCT / 100) * targetHeight)),
+      sectionLabel: `${s}%`,
+      exitPct: `${Math.round(dropoff * 100)}%`,
+      level,
+      dropoff,
     })
+  }
+  return rows
 }
 
 // ── 続123: element-level (本物のホットスポット / シグナル) builders ────────────
@@ -528,6 +534,34 @@ function buildDeadCountMap(
   return map
 }
 
+/**
+ * 続125 ③ (Owner: 「ネガティブスポットのタブを作るべき」):
+ * dead_click / rage_click の selector 別上位を統合し、回数降順のランキングにする。
+ * 右パネルの「ネガティブ」タブが表示する (ホットスポットの負の対)。
+ */
+function buildNegativeSpots(
+  elements: HeatmapElementsData | null | undefined,
+  pageY: number,
+  ctx?: HeatmapCoordinateContext,
+): import('@/lib/heatmap/types').NegativeSpot[] {
+  if (!elements) return []
+  const out: import('@/lib/heatmap/types').NegativeSpot[] = []
+  for (const sig of elements.signals) {
+    for (const t of sig.top) {
+      const p = scaleElementPoint(t.x, t.y, pageY, ctx)
+      out.push({
+        id: `neg-${sig.type}-${out.length + 1}`,
+        type: sig.type,
+        name: deriveElementName({ text: t.text, tag: '', selector: t.selector }),
+        selector: t.selector,
+        count: t.count,
+        y: p ? Math.round(p.y) : null,
+      })
+    }
+  }
+  return out.sort((a, b) => b.count - a.count).slice(0, 8)
+}
+
 /** rage/dead シグナル → canvas marker + 右パネル card。データが無い type は出さない。 */
 function buildSignalExtras(
   elements: HeatmapElementsData | null | undefined,
@@ -606,7 +640,9 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
   )
   const deadCounts = buildDeadCountMap(opts.elements)
   const elementCards = els.length > 0 ? buildElementHotspotCards(els, deadCounts) : []
-  const elementExtras = { ...signalExtras, hotspotCards: elementCards }
+  // 続125 ③: ネガティブスポット (dead/rage 要素ランキング) も全 real layer に同梱
+  const negativeSpots = buildNegativeSpots(opts.elements, pageY, opts.coordinateContext)
+  const elementExtras = { ...signalExtras, hotspotCards: elementCards, negativeSpots }
 
   // ── read (熟読 / attention) ─────────────────────────────────────────────
   if (heatmapType === 'read') {
@@ -673,5 +709,6 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
     emotionSummary: EMPTY_EMOTION_SUMMARY,
     hotspotCards: useElements ? elementCards : buildRealHotspotCards(hotspots),
     signalCards: signalExtras.signalCards,
+    negativeSpots,
   }
 }

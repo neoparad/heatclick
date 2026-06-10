@@ -17,7 +17,7 @@ export type EmotionKey = 'frust' | 'hes' | 'cmp' | 'eng' | 'conf' | 'anx'
 
 export type SignalKey = 'rage' | 'dead' | 'hover' | 'copy' | 'backscroll' | 'hesitation'
 
-export type SideTab = 'hotspots' | 'signals' | 'summary' | 'sessions'
+export type SideTab = 'hotspots' | 'negative' | 'signals' | 'summary' | 'sessions'
 
 export type DeviceKind = 'pc' | 'sp' | 'tab'
 
@@ -79,6 +79,8 @@ export interface ExitRow {
   sectionLabel: string
   exitPct: string
   level: 'lo' | 'mid' | 'hi' | 'ok'
+  /** 続125 ②: 数値 dropoff [0,1] (グラデーション描画用。旧 deploy 互換で optional) */
+  dropoff?: number
 }
 
 export interface EmotionDistribution {
@@ -143,6 +145,22 @@ export interface ScrollReachBand {
   reachLabel: string
 }
 
+/**
+ * 続125 (Owner ③): ネガティブスポット — dead_click / rage_click が観測された要素の
+ * ランキング。右パネルの専用タブに表示する (ホットスポットの負の対)。
+ */
+export interface NegativeSpot {
+  id: string
+  type: 'dead' | 'rage'
+  /** 人間可読ラベル (element_text or selector 由来) */
+  name: string
+  selector: string
+  /** 発生回数 */
+  count: number
+  /** capture CSS px の y (outlier guard で落ちた場合 null = 位置不明) */
+  y: number | null
+}
+
 export interface HeatmapViewModel {
   blobs: HeatBlob[]
   tags: HeatTag[]
@@ -156,6 +174,8 @@ export interface HeatmapViewModel {
   emotionSummary: EmotionDistribution
   hotspotCards: HotspotCard[]
   signalCards: SignalCard[]
+  /** 続125 ③: ネガティブスポット (dead/rage 要素ランキング、右パネル専用タブ) */
+  negativeSpots: NegativeSpot[]
 }
 
 /**

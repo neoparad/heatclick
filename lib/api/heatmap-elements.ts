@@ -52,6 +52,8 @@ export interface HeatmapElementsQuery {
   start_date?: string
   end_date?: string
   device_type?: 'desktop' | 'mobile' | 'tablet' | 'unknown'
+  /** 続125: 行動セグメント (lib/api/heatmap.ts HeatmapSegment と同一) */
+  segment?: 'all' | 'deep_read' | 'bounce' | 'ad'
 }
 
 interface ElementsSuccess {
@@ -78,6 +80,7 @@ export async function fetchHeatmapElements(
   if (query.start_date) params.set('start_date', query.start_date)
   if (query.end_date) params.set('end_date', query.end_date)
   if (query.device_type) params.set('device_type', query.device_type)
+  if (query.segment && query.segment !== 'all') params.set('segment', query.segment)
 
   try {
     const res = await fetch(`/api/heatmap/elements?${params.toString()}`, {

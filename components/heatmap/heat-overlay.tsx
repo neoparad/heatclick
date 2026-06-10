@@ -128,30 +128,7 @@ export function HeatOverlay({
       ) : null}
 
       {layers.has('exit') ? (
-        <div
-          className="exit-overlay pointer-events-none absolute inset-0"
-          data-testid="exit-overlay"
-        >
-          {vm.exitRows.map((row, i) => (
-            <div
-              key={`exit-${i}`}
-              className={`exit-row lvl-${row.level} absolute left-0 right-0 flex items-center px-[14px] py-1 font-mono text-[11px] font-bold text-white`}
-              style={{
-                top: row.top * displayScale,
-                height: row.height * displayScale,
-                background: EXIT_ROW_BG[row.level],
-                mixBlendMode: 'multiply',
-                textShadow: '0 1px 2px rgba(0,0,0,.3)',
-              }}
-              data-testid={`exit-row-${row.level}`}
-            >
-              <span>
-                {row.sectionLabel} — exit
-              </span>
-              <span className="ml-auto">{row.exitPct}</span>
-            </div>
-          ))}
-        </div>
+        <ExitGradientOverlay rows={vm.exitRows} displayScale={displayScale} />
       ) : null}
 
       {layers.has('attention') && vm.readBands.length > 0 ? (
@@ -257,9 +234,10 @@ function ReadBandOverlay({
 }
 
 /**
- * スクロール到達率 (scroll reach) バンドオーバーレイ。
- * 各深度の reach% を左端の縦グラデーション帯 + ラベルで表現する。
- * reach が高い (多くのセッションが到達) ほど濃い青系。
+ * スクロール到達率 (scroll reach) オーバーレイ。
+ * 続125 ②: 帯のベタ塗り (段差) をやめ、バンド中心を color stop にした連続 gradient 1 枚 +
+ * 10% 刻みの reach% ラベル。バンドは view-model が 0..95% を連続で出すため
+ * 構造的に screenshot 全高をカバーする (途切れ不可能)。
  */
 function ScrollReachOverlay({
   bands,
@@ -268,34 +246,118 @@ function ScrollReachOverlay({
   bands: ScrollReachBand[]
   displayScale: number
 }) {
+  const sorted = [...bands].sort((a, b) => a.top - b.top)
+  const maxBottom = sorted.reduce((m, b) => Math.max(m, b.top + b.height), 0)
+
+  const stops: string[] = []
+  if (maxBottom > 0) {
+    for (const band of sorted) {
+      const centerPct = (((band.top + band.height / 2) / maxBottom) * 100).toFixed(2)
+      const alpha = 0.08 + band.reach * 0.4
+      stops.push(`rgba(47,134,224,${alpha.toFixed(2)}) ${centerPct}%`)
+    }
+  }
+
+  // ラベルは 10% 刻み (= 2 バンドごと) のみ表示して clutter を避ける
+  const labeled = sorted.filter((_, i) => i % 2 === 0)
+
   return (
     <div
       className="scroll-reach-overlay pointer-events-none absolute inset-0"
       data-testid="scroll-reach-overlay"
     >
-      {bands.map((band, i) => {
-        const alpha = 0.12 + band.reach * 0.38
-        return (
-          <div
-            key={`scroll-reach-${i}`}
-            className="scroll-reach-band absolute left-0 right-0 flex items-center px-[10px] font-mono text-[10.5px] font-bold"
-            style={{
-              top: band.top * displayScale,
-              height: Math.max(2, band.height * displayScale),
-              background: `rgba(47,134,224,${alpha.toFixed(2)})`,
-              mixBlendMode: 'multiply',
-              borderBottom: '1px solid rgba(47,134,224,.15)',
-              color: 'rgba(10,40,90,.85)',
-            }}
-            data-testid={`scroll-reach-band-${i}`}
-            aria-hidden
-          >
-            <span style={{ textShadow: '0 1px 1px rgba(255,255,255,.7)' }}>
-              {band.reachLabel}
-            </span>
-          </div>
-        )
-      })}
+      {maxBottom > 0 ? (
+        <div
+          className="absolute left-0 right-0"
+          style={{
+            top: 0,
+            height: maxBottom * displayScale,
+            background: `linear-gradient(180deg, ${stops.join(', ')})`,
+            mixBlendMode: 'multiply',
+          }}
+          aria-hidden
+        />
+      ) : null}
+      {labeled.map((band, i) => (
+        <div
+          key={`scroll-reach-label-${i}`}
+          className="absolute left-[10px] font-mono text-[10.5px] font-bold"
+          style={{
+            top: (band.top + band.height / 2) * displayScale - 7,
+            color: 'rgba(10,40,90,.85)',
+            textShadow: '0 1px 1px rgba(255,255,255,.7)',
+          }}
+          data-testid={`scroll-reach-band-${i}`}
+          aria-hidden
+        >
+          {band.reachLabel}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * 続125 ②: 離脱 (exit) グラデーションオーバーレイ。
+ * view-model が 0..95% 全スロットを連続で出す (dropoff=0 は透明) ため全高カバー。
+ * dropoff >= 5% のスロットのみ右側にラベル表示。
+ */
+function ExitGradientOverlay({
+  rows,
+  displayScale,
+}: {
+  rows: import('@/lib/heatmap/types').ExitRow[]
+  displayScale: number
+}) {
+  const sorted = [...rows].sort((a, b) => a.top - b.top)
+  const maxBottom = sorted.reduce((m, r) => Math.max(m, r.top + r.height), 0)
+  const maxDrop = sorted.reduce((m, r) => Math.max(m, r.dropoff ?? 0), 0)
+
+  const stops: string[] = []
+  if (maxBottom > 0) {
+    for (const row of sorted) {
+      const centerPct = (((row.top + row.height / 2) / maxBottom) * 100).toFixed(2)
+      const norm = maxDrop > 0 ? (row.dropoff ?? 0) / maxDrop : 0
+      const alpha = norm * 0.5
+      stops.push(`rgba(214,69,69,${alpha.toFixed(2)}) ${centerPct}%`)
+    }
+  }
+
+  const labeled = sorted.filter((r) => (r.dropoff ?? 0) >= 0.05)
+
+  return (
+    <div
+      className="exit-overlay pointer-events-none absolute inset-0"
+      data-testid="exit-overlay"
+    >
+      {maxBottom > 0 ? (
+        <div
+          className="absolute left-0 right-0"
+          style={{
+            top: 0,
+            height: maxBottom * displayScale,
+            background: `linear-gradient(180deg, ${stops.join(', ')})`,
+            mixBlendMode: 'multiply',
+          }}
+          aria-hidden
+        />
+      ) : null}
+      {labeled.map((row, i) => (
+        <div
+          key={`exit-label-${i}`}
+          className="absolute right-[10px] rounded px-1.5 py-px font-mono text-[10.5px] font-bold"
+          style={{
+            top: (row.top + row.height / 2) * displayScale - 8,
+            color: '#fff',
+            background: EXIT_ROW_BG[row.level],
+            textShadow: '0 1px 2px rgba(0,0,0,.3)',
+          }}
+          data-testid={`exit-row-${row.level}`}
+          aria-hidden
+        >
+          {row.sectionLabel} 離脱 {row.exitPct}
+        </div>
+      ))}
     </div>
   )
 }

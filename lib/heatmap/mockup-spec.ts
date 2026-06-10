@@ -82,9 +82,10 @@ export const SIGNALS: ReadonlyArray<{ key: SignalKey; label: string; unique: boo
   { key: 'hesitation', label: 'hesitation (迷い)', unique: true },
 ]
 
-/** Side panel tabs */
+/** Side panel tabs (続125 ③: ネガティブスポット専用タブを追加) */
 export const SIDE_TABS: ReadonlyArray<{ key: SideTab; label: string }> = [
   { key: 'hotspots', label: 'ホットスポット' },
+  { key: 'negative', label: 'ネガティブ' },
   { key: 'signals', label: 'シグナル' },
   { key: 'summary', label: 'サマリー' },
   { key: 'sessions', label: 'セッション' },

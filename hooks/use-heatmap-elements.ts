@@ -25,12 +25,15 @@ export function useHeatmapElements(query: {
   pageUrl: string
   dateRange: { start: string; end: string }
   deviceType: 'all' | 'desktop' | 'mobile' | 'tablet'
+  /** 続125: 行動セグメント (未指定 = all) */
+  segment?: 'all' | 'deep_read' | 'bounce' | 'ad'
 }): UseHeatmapElementsResult {
   const [elements, setElements] = useState<HeatmapElementsData | null>(null)
   const [loading, setLoading] = useState(false)
 
   const { siteId, pageUrl, deviceType } = query
   const { start, end } = query.dateRange
+  const segment = query.segment ?? 'all'
 
   useEffect(() => {
     if (!siteId || !pageUrl) {
@@ -45,6 +48,7 @@ export function useHeatmapElements(query: {
       start_date: start,
       end_date: end,
       device_type: deviceType === 'all' ? undefined : deviceType,
+      segment,
     }
     fetchHeatmapElements(apiQuery, ctrl.signal)
       .then((data) => {
@@ -54,7 +58,7 @@ export function useHeatmapElements(query: {
         if (!ctrl.signal.aborted) setLoading(false)
       })
     return () => ctrl.abort()
-  }, [siteId, pageUrl, start, end, deviceType])
+  }, [siteId, pageUrl, start, end, deviceType, segment])
 
   return { elements, loading }
 }

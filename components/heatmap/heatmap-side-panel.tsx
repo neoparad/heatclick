@@ -22,6 +22,7 @@ import type {
   EmotionDistribution,
   EmotionKey,
   HotspotCard,
+  NegativeSpot,
   SideTab,
   SignalCard,
   SignalKey,
@@ -33,6 +34,8 @@ interface HeatmapSidePanelProps {
   emotionSummary: EmotionDistribution
   hotspotCards: HotspotCard[]
   signalCards: SignalCard[]
+  /** 続125 ③: ネガティブスポット (dead/rage 要素ランキング) */
+  negativeSpots: NegativeSpot[]
   enabledSignals: ReadonlySet<SignalKey>
   onToggleSignal: (key: SignalKey) => void
   onSelectHotspot?: (cardId: string) => void
@@ -44,6 +47,7 @@ export function HeatmapSidePanel({
   emotionSummary,
   hotspotCards,
   signalCards,
+  negativeSpots,
   enabledSignals,
   onToggleSignal,
   onSelectHotspot,
@@ -91,7 +95,9 @@ export function HeatmapSidePanel({
               ? hotspotCards.length
               : t.key === 'signals'
                 ? signalCards.length
-                : 0
+                : t.key === 'negative'
+                  ? negativeSpots.length
+                  : 0
           return (
             <button
               key={t.key}
@@ -135,6 +141,7 @@ export function HeatmapSidePanel({
             onSelectHotspot={onSelectHotspot}
           />
         ) : null}
+        {activeTab === 'negative' ? <NegativeView spots={negativeSpots} /> : null}
         {activeTab === 'signals' ? (
           <SignalsView
             signalCards={signalCards}
@@ -276,6 +283,74 @@ function EmotionTag({ emotion }: { emotion: EmotionKey | 'cmp' }) {
                 ? 'anxiety'
                 : 'confidence'}
     </span>
+  )
+}
+
+/**
+ * 続125 ③: ネガティブスポット — dead/rage が観測された要素のランキング。
+ * 「押されたのに反応しない」「連打される」= 直すべき場所の負のランキング。
+ */
+function NegativeView({ spots }: { spots: NegativeSpot[] }) {
+  return (
+    <div data-testid="hm-side-negative">
+      <div className="mb-2.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
+        ネガティブスポット (発生回数順)
+      </div>
+      {spots.length === 0 ? (
+        <div className="rounded-md border border-dashed border-[var(--ug-border)] bg-[var(--ug-panel-2,#fbfbfc)] px-3 py-2.5 text-[11.5px] leading-snug text-[var(--ug-text-3)]">
+          この期間・セグメントでは dead click / rage click は観測されていません。
+        </div>
+      ) : (
+        <ol className="space-y-2">
+          {spots.map((s, i) => (
+            <li key={s.id}>
+              <div
+                data-testid={`negative-spot-${i + 1}`}
+                className="w-full rounded-md border border-[var(--ug-border)] bg-[var(--ug-panel-2,#fbfbfc)] p-3"
+                style={{ borderLeft: '3px solid #d64545' }}
+              >
+                <div className="mb-1 flex items-center gap-2">
+                  <span
+                    className="inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full font-mono text-[10.5px] font-bold text-white"
+                    style={{ background: '#d64545' }}
+                  >
+                    {i + 1}
+                  </span>
+                  <span className="text-[12.5px] font-semibold tracking-tight text-[var(--ug-text)]">
+                    {s.name}
+                  </span>
+                  <span
+                    className="ml-auto rounded border px-1.5 py-px font-mono text-[9.5px] font-semibold"
+                    style={{
+                      color: s.type === 'rage' ? '#d64545' : '#6c6e75',
+                      background: s.type === 'rage' ? 'rgba(214,69,69,.08)' : 'rgba(108,110,117,.08)',
+                      borderColor: s.type === 'rage' ? 'rgba(214,69,69,.25)' : 'rgba(108,110,117,.25)',
+                    }}
+                  >
+                    {s.type === 'rage' ? 'レイジ' : 'デッド'}
+                  </span>
+                </div>
+                <div className="break-all font-mono text-[10.5px] text-[var(--ug-text-3)]">
+                  {s.selector}
+                </div>
+                <div className="mt-2 border-t border-dashed border-[var(--ug-border-2,#eef0f3)] pt-2 font-mono text-[10.5px] text-[var(--ug-text-3)]">
+                  発生{' '}
+                  <b className="font-semibold" style={{ color: 'var(--ug-red,#d64545)' }}>
+                    {s.count.toLocaleString()}
+                  </b>{' '}
+                  回
+                </div>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+      <AIPromptCta
+        title="ネガティブスポットを直す"
+        body="反応しない要素・連打される要素は離脱要因です。AI に改善案を依頼できます。"
+        cta="改善案を依頼 →"
+      />
+    </div>
   )
 }
 

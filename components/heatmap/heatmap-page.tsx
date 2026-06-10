@@ -27,7 +27,13 @@ import { EvidenceBadge } from '@/components/dashboard/evidence-badge'
 import { useHeatmapElements } from '@/hooks/use-heatmap-elements'
 import { useHeatmapTiles } from '@/hooks/use-heatmap-tiles'
 import { pageStatsToLabels, usePageStats } from '@/hooks/use-page-stats'
-import type { HeatmapLayer, HeatmapPoint, HeatmapTile } from '@/lib/api/heatmap'
+import {
+  SEGMENT_LABELS,
+  type HeatmapLayer,
+  type HeatmapPoint,
+  type HeatmapSegment,
+  type HeatmapTile,
+} from '@/lib/api/heatmap'
 
 // 直接 import (旧: dynamic({ssr:false}))。本コンポーネントは route 側で既に ssr:false の
 // 配下にあり、二重 dynamic は client チャンクの待ちを増やすだけで利点が無いため統合。
@@ -73,6 +79,8 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
   // 続124: device は canvas の PC/SP/TAB タブと同一 state (screenshot + データ両方を切替)
   const [device, setDevice] = useState<CanvasDevice>('pc')
   const [periodDays, setPeriodDays] = useState<PeriodDays>(7)
+  // 続125 (Owner ①): 行動セグメント — 観測ベースのクラスタ分け (熟読層/浅読層/広告流入)
+  const [segment, setSegment] = useState<HeatmapSegment>('all')
   const [selected, setSelected] = useState<{ point: HeatmapPoint; tile: HeatmapTile } | null>(null)
 
   const dateRange = useMemo(() => periodToRange(periodDays), [periodDays])
@@ -84,6 +92,7 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
       page_url: pageUrl,
       layer,
       device_type: deviceFilter,
+      segment,
       start_date: dateRange.start,
       end_date: dateRange.end,
       // 続 117 v2: tile_size = 1 tile がカバーする縦 y-px 窓 (800-6000, 既定 2400)。最大の 6000 に
@@ -92,7 +101,7 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
       //  tile を細切れにすると最初の数枚しか描画されなかった = bug #5)。
       tile_size: 6000,
     }),
-    [siteId, pageUrl, layer, deviceFilter, dateRange.start, dateRange.end],
+    [siteId, pageUrl, layer, deviceFilter, segment, dateRange.start, dateRange.end],
   )
 
   const { tiles, loading, hasMore, pageHeightEstimate, meta, error, loadMore } =
@@ -114,6 +123,7 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
     pageUrl,
     dateRange,
     deviceType: deviceFilter,
+    segment,
   })
 
   return (
@@ -165,6 +175,28 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
           >
             直近 30 日
           </SegmentChip>
+        </div>
+
+        <span className="hidden h-4 w-px bg-[var(--ug-border)] md:block" aria-hidden />
+
+        {/* 続125 (Owner ①): 行動セグメント — 観測データから直接導出するクラスタ分け。
+            熟読層 = max scroll>=70% / 浅読・直帰層 = <=20% / 広告流入 = gclid・fbclid。
+            ML ペルソナ (persona_sessions) が ClickHouse に配管されたら同じ列に追加する。 */}
+        <div role="radiogroup" aria-label="行動セグメント" className="flex items-center gap-1.5">
+          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
+            Segment
+          </span>
+          {SEGMENT_LABELS.map((s) => (
+            <SegmentChip
+              key={s.key}
+              asRadio
+              active={segment === s.key}
+              onClick={() => setSegment(s.key)}
+              data-testid={`segment-chip-segment-${s.key}`}
+            >
+              {s.label}
+            </SegmentChip>
+          ))}
         </div>
 
         <div className="ml-auto">

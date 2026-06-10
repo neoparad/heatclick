@@ -37,7 +37,42 @@ const querySchema = z.object({
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .optional(),
   device_type: z.enum(['desktop', 'mobile', 'tablet', 'unknown']).optional(),
+  // 続125: 行動セグメント (tile API と同一定義)
+  segment: z.enum(['all', 'deep_read', 'bounce', 'ad']).default('all'),
 })
+
+/**
+ * 続125: 行動セグメントの session 絞り込み SQL 断片 (app/api/heatmap/route.ts と同一規約:
+ * 定数断片 + parameter binding のみ、ユーザー入力の文字列連結なし)。
+ */
+function segmentFilterSql(segment: 'all' | 'deep_read' | 'bounce' | 'ad'): string {
+  if (segment === 'all') return ''
+  if (segment === 'ad') {
+    return `AND session_id IN (
+      SELECT DISTINCT session_id FROM clickinsight.events
+      WHERE tenant_id = {tenant_id:String}
+        AND site_id = {site_id:String}
+        AND url = {page_url:String}
+        AND is_agent = 0
+        AND ((gclid IS NOT NULL AND gclid != '') OR (fbclid IS NOT NULL AND fbclid != ''))
+        AND timestamp >= toDateTime({start:String})
+        AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+    )`
+  }
+  const havingCond =
+    segment === 'deep_read' ? 'max(scroll_percentage) >= 70' : 'max(scroll_percentage) <= 20'
+  return `AND session_id IN (
+    SELECT session_id FROM clickinsight.events
+    WHERE tenant_id = {tenant_id:String}
+      AND site_id = {site_id:String}
+      AND url = {page_url:String}
+      AND is_agent = 0
+      AND timestamp >= toDateTime({start:String})
+      AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+    GROUP BY session_id
+    HAVING ${havingCond}
+  )`
+}
 
 const TOP_ELEMENTS_LIMIT = 6
 /** signal selector 上位 (マーカー描画 + whereLabel)。type 毎にこの件数まで。 */
@@ -72,6 +107,7 @@ export async function GET(request: Request) {
     start_date: url.searchParams.get('start_date') ?? undefined,
     end_date: url.searchParams.get('end_date') ?? undefined,
     device_type: url.searchParams.get('device_type') ?? undefined,
+    segment: url.searchParams.get('segment') ?? undefined,
   })
   if (!parsed.success) {
     return NextResponse.json(
@@ -100,6 +136,7 @@ export async function GET(request: Request) {
   }
 
   const deviceFilter = params.device_type ? `AND device_type = {device_type:String}` : ''
+  const segmentFilter = segmentFilterSql(params.segment)
   const queryParams: Record<string, string> = {
     tenant_id: session.tenant_id,
     site_id: params.site_id,
@@ -134,6 +171,7 @@ export async function GET(request: Request) {
           AND timestamp >= toDateTime({start:String})
           AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
           ${deviceFilter}
+          ${segmentFilter}
         GROUP BY selector
         ORDER BY clicks DESC
         LIMIT ${TOP_ELEMENTS_LIMIT}
@@ -163,6 +201,7 @@ export async function GET(request: Request) {
           AND timestamp >= toDateTime({start:String})
           AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
           ${deviceFilter}
+          ${segmentFilter}
         GROUP BY event_type, selector
         ORDER BY count DESC
         LIMIT 100

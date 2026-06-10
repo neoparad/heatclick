@@ -548,5 +548,43 @@ describe('buildHeatmapViewModel', () => {
       ).toBe(true)
       expect(vm.tags[0].intent).toBe('warn')
     })
+
+    it('builds negativeSpots ranking from dead/rage tops (続125 ③)', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+      })
+      expect(vm.negativeSpots.length).toBeGreaterThan(0)
+      expect(vm.negativeSpots[0]).toMatchObject({ type: 'dead', count: 200 })
+      expect(vm.negativeSpots[0].name).toContain('反応しない領域')
+      // 回数降順
+      const counts = vm.negativeSpots.map((s) => s.count)
+      expect([...counts].sort((a, b) => b - a)).toEqual(counts)
+    })
+
+    it('exit layer emits continuous 0..95% slots (続125 ② — cannot visually cut off)', () => {
+      const exitMeta: HeatmapTileMeta = {
+        ...metaWith('clickhouse_events'),
+        heatmap_type: 'exit',
+      }
+      // 観測は 2 スロットのみ (10% と 90%) — それでも全 20 スロットが出る
+      const vm = buildHeatmapViewModel({
+        tiles: [
+          tileWith([
+            { x: 0, y: 10, count: 5, sessions: 5 },
+            { x: 0, y: 90, count: 3, sessions: 3 },
+          ]),
+        ],
+        meta: exitMeta,
+        coordinateContext: { sourceWidth: 1280, referenceWidth: 720, pageHeight: 10_000 },
+      })
+      expect(vm.exitRows).toHaveLength(20)
+      // 最初のスロットは 0px、最後のスロットは 95% 位置 = 9500px
+      expect(vm.exitRows[0].top).toBe(0)
+      expect(vm.exitRows[19].top).toBe(9500)
+      // 観測ありスロットは dropoff > 0、なしは 0
+      expect(vm.exitRows.filter((r) => (r.dropoff ?? 0) > 0)).toHaveLength(2)
+    })
   })
 })
