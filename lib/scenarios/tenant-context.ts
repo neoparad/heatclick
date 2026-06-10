@@ -16,6 +16,8 @@
 
 import { NextResponse, type NextRequest } from 'next/server'
 
+import { emitScenarioAudit } from './audit'
+
 const SITE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 
 export interface ScenarioTenantContext {
@@ -64,6 +66,20 @@ export function resolveScenarioTenantContext(
     .filter((s) => s.length > 0)
 
   if (!siteIds.includes(siteId)) {
+    // §3.8.1: cross-tenant アクセス試行は 403 で拒否 + audit_events に記録 (best-effort)。
+    // この層では scenario_id は未確定のため、resource として試行された site_id を記録する。
+    void emitScenarioAudit({
+      action: 'scenario.access_denied',
+      tenant_id: tenantId,
+      scenario_id: siteId,
+      user_id: userId,
+      response_status: 403,
+      metadata: {
+        reason: 'site_not_in_tenant',
+        attempted_site_id: siteId,
+        granted_site_ids: siteIds,
+      },
+    })
     return NextResponse.json(
       { error: 'forbidden', message: 'site_id is not in the authenticated tenant' },
       { status: 403 },
