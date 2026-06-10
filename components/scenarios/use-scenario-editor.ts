@@ -56,6 +56,8 @@ export interface UseScenarioEditorResult {
   setStatus: (value: ScenarioStatus) => void
   setConditionAst: (next: ConditionNode) => void
   updateVariant: (variantId: string, patch: Partial<Variant>) => void
+  /** variants 配列を丸ごと差し替え (content_type 切替・追加・削除など shape 変更を伴う操作用) */
+  setVariants: (next: Variant[]) => void
   /** Save 実行 (PUT API call) */
   save: () => Promise<void>
   /** dirty state を original に reset */
@@ -120,6 +122,9 @@ export function useScenarioEditor(opts: UseScenarioEditorOptions): UseScenarioEd
       ...d,
       variants: d.variants.map((v) => (v.id === variantId ? ({ ...v, ...patch } as Variant) : v)),
     }))
+  }, [])
+  const setVariants = useCallback((next: Variant[]) => {
+    setDraft((d) => ({ ...d, variants: next }))
   }, [])
 
   const reset = useCallback(() => {
@@ -188,6 +193,7 @@ export function useScenarioEditor(opts: UseScenarioEditorOptions): UseScenarioEd
     setStatus,
     setConditionAst,
     updateVariant,
+    setVariants,
     save,
     reset,
   }
