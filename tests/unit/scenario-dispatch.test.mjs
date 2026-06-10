@@ -79,13 +79,14 @@ function setup({ sessionSeed = { ci_sid: 'sess1' }, cookie = '__ugk_vid=vis123' 
     userAgent: 'Mozilla/5.0 (Windows NT 10.0)',
     language: 'ja-JP',
     sendBeacon: (url, blob) => {
-      beacons.push({ url, payload: JSON.parse(blob._payload) })
+      beacons.push({ url, payload: JSON.parse(blob._payload), type: blob._type })
       return true
     },
   }
   class FakeBlob {
-    constructor(parts) {
+    constructor(parts, opts) {
       this._payload = parts.join('')
+      this._type = opts && opts.type
     }
   }
 
@@ -179,4 +180,14 @@ test('evaluateAll: draft is neither measured nor rendered', () => {
   runtime.evaluateAll([scenario('draft')])
   assert.equal(beacons.length, 0)
   assert.equal(createdTags.length, 0)
+})
+
+test('scenario_match beacon uses a text/plain Blob (CORS simple request, no preflight)', () => {
+  // cross-origin の event-ingest worker は ACAO:* のため、application/json (non-simple) だと
+  // credentialed sendBeacon で preflight が blocked になる。tracking.js と同じ text/plain で送る。
+  const { runtime, beacons } = setup()
+  runtime.evaluateAll([scenario('live')])
+  const match = beacons.find((b) => b.payload.match_type === 'match')
+  assert.ok(match, 'expected a match beacon')
+  assert.equal(match.type, 'text/plain')
 })

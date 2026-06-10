@@ -259,9 +259,14 @@
       evaluation_ms: evalMs || 0,
     }
     try {
-      var blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
+      // CORS: cross-origin の event-ingest worker は ACAO:* を返すため、credentialed な
+      // sendBeacon で 'application/json' (non-simple) を送ると preflight が走り blocked になる。
+      // tracking.js (public/v2/tracking.js) と同じく 'text/plain' (CORS simple request、
+      // preflight 無し) で送る。worker は body を JSON parse するので content-type 非依存。
+      var blob = new Blob([JSON.stringify(payload)], { type: 'text/plain' })
       var ok = navigator.sendBeacon && navigator.sendBeacon(TRACK_URL, blob)
       if (!ok) {
+        // fallback も text/plain blob のため simple request (preflight 無し)。
         fetch(TRACK_URL, { method: 'POST', body: blob, keepalive: true }).catch(function () {})
       }
     } catch (e) { /* noop */ }
