@@ -41,9 +41,43 @@ export interface HeatmapSignalStat {
   }>
 }
 
+/**
+ * 続126 ⑤: 画像視認率 (image_visibility 専用テーブル由来)。
+ * y/w/h は median (混在 viewport の外れ値に強い)、document CSS px。
+ */
+export interface HeatmapImageStat {
+  src: string
+  alt: string
+  /** この画像を視認したセッション数 */
+  sessions: number
+  views: number
+  /** 平均最大視認率 [0,1] (どこまで画面内に入ったか) */
+  avg_ratio: number
+  /** 視認時間の中央値 (ms) */
+  median_ms: number
+  y: number
+  w: number
+  h: number
+}
+
+/** 続126 ★: UGOKI Crawl が取り込んだページ構造/品質 issue。 */
+export interface HeatmapPageIssue {
+  category: string
+  type: string
+  severity: string
+  count: number
+  recommendation: string
+}
+
 export interface HeatmapElementsData {
+  /** クリック率の分母: フィルタ適用後のページ全セッション数 */
+  page_sessions: number
   elements: HeatmapElementStat[]
   signals: HeatmapSignalStat[]
+  /** 画像視認率 (データ無しページは []) */
+  images: HeatmapImageStat[]
+  /** クロール由来の構造 issue (クロール未取込ページは []) */
+  issues: HeatmapPageIssue[]
 }
 
 export interface HeatmapElementsQuery {

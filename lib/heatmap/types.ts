@@ -17,7 +17,7 @@ export type EmotionKey = 'frust' | 'hes' | 'cmp' | 'eng' | 'conf' | 'anx'
 
 export type SignalKey = 'rage' | 'dead' | 'hover' | 'copy' | 'backscroll' | 'hesitation'
 
-export type SideTab = 'hotspots' | 'negative' | 'signals' | 'summary' | 'sessions'
+export type SideTab = 'hotspots' | 'negative' | 'signals' | 'structure' | 'summary' | 'sessions'
 
 export type DeviceKind = 'pc' | 'sp' | 'tab'
 
@@ -161,6 +161,36 @@ export interface NegativeSpot {
   y: number | null
 }
 
+/**
+ * 続126 ⑤: 画像視認スポット — canvas 上の hover 領域 + tooltip。
+ * 座標は capture CSS px 空間 (overlay 側で displayScale を掛ける)。
+ */
+export interface ImageSpot {
+  id: string
+  /** 領域上端 (capture CSS px) */
+  y: number
+  /** 領域高さ (capture CSS px) */
+  height: number
+  /** alt or src 末尾由来の人間可読ラベル */
+  name: string
+  /** このフィルタ条件でページに来たセッションのうち、この画像を視認した割合 [0,1] */
+  viewRate: number
+  /** 平均最大視認率 [0,1] */
+  ratio: number
+  /** 視認時間の中央値 (秒) */
+  medianSec: number
+  sessions: number
+}
+
+/** 続126 ★: クロール由来 issue (右パネル「構造」タブ表示用の生データ)。 */
+export interface PageIssueItem {
+  category: string
+  type: string
+  severity: string
+  count: number
+  recommendation: string
+}
+
 export interface HeatmapViewModel {
   blobs: HeatBlob[]
   tags: HeatTag[]
@@ -176,6 +206,10 @@ export interface HeatmapViewModel {
   signalCards: SignalCard[]
   /** 続125 ③: ネガティブスポット (dead/rage 要素ランキング、右パネル専用タブ) */
   negativeSpots: NegativeSpot[]
+  /** 続126 ⑤: 画像視認スポット (canvas hover 領域) */
+  imageSpots: ImageSpot[]
+  /** 続126 ★: クロール由来 issue (構造タブ) */
+  pageIssues: PageIssueItem[]
 }
 
 /**

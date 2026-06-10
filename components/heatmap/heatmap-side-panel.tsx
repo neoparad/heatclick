@@ -23,6 +23,7 @@ import type {
   EmotionKey,
   HotspotCard,
   NegativeSpot,
+  PageIssueItem,
   SideTab,
   SignalCard,
   SignalKey,
@@ -36,6 +37,8 @@ interface HeatmapSidePanelProps {
   signalCards: SignalCard[]
   /** 続125 ③: ネガティブスポット (dead/rage 要素ランキング) */
   negativeSpots: NegativeSpot[]
+  /** 続126 ★: クロール由来の構造 issue (UGOKI Crawl 取込ページのみ非空) */
+  pageIssues: PageIssueItem[]
   enabledSignals: ReadonlySet<SignalKey>
   onToggleSignal: (key: SignalKey) => void
   onSelectHotspot?: (cardId: string) => void
@@ -48,6 +51,7 @@ export function HeatmapSidePanel({
   hotspotCards,
   signalCards,
   negativeSpots,
+  pageIssues,
   enabledSignals,
   onToggleSignal,
   onSelectHotspot,
@@ -97,7 +101,9 @@ export function HeatmapSidePanel({
                 ? signalCards.length
                 : t.key === 'negative'
                   ? negativeSpots.length
-                  : 0
+                  : t.key === 'structure'
+                    ? pageIssues.length
+                    : 0
           return (
             <button
               key={t.key}
@@ -142,6 +148,7 @@ export function HeatmapSidePanel({
           />
         ) : null}
         {activeTab === 'negative' ? <NegativeView spots={negativeSpots} /> : null}
+        {activeTab === 'structure' ? <StructureView issues={pageIssues} /> : null}
         {activeTab === 'signals' ? (
           <SignalsView
             signalCards={signalCards}
@@ -349,6 +356,80 @@ function NegativeView({ spots }: { spots: NegativeSpot[] }) {
         title="ネガティブスポットを直す"
         body="反応しない要素・連打される要素は離脱要因です。AI に改善案を依頼できます。"
         cta="改善案を依頼 →"
+      />
+    </div>
+  )
+}
+
+/** severity 文字列 → 表示色 (critical/high=赤, medium=琥珀, その他=灰)。 */
+function severityColor(severity: string): { fg: string; bg: string } {
+  const s = severity.toLowerCase()
+  if (s.includes('critical') || s.includes('high') || s === '3' || s === '4') {
+    return { fg: '#d64545', bg: 'rgba(214,69,69,.08)' }
+  }
+  if (s.includes('medium') || s === '2') {
+    return { fg: '#c9911a', bg: 'rgba(201,145,26,.08)' }
+  }
+  return { fg: '#6c6e75', bg: 'rgba(108,110,117,.08)' }
+}
+
+/**
+ * 続126 ★ (Owner: 「LLMクローラーで意味・構造の価値を右メニューに」):
+ * UGOKI Crawl が取り込んだページ構造/品質 issue (SEO / a11y / content / perf)。
+ * 行動データと同じ画面に「ページの作り」の問題を並べる = 行動×構造の融合ビュー。
+ */
+function StructureView({ issues }: { issues: PageIssueItem[] }) {
+  return (
+    <div data-testid="hm-side-structure">
+      <div className="mb-2.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
+        構造・品質 issue (UGOKI Crawl)
+      </div>
+      {issues.length === 0 ? (
+        <div className="rounded-md border border-dashed border-[var(--ug-border)] bg-[var(--ug-panel-2,#fbfbfc)] px-3 py-2.5 text-[11.5px] leading-snug text-[var(--ug-text-3)]">
+          このページのクロール結果はまだ取り込まれていません。UGOKI Crawl
+          の定期実行で自動反映されます (取込済みページでは SEO / アクセシビリティ /
+          コンテンツ品質の issue がここに表示されます)。
+        </div>
+      ) : (
+        <ol className="space-y-2">
+          {issues.map((issue, i) => {
+            const c = severityColor(issue.severity)
+            return (
+              <li key={`issue-${i}`}>
+                <div
+                  data-testid={`structure-issue-${i + 1}`}
+                  className="w-full rounded-md border border-[var(--ug-border)] bg-[var(--ug-panel-2,#fbfbfc)] p-3"
+                  style={{ borderLeft: `3px solid ${c.fg}` }}
+                >
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="text-[12.5px] font-semibold tracking-tight text-[var(--ug-text)]">
+                      {issue.type}
+                    </span>
+                    <span
+                      className="ml-auto rounded border px-1.5 py-px font-mono text-[9.5px] font-semibold"
+                      style={{ color: c.fg, background: c.bg, borderColor: `${c.fg}40` }}
+                    >
+                      {issue.severity}
+                    </span>
+                  </div>
+                  <div className="font-mono text-[10px] uppercase tracking-[0.04em] text-[var(--ug-text-3)]">
+                    {issue.category} · {issue.count} 件
+                  </div>
+                  {issue.recommendation ? (
+                    <div className="mt-1.5 border-t border-dashed border-[var(--ug-border-2,#eef0f3)] pt-1.5 text-[11px] leading-snug text-[var(--ug-text-2)]">
+                      {issue.recommendation}
+                    </div>
+                  ) : null}
+                </div>
+              </li>
+            )
+          })}
+        </ol>
+      )}
+      <AIPromptCta
+        title="行動 × 構造で直す順を出す"
+        body="AIチャットの「直すべき所ランキング」は、これらの issue を実ユーザーの行動 (到達・摩擦) で重み付けします。"
+        cta="AI に直す順を聞く →"
       />
     </div>
   )

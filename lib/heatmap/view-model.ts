@@ -242,6 +242,8 @@ function emptyViewModel(): HeatmapViewModel {
     hotspotCards: [],
     signalCards: [],
     negativeSpots: [],
+    imageSpots: [],
+    pageIssues: [],
   }
 }
 
@@ -495,10 +497,13 @@ function buildElementTags(
  * 要素集計 → 右パネルの本物ホットスポットカード。
  * 続124 ⑨ (Owner: 「ネガティブスポットもあるべき」): dead_click が観測された要素は
  * intent='warn' (赤枠) + デッド回数を stats に出す = ネガティブスポットの可視化。
+ * 続126 ★ (Owner: 「ボタンのクリック率も可視化」): pageSessions を分母にした
+ * クリック率% (その要素をクリックしたセッション / ページ全セッション) を表示。
  */
 function buildElementHotspotCards(
   els: HeatmapElementStat[],
   deadCounts: ReadonlyMap<string, number>,
+  pageSessions: number,
 ): HotspotCard[] {
   return els.slice(0, MAX_HOTSPOTS).map((el, i) => {
     const dead = deadCounts.get(el.selector) ?? 0
@@ -506,6 +511,14 @@ function buildElementHotspotCards(
       { label: 'クリック', value: el.clicks.toLocaleString() },
       { label: 'セッション', value: el.sessions.toLocaleString() },
     ]
+    if (pageSessions > 0) {
+      const rate = (el.sessions / pageSessions) * 100
+      stats.push({
+        label: 'クリック率',
+        value: `${rate >= 10 ? Math.round(rate) : rate.toFixed(1)}%`,
+        tone: 'pos',
+      })
+    }
     if (dead > 0) {
       stats.push({ label: 'デッド', value: dead.toLocaleString(), tone: 'neg' })
     }
@@ -520,6 +533,51 @@ function buildElementHotspotCards(
       stats,
     }
   })
+}
+
+/**
+ * 続126 ⑤: 画像視認率 → canvas hover 領域。
+ * y/h は document CSS px (median) → click と同じ座標変換。w は領域幅に使わず
+ * full-width hover 帯にする (記事画像はカラム幅が支配的、x 列は未収集のため)。
+ */
+function buildImageSpots(
+  elements: HeatmapElementsData | null | undefined,
+  pageY: number,
+  ctx: HeatmapCoordinateContext | undefined,
+  pageSessions: number,
+): import('@/lib/heatmap/types').ImageSpot[] {
+  const images = elements?.images ?? []
+  const out: import('@/lib/heatmap/types').ImageSpot[] = []
+  for (const img of images) {
+    const p = scaleElementPoint(0, img.y, pageY, ctx)
+    if (!p) continue
+    // 高さも y と同じ空間 (ctx あり = raw px / なし = 圧縮率を掛ける)
+    const height = ctx
+      ? img.h
+      : pageY > 0
+        ? (img.h / pageY) * MOCK_PAGE_HEIGHT
+        : img.h
+    const name = img.alt.trim() || decodeURIComponentSafe(img.src.split('/').pop() ?? '画像')
+    out.push({
+      id: `img-${out.length + 1}`,
+      y: Math.round(p.y),
+      height: Math.max(24, Math.round(height)),
+      name: name.length > 30 ? `${name.slice(0, 30)}…` : name,
+      viewRate: pageSessions > 0 ? Math.min(1, img.sessions / pageSessions) : 0,
+      ratio: img.avg_ratio,
+      medianSec: Math.round(img.median_ms / 1000),
+      sessions: img.sessions,
+    })
+  }
+  return out
+}
+
+function decodeURIComponentSafe(s: string): string {
+  try {
+    return decodeURIComponent(s)
+  } catch {
+    return s
+  }
 }
 
 /** dead_click の selector → 回数 map (ネガティブスポット判定用)。 */
@@ -639,10 +697,21 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
     (el) => scaleElementPoint(el.x, el.y, pageY, opts.coordinateContext) !== null,
   )
   const deadCounts = buildDeadCountMap(opts.elements)
-  const elementCards = els.length > 0 ? buildElementHotspotCards(els, deadCounts) : []
+  const pageSessions = opts.elements?.page_sessions ?? 0
+  const elementCards =
+    els.length > 0 ? buildElementHotspotCards(els, deadCounts, pageSessions) : []
   // 続125 ③: ネガティブスポット (dead/rage 要素ランキング) も全 real layer に同梱
   const negativeSpots = buildNegativeSpots(opts.elements, pageY, opts.coordinateContext)
-  const elementExtras = { ...signalExtras, hotspotCards: elementCards, negativeSpots }
+  // 続126 ⑤/★: 画像視認スポット + クロール issue も全 real layer に同梱
+  const imageSpots = buildImageSpots(opts.elements, pageY, opts.coordinateContext, pageSessions)
+  const pageIssues = opts.elements?.issues ?? []
+  const elementExtras = {
+    ...signalExtras,
+    hotspotCards: elementCards,
+    negativeSpots,
+    imageSpots,
+    pageIssues,
+  }
 
   // ── read (熟読 / attention) ─────────────────────────────────────────────
   if (heatmapType === 'read') {
@@ -710,5 +779,7 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
     hotspotCards: useElements ? elementCards : buildRealHotspotCards(hotspots),
     signalCards: signalExtras.signalCards,
     negativeSpots,
+    imageSpots,
+    pageIssues,
   }
 }

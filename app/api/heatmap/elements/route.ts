@@ -77,6 +77,10 @@ function segmentFilterSql(segment: 'all' | 'deep_read' | 'bounce' | 'ad'): strin
 const TOP_ELEMENTS_LIMIT = 6
 /** signal selector 上位 (マーカー描画 + whereLabel)。type 毎にこの件数まで。 */
 const TOP_SIGNALS_PER_TYPE = 12
+/** 画像視認率 (続126 ⑤): 上位画像の件数 */
+const TOP_IMAGES_LIMIT = 12
+/** 構造 issue (続126 ★クロール価値): 上位 issue の件数 */
+const TOP_ISSUES_LIMIT = 8
 
 interface ElementRow {
   selector: string
@@ -227,10 +231,103 @@ export async function GET(request: Request) {
       }
     })
 
+    // 3) ページ全体セッション数 (続126 ★: 要素クリック率の分母)
+    const pageSessionsRs = await ch.query({
+      query: `
+        SELECT uniqExact(session_id) AS sessions
+        FROM clickinsight.events
+        WHERE tenant_id = {tenant_id:String}
+          AND site_id = {site_id:String}
+          AND url = {page_url:String}
+          AND is_agent = 0
+          AND timestamp >= toDateTime({start:String})
+          AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+          ${deviceFilter}
+          ${segmentFilter}
+      `,
+      query_params: queryParams,
+      format: 'JSONEachRow',
+    })
+    const pageSessions = Number(
+      ((await pageSessionsRs.json()) as Array<{ sessions: number }>)[0]?.sessions ?? 0,
+    )
+
+    // 4) 画像視認率 (続126 ⑤): image_visibility 専用テーブル。
+    //    座標は median (混在 viewport の外れ値に強い)。duration は median (累積計測のため
+    //    avg は跳ねる)。segment は session 単位サブクエリがそのまま適用可能。
+    const imagesRs = await ch.query({
+      query: `
+        SELECT
+          image_src AS src,
+          anyLast(image_alt) AS alt,
+          uniqExact(session_id) AS sessions,
+          count() AS views,
+          round(avg(max_visible_ratio), 3) AS avg_ratio,
+          toUInt32(round(quantile(0.5)(visible_duration_ms))) AS median_ms,
+          toUInt32(round(quantile(0.5)(image_y))) AS y,
+          toUInt16(round(quantile(0.5)(image_width))) AS w,
+          toUInt16(round(quantile(0.5)(image_height))) AS h
+        FROM clickinsight.image_visibility
+        WHERE tenant_id = {tenant_id:String}
+          AND site_id = {site_id:String}
+          AND page_url = {page_url:String}
+          AND created_at >= toDateTime({start:String})
+          AND created_at < toDateTime({end:String}) + INTERVAL 1 DAY
+          ${params.device_type ? 'AND device_type = {device_type:String}' : ''}
+          ${segmentFilter}
+        GROUP BY src
+        ORDER BY sessions DESC
+        LIMIT ${TOP_IMAGES_LIMIT}
+      `,
+      query_params: queryParams,
+      format: 'JSONEachRow',
+    })
+    const imageRows = (await imagesRs.json()) as Array<{
+      src: string
+      alt: string
+      sessions: number
+      views: number
+      avg_ratio: number
+      median_ms: number
+      y: number
+      w: number
+      h: number
+    }>
+
+    // 5) 構造 issue (続126 ★クロール価値): UGOKI Crawl が取り込んだ page_issues。
+    //    クロール未取込ページは 0 行 = UI は「クロール未取込」を表示 (graceful)。
+    const issuesRs = await ch.query({
+      query: `
+        SELECT
+          issue_category,
+          issue_type,
+          severity,
+          count() AS n,
+          anyLast(substring(recommendation, 1, 200)) AS recommendation
+        FROM clickinsight.page_issues
+        WHERE tenant_id = {tenant_id:String}
+          AND site_id = {site_id:String}
+          AND page_url = {page_url:String}
+        GROUP BY issue_category, issue_type, severity
+        ORDER BY severity DESC, n DESC
+        LIMIT ${TOP_ISSUES_LIMIT}
+      `,
+      query_params: queryParams,
+      format: 'JSONEachRow',
+    })
+    const issueRows = (await issuesRs.json()) as Array<{
+      issue_category: string
+      issue_type: string
+      severity: string | number
+      n: number
+      recommendation: string
+    }>
+
     return NextResponse.json(
       {
         success: true,
         data: {
+          page_sessions: pageSessions,
           elements: elementRows.map((r) => ({
             selector: r.selector,
             text: r.text,
@@ -242,6 +339,24 @@ export async function GET(request: Request) {
             y: Number(r.y),
           })),
           signals,
+          images: imageRows.map((r) => ({
+            src: r.src,
+            alt: r.alt,
+            sessions: Number(r.sessions),
+            views: Number(r.views),
+            avg_ratio: Number(r.avg_ratio),
+            median_ms: Number(r.median_ms),
+            y: Number(r.y),
+            w: Number(r.w),
+            h: Number(r.h),
+          })),
+          issues: issueRows.map((r) => ({
+            category: r.issue_category,
+            type: r.issue_type,
+            severity: String(r.severity),
+            count: Number(r.n),
+            recommendation: r.recommendation,
+          })),
         },
       },
       // 集計はリアルタイム性不要。ブラウザ private cache 2 分で再ナビを軽くする。

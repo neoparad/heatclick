@@ -410,6 +410,7 @@ describe('buildHeatmapViewModel', () => {
   // ── 続123: element-level (本物のホットスポット / シグナル) ───────────────
   describe('element-level hotspots / signals (続123)', () => {
     const elementsData: HeatmapElementsData = {
+      page_sessions: 870,
       elements: [
         {
           selector: '#bihadashop-toc-container>div>nav>ul>li:nth-child(2)>a',
@@ -440,6 +441,28 @@ describe('buildHeatmapViewModel', () => {
           top: [{ selector: '#dead-zone', text: '反応しない領域', count: 200, x: 100, y: 500 }],
         },
         { type: 'rage', count: 0, sessions: 0, top: [] },
+      ],
+      images: [
+        {
+          src: 'https://bihadashop.jp/wp-content/uploads/2025/03/hero.jpg',
+          alt: 'TIRTIR ヒーロー画像',
+          sessions: 575,
+          views: 767,
+          avg_ratio: 0.97,
+          median_ms: 4200,
+          y: 2400,
+          w: 710,
+          h: 532,
+        },
+      ],
+      issues: [
+        {
+          category: 'a11y',
+          type: 'image-alt-missing',
+          severity: 'high',
+          count: 3,
+          recommendation: 'alt 属性を追加してください。',
+        },
       ],
     }
     const clickTiles = [tileWith([{ x: 100, y: 200, count: 10, sessions: 5 }])]
@@ -516,6 +539,7 @@ describe('buildHeatmapViewModel', () => {
 
     it('marks dead-clicked elements as negative spots (warn intent + デッド stat)', () => {
       const data: HeatmapElementsData = {
+        page_sessions: 100,
         elements: [
           {
             selector: '#cta-cart',
@@ -536,6 +560,8 @@ describe('buildHeatmapViewModel', () => {
             top: [{ selector: '#cta-cart', text: 'カートに追加', count: 12, x: 640, y: 700 }],
           },
         ],
+        images: [],
+        issues: [],
       }
       const vm = buildHeatmapViewModel({
         tiles: clickTiles,
@@ -561,6 +587,45 @@ describe('buildHeatmapViewModel', () => {
       // 回数降順
       const counts = vm.negativeSpots.map((s) => s.count)
       expect([...counts].sort((a, b) => b - a)).toEqual(counts)
+    })
+
+    it('adds click-rate stat from page_sessions (続126 ★ ボタンクリック率)', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+      })
+      // 87 sessions / 870 page sessions = 10%
+      const rateStat = vm.hotspotCards[0].stats.find((s) => s.label === 'クリック率')
+      expect(rateStat).toBeDefined()
+      expect(rateStat?.value).toBe('10%')
+    })
+
+    it('builds imageSpots with view rate from image_visibility (続126 ⑤)', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+        coordinateContext: { sourceWidth: 1280, referenceWidth: 720, pageHeight: 14_000 },
+      })
+      expect(vm.imageSpots).toHaveLength(1)
+      const spot = vm.imageSpots[0]
+      expect(spot.name).toContain('TIRTIR')
+      // 575/870 ≈ 66%
+      expect(Math.round(spot.viewRate * 100)).toBe(66)
+      expect(spot.y).toBe(2400) // ctx あり = raw px
+      expect(spot.height).toBe(532)
+      expect(spot.medianSec).toBe(4)
+    })
+
+    it('passes crawl issues through to pageIssues (続126 ★ 構造タブ)', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+      })
+      expect(vm.pageIssues).toHaveLength(1)
+      expect(vm.pageIssues[0]).toMatchObject({ type: 'image-alt-missing', severity: 'high' })
     })
 
     it('exit layer emits continuous 0..95% slots (続125 ② — cannot visually cut off)', () => {

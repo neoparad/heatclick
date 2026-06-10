@@ -715,6 +715,7 @@ export function HeatmapCanvas({
             hotspotCards={vm.hotspotCards}
             signalCards={vm.signalCards}
             negativeSpots={vm.negativeSpots}
+            pageIssues={vm.pageIssues}
             enabledSignals={activeSignals}
             onToggleSignal={toggleSignal}
             onSelectHotspot={onSelectHotspot}

@@ -73,6 +73,37 @@ export function HeatOverlay({
       className="heat-overlay pointer-events-none absolute inset-0"
       data-testid="heat-overlay"
     >
+      {/* 続126 ⑤ (Owner: 「画像にカーソルで視認率」): 画像視認 hover 領域。
+          最初の子 = 最下層に置き、tag/blob のクリックを妨げない。
+          hover で枠 + tooltip (視認セッション率 / 平均視認率 / 視認時間中央値)。 */}
+      {vm.imageSpots.length > 0 ? (
+        <div
+          className="image-visibility-overlay absolute inset-0"
+          data-testid="image-visibility-overlay"
+        >
+          {vm.imageSpots.map((s) => (
+            <div
+              key={s.id}
+              data-testid={`image-spot-${s.id}`}
+              className="group pointer-events-auto absolute left-0 right-0"
+              style={{ top: s.y * displayScale, height: Math.max(18, s.height * displayScale) }}
+            >
+              <div
+                className="absolute inset-0 rounded border border-dashed border-transparent transition-colors duration-150 group-hover:border-[rgba(79,107,255,.6)] group-hover:bg-[rgba(79,107,255,.07)]"
+                aria-hidden
+              />
+              <div className="pointer-events-none absolute right-2 top-1 z-10 hidden max-w-[260px] rounded bg-[rgba(15,17,23,.85)] px-2 py-1.5 font-mono text-[10.5px] leading-snug text-white shadow-md group-hover:block">
+                <b>{s.name}</b>
+                <br />
+                視認 {Math.round(s.viewRate * 100)}% のセッション · 表示率{' '}
+                {Math.round(s.ratio * 100)}%
+                {s.medianSec > 0 && s.medianSec < 600 ? ` · 視認 ${s.medianSec}s` : ''}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       {visibleBlobs.map((b) => (
         <div
           key={b.id}

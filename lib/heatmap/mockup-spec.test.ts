@@ -63,6 +63,7 @@ describe('mockup-spec', () => {
       'hotspots',
       'negative',
       'signals',
+      'structure',
       'summary',
       'sessions',
     ])
