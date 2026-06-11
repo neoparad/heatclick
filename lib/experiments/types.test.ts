@@ -2,6 +2,7 @@ import {
   ExperimentSchema,
   LockedTaxonomySchema,
   ConsentSchema,
+  RenderConfigSchema,
   K_ANONYMITY_FLOOR,
   isTaxonomyEditable,
   assertLockedFieldsUnchanged,
@@ -107,6 +108,57 @@ describe('experiments/types — lock 不変条件 (事前登録)', () => {
     const exp = baseExperiment({ status: 'running' })
     expect(() => assertLockedFieldsUnchanged(exp, { url_pattern: '/other' })).toThrow(ExperimentLockError)
     expect(() => assertLockedFieldsUnchanged(exp, { salt_version: 2 })).toThrow(ExperimentLockError)
+  })
+})
+
+describe('experiments/types — RenderConfig (M6)', () => {
+  it('cta / form_fields の両 kind を受理、未知 kind / 余剰キーを拒否', () => {
+    expect(RenderConfigSchema.safeParse({ kind: 'cta', cta_selector: '#buy' }).success).toBe(true)
+    expect(
+      RenderConfigSchema.safeParse({ kind: 'form_fields', field_selectors: ['#opt1', '.opt2'] }).success,
+    ).toBe(true)
+    expect(RenderConfigSchema.safeParse({ kind: 'html', html: '<b>x</b>' }).success).toBe(false) // HTML は構造的に不可
+    expect(
+      RenderConfigSchema.safeParse({ kind: 'cta', cta_selector: '#a', extra: 1 }).success,
+    ).toBe(false)
+  })
+
+  it('field_selectors は 1..20、selector は 256 文字まで', () => {
+    expect(RenderConfigSchema.safeParse({ kind: 'form_fields', field_selectors: [] }).success).toBe(false)
+    expect(
+      RenderConfigSchema.safeParse({
+        kind: 'form_fields',
+        field_selectors: Array.from({ length: 21 }, (_, i) => `#f${i}`),
+      }).success,
+    ).toBe(false)
+    expect(RenderConfigSchema.safeParse({ kind: 'cta', cta_selector: 'a'.repeat(257) }).success).toBe(false)
+  })
+
+  it('render_config.kind と intervention_type の不整合を拒否 (cross-field refine)', () => {
+    const bad = ExperimentSchema.safeParse({
+      ...baseExperiment(),
+      render_config: { kind: 'form_fields', field_selectors: ['#x'] }, // cta_placement に form_fields
+    })
+    expect(bad.success).toBe(false)
+    const good = ExperimentSchema.safeParse({
+      ...baseExperiment(),
+      render_config: { kind: 'cta', cta_selector: '#buy' },
+    })
+    expect(good.success).toBe(true)
+  })
+
+  it('running で render_config 変更は ExperimentLockError (treatment 定義の不変性)', () => {
+    const exp = {
+      ...baseExperiment({ status: 'running' }),
+      render_config: { kind: 'cta', cta_selector: '#buy' },
+    } as Experiment
+    expect(() =>
+      assertLockedFieldsUnchanged(exp, { render_config: { kind: 'cta', cta_selector: '#other' } }),
+    ).toThrow(ExperimentLockError)
+    // 同値 (キー順違い) は許可
+    expect(() =>
+      assertLockedFieldsUnchanged(exp, { render_config: { cta_selector: '#buy', kind: 'cta' } as never }),
+    ).not.toThrow()
   })
 })
 

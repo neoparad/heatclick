@@ -8,7 +8,7 @@
 
 import { experimentsQuery } from './db'
 import { type ExperimentStore } from './repository'
-import { ExperimentSchema, type Experiment } from './types'
+import { ExperimentSchema, type Experiment, type RenderConfig } from './types'
 
 interface ExperimentRow {
   id: string
@@ -28,6 +28,7 @@ interface ExperimentRow {
   salt_version: number
   pool_opt_in: boolean
   k_anonymity_min: number
+  render_config: RenderConfig | null
   created_by: string
   locked_at: Date | string | null
   stopped_at: Date | string | null
@@ -40,7 +41,7 @@ const SELECT_COLS = `
   id, tenant_id, site_id, name, url_pattern,
   intervention_type, page_type, industry, device, primary_metric, window_code,
   status, start_at, end_at, salt_version, pool_opt_in, k_anonymity_min,
-  created_by, locked_at, stopped_at, archived_at, created_at, updated_at
+  render_config, created_by, locked_at, stopped_at, archived_at, created_at, updated_at
 `
 
 export class PostgresExperimentStore implements ExperimentStore {
@@ -50,9 +51,9 @@ export class PostgresExperimentStore implements ExperimentStore {
          id, tenant_id, site_id, name, url_pattern,
          intervention_type, page_type, industry, device, primary_metric, window_code,
          status, start_at, end_at, salt_version, pool_opt_in, k_anonymity_min,
-         created_by, locked_at, stopped_at, archived_at, created_at, updated_at
+         render_config, created_by, locked_at, stopped_at, archived_at, created_at, updated_at
        ) VALUES (
-         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24
        )`,
       insertValues(row),
     )
@@ -100,8 +101,8 @@ export class PostgresExperimentStore implements ExperimentStore {
          intervention_type = $6, page_type = $7, industry = $8, device = $9,
          primary_metric = $10, window_code = $11, status = $12,
          start_at = $13, end_at = $14, salt_version = $15,
-         pool_opt_in = $16, k_anonymity_min = $17,
-         locked_at = $18, stopped_at = $19, archived_at = $20, updated_at = $21
+         pool_opt_in = $16, k_anonymity_min = $17, render_config = $18,
+         locked_at = $19, stopped_at = $20, archived_at = $21, updated_at = $22
        WHERE id = $1 AND tenant_id = $2 AND site_id = $3`,
       updateValues(row),
     )
@@ -127,6 +128,8 @@ function insertValues(row: Experiment): ReadonlyArray<unknown> {
     row.salt_version,
     row.consent.pool_opt_in,
     row.consent.k_anonymity_min,
+    // JSONB: node-pg は object を JSON として直列化する。null はそのまま NULL。
+    row.render_config,
     row.created_by,
     row.locked_at,
     row.stopped_at,
@@ -155,6 +158,7 @@ function updateValues(row: Experiment): ReadonlyArray<unknown> {
     row.salt_version,
     row.consent.pool_opt_in,
     row.consent.k_anonymity_min,
+    row.render_config,
     row.locked_at,
     row.stopped_at,
     row.archived_at,
@@ -186,6 +190,7 @@ function rowToExperiment(row: ExperimentRow): Experiment {
     dates: { start_at: toIso(row.start_at), end_at: toIso(row.end_at) },
     salt_version: row.salt_version,
     consent: { pool_opt_in: row.pool_opt_in, k_anonymity_min: row.k_anonymity_min },
+    render_config: row.render_config ?? null,
     created_at: toIso(row.created_at) as string,
     updated_at: toIso(row.updated_at) as string,
     created_by: row.created_by,

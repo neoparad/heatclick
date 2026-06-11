@@ -6,12 +6,21 @@
  */
 
 import { computeArm, type Arm } from './assignment'
-import type { Experiment } from './types'
+import type { InterventionType } from './taxonomy'
+import type { Experiment, RenderConfig } from './types'
 
 export interface Assignment {
   experiment_id: string
   arm: Arm
   url_pattern: string
+  /**
+   * M6: treatment のみに付与されるレンダリング指示 (control には付けない = 露出最小化)。
+   * render_config 未設定の実験では treatment でも省略 (A/A 計測のみ)。
+   */
+  render?: {
+    intervention_type: InterventionType
+    config: RenderConfig
+  }
 }
 
 /** 実験が計測 window 内か (start <= now < end、null 端は無制限)。 */
@@ -47,9 +56,19 @@ export function resolveActiveAssignments(
         e.dates.end_at !== null &&
         isWithinWindow(e, nowMs),
     )
-    .map((e) => ({
-      experiment_id: e.id,
-      arm: computeArm({ experimentId: e.id, visitorId, salt, saltVersion: e.salt_version }),
-      url_pattern: e.url_pattern,
-    }))
+    .map((e) => {
+      const arm = computeArm({ experimentId: e.id, visitorId, salt, saltVersion: e.salt_version })
+      const assignment: Assignment = {
+        experiment_id: e.id,
+        arm,
+        url_pattern: e.url_pattern,
+      }
+      if (arm === 'treatment' && e.render_config) {
+        assignment.render = {
+          intervention_type: e.taxonomy.intervention_type,
+          config: e.render_config,
+        }
+      }
+      return assignment
+    })
 }

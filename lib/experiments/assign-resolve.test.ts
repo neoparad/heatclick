@@ -117,4 +117,34 @@ describe('experiments/assign-resolve — resolveActiveAssignments', () => {
     })
     expect(resolveActiveAssignments([nullDates], 'visitor-1', NOW, SALT)).toEqual([])
   })
+
+  it('render は treatment のみに付与 (M6、control へは露出しない)', () => {
+    const withRender = {
+      ...running,
+      render_config: { kind: 'cta', cta_selector: '#buy' },
+    } as Experiment
+    // 多数 visitor を回して両 arm を観測
+    let sawTreatmentRender = false
+    for (let i = 0; i < 200; i++) {
+      const out = resolveActiveAssignments([withRender], `v-${i}`, NOW, SALT)
+      const a = out[0]
+      if (a.arm === 'treatment') {
+        expect(a.render).toEqual({
+          intervention_type: 'cta_placement',
+          config: { kind: 'cta', cta_selector: '#buy' },
+        })
+        sawTreatmentRender = true
+      } else {
+        expect(a.render).toBeUndefined()
+      }
+    }
+    expect(sawTreatmentRender).toBe(true)
+  })
+
+  it('render_config なし (A/A) は treatment でも render を付けない', () => {
+    for (let i = 0; i < 50; i++) {
+      const out = resolveActiveAssignments([running], `v-${i}`, NOW, SALT)
+      expect(out[0].render).toBeUndefined()
+    }
+  })
 })

@@ -27,7 +27,8 @@ import {
 import { resolveActiveAssignments } from '@/lib/experiments/assign-resolve'
 import { createExperimentRepository } from '@/lib/experiments/repository'
 import { PostgresExperimentStore } from '@/lib/experiments/postgres-store'
-import type { Experiment } from '@/lib/experiments/types'
+import { InterventionTypeSchema } from '@/lib/experiments/taxonomy'
+import { RenderConfigSchema, type Experiment } from '@/lib/experiments/types'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -60,6 +61,10 @@ const AssignmentResponseSchema = z.object({
       experiment_id: z.string().uuid(),
       arm: z.enum(['control', 'treatment']),
       url_pattern: z.string(),
+      // M6: treatment のみ。CSS selector のみ (任意 HTML は構造的に流れない — RenderConfigSchema)。
+      render: z
+        .object({ intervention_type: InterventionTypeSchema, config: RenderConfigSchema })
+        .optional(),
     }),
   ),
 })

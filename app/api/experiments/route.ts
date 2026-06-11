@@ -22,7 +22,7 @@ import {
   ExperimentValidationError,
   createExperimentRepository,
 } from '@/lib/experiments/repository'
-import { LockedTaxonomySchema } from '@/lib/experiments/types'
+import { LockedTaxonomySchema, RenderConfigSchema } from '@/lib/experiments/types'
 import { getServerSession } from '@/lib/auth/server-session'
 import { canWriteScenario, normalizeRole } from '@/lib/scenarios/publish-rbac'
 import { isTenantContext, resolveScenarioTenantContext } from '@/lib/scenarios/tenant-context'
@@ -38,6 +38,9 @@ const CreateBodySchema = z.object({
   url_pattern: z.string().min(1).max(512).regex(/^\/[^\s]*$/),
   taxonomy: LockedTaxonomySchema,
   pool_opt_in: z.boolean().optional().default(false),
+  // M6: treatment レンダリング設定 (CSS selector のみ。kind×intervention の整合は
+  // ExperimentSchema の cross-field refine が repository 層で検証 → 不整合は 400)。
+  render_config: RenderConfigSchema.nullable().optional(),
 })
 
 function makeRepo() {
@@ -120,6 +123,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       url_pattern: parsed.data.url_pattern,
       taxonomy: parsed.data.taxonomy,
       consent: { pool_opt_in: parsed.data.pool_opt_in, k_anonymity_min: 50 },
+      render_config: parsed.data.render_config ?? null,
       created_by: ctx.userId,
     })
     return NextResponse.json(created, { status: 201, headers: { 'Cache-Control': 'no-store' } })

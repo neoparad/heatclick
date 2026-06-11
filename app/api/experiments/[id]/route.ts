@@ -22,7 +22,7 @@ import {
   ExperimentValidationError,
   createExperimentRepository,
 } from '@/lib/experiments/repository'
-import { LockedTaxonomySchema } from '@/lib/experiments/types'
+import { LockedTaxonomySchema, RenderConfigSchema } from '@/lib/experiments/types'
 import { getServerSession } from '@/lib/auth/server-session'
 import { canWriteScenario, normalizeRole } from '@/lib/scenarios/publish-rbac'
 import { isTenantContext, resolveScenarioTenantContext } from '@/lib/scenarios/tenant-context'
@@ -39,6 +39,8 @@ const UpdateBodySchema = z
     url_pattern: z.string().min(1).max(512).regex(/^\/[^\s]*$/).optional(),
     taxonomy: LockedTaxonomySchema.optional(),
     pool_opt_in: z.boolean().optional(),
+    // M6: locked field (running 以降の変更は repository が ExperimentLockError → 409)
+    render_config: RenderConfigSchema.nullable().optional(),
   })
   .strict()
 
@@ -164,6 +166,7 @@ export async function PUT(
       ...(parsed.data.pool_opt_in !== undefined
         ? { consent: { pool_opt_in: parsed.data.pool_opt_in, k_anonymity_min: 50 } }
         : {}),
+      ...(parsed.data.render_config !== undefined ? { render_config: parsed.data.render_config } : {}),
     })
     return NextResponse.json(updated, { status: 200, headers: { 'Cache-Control': 'no-store' } })
   } catch (err) {

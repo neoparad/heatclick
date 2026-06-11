@@ -79,29 +79,68 @@ const UrlPatternSchema = z
   .max(512)
   .regex(/^\/[^\s]*$/, { message: 'url_pattern must be an absolute path starting with /' })
 
+// ── render_config (M6): treatment が顧客サイトで適用する mechanical 操作のパラメータ ──
+// 任意 HTML は受けない — CSS selector (自サイト内の既存要素を指す) のみ。
+// experiment-runtime.js は selector で見つけた既存要素の移動/クローン/表示切替だけを行う。
+const CssSelectorSchema = z.string().min(1).max(256)
+
+export const RenderConfigSchema = z.discriminatedUnion('kind', [
+  // cta_placement / sticky_cta_mobile: 対象 CTA (アンカー要素) の selector
+  z.object({ kind: z.literal('cta'), cta_selector: CssSelectorSchema }).strict(),
+  // form_field_reduction: 非表示にする任意項目 (required を含む要素は runtime 側で skip)
+  z
+    .object({ kind: z.literal('form_fields'), field_selectors: z.array(CssSelectorSchema).min(1).max(20) })
+    .strict(),
+])
+export type RenderConfig = z.infer<typeof RenderConfigSchema>
+
+/** intervention_type ごとに要求される render_config.kind。 */
+export const RENDER_KIND_BY_INTERVENTION: Readonly<Record<string, RenderConfig['kind']>> = {
+  cta_placement: 'cta',
+  sticky_cta_mobile: 'cta',
+  form_field_reduction: 'form_fields',
+}
+
 // ── experiment row ──────────────────────────────────────────────────────────────
-export const ExperimentSchema = z.object({
-  id: z.string().uuid(),
-  tenant_id: z.string().min(1).max(64),
-  site_id: z.string().min(1).max(64),
-  name: z.string().min(1).max(255),
-  url_pattern: UrlPatternSchema,
-  taxonomy: LockedTaxonomySchema,
-  status: z.enum(EXPERIMENT_STATUSES).default('draft'),
-  dates: ExperimentDatesSchema,
-  salt_version: z.number().int().min(1).default(1),
-  consent: ConsentSchema,
-  created_at: z.string().datetime(),
-  updated_at: z.string().datetime(),
-  created_by: z.string().min(1).max(255),
-  locked_at: z.string().datetime().nullable().default(null),
-  stopped_at: z.string().datetime().nullable().default(null),
-  archived_at: z.string().datetime().nullable().default(null),
-})
+export const ExperimentSchema = z
+  .object({
+    id: z.string().uuid(),
+    tenant_id: z.string().min(1).max(64),
+    site_id: z.string().min(1).max(64),
+    name: z.string().min(1).max(255),
+    url_pattern: UrlPatternSchema,
+    taxonomy: LockedTaxonomySchema,
+    status: z.enum(EXPERIMENT_STATUSES).default('draft'),
+    dates: ExperimentDatesSchema,
+    salt_version: z.number().int().min(1).default(1),
+    consent: ConsentSchema,
+    /** M6: treatment のレンダリング設定。null = レンダリングなし (実質 A/A、計測のみ)。 */
+    render_config: RenderConfigSchema.nullable().optional().default(null),
+    created_at: z.string().datetime(),
+    updated_at: z.string().datetime(),
+    created_by: z.string().min(1).max(255),
+    locked_at: z.string().datetime().nullable().default(null),
+    stopped_at: z.string().datetime().nullable().default(null),
+    archived_at: z.string().datetime().nullable().default(null),
+  })
+  .superRefine((row, ctx) => {
+    // render_config.kind は intervention_type と整合していること (taxonomy と独立に変えられない)。
+    if (!row.render_config) return
+    const expected = RENDER_KIND_BY_INTERVENTION[row.taxonomy.intervention_type]
+    if (expected && row.render_config.kind !== expected) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['render_config', 'kind'],
+        message: `render_config.kind must be "${expected}" for ${row.taxonomy.intervention_type}`,
+      })
+    }
+  })
 export type Experiment = z.infer<typeof ExperimentSchema>
 
 // ── lock 不変条件の強制 (pure、repository から呼ぶ) ──────────────────────────
-export const LOCKED_FIELDS = ['taxonomy', 'url_pattern', 'salt_version'] as const
+// render_config も locked: treatment の定義が実験中に変わると計測が混合され無効化するため
+// (M6)。running 以降は taxonomy / url_pattern / salt_version / render_config すべて不変。
+export const LOCKED_FIELDS = ['taxonomy', 'url_pattern', 'salt_version', 'render_config'] as const
 
 export class ExperimentLockError extends Error {
   constructor(public readonly field: string) {
@@ -112,11 +151,11 @@ export class ExperimentLockError extends Error {
 
 /**
  * running/stopped/archived の実験で locked field を変更しようとしたら throw。draft では許可。
- * taxonomy は key 順非依存で比較する (canonical 化 + JSON 文字列比較)。
+ * taxonomy / render_config は key 順非依存で比較する (canonical 化 + JSON 文字列比較)。
  */
 export function assertLockedFieldsUnchanged(
-  existing: Pick<Experiment, 'status' | 'taxonomy' | 'url_pattern' | 'salt_version'>,
-  patch: Partial<Pick<Experiment, 'taxonomy' | 'url_pattern' | 'salt_version'>>,
+  existing: Pick<Experiment, 'status' | 'taxonomy' | 'url_pattern' | 'salt_version' | 'render_config'>,
+  patch: Partial<Pick<Experiment, 'taxonomy' | 'url_pattern' | 'salt_version' | 'render_config'>>,
 ): void {
   if (isTaxonomyEditable(existing.status)) return
   if (patch.taxonomy !== undefined && !deepEqualJson(patch.taxonomy, existing.taxonomy)) {
@@ -127,6 +166,9 @@ export function assertLockedFieldsUnchanged(
   }
   if (patch.salt_version !== undefined && patch.salt_version !== existing.salt_version) {
     throw new ExperimentLockError('salt_version')
+  }
+  if (patch.render_config !== undefined && !deepEqualJson(patch.render_config, existing.render_config)) {
+    throw new ExperimentLockError('render_config')
   }
 }
 

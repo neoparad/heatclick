@@ -23,6 +23,7 @@ import {
   type Experiment,
   type ExperimentDates,
   type LockedTaxonomy,
+  type RenderConfig,
 } from './types'
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -113,6 +114,8 @@ export interface CreateExperimentInput {
   dates?: ExperimentDates
   salt_version?: number
   consent?: Consent
+  /** M6: treatment のレンダリング設定 (null = A/A 計測のみ)。 */
+  render_config?: RenderConfig | null
   created_by: string
 }
 
@@ -123,6 +126,8 @@ export interface UpdateExperimentInput {
   dates?: ExperimentDates
   salt_version?: number
   consent?: Consent
+  /** M6: locked field (running 以降は変更不可)。 */
+  render_config?: RenderConfig | null
 }
 
 export interface ExperimentRepositoryOptions {
@@ -154,6 +159,7 @@ export function createExperimentRepository(opts: ExperimentRepositoryOptions = {
       dates: input.dates ?? { start_at: null, end_at: null },
       salt_version: input.salt_version ?? 1,
       consent: input.consent ?? { pool_opt_in: false, k_anonymity_min: 50 },
+      render_config: input.render_config ?? null,
       created_at: ts,
       updated_at: ts,
       created_by: input.created_by,
@@ -200,6 +206,7 @@ export function createExperimentRepository(opts: ExperimentRepositoryOptions = {
       taxonomy: patch.taxonomy,
       url_pattern: patch.url_pattern,
       salt_version: patch.salt_version,
+      render_config: patch.render_config,
     })
     return save({
       ...existing,
@@ -209,6 +216,7 @@ export function createExperimentRepository(opts: ExperimentRepositoryOptions = {
       ...(patch.dates !== undefined ? { dates: patch.dates } : {}),
       ...(patch.salt_version !== undefined ? { salt_version: patch.salt_version } : {}),
       ...(patch.consent !== undefined ? { consent: patch.consent } : {}),
+      ...(patch.render_config !== undefined ? { render_config: patch.render_config } : {}),
       updated_at: now(),
     })
   }

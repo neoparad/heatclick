@@ -52,6 +52,10 @@ interface CreateFormState {
   primary_metric: (typeof PRIMARY_METRICS)[number]
   window: (typeof EXPERIMENT_WINDOWS)[number]
   pool_opt_in: boolean
+  /** M6: CTA selector (cta_placement / sticky_cta_mobile)。空 = A/A 計測のみ。 */
+  cta_selector: string
+  /** M6: 非表示にする任意項目 selector (form_field_reduction、改行区切り)。 */
+  field_selectors_text: string
 }
 
 const INITIAL_FORM: CreateFormState = {
@@ -64,6 +68,22 @@ const INITIAL_FORM: CreateFormState = {
   primary_metric: 'cvr',
   window: '28d',
   pool_opt_in: false,
+  cta_selector: '',
+  field_selectors_text: '',
+}
+
+/** form state → render_config (空入力は null = A/A)。 */
+function buildRenderConfig(form: CreateFormState): Record<string, unknown> | null {
+  if (form.intervention_type === 'form_field_reduction') {
+    const selectors = form.field_selectors_text
+      .split('\n')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .slice(0, 20)
+    return selectors.length > 0 ? { kind: 'form_fields', field_selectors: selectors } : null
+  }
+  const sel = form.cta_selector.trim()
+  return sel.length > 0 ? { kind: 'cta', cta_selector: sel } : null
 }
 
 export function ExperimentsView({ siteId, experiments, registryUnavailable }: ExperimentsViewProps) {
@@ -120,6 +140,7 @@ export function ExperimentsView({ siteId, experiments, registryUnavailable }: Ex
           window: form.window,
         },
         pool_opt_in: form.pool_opt_in,
+        render_config: buildRenderConfig(form),
       }),
     })
     if (ok) {
@@ -244,6 +265,26 @@ export function ExperimentsView({ siteId, experiments, registryUnavailable }: Ex
             options={EXPERIMENT_WINDOWS.map((v) => [v, v.replace('d', '日間')])}
             onChange={(v) => setForm((f) => ({ ...f, window: v as CreateFormState['window'] }))}
           />
+          {form.intervention_type === 'form_field_reduction' ? (
+            <Field label="非表示にする任意項目の CSS selector（改行区切り・最大20。必須項目は自動でスキップ）">
+              <textarea
+                className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm font-mono"
+                rows={3}
+                value={form.field_selectors_text}
+                onChange={(e) => setForm((f) => ({ ...f, field_selectors_text: e.target.value }))}
+                placeholder={'#company-field\n.optional-row'}
+              />
+            </Field>
+          ) : (
+            <Field label="CTA の CSS selector（アンカー要素。空なら計測のみ＝表示変更なし）">
+              <input
+                className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm font-mono"
+                value={form.cta_selector}
+                onChange={(e) => setForm((f) => ({ ...f, cta_selector: e.target.value }))}
+                placeholder="#buy-button"
+              />
+            </Field>
+          )}
         </div>
         <label className="flex items-start gap-2 text-xs text-text-2">
           <input
