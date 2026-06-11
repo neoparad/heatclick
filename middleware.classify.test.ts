@@ -94,4 +94,13 @@ describe('middleware classify() — experiments assign access control (宝 M2b)'
     // 将来 private な subroute を足すなら length-exact override を入れる。
     expect(classify('/api/experiments/assign/extra')).toBe('api-public')
   })
+
+  // ── pool recompute (残タスク④ cron 化): 公開だが route 内で cron/operator 認証 ──
+  it('classifies /api/experiments/pool as api-public (Vercel Cron は JWT を持たない)', () => {
+    expect(classify('/api/experiments/pool')).toBe('api-public')
+  })
+
+  it('classifies /api/experiments/[id]/result as api-tenant (JWT 必須のまま)', () => {
+    expect(classify('/api/experiments/00000000-0000-4000-8000-000000000001/result')).toBe('api-tenant')
+  })
 })
