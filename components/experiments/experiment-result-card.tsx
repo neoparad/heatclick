@@ -12,28 +12,10 @@
  */
 
 import { EvidenceBadge } from '@/components/dashboard/evidence-badge'
+import { INTERVENTION_LABELS, METRIC_LABELS, STATUS_LABELS } from '@/components/experiments/labels'
 import type { ExperimentResultView, ArmView } from '@/lib/experiments/result-view-model'
 import { WINDOW_DAYS } from '@/lib/experiments/taxonomy'
 import { cn } from '@/lib/utils'
-
-const INTERVENTION_LABELS: Record<string, string> = {
-  cta_placement: 'CTA をファーストビューへ',
-  sticky_cta_mobile: 'モバイル固定 CTA バー',
-  form_field_reduction: 'フォーム項目削減',
-}
-
-const METRIC_LABELS: Record<string, string> = {
-  cvr: 'CVR',
-  cta_click_rate: 'CTA クリック率',
-  form_submit_rate: 'フォーム送信率',
-}
-
-const STATUS_LABELS: Record<string, string> = {
-  draft: '下書き',
-  running: '計測中',
-  stopped: '計測終了',
-  archived: 'アーカイブ',
-}
 
 interface ExperimentResultCardProps {
   view: ExperimentResultView
