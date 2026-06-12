@@ -45,18 +45,22 @@ export function layerToHeatmapType(layer: HeatmapLayer): HeatmapApiType {
 }
 
 /**
- * 続125 (Owner ①): 行動セグメント — 観測データから直接導出するルールベースの
+ * 続125 (Owner ①) / 続132: 行動セグメント — 観測データから直接導出するルールベースの
  * クラスタ分け (偽 ML ではない、D-07 'observed')。
  *   - all       : 全セッション
  *   - deep_read : 熟読層 (そのページで max scroll >= 70%)
  *   - bounce    : 浅読・直帰層 (max scroll <= 20%)
  *   - ad        : 広告流入 (gclid / fbclid 付きセッション)
+ *   - returning : リピーター (visitor のサイト全体 初回来訪 < 当該セッション開始 = 再訪) [続132]
+ *   - new       : 新規 (visitor の初回来訪が当該セッション = サイト初訪問) [続132]
  * 将来 ML ペルソナ (persona_sessions) が ClickHouse に配管されたら同じ UI に追加する。
  */
-export type HeatmapSegment = 'all' | 'deep_read' | 'bounce' | 'ad'
+export type HeatmapSegment = 'all' | 'deep_read' | 'bounce' | 'ad' | 'returning' | 'new'
 
 export const SEGMENT_LABELS: ReadonlyArray<{ key: HeatmapSegment; label: string }> = [
   { key: 'all', label: '全体' },
+  { key: 'returning', label: 'リピーター' },
+  { key: 'new', label: '新規' },
   { key: 'deep_read', label: '熟読層' },
   { key: 'bounce', label: '浅読・直帰層' },
   { key: 'ad', label: '広告流入' },

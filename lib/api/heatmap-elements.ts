@@ -6,6 +6,8 @@
  * view-model 側で coordinateContext により capture CSS px 空間へスケールする。
  */
 
+import type { HeatmapSegment } from '@/lib/api/heatmap'
+
 export interface HeatmapElementStat {
   /** DOM selector (tracking.js が記録した element_selector) */
   selector: string
@@ -86,8 +88,8 @@ export interface HeatmapElementsQuery {
   start_date?: string
   end_date?: string
   device_type?: 'desktop' | 'mobile' | 'tablet' | 'unknown'
-  /** 続125: 行動セグメント (lib/api/heatmap.ts HeatmapSegment と同一) */
-  segment?: 'all' | 'deep_read' | 'bounce' | 'ad'
+  /** 続125/132: 行動セグメント (lib/api/heatmap.ts HeatmapSegment と同一) */
+  segment?: HeatmapSegment
 }
 
 interface ElementsSuccess {

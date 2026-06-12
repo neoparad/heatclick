@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from 'react'
 
+import type { HeatmapSegment } from '@/lib/api/heatmap'
 import {
   fetchHeatmapElements,
   type HeatmapElementsData,
@@ -25,8 +26,8 @@ export function useHeatmapElements(query: {
   pageUrl: string
   dateRange: { start: string; end: string }
   deviceType: 'all' | 'desktop' | 'mobile' | 'tablet'
-  /** 続125: 行動セグメント (未指定 = all) */
-  segment?: 'all' | 'deep_read' | 'bounce' | 'ad'
+  /** 続125/132: 行動セグメント (未指定 = all) */
+  segment?: HeatmapSegment
 }): UseHeatmapElementsResult {
   const [elements, setElements] = useState<HeatmapElementsData | null>(null)
   const [loading, setLoading] = useState(false)

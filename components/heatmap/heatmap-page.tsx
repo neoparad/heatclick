@@ -179,10 +179,15 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
 
         <span className="hidden h-4 w-px bg-[var(--ug-border)] md:block" aria-hidden />
 
-        {/* 続125 (Owner ①): 行動セグメント — 観測データから直接導出するクラスタ分け。
+        {/* 続125/132 (Owner ①): 行動セグメント — 観測データから直接導出するクラスタ分け。
+            リピーター = visitor 初回来訪<当該session / 新規 = 初回来訪=当該session /
             熟読層 = max scroll>=70% / 浅読・直帰層 = <=20% / 広告流入 = gclid・fbclid。
             ML ペルソナ (persona_sessions) が ClickHouse に配管されたら同じ列に追加する。 */}
-        <div role="radiogroup" aria-label="行動セグメント" className="flex items-center gap-1.5">
+        <div
+          role="radiogroup"
+          aria-label="行動セグメント"
+          className="flex flex-wrap items-center gap-1.5"
+        >
           <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
             Segment
           </span>

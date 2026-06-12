@@ -21,6 +21,7 @@ import { z } from 'zod'
 
 import { getServerSession } from '@/lib/auth/server-session'
 import { getClickHouseClient } from '@/lib/clickhouse'
+import { segmentFilterSql } from '@/lib/heatmap/segment-filter'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -38,41 +39,8 @@ const querySchema = z.object({
     .optional(),
   device_type: z.enum(['desktop', 'mobile', 'tablet', 'unknown']).optional(),
   // 続125: 行動セグメント (tile API と同一定義)
-  segment: z.enum(['all', 'deep_read', 'bounce', 'ad']).default('all'),
+  segment: z.enum(['all', 'deep_read', 'bounce', 'ad', 'returning', 'new']).default('all'),
 })
-
-/**
- * 続125: 行動セグメントの session 絞り込み SQL 断片 (app/api/heatmap/route.ts と同一規約:
- * 定数断片 + parameter binding のみ、ユーザー入力の文字列連結なし)。
- */
-function segmentFilterSql(segment: 'all' | 'deep_read' | 'bounce' | 'ad'): string {
-  if (segment === 'all') return ''
-  if (segment === 'ad') {
-    return `AND session_id IN (
-      SELECT DISTINCT session_id FROM clickinsight.events
-      WHERE tenant_id = {tenant_id:String}
-        AND site_id = {site_id:String}
-        AND url = {page_url:String}
-        AND is_agent = 0
-        AND ((gclid IS NOT NULL AND gclid != '') OR (fbclid IS NOT NULL AND fbclid != ''))
-        AND timestamp >= toDateTime({start:String})
-        AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
-    )`
-  }
-  const havingCond =
-    segment === 'deep_read' ? 'max(scroll_percentage) >= 70' : 'max(scroll_percentage) <= 20'
-  return `AND session_id IN (
-    SELECT session_id FROM clickinsight.events
-    WHERE tenant_id = {tenant_id:String}
-      AND site_id = {site_id:String}
-      AND url = {page_url:String}
-      AND is_agent = 0
-      AND timestamp >= toDateTime({start:String})
-      AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
-    GROUP BY session_id
-    HAVING ${havingCond}
-  )`
-}
 
 const TOP_ELEMENTS_LIMIT = 6
 /** signal selector 上位 (マーカー描画 + whereLabel)。type 毎にこの件数まで。 */

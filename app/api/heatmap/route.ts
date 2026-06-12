@@ -24,6 +24,8 @@ import { z } from 'zod'
 import { getServerSession } from '@/lib/auth/server-session'
 
 import { getClickHouseClient } from '@/lib/clickhouse'
+import type { HeatmapSegment } from '@/lib/api/heatmap'
+import { segmentFilterSql } from '@/lib/heatmap/segment-filter'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -51,45 +53,9 @@ const querySchema = z.object({
   end_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   tile_size: z.coerce.number().int().min(800).max(6000).default(2400),
   cursor: z.string().max(2000).optional(),
-  // 続125 (Owner ①): 行動セグメント (ルールベースのクラスタ分け、観測データ直結)
-  segment: z.enum(['all', 'deep_read', 'bounce', 'ad']).default('all'),
+  // 続125/132 (Owner ①): 行動セグメント (ルールベースのクラスタ分け、観測データ直結)
+  segment: z.enum(['all', 'deep_read', 'bounce', 'ad', 'returning', 'new']).default('all'),
 })
-
-/**
- * 続125: 行動セグメントの session 絞り込み SQL 断片。
- * 値は全て parameter binding 済みの定数断片のみ (ユーザー入力の文字列連結なし)。
- *   - deep_read: そのページで max(scroll_percentage) >= 70 のセッション (熟読層)
- *   - bounce   : max(scroll_percentage) <= 20 (浅読・直帰層)
- *   - ad       : gclid / fbclid を伴うセッション (広告流入)
- */
-function segmentFilterSql(segment: 'all' | 'deep_read' | 'bounce' | 'ad'): string {
-  if (segment === 'all') return ''
-  if (segment === 'ad') {
-    return `AND session_id IN (
-      SELECT DISTINCT session_id FROM clickinsight.events
-      WHERE tenant_id = {tenant_id:String}
-        AND site_id = {site_id:String}
-        AND url = {page_url:String}
-        AND is_agent = 0
-        AND ((gclid IS NOT NULL AND gclid != '') OR (fbclid IS NOT NULL AND fbclid != ''))
-        AND timestamp >= toDateTime({start:String})
-        AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
-    )`
-  }
-  const havingCond =
-    segment === 'deep_read' ? 'max(scroll_percentage) >= 70' : 'max(scroll_percentage) <= 20'
-  return `AND session_id IN (
-    SELECT session_id FROM clickinsight.events
-    WHERE tenant_id = {tenant_id:String}
-      AND site_id = {site_id:String}
-      AND url = {page_url:String}
-      AND is_agent = 0
-      AND timestamp >= toDateTime({start:String})
-      AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
-    GROUP BY session_id
-    HAVING ${havingCond}
-  )`
-}
 
 // 続120: 旧 30_000 は縦長記事で深部クリックを取りこぼしていた (click_y は UInt16 で
 // max 65535、実測 max ~50k)。UInt16 上限に合わせ 66_000 まで tile を辿れるよう拡張し、
@@ -411,7 +377,7 @@ async function fetchRealHeatmapPoints(input: {
   pageUrl: string
   heatmapType: 'click' | 'scroll' | 'read' | 'exit'
   deviceType?: 'desktop' | 'mobile' | 'tablet' | 'unknown'
-  segment?: 'all' | 'deep_read' | 'bounce' | 'ad'
+  segment?: HeatmapSegment
   yStart: number
   yEnd: number
   startDate?: string
