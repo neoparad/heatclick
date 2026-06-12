@@ -505,12 +505,15 @@ async function fetchRealHeatmapPoints(input: {
     `
   }
 
+  // 続130 (本番 dummy 退避の根本原因): per-query max_memory_usage は analytics_reader が
+  // readonly=1 のため **設定変更=禁止操作として HTTP 層で即拒否**され、tile クエリが
+  // ClickHouse に一切届かず全レイヤー dummy 退避していた (query_log で実証。
+  // max_execution_time は changeable_in_readonly のため通る — 同列に考えたのが誤り)。
+  // メモリ防御は (a) 2パスクエリ形状 (実証 3s/数十MB) + (b) server 側 user-level
+  // 設定 (scripts/operator-grant-analytics-reader.mjs で Owner が適用) の 2 層で担う。
   const rs = await client.query({
     query: sql,
     query_params: queryParams,
-    // 続129: heatmap クエリ単体のメモリ上限 (1.5GB)。万一クエリ形状が悪化しても
-    // server 全体 (他テナント/チャット) を巻き込まず、この 1 クエリだけが失敗する。
-    clickhouse_settings: { max_memory_usage: '1500000000' },
     format: 'JSONEachRow',
   })
   const rows = (await rs.json()) as Array<{

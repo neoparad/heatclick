@@ -255,34 +255,12 @@ export async function GET(request: Request) {
     // 4) 画像視認率 (続126 ⑤): image_visibility 専用テーブル。
     //    座標は median (混在 viewport の外れ値に強い)。duration は median (累積計測のため
     //    avg は跳ねる)。segment は session 単位サブクエリがそのまま適用可能。
-    const imagesRs = await ch.query({
-      query: `
-        SELECT
-          image_src AS src,
-          anyLast(image_alt) AS alt,
-          uniqExact(session_id) AS sessions,
-          count() AS views,
-          round(avg(max_visible_ratio), 3) AS avg_ratio,
-          toUInt32(round(quantile(0.5)(visible_duration_ms))) AS median_ms,
-          toUInt32(round(quantile(0.5)(image_y))) AS y,
-          toUInt16(round(quantile(0.5)(image_width))) AS w,
-          toUInt16(round(quantile(0.5)(image_height))) AS h
-        FROM clickinsight.image_visibility
-        WHERE tenant_id = {tenant_id:String}
-          AND site_id = {site_id:String}
-          AND page_url = {page_url:String}
-          AND created_at >= toDateTime({start:String})
-          AND created_at < toDateTime({end:String}) + INTERVAL 1 DAY
-          ${params.device_type ? 'AND device_type = {device_type:String}' : ''}
-          ${segmentFilter}
-        GROUP BY src
-        ORDER BY sessions DESC
-        LIMIT ${TOP_IMAGES_LIMIT}
-      `,
-      query_params: queryParams,
-      format: 'JSONEachRow',
-    })
-    const imageRows = (await imagesRs.json()) as Array<{
+    //
+    // 続130: enhancement 系 (images / issues) は **個別 try/catch で [] に degrade**。
+    //    本番 analytics_reader に image_visibility の SELECT grant が無く 497 が出ると
+    //    route 全体が 502 になり、要素カード/ネガティブ/構造タブまで巻き添え全滅していた
+    //    (query_log 実証)。core (elements/signals) は enhancement の欠落で死なない。
+    type ImageRow = {
       src: string
       alt: string
       sessions: number
@@ -292,36 +270,78 @@ export async function GET(request: Request) {
       y: number
       w: number
       h: number
-    }>
+    }
+    let imageRows: ImageRow[] = []
+    try {
+      const imagesRs = await ch.query({
+        query: `
+          SELECT
+            image_src AS src,
+            anyLast(image_alt) AS alt,
+            uniqExact(session_id) AS sessions,
+            count() AS views,
+            round(avg(max_visible_ratio), 3) AS avg_ratio,
+            toUInt32(round(quantile(0.5)(visible_duration_ms))) AS median_ms,
+            toUInt32(round(quantile(0.5)(image_y))) AS y,
+            toUInt16(round(quantile(0.5)(image_width))) AS w,
+            toUInt16(round(quantile(0.5)(image_height))) AS h
+          FROM clickinsight.image_visibility
+          WHERE tenant_id = {tenant_id:String}
+            AND site_id = {site_id:String}
+            AND page_url = {page_url:String}
+            AND created_at >= toDateTime({start:String})
+            AND created_at < toDateTime({end:String}) + INTERVAL 1 DAY
+            ${params.device_type ? 'AND device_type = {device_type:String}' : ''}
+            ${segmentFilter}
+          GROUP BY src
+          ORDER BY sessions DESC
+          LIMIT ${TOP_IMAGES_LIMIT}
+        `,
+        query_params: queryParams,
+        format: 'JSONEachRow',
+      })
+      imageRows = (await imagesRs.json()) as ImageRow[]
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message.split('\n')[0] : 'unknown'
+      console.error(`[heatmap/elements] image_visibility degraded to []: ${msg}`)
+    }
 
     // 5) 構造 issue (続126 ★クロール価値): UGOKI Crawl が取り込んだ page_issues。
     //    クロール未取込ページは 0 行 = UI は「クロール未取込」を表示 (graceful)。
-    const issuesRs = await ch.query({
-      query: `
-        SELECT
-          issue_category,
-          issue_type,
-          severity,
-          count() AS n,
-          anyLast(substring(recommendation, 1, 200)) AS recommendation
-        FROM clickinsight.page_issues
-        WHERE tenant_id = {tenant_id:String}
-          AND site_id = {site_id:String}
-          AND page_url = {page_url:String}
-        GROUP BY issue_category, issue_type, severity
-        ORDER BY severity DESC, n DESC
-        LIMIT ${TOP_ISSUES_LIMIT}
-      `,
-      query_params: queryParams,
-      format: 'JSONEachRow',
-    })
-    const issueRows = (await issuesRs.json()) as Array<{
+    //    続130: images と同様、grant 欠落等は [] に degrade (core を巻き込まない)。
+    type IssueRow = {
       issue_category: string
       issue_type: string
       severity: string | number
       n: number
       recommendation: string
-    }>
+    }
+    let issueRows: IssueRow[] = []
+    try {
+      const issuesRs = await ch.query({
+        query: `
+          SELECT
+            issue_category,
+            issue_type,
+            severity,
+            count() AS n,
+            anyLast(substring(recommendation, 1, 200)) AS recommendation
+          FROM clickinsight.page_issues
+          WHERE tenant_id = {tenant_id:String}
+            AND site_id = {site_id:String}
+            AND page_url = {page_url:String}
+          GROUP BY issue_category, issue_type, severity
+          ORDER BY severity DESC, n DESC
+          LIMIT ${TOP_ISSUES_LIMIT}
+        `,
+        query_params: queryParams,
+        format: 'JSONEachRow',
+      })
+      issueRows = (await issuesRs.json()) as IssueRow[]
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message.split('\n')[0] : 'unknown'
+      console.error(`[heatmap/elements] page_issues degraded to []: ${msg}`)
+    }
 
     return NextResponse.json(
       {
