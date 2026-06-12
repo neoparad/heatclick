@@ -16,6 +16,7 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { z } from 'zod'
 
+import { getServerSession } from '@/lib/auth/server-session'
 import { checkChatRateLimit } from '@/lib/llm/chat-rate-limit'
 import {
   NL_INPUT_MAX_CHARS,
@@ -46,16 +47,18 @@ interface ErrorResponse {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse<SuccessResponse | ErrorResponse>> {
-  // ── tenant resolution (JWT 由来のみ、body の tenant_id 完全無視) ──
-  const tenantId = request.headers.get('x-tenant-id')
-  if (!tenantId) {
+  // ── tenant resolution (REQ-SEC-126: getServerSession 経由・JWT 署名 + Layer 2 失効照合。
+  //    header 直読みは失効済みトークンを素通しするため使わない。body の tenant_id は完全無視) ──
+  const session = await getServerSession()
+  if (!session) {
     return NextResponse.json(
       { success: false, error: { code: 'UNAUTHORIZED', message: 'tenant context missing' } },
       { status: 401 },
     )
   }
+  const tenantId = session.tenant_id
 
-  // ── rate limit ──
+  // ── rate limit (tenant あたり。LLM コスト面で安全側) ──
   const rl = await checkChatRateLimit(tenantId)
   if (!rl.allowed) {
     const res = NextResponse.json<ErrorResponse>(
