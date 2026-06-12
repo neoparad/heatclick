@@ -255,6 +255,27 @@ export function HeatmapCanvas({
   const pageCssHeight = cap
     ? computePageCssHeight(cap.naturalWidth, cap.naturalHeight, referenceWidth) || MOCK_PAGE_HEIGHT
     : MOCK_PAGE_HEIGHT
+
+  // ── 続131 (実走査監査で根本特定): 切断スクショ検知ガード ─────────────────────
+  //   劣化経路 (Worker 失敗 → CF REST / Microlink) は fullPage を無視して **1 viewport 分
+  //   (例 800 CSS px)** の画像を返すことがある。従来はその高さを座標系の全高として採用し、
+  //   outlier guard (pageHeight*1.05) が**それ以深の全クリックを廃棄** → 「データはあるのに
+  //   『クリックデータがまだありません』」という嘘の空表示・「途中で切れる」の積年の正体。
+  //   対策: px 空間レイヤー (click/read) のデータ最大 y が画像高の 1.3 倍を超えるとき
+  //   capture を「部分画像」と判定し、座標系の全高をデータ範囲まで拡張する。画像は上部に
+  //   そのまま敷き、以深は中立背景 — **データは絶対に隠さない**。
+  const isPxSpaceLayer = meta?.heatmap_type === 'click' || meta?.heatmap_type === 'read'
+  const dataMaxDocY = useMemo(() => {
+    if (!isPxSpaceLayer) return 0
+    let max = 0
+    for (const t of tiles) for (const p of t.points) if (p.y > max) max = p.y
+    return max
+  }, [tiles, isPxSpaceLayer])
+  const captureTruncated = cap != null && isPxSpaceLayer && dataMaxDocY > pageCssHeight * 1.3
+  // 座標系・容器の全高 (CSS px)。通常は画像全高、部分画像時はデータ範囲 +8% まで拡張。
+  const renderPageHeight = captureTruncated
+    ? Math.max(Math.round(dataMaxDocY * 1.08), pageCssHeight)
+    : pageCssHeight
   // outer .hm-page の最大幅: ready / provisional 時は referenceWidth で頭打ち (wide screenshot を
   //   column 幅に収め、sp は native 390 に収める)。provisional と real で同値なので遷移時に幅が動かない。
   const displayMaxWidth = cap
@@ -357,7 +378,8 @@ export function HeatmapCanvas({
     ? {
         sourceWidth: SOURCE_WIDTH,
         referenceWidth,
-        pageHeight: pageCssHeight,
+        // 続131: 部分画像時はデータ範囲まで拡張した全高 (outlier guard がデータを捨てない)
+        pageHeight: renderPageHeight,
       }
     : provisionalActive
       ? {
@@ -630,7 +652,14 @@ export function HeatmapCanvas({
               //   - overlay は `displayScale = actualOuterWidth / referenceWidth` で縮小
               //   - fallback (loading / error / 未取得) は mock underlay + 同 overlay (displayScale=1)
               const outerStyle: React.CSSProperties = cap
-                ? { maxWidth: displayMaxWidth, width: '100%', height: 'auto' }
+                ? captureTruncated
+                  ? {
+                      // 続131: 部分画像 — 容器はデータ全高、画像は normal flow で上部に乗る
+                      maxWidth: displayMaxWidth,
+                      width: '100%',
+                      height: Math.round(renderPageHeight * displayScale),
+                    }
+                  : { maxWidth: displayMaxWidth, width: '100%', height: 'auto' }
                 : provisionalActive
                   ? {
                       // 続128: 観測データ範囲に合わせた暫定高さ。screenshot 到着で実画像高さに refine。
@@ -655,6 +684,7 @@ export function HeatmapCanvas({
                     }
                     data-capture-natural-width={cap?.naturalWidth ?? ''}
                     data-capture-natural-height={cap?.naturalHeight ?? ''}
+                    data-capture-truncated={captureTruncated ? '1' : '0'}
                     data-reference-width={referenceWidth}
                     data-page-css-height={cap ? pageCssHeight : ''}
                     data-display-width={displayMaxWidth}
@@ -730,6 +760,16 @@ export function HeatmapCanvas({
                         title={`${captureState.code}: ${captureState.message}`}
                       >
                         実 page 未取得 — 仮 underlay 表示中
+                      </div>
+                    ) : null}
+                    {captureTruncated ? (
+                      <div
+                        role="status"
+                        data-testid="capture-truncated-badge"
+                        className="absolute right-3 top-3 z-10 rounded-full border border-amber-400/40 bg-amber-100/95 px-2.5 py-1 font-mono text-[10.5px] text-amber-900 shadow-sm"
+                        title={`画像 ${Math.round(pageCssHeight)}px / データ範囲 ${Math.round(dataMaxDocY)}px`}
+                      >
+                        実ページ画像が上部のみ — ヒートマップは全域を表示中 (画像は再取得されます)
                       </div>
                     ) : null}
                   </div>

@@ -237,6 +237,54 @@ export async function GET(request: Request) {
   // scroll / exit は scroll_percentage(0-100) ベースの band 集計 = ページ全体を1タイルで返す
   // (px window 不要、PAGE_HEIGHT_ESTIMATE まで一括)。click / read は従来の px window 分割。
   const isSingleTileLayer = params.heatmap_type === 'scroll' || params.heatmap_type === 'exit'
+  const isPxLayer = params.heatmap_type === 'click' || params.heatmap_type === 'read'
+
+  // ── 続131 (実走査監査 perf): px 層は初回 (cursor 無し) に**全帯域を 1 クエリで一括取得**する。
+  //    旧: 1 band/リクエスト × 最大 11 回の直列 CH クエリ (実測 1批 2-5s) = 初回表示が分単位。
+  //    新: per-band top-500 を LIMIT BY で 1 クエリに集約 → tiles[] を全 band 分返し
+  //    next_cursor=null (hook の eager loop は 1 周で完了)。失敗時は従来の per-band 経路へ
+  //    fall-through (dummy fallback 含む契約は不変)。cursor 継続リクエストも従来経路のまま。
+  if (isPxLayer && yStart === 0 && !isDummyOnly()) {
+    try {
+      const allPoints = await fetchRealHeatmapPoints({
+        tenantId,
+        siteId: params.site_id,
+        pageUrl: params.page_url,
+        heatmapType: params.heatmap_type,
+        deviceType: params.device_type,
+        segment: params.segment,
+        yStart: 0,
+        yEnd: PAGE_HEIGHT_ESTIMATE,
+        startDate: params.start_date,
+        endDate: params.end_date,
+        allBands: true,
+        tileSize: params.tile_size,
+      })
+      return NextResponse.json({
+        success: true,
+        data: {
+          tiles: partitionIntoTiles(allPoints, params.tile_size),
+          next_cursor: null,
+        },
+        meta: {
+          tile_size: params.tile_size,
+          page_height_estimate: PAGE_HEIGHT_ESTIMATE,
+          cached: false,
+          cache_ttl_sec: 7200,
+          query_hash: queryHash,
+          data_source: 'clickhouse_events' as const,
+          heatmap_type: params.heatmap_type,
+        },
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown'
+      console.error(
+        `[heatmap] all-bands query failed query_hash=${queryHash.slice(0, 8)}, falling back to per-band path: ${message}`,
+      )
+      // fall through: 従来の per-band (dummy fallback 含む) 経路
+    }
+  }
+
   const tileEnd = isSingleTileLayer
     ? PAGE_HEIGHT_ESTIMATE
     : Math.min(yStart + params.tile_size, PAGE_HEIGHT_ESTIMATE + params.tile_size)
@@ -309,6 +357,40 @@ export async function GET(request: Request) {
 }
 
 /**
+ * 続131: 全帯域 points を tile_size ごとの band に分割して tiles[] にする。
+ * 空 band は省略 (hook は y_start で dedupe するだけなので欠番可)。全 0 件のときは
+ * 従来挙動 (空 points の band 0) を返し、UI の real-empty 判定を変えない。
+ */
+function partitionIntoTiles(
+  points: Array<{ x: number; y: number; count: number; sessions: number }>,
+  tileSize: number,
+): Array<{
+  y_start: number
+  y_end: number
+  points: Array<{ x: number; y: number; count: number; sessions: number }>
+  truncated: boolean
+}> {
+  const byBand = new Map<number, Array<{ x: number; y: number; count: number; sessions: number }>>()
+  for (const p of points) {
+    const start = Math.floor(p.y / tileSize) * tileSize
+    const arr = byBand.get(start)
+    if (arr) arr.push(p)
+    else byBand.set(start, [p])
+  }
+  if (byBand.size === 0) {
+    return [{ y_start: 0, y_end: tileSize, points: [], truncated: false }]
+  }
+  return [...byBand.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([y_start, pts]) => ({
+      y_start,
+      y_end: y_start + tileSize,
+      points: pts,
+      truncated: false,
+    }))
+}
+
+/**
  * ClickHouse `clickinsight.events` から heatmap_type に応じた集約を返す。
  *
  * layer → event_type → coordinate 列のマッピング:
@@ -334,6 +416,10 @@ async function fetchRealHeatmapPoints(input: {
   yEnd: number
   startDate?: string
   endDate?: string
+  /** 続131: true なら px 層を全帯域 1 クエリ (per-band top を LIMIT BY) で返す */
+  allBands?: boolean
+  /** allBands 時の band 幅 (LIMIT BY の band 式に使用) */
+  tileSize?: number
 }): Promise<Array<{ x: number; y: number; count: number; sessions: number }>> {
   const client = getClickHouseClient('analytics_reader')
 
@@ -354,6 +440,9 @@ async function fetchRealHeatmapPoints(input: {
   }
   if (deviceFilter && input.deviceType) {
     queryParams.device_type = input.deviceType
+  }
+  if (input.allBands) {
+    queryParams.tile_px = String(input.tileSize ?? 6000)
   }
 
   let sql: string
@@ -387,6 +476,15 @@ async function fetchRealHeatmapPoints(input: {
         AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
         ${deviceFilter}
         ${segmentFilter}`
+    // 続131 (allBands): per-band top-500 を LIMIT BY で 1 クエリに集約 (band = intDiv(y, tile_px))。
+    //   pass1 は counter のみ (~数十MB)、pass2 は選抜 bin (≤500×11) の uniq のみ — メモリ安全は不変。
+    const pass1Limit = input.allBands
+      ? `ORDER BY intDiv(y, {tile_px:UInt32}) ASC, c DESC
+          LIMIT 500 BY intDiv(y, {tile_px:UInt32})
+          LIMIT 6000`
+      : `ORDER BY c DESC
+          LIMIT 500`
+    const outerLimit = input.allBands ? 6000 : 500
     sql = `
       SELECT x, y, count() AS count, uniq(session_id) AS sessions
       FROM (
@@ -400,14 +498,13 @@ async function fetchRealHeatmapPoints(input: {
           FROM clickinsight.events
           WHERE ${clickWhere}
           GROUP BY x, y
-          ORDER BY c DESC
-          LIMIT 500
+          ${pass1Limit}
         )
       )
       GROUP BY x, y
       HAVING count >= 1
       ORDER BY count DESC
-      LIMIT 500
+      LIMIT ${outerLimit}
     `
   } else if (input.heatmapType === 'read') {
     // ── READ (熟読 / attention) ──────────────────────────────────────────
@@ -435,7 +532,7 @@ async function fetchRealHeatmapPoints(input: {
       GROUP BY y
       HAVING count >= 1
       ORDER BY y ASC
-      LIMIT 500
+      LIMIT ${input.allBands ? 2000 : 500}
     `
   } else if (input.heatmapType === 'scroll') {
     // ── SCROLL (スクロール到達率) ────────────────────────────────────────
