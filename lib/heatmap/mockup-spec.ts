@@ -105,6 +105,20 @@ export const DEVICES: ReadonlyArray<{
 ]
 
 /**
+ * 続128 (初回表示速度): screenshot capture の viewport 幅 (= 座標系 referenceWidth)。
+ * server 側 `lib/heatmap/screenshot-provider.ts` の CAPTURE_WIDTH_FOR_DEVICE と一致させること
+ * (client から server module を import すると node 依存を巻き込むため、client-safe な定数として複製)。
+ *
+ * 用途: screenshot 到着前に「暫定座標系」で heatmap overlay を先行描画する際の referenceWidth。
+ * 実 capture の viewportWidth と同値のため、screenshot 差し替え時に blob が水平方向に動かない。
+ */
+export const DEVICE_CAPTURE_WIDTH: Record<DeviceKind, number> = {
+  pc: 1280,
+  sp: 390,
+  tab: 820,
+}
+
+/**
  * Blob radial gradient by mode/emotion/severity (mockup `.heat-blob.*` 完全一致)
  * inline `background` として使う。emotion mode は emotion key で分岐。
  */

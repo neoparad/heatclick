@@ -394,6 +394,28 @@ describe('buildHeatmapViewModel', () => {
       expect(t.x).toBeLessThanOrEqual(1254)
     })
 
+    it('続128: blob/tag 座標は ctx.pageHeight に依存しない (provisional→real で動かない不変条件)', () => {
+      // 暫定座標系 (pageHeight=66000、outlier guard generous) と 実 capture (pageHeight=8000) で
+      // referenceWidth が同じなら tag の x/y は完全一致する。= screenshot 差し替え時に blob が動かない。
+      const tiles = [tileWith([{ x: 640, y: 3200, count: 10, sessions: 5 }])]
+      const meta = metaWith('clickhouse_events')
+      const provisional = buildHeatmapViewModel({
+        tiles,
+        meta,
+        coordinateContext: { sourceWidth: 1280, referenceWidth: 1280, pageHeight: 66_000 },
+      })
+      const real = buildHeatmapViewModel({
+        tiles,
+        meta,
+        coordinateContext: { sourceWidth: 1280, referenceWidth: 1280, pageHeight: 8_000 },
+      })
+      expect(provisional.tags).toHaveLength(1)
+      expect(real.tags).toHaveLength(1)
+      // x も y も完全一致 (pageHeight は座標に効かない、outlier guard と容器高さのみ)
+      expect(provisional.tags[0].x).toBe(real.tags[0].x)
+      expect(provisional.tags[0].y).toBe(real.tags[0].y)
+    })
+
     it('Phase 1 path (no coordinateContext) still uses MOCK_PAGE_HEIGHT compression', () => {
       // Phase 1 backward compat: context 未指定なら旧 scale で動く
       const vm = buildHeatmapViewModel({
