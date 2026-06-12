@@ -71,8 +71,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<SuccessRe
     )
   }
 
-  // ── tenant + site 照合 (JWT 由来) ──
-  const tenantResult = resolveScenarioTenantContext(request, parsedBody.site_id)
+  // ── tenant + site 照合 (REQ-SEC-126: getServerSession 経由・失効照合済み。async) ──
+  const tenantResult = await resolveScenarioTenantContext(request, parsedBody.site_id)
   if (tenantResult instanceof NextResponse) {
     return tenantResult as NextResponse<ErrorResponse>
   }

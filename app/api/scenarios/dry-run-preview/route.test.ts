@@ -32,8 +32,40 @@ jest.mock('@/lib/llm/chat-rate-limit', () => ({
   })),
 }))
 
+// REQ-SEC-126: tenant 解決は getServerSession() (JWT 署名 + Layer 2 失効照合) 経由。
+// header 直読みではないため、boundary テストは session を mock する。
+jest.mock('@/lib/auth/server-session', () => ({
+  getServerSession: jest.fn(),
+}))
+
 import { POST } from './route'
 import { runDryRunPreview } from '@/lib/scenarios/dry-run-preview'
+import { getServerSession } from '@/lib/auth/server-session'
+
+const mockGetServerSession = getServerSession as jest.MockedFunction<typeof getServerSession>
+
+/** 既定: tenant_a / site CIP_site_a を 1 つ持つ owner セッション。 */
+function sessionWith(opts: { tenant_id?: string; site_ids?: string[]; user_id?: string } = {}) {
+  const tenant_id = opts.tenant_id ?? 'tenant_a'
+  const user_id = opts.user_id ?? 'user_1'
+  const site_ids = opts.site_ids ?? ['CIP_site_a']
+  return {
+    user: {
+      sub: user_id,
+      email: 'user@example.com',
+      name: 'User',
+      tenant_id,
+      plan: 'free' as const,
+      site_ids,
+      role: 'owner' as const,
+      session_version: 0,
+      membership_version: 0,
+    },
+    tenant_id,
+    user_id,
+    role: 'owner' as const,
+  }
+}
 
 const URL_BASE = 'https://app.example.com/api/scenarios/dry-run-preview'
 
@@ -56,6 +88,8 @@ function makeRequest(
 describe('POST /api/scenarios/dry-run-preview — boundary checks', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // 既定で認可済みセッション (各テストが必要なら上書き)。
+    mockGetServerSession.mockResolvedValue(sessionWith())
   })
 
   it('rejects body without site_id', async () => {
@@ -126,34 +160,25 @@ describe('POST /api/scenarios/dry-run-preview — boundary checks', () => {
     expect(runDryRunPreview).not.toHaveBeenCalled()
   })
 
-  it('rejects when tenant header missing (REQ-SEC-004)', async () => {
+  it('rejects when there is no valid session (REQ-SEC-126: revoked/unauth → 401)', async () => {
+    mockGetServerSession.mockResolvedValue(null)
     const res = await POST(
-      makeRequest(
-        {
-          site_id: 'CIP_site_a',
-          condition_ast: { op: 'AND', children: [{ op: 'EQ', field: 'utm_source', value: 'x' }] },
-        },
-        { 'content-type': 'application/json', 'x-site-ids': 'CIP_site_a' },
-      ),
+      makeRequest({
+        site_id: 'CIP_site_a',
+        condition_ast: { op: 'AND', children: [{ op: 'EQ', field: 'utm_source', value: 'x' }] },
+      }),
     )
     expect(res.status).toBe(401)
     expect(runDryRunPreview).not.toHaveBeenCalled()
   })
 
-  it('rejects when site_id is not in JWT site_ids (IDOR guard)', async () => {
+  it('rejects when site_id is not in the session site_ids (IDOR guard)', async () => {
+    mockGetServerSession.mockResolvedValue(sessionWith({ site_ids: ['CIP_site_a'] }))
     const res = await POST(
-      makeRequest(
-        {
-          site_id: 'CIP_other_site',
-          condition_ast: { op: 'AND', children: [{ op: 'EQ', field: 'utm_source', value: 'x' }] },
-        },
-        {
-          'content-type': 'application/json',
-          'x-tenant-id': 'tenant_a',
-          'x-site-ids': 'CIP_site_a',
-          'x-user-id': 'user_1',
-        },
-      ),
+      makeRequest({
+        site_id: 'CIP_other_site',
+        condition_ast: { op: 'AND', children: [{ op: 'EQ', field: 'utm_source', value: 'x' }] },
+      }),
     )
     expect(res.status).toBe(403)
     expect(runDryRunPreview).not.toHaveBeenCalled()
