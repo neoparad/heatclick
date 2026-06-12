@@ -1,8 +1,9 @@
 /**
- * REQ-SEC-004 / REQ-SEC-126 — JWT-derived tenant context unit tests.
+ * REQ-SEC-004 / REQ-SEC-126 / §3.8.1 — tenant context unit tests.
  *
- * tenant_id / site_ids は getServerSession() (検証済み JWT + Layer 2 失効照合) からのみ取得し、
- * site_id が JWT の site_ids に無ければ 403 (cross-tenant IDOR 防止)。session 不在は 401。
+ * - tenant_id / site_ids は getServerSession() (検証済み JWT + Layer 2 失効照合) からのみ取得
+ * - site_id が session の site_ids に無ければ 403 (cross-tenant IDOR 防止) + audit_events 記録
+ * - session 不在は 401 (失効済み/未認証)
  */
 
 import type { NextRequest } from 'next/server'
@@ -10,11 +11,15 @@ import type { NextRequest } from 'next/server'
 jest.mock('@/lib/auth/server-session', () => ({
   getServerSession: jest.fn(),
 }))
+// §3.8.1: cross-tenant 403 で audit_events に記録することを検証するため audit を mock。
+jest.mock('./audit', () => ({ emitScenarioAudit: jest.fn() }))
 
 import { getServerSession } from '@/lib/auth/server-session'
+import { emitScenarioAudit } from './audit'
 import { isTenantContext, resolveScenarioTenantContext } from './tenant-context'
 
 const mockGetServerSession = getServerSession as jest.MockedFunction<typeof getServerSession>
+const mockEmit = emitScenarioAudit as jest.Mock
 
 // resolver は request を tenant 導出に使わない (session 由来) ため、空スタブで十分。
 const stubReq = {} as unknown as NextRequest
@@ -45,11 +50,12 @@ function sessionWith(opts: {
   }
 }
 
-describe('resolveScenarioTenantContext (REQ-SEC-004 / REQ-SEC-126)', () => {
-  beforeEach(() => {
-    mockGetServerSession.mockReset()
-  })
+beforeEach(() => {
+  mockGetServerSession.mockReset()
+  mockEmit.mockClear()
+})
 
+describe('resolveScenarioTenantContext (REQ-SEC-004 / REQ-SEC-126)', () => {
   it('derives tenant_id/user_id from the verified session and accepts a granted site', async () => {
     mockGetServerSession.mockResolvedValue(
       sessionWith({ tenant_id: 'tenant_a', site_ids: ['CIP_one', 'CIP_two'], user_id: 'user_1' }),
@@ -71,9 +77,7 @@ describe('resolveScenarioTenantContext (REQ-SEC-004 / REQ-SEC-126)', () => {
   })
 
   it('returns 403 when site_id is NOT in the session site_ids (cross-tenant IDOR)', async () => {
-    mockGetServerSession.mockResolvedValue(
-      sessionWith({ site_ids: ['CIP_one', 'CIP_two'] }),
-    )
+    mockGetServerSession.mockResolvedValue(sessionWith({ site_ids: ['CIP_one', 'CIP_two'] }))
     const res = await resolveScenarioTenantContext(stubReq, 'CIP_victim')
     expect(isTenantContext(res)).toBe(false)
     if (!isTenantContext(res)) expect(res.status).toBe(403)
@@ -99,5 +103,45 @@ describe('resolveScenarioTenantContext (REQ-SEC-004 / REQ-SEC-126)', () => {
     )
     const ctx = await resolveScenarioTenantContext(stubReq, 'CIP_one')
     if (isTenantContext(ctx)) expect(ctx.userId).toBe('usr_42')
+  })
+})
+
+describe('resolveScenarioTenantContext audit on cross-tenant 403 (§3.8.1)', () => {
+  it('emits a scenario.access_denied audit event on a cross-tenant 403', async () => {
+    mockGetServerSession.mockResolvedValue(
+      sessionWith({ tenant_id: 'tenant_a', site_ids: ['CIP_one', 'CIP_two'], user_id: 'user_9' }),
+    )
+    const res = await resolveScenarioTenantContext(stubReq, 'CIP_victim')
+    expect(isTenantContext(res)).toBe(false)
+    if (!isTenantContext(res)) expect(res.status).toBe(403)
+
+    expect(mockEmit).toHaveBeenCalledTimes(1)
+    const arg = mockEmit.mock.calls[0][0]
+    expect(arg.action).toBe('scenario.access_denied')
+    expect(arg.tenant_id).toBe('tenant_a')
+    expect(arg.user_id).toBe('user_9')
+    expect(arg.response_status).toBe(403)
+    expect(arg.metadata.attempted_site_id).toBe('CIP_victim')
+    expect(arg.metadata.granted_site_ids).toEqual(['CIP_one', 'CIP_two'])
+  })
+
+  it('does NOT emit on a successful resolve', async () => {
+    mockGetServerSession.mockResolvedValue(
+      sessionWith({ site_ids: ['CIP_one'], user_id: 'u1' }),
+    )
+    await resolveScenarioTenantContext(stubReq, 'CIP_one')
+    expect(mockEmit).not.toHaveBeenCalled()
+  })
+
+  it('does NOT emit on 401 (no session — not a cross-tenant attempt)', async () => {
+    mockGetServerSession.mockResolvedValue(null)
+    await resolveScenarioTenantContext(stubReq, 'CIP_one')
+    expect(mockEmit).not.toHaveBeenCalled()
+  })
+
+  it('does NOT emit on 400 (malformed site_id, before the membership check)', async () => {
+    mockGetServerSession.mockResolvedValue(sessionWith({ site_ids: ['CIP_one'] }))
+    await resolveScenarioTenantContext(stubReq, 'bad site id!')
+    expect(mockEmit).not.toHaveBeenCalled()
   })
 })

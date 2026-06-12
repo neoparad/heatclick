@@ -20,7 +20,7 @@
 
 import Link from 'next/link'
 import { useState } from 'react'
-import { ArrowLeft, Check, Code2, Eye, ImageIcon, Plus, RotateCcw, Save } from 'lucide-react'
+import { ArrowLeft, Check, RotateCcw, Save } from 'lucide-react'
 
 import { PageMeta } from '@/components/layout/page-meta'
 import { Badge } from '@/components/ui/badge'
@@ -34,12 +34,13 @@ import {
   type ScenarioRole,
 } from '@/lib/scenarios/publish-rbac'
 import type { ConditionNode, Scenario, Variant } from '@/lib/scenarios/types'
-import { SCENARIO_STATUSES, VARIANT_POSITIONS } from '@/lib/scenarios/types'
+import { SCENARIO_STATUSES } from '@/lib/scenarios/types'
 
 import { ConditionVisualBuilder } from './condition-visual-builder'
 import { ScenarioStatsPanel } from './scenario-stats-panel'
 import { useScenarioEditor } from './use-scenario-editor'
-import { VariantImageUpload } from './variant-image-upload'
+import { VariantPreview } from './variant-preview'
+import { VariantSetEditor } from './variant-set-editor'
 
 interface ScenarioEditorViewProps {
   scenario: Scenario
@@ -50,9 +51,9 @@ interface ScenarioEditorViewProps {
 export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewProps) {
   const editor = useScenarioEditor({ scenario })
   const role: ScenarioRole = normalizeRole(viewerRole)
-  const [activeVariantId, setActiveVariantId] = useState<string>(editor.draft.variants[0]?.id ?? 'A')
-  const activeVariant =
-    editor.draft.variants.find((v) => v.id === activeVariantId) ?? editor.draft.variants[0]
+  // C: エディタ内ビジュアルプレビュー。preview 対象 variant (null = 非表示)。
+  // active variant の管理は VariantSetEditor 内部に委譲し、onPreview で対象を受け取る。
+  const [previewVariant, setPreviewVariant] = useState<Variant | null>(null)
 
   return (
     <>
@@ -95,9 +96,6 @@ export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewP
             >
               <ArrowLeft className="h-3 w-3" /> 一覧へ
             </Link>
-            <Button variant="outline" size="sm" disabled title="Stage 4 (visual builder) で実装">
-              <Eye className="mr-1.5 h-3 w-3" /> プレビュー
-            </Button>
             {editor.isDirty ? (
               <Button variant="outline" size="sm" onClick={editor.reset} disabled={editor.isSaving}>
                 <RotateCcw className="mr-1.5 h-3 w-3" /> 戻す
@@ -165,99 +163,21 @@ export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewP
 
           {/* RIGHT: variant editor */}
           <div>
-            <Panel title="バリアント (A/B/C 最大 3 つ)" meta="画像 or HTML、汎用フィールドなし">
-              {/* A/B/C tabs */}
-              <div className="flex gap-1.5 px-4 pt-2.5 border-b border-slate-100 bg-slate-50 items-end">
-                {editor.draft.variants.map((v) => {
-                  const isActive = activeVariantId === v.id
-                  const color = v.id === 'A' ? 'indigo' : v.id === 'B' ? 'purple' : 'emerald'
-                  return (
-                    <button
-                      key={v.id}
-                      type="button"
-                      onClick={() => setActiveVariantId(v.id)}
-                      className={`px-3.5 py-2 text-xs font-semibold rounded-t-md border ${
-                        isActive
-                          ? `border-${color}-300 bg-white text-${color}-700`
-                          : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-100'
-                      } -mb-[1px] flex items-center gap-2`}
-                    >
-                      <span
-                        className={`w-4.5 h-4.5 rounded-full text-white font-mono text-[10px] font-bold flex items-center justify-center ${
-                          v.id === 'A' ? 'bg-indigo-500' : v.id === 'B' ? 'bg-purple-500' : 'bg-emerald-500'
-                        }`}
-                      >
-                        {v.id}
-                      </span>
-                      variant {v.id}
-                    </button>
-                  )
-                })}
-                {editor.draft.variants.length < 3 ? (
-                  <button
-                    type="button"
-                    disabled
-                    title="Stage 4 (visual builder) で実装"
-                    className="px-3.5 py-2 text-xs font-semibold border-2 border-dashed border-slate-300 rounded-t-md text-slate-400 -mb-[1px] flex items-center gap-1"
-                  >
-                    <Plus className="h-3 w-3" /> 追加
-                  </button>
-                ) : null}
-                <div className="ml-auto font-mono text-[10.5px] text-slate-400 pb-2">
-                  {editor.draft.variants.length} / 3 variants
-                </div>
-              </div>
-
+            <Panel
+              title="バリアント (A/B/C 最大 3 つ)"
+              meta="画像 or HTML · 追加/削除・content_type 切替・プレビュー可"
+            >
               <div className="px-4 py-4">
-                {activeVariant ? (
-                  <VariantEditor
-                    variant={activeVariant}
-                    scenarioId={scenario.id}
-                    tenantId={scenario.tenant_id}
-                    siteId={scenario.site_id}
-                    onChange={(patch) => editor.updateVariant(activeVariant.id, patch)}
-                  />
-                ) : null}
+                <VariantSetEditor
+                  variants={editor.draft.variants}
+                  onChange={editor.setVariants}
+                  scenarioId={scenario.id}
+                  siteId={scenario.site_id}
+                  tenantId={scenario.tenant_id}
+                  onPreview={setPreviewVariant}
+                />
               </div>
             </Panel>
-
-            {/* Traffic split */}
-            <SectionHeader>traffic split (A/B/C 配信比率、合計 100 必須)</SectionHeader>
-            <div className="bg-slate-50 border border-slate-200 rounded-lg p-3.5">
-              <SplitBar variants={editor.draft.variants} />
-              <div className="grid grid-cols-3 gap-2 mt-2">
-                {editor.draft.variants.map((v) => {
-                  const color =
-                    v.id === 'A' ? 'text-indigo-600' : v.id === 'B' ? 'text-purple-600' : 'text-emerald-600'
-                  return (
-                    <div
-                      key={v.id}
-                      className="px-2 py-1.5 border border-slate-200 rounded bg-white flex items-center gap-1.5"
-                    >
-                      <span className={`font-mono text-[10.5px] font-bold ${color}`}>{v.id}</span>
-                      <Input
-                        type="number"
-                        min={0}
-                        max={100}
-                        value={String(v.traffic_split)}
-                        onChange={(e) => {
-                          const n = Number.parseInt(e.target.value, 10)
-                          if (!Number.isFinite(n)) return
-                          editor.updateVariant(v.id, { traffic_split: Math.max(0, Math.min(100, n)) })
-                        }}
-                        className="w-12 h-6 text-right text-[11.5px] font-mono p-1"
-                        aria-label={`variant ${v.id} traffic_split`}
-                      />
-                      <span className="text-[10.5px] text-slate-400">%</span>
-                    </div>
-                  )
-                })}
-              </div>
-              <div className="text-[11px] text-slate-500 mt-2 leading-relaxed">
-                visitor_id の hash で決定論的に振り分け (同 visitor は常に同じ variant が当たる)。
-                各 variant の impression / click / dismiss / conversion を計測。Phase 3 で AI 自動勝者振り分けに昇格予定。
-              </div>
-            </div>
 
             {/* Status section */}
             <div className="bg-slate-50 border border-slate-200 rounded-lg p-3.5 mt-3">
@@ -314,6 +234,10 @@ export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewP
           </div>
         </div>
       </div>
+
+      {previewVariant ? (
+        <VariantPreview variant={previewVariant} onClose={() => setPreviewVariant(null)} />
+      ) : null}
     </>
   )
 }
@@ -375,144 +299,5 @@ function formatAstForDisplay(ast: ConditionNode): string {
   }
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-
-interface VariantEditorProps {
-  variant: Variant
-  scenarioId: string
-  tenantId: string
-  siteId: string
-  onChange: (patch: Partial<Variant>) => void
-}
-
-function VariantEditor({ variant, scenarioId, tenantId, siteId, onChange }: VariantEditorProps) {
-  return (
-    <div>
-      {/* content_type radio (Stage 3 で switch 可能化) */}
-      <div className="flex gap-2 p-1 bg-slate-100 rounded-md mb-3.5">
-        <label
-          className={`flex-1 flex items-center gap-2 px-3 py-2 rounded cursor-not-allowed ${
-            variant.content_type === 'image' ? 'bg-white border border-indigo-300 shadow-sm' : ''
-          }`}
-        >
-          <input type="radio" name="vtype" checked={variant.content_type === 'image'} readOnly />
-          <div
-            className={`w-7 h-7 rounded-md flex items-center justify-center ${
-              variant.content_type === 'image'
-                ? 'bg-gradient-to-br from-indigo-500 to-purple-500 text-white'
-                : 'bg-slate-50 text-slate-400'
-            }`}
-          >
-            <ImageIcon className="h-3.5 w-3.5" />
-          </div>
-          <div className="text-xs">
-            <div className="font-semibold">画像</div>
-            <div className="text-[10.5px] text-slate-400">Cloudflare R2 (Stage 3)</div>
-          </div>
-        </label>
-        <label
-          className={`flex-1 flex items-center gap-2 px-3 py-2 rounded cursor-not-allowed ${
-            variant.content_type === 'html' ? 'bg-white border border-indigo-300 shadow-sm' : ''
-          }`}
-        >
-          <input type="radio" name="vtype" checked={variant.content_type === 'html'} readOnly />
-          <div
-            className={`w-7 h-7 rounded-md flex items-center justify-center ${
-              variant.content_type === 'html'
-                ? 'bg-gradient-to-br from-indigo-500 to-purple-500 text-white'
-                : 'bg-slate-50 text-slate-400'
-            }`}
-          >
-            <Code2 className="h-3.5 w-3.5" />
-          </div>
-          <div className="text-xs">
-            <div className="font-semibold">HTML</div>
-            <div className="text-[10.5px] text-slate-400">インライン (Stage 4)</div>
-          </div>
-        </label>
-      </div>
-
-      {/* Content preview (Stage 3-4 で edit 化) */}
-      {variant.content_type === 'image' ? (
-        <div className="bg-slate-50 border border-slate-200 rounded overflow-hidden">
-          <div className="h-44 bg-gradient-to-br from-indigo-100 to-purple-100 flex items-center justify-center text-xs text-slate-400 font-mono relative">
-            画像プレビュー ({variant.image_width ?? '?'} × {variant.image_height ?? '?'})
-            <span className="absolute bottom-2 right-2.5 px-1.5 py-0.5 bg-black/50 text-white rounded text-[10px]">
-              {variant.image_url.split('/').pop()}
-            </span>
-          </div>
-          <div className="px-3.5 py-2.5 text-[11.5px] text-slate-600 flex gap-2 items-center">
-            <span className="truncate flex-1">{variant.image_alt}</span>
-            {variant.content_type === 'image' ? (
-              <VariantImageUpload
-                scenarioId={scenarioId}
-                tenantId={tenantId}
-                siteId={siteId}
-                currentUrl={variant.image_url}
-                onUploaded={({ publicUrl }) => onChange({ image_url: publicUrl } as Partial<Variant>)}
-              />
-            ) : null}
-          </div>
-        </div>
-      ) : (
-        <pre className="bg-slate-900 text-slate-100 rounded p-3.5 font-mono text-[11.5px] leading-relaxed border border-slate-700 min-h-[180px] whitespace-pre-wrap overflow-auto">
-          {variant.html}
-        </pre>
-      )}
-
-      <div className="grid grid-cols-[110px_1fr] gap-2.5 items-center mt-3">
-        <span className="text-[11.5px] text-slate-500 font-medium">CTA URL</span>
-        <Input
-          type="url"
-          value={variant.cta_url ?? ''}
-          onChange={(e) => onChange({ cta_url: e.target.value || undefined } as Partial<Variant>)}
-          placeholder="https://bihadashop.jp/products?promo=..."
-          className="h-9 text-xs"
-        />
-
-        <span className="text-[11.5px] text-slate-500 font-medium">表示位置</span>
-        <select
-          value={variant.position}
-          onChange={(e) => onChange({ position: e.target.value as Variant['position'] } as Partial<Variant>)}
-          className="h-9 text-xs px-3 border border-slate-200 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400"
-        >
-          {VARIANT_POSITIONS.map((p) => (
-            <option key={p} value={p}>
-              {p}
-            </option>
-          ))}
-        </select>
-      </div>
-    </div>
-  )
-}
-
-// ───────────────────────────────────────────────────────────────────────────
-
-function SplitBar({ variants }: { variants: ReadonlyArray<Variant> }) {
-  const total = variants.reduce((s, v) => s + v.traffic_split, 0)
-  return (
-    <>
-      <div className="flex h-6 rounded overflow-hidden border border-slate-200">
-        {variants.map((v) => {
-          const color = v.id === 'A' ? 'bg-indigo-500' : v.id === 'B' ? 'bg-purple-500' : 'bg-emerald-500'
-          return (
-            <div
-              key={v.id}
-              className={`${color} flex items-center justify-center font-mono text-[11px] text-white font-bold`}
-              style={{ width: `${total > 0 ? (v.traffic_split / total) * 100 : 0}%` }}
-              title={`variant ${v.id}: ${v.traffic_split}%`}
-            >
-              {v.traffic_split}%
-            </div>
-          )
-        })}
-      </div>
-      {total !== 100 ? (
-        <div className="text-[11px] text-amber-600 mt-1 font-medium">
-          ⚠️ 合計 {total}% (100% にしないと保存できません)
-        </div>
-      ) : null}
-    </>
-  )
-}
+// VariantEditor / SplitBar は components/scenarios/variant-set-editor.tsx の
+// VariantSetEditor に統合 (F、続)。本ファイルからは削除済。

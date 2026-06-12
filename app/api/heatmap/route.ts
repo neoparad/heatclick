@@ -51,7 +51,45 @@ const querySchema = z.object({
   end_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   tile_size: z.coerce.number().int().min(800).max(6000).default(2400),
   cursor: z.string().max(2000).optional(),
+  // 続125 (Owner ①): 行動セグメント (ルールベースのクラスタ分け、観測データ直結)
+  segment: z.enum(['all', 'deep_read', 'bounce', 'ad']).default('all'),
 })
+
+/**
+ * 続125: 行動セグメントの session 絞り込み SQL 断片。
+ * 値は全て parameter binding 済みの定数断片のみ (ユーザー入力の文字列連結なし)。
+ *   - deep_read: そのページで max(scroll_percentage) >= 70 のセッション (熟読層)
+ *   - bounce   : max(scroll_percentage) <= 20 (浅読・直帰層)
+ *   - ad       : gclid / fbclid を伴うセッション (広告流入)
+ */
+function segmentFilterSql(segment: 'all' | 'deep_read' | 'bounce' | 'ad'): string {
+  if (segment === 'all') return ''
+  if (segment === 'ad') {
+    return `AND session_id IN (
+      SELECT DISTINCT session_id FROM clickinsight.events
+      WHERE tenant_id = {tenant_id:String}
+        AND site_id = {site_id:String}
+        AND url = {page_url:String}
+        AND is_agent = 0
+        AND ((gclid IS NOT NULL AND gclid != '') OR (fbclid IS NOT NULL AND fbclid != ''))
+        AND timestamp >= toDateTime({start:String})
+        AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+    )`
+  }
+  const havingCond =
+    segment === 'deep_read' ? 'max(scroll_percentage) >= 70' : 'max(scroll_percentage) <= 20'
+  return `AND session_id IN (
+    SELECT session_id FROM clickinsight.events
+    WHERE tenant_id = {tenant_id:String}
+      AND site_id = {site_id:String}
+      AND url = {page_url:String}
+      AND is_agent = 0
+      AND timestamp >= toDateTime({start:String})
+      AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+    GROUP BY session_id
+    HAVING ${havingCond}
+  )`
+}
 
 // 続120: 旧 30_000 は縦長記事で深部クリックを取りこぼしていた (click_y は UInt16 で
 // max 65535、実測 max ~50k)。UInt16 上限に合わせ 66_000 まで tile を辿れるよう拡張し、
@@ -72,8 +110,10 @@ function buildQueryHash(params: {
   device_type?: string
   start_date?: string
   end_date?: string
+  segment?: string
 }): string {
-  const raw = `${params.site_id}|${params.page_url}|${params.heatmap_type}|${params.device_type ?? ''}|${params.start_date ?? ''}|${params.end_date ?? ''}|${params.tile_size}`
+  // 続125: segment も hash に含める (segment 切替を跨いだ cursor 再利用を CURSOR_INVALID に)
+  const raw = `${params.site_id}|${params.page_url}|${params.heatmap_type}|${params.device_type ?? ''}|${params.start_date ?? ''}|${params.end_date ?? ''}|${params.tile_size}|${params.segment ?? 'all'}`
   const hmac = createHmac('sha256', getCursorSecret()).update(raw).digest('hex')
   return hmac.slice(0, 32)
 }
@@ -131,6 +171,7 @@ export async function GET(request: Request) {
     end_date: url.searchParams.get('end_date') ?? undefined,
     tile_size: url.searchParams.get('tile_size') ?? undefined,
     cursor: url.searchParams.get('cursor') ?? undefined,
+    segment: url.searchParams.get('segment') ?? undefined,
   })
 
   if (!parsed.success) {
@@ -196,6 +237,54 @@ export async function GET(request: Request) {
   // scroll / exit は scroll_percentage(0-100) ベースの band 集計 = ページ全体を1タイルで返す
   // (px window 不要、PAGE_HEIGHT_ESTIMATE まで一括)。click / read は従来の px window 分割。
   const isSingleTileLayer = params.heatmap_type === 'scroll' || params.heatmap_type === 'exit'
+  const isPxLayer = params.heatmap_type === 'click' || params.heatmap_type === 'read'
+
+  // ── 続131 (実走査監査 perf): px 層は初回 (cursor 無し) に**全帯域を 1 クエリで一括取得**する。
+  //    旧: 1 band/リクエスト × 最大 11 回の直列 CH クエリ (実測 1批 2-5s) = 初回表示が分単位。
+  //    新: per-band top-500 を LIMIT BY で 1 クエリに集約 → tiles[] を全 band 分返し
+  //    next_cursor=null (hook の eager loop は 1 周で完了)。失敗時は従来の per-band 経路へ
+  //    fall-through (dummy fallback 含む契約は不変)。cursor 継続リクエストも従来経路のまま。
+  if (isPxLayer && yStart === 0 && !isDummyOnly()) {
+    try {
+      const allPoints = await fetchRealHeatmapPoints({
+        tenantId,
+        siteId: params.site_id,
+        pageUrl: params.page_url,
+        heatmapType: params.heatmap_type,
+        deviceType: params.device_type,
+        segment: params.segment,
+        yStart: 0,
+        yEnd: PAGE_HEIGHT_ESTIMATE,
+        startDate: params.start_date,
+        endDate: params.end_date,
+        allBands: true,
+        tileSize: params.tile_size,
+      })
+      return NextResponse.json({
+        success: true,
+        data: {
+          tiles: partitionIntoTiles(allPoints, params.tile_size),
+          next_cursor: null,
+        },
+        meta: {
+          tile_size: params.tile_size,
+          page_height_estimate: PAGE_HEIGHT_ESTIMATE,
+          cached: false,
+          cache_ttl_sec: 7200,
+          query_hash: queryHash,
+          data_source: 'clickhouse_events' as const,
+          heatmap_type: params.heatmap_type,
+        },
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown'
+      console.error(
+        `[heatmap] all-bands query failed query_hash=${queryHash.slice(0, 8)}, falling back to per-band path: ${message}`,
+      )
+      // fall through: 従来の per-band (dummy fallback 含む) 経路
+    }
+  }
+
   const tileEnd = isSingleTileLayer
     ? PAGE_HEIGHT_ESTIMATE
     : Math.min(yStart + params.tile_size, PAGE_HEIGHT_ESTIMATE + params.tile_size)
@@ -217,6 +306,7 @@ export async function GET(request: Request) {
         pageUrl: params.page_url,
         heatmapType: params.heatmap_type,
         deviceType: params.device_type,
+        segment: params.segment,
         yStart,
         yEnd: tileEnd,
         startDate: params.start_date,
@@ -267,6 +357,40 @@ export async function GET(request: Request) {
 }
 
 /**
+ * 続131: 全帯域 points を tile_size ごとの band に分割して tiles[] にする。
+ * 空 band は省略 (hook は y_start で dedupe するだけなので欠番可)。全 0 件のときは
+ * 従来挙動 (空 points の band 0) を返し、UI の real-empty 判定を変えない。
+ */
+function partitionIntoTiles(
+  points: Array<{ x: number; y: number; count: number; sessions: number }>,
+  tileSize: number,
+): Array<{
+  y_start: number
+  y_end: number
+  points: Array<{ x: number; y: number; count: number; sessions: number }>
+  truncated: boolean
+}> {
+  const byBand = new Map<number, Array<{ x: number; y: number; count: number; sessions: number }>>()
+  for (const p of points) {
+    const start = Math.floor(p.y / tileSize) * tileSize
+    const arr = byBand.get(start)
+    if (arr) arr.push(p)
+    else byBand.set(start, [p])
+  }
+  if (byBand.size === 0) {
+    return [{ y_start: 0, y_end: tileSize, points: [], truncated: false }]
+  }
+  return [...byBand.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([y_start, pts]) => ({
+      y_start,
+      y_end: y_start + tileSize,
+      points: pts,
+      truncated: false,
+    }))
+}
+
+/**
  * ClickHouse `clickinsight.events` から heatmap_type に応じた集約を返す。
  *
  * layer → event_type → coordinate 列のマッピング:
@@ -287,14 +411,21 @@ async function fetchRealHeatmapPoints(input: {
   pageUrl: string
   heatmapType: 'click' | 'scroll' | 'read' | 'exit'
   deviceType?: 'desktop' | 'mobile' | 'tablet' | 'unknown'
+  segment?: 'all' | 'deep_read' | 'bounce' | 'ad'
   yStart: number
   yEnd: number
   startDate?: string
   endDate?: string
+  /** 続131: true なら px 層を全帯域 1 クエリ (per-band top を LIMIT BY) で返す */
+  allBands?: boolean
+  /** allBands 時の band 幅 (LIMIT BY の band 式に使用) */
+  tileSize?: number
 }): Promise<Array<{ x: number; y: number; count: number; sessions: number }>> {
   const client = getClickHouseClient('analytics_reader')
 
   const deviceFilter = input.deviceType ? `AND device_type = {device_type:String}` : ''
+  // 続125: 行動セグメント絞り込み (定数 SQL 断片 + parameter binding のみ)
+  const segmentFilter = segmentFilterSql(input.segment ?? 'all')
   const dateStart = input.startDate ?? '1970-01-01'
   const dateEnd = input.endDate ?? '2099-12-31'
 
@@ -310,6 +441,9 @@ async function fetchRealHeatmapPoints(input: {
   if (deviceFilter && input.deviceType) {
     queryParams.device_type = input.deviceType
   }
+  if (input.allBands) {
+    queryParams.tile_px = String(input.tileSize ?? 6000)
+  }
 
   let sql: string
 
@@ -318,14 +452,20 @@ async function fetchRealHeatmapPoints(input: {
     // click_x を 1280 基準に正規化、[0,1280] に clamp。
     // click_y = document 絶対 CSS px (UInt32 で wrap を避ける)。
     // viewport_width <= 0 の malformed row は生 click_x をそのまま使う (worst-case)。
-    sql = `
-      SELECT
-        toUInt16(least(1280, greatest(0, if(viewport_width > 0, click_x * 1280 / viewport_width, click_x)))) AS x,
-        toUInt32(click_y) AS y,
-        count() AS count,
-        uniqExact(session_id) AS sessions
-      FROM clickinsight.events
-      WHERE tenant_id = {tenant_id:String}
+    //
+    // 続129 (本番障害 fix): 旧実装は GROUP BY が「生 px (x 1280 × y tile全域)」+
+    //   uniqExact (厳密セット) で、再タグ後のデータ量 (3倍) で server の総メモリ上限
+    //   (6.81GiB) を超過し MEMORY_LIMIT_EXCEEDED → heatmap 全滅していた。
+    //   実測の学び: 8px ビン化 + uniq(HLL) でも最大 ~133万 bin × HLL 状態 ~2.5KB ≈ 5GB で
+    //   依然超過する (live 検証済)。よって **2パス方式**:
+    //     pass1 (subquery): count のみで上位 500 bin を選抜 — counter だけなので ~数十MB。
+    //     pass2 (outer)   : その 500 bin に該当する行だけ uniq(session_id) — HLL 500 個 ≈ 1MB。
+    //   座標 8px グリッド (bin 中心 +4) は view-model の 48px クラスタ半径より十分細かく視覚差ゼロ。
+    //   sessions の uniq() 誤差 ~1% は blob 強度/tooltip 用途で無影響 (observed であることは不変)。
+    const binnedX = `toUInt16(least(1280, greatest(0, floor(if(viewport_width > 0, click_x * 1280 / viewport_width, click_x) / 8) * 8 + 4)))`
+    const binnedY = `toUInt32(intDiv(click_y, 8) * 8 + 4)`
+    const clickWhere = `
+        tenant_id = {tenant_id:String}
         AND site_id = {site_id:String}
         AND url = {page_url:String}
         AND event_type = 'click'
@@ -335,10 +475,36 @@ async function fetchRealHeatmapPoints(input: {
         AND timestamp >= toDateTime({start:String})
         AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
         ${deviceFilter}
+        ${segmentFilter}`
+    // 続131 (allBands): per-band top-500 を LIMIT BY で 1 クエリに集約 (band = intDiv(y, tile_px))。
+    //   pass1 は counter のみ (~数十MB)、pass2 は選抜 bin (≤500×11) の uniq のみ — メモリ安全は不変。
+    const pass1Limit = input.allBands
+      ? `ORDER BY intDiv(y, {tile_px:UInt32}) ASC, c DESC
+          LIMIT 500 BY intDiv(y, {tile_px:UInt32})
+          LIMIT 6000`
+      : `ORDER BY c DESC
+          LIMIT 500`
+    const outerLimit = input.allBands ? 6000 : 500
+    sql = `
+      SELECT x, y, count() AS count, uniq(session_id) AS sessions
+      FROM (
+        SELECT ${binnedX} AS x, ${binnedY} AS y, session_id
+        FROM clickinsight.events
+        WHERE ${clickWhere}
+      )
+      WHERE (x, y) IN (
+        SELECT x, y FROM (
+          SELECT ${binnedX} AS x, ${binnedY} AS y, count() AS c
+          FROM clickinsight.events
+          WHERE ${clickWhere}
+          GROUP BY x, y
+          ${pass1Limit}
+        )
+      )
       GROUP BY x, y
       HAVING count >= 1
       ORDER BY count DESC
-      LIMIT 500
+      LIMIT ${outerLimit}
     `
   } else if (input.heatmapType === 'read') {
     // ── READ (熟読 / attention) ──────────────────────────────────────────
@@ -362,10 +528,11 @@ async function fetchRealHeatmapPoints(input: {
         AND timestamp >= toDateTime({start:String})
         AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
         ${deviceFilter}
+        ${segmentFilter}
       GROUP BY y
       HAVING count >= 1
       ORDER BY y ASC
-      LIMIT 500
+      LIMIT ${input.allBands ? 2000 : 500}
     `
   } else if (input.heatmapType === 'scroll') {
     // ── SCROLL (スクロール到達率) ────────────────────────────────────────
@@ -386,6 +553,7 @@ async function fetchRealHeatmapPoints(input: {
           AND timestamp >= toDateTime({start:String})
           AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
           ${deviceFilter}
+          ${segmentFilter}
         GROUP BY session_id
       )
       SELECT
@@ -418,6 +586,7 @@ async function fetchRealHeatmapPoints(input: {
           AND timestamp >= toDateTime({start:String})
           AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
           ${deviceFilter}
+          ${segmentFilter}
         GROUP BY session_id
       )
       SELECT
@@ -433,6 +602,12 @@ async function fetchRealHeatmapPoints(input: {
     `
   }
 
+  // 続130 (本番 dummy 退避の根本原因): per-query max_memory_usage は analytics_reader が
+  // readonly=1 のため **設定変更=禁止操作として HTTP 層で即拒否**され、tile クエリが
+  // ClickHouse に一切届かず全レイヤー dummy 退避していた (query_log で実証。
+  // max_execution_time は changeable_in_readonly のため通る — 同列に考えたのが誤り)。
+  // メモリ防御は (a) 2パスクエリ形状 (実証 3s/数十MB) + (b) server 側 user-level
+  // 設定 (scripts/operator-grant-analytics-reader.mjs で Owner が適用) の 2 層で担う。
   const rs = await client.query({
     query: sql,
     query_params: queryParams,

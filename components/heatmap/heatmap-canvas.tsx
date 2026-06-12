@@ -31,11 +31,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { HeatmapLayer, HeatmapPoint, HeatmapTile, HeatmapTileMeta } from '@/lib/api/heatmap'
+import type { HeatmapElementsData } from '@/lib/api/heatmap-elements'
 import { fetchHeatmapUnderlay } from '@/lib/api/heatmap-screenshot'
 import { isRealEmptyHeatmap } from '@/lib/heatmap/display-state'
 import { computeDisplayScale, computePageCssHeight } from '@/lib/heatmap/stage-layout'
 import { buildHeatmapViewModel } from '@/lib/heatmap/view-model'
 import {
+  DEVICE_CAPTURE_WIDTH,
   DEVICES,
   EMOTIONS,
   LAYERS,
@@ -92,6 +94,18 @@ export interface HeatmapCanvasProps {
   ctrLabel?: string
   dwellLabel?: string
   scrollLabel?: string
+  /**
+   * 続123: `/api/heatmap/elements` の要素単位集計 (heatmap-page の useHeatmapElements が own)。
+   * 提供時、hotspot card / tag が本物の要素名 + selector になり、rage/dead シグナルが実データ化。
+   * null でも cluster fallback で描画は継続する (非致命の強化データ)。
+   */
+  elements?: HeatmapElementsData | null
+  /**
+   * 続124: デバイスタブ (PC/SP/TAB) の controlled prop。親が screenshot とデータの
+   * 両方を同じデバイスに揃えるために own する。未指定なら内部 state (legacy 互換)。
+   */
+  device?: DeviceKind
+  onDeviceChange?: (d: DeviceKind) => void
 }
 
 /** view-model に渡す sourceWidth: ClickHouse 正規化済 click_x の最大幅 */
@@ -165,6 +179,9 @@ export function HeatmapCanvas({
   ctrLabel,
   dwellLabel,
   scrollLabel,
+  elements,
+  device: deviceProp,
+  onDeviceChange,
 }: HeatmapCanvasProps) {
   // pageHeightEstimate は legacy 契約。mockup parity rebuild では 720px 固定 underlay
   // のため canvas 高さ計算には使わない。Phase 2 (実 screenshot underlay) で復活予定。
@@ -187,7 +204,11 @@ export function HeatmapCanvas({
   const [controlsVisible, setControlsVisible] = useState(true)
   const [sideVisible, setSideVisible] = useState(true)
   const [fullscreen, setFullscreen] = useState(false)
-  const [device, setDevice] = useState<DeviceKind>('pc')
+  // 続124: device は親 (HeatmapPage) が own できる controlled prop (screenshot + データを
+  // 同時切替するため)。未指定 (legacy 呼出 / test) は内部 state fallback。
+  const [internalDevice, setInternalDevice] = useState<DeviceKind>('pc')
+  const device = deviceProp ?? internalDevice
+  const setDevice = onDeviceChange ?? setInternalDevice
   const [highlightedTagId, setHighlightedTagId] = useState<string | null>(null)
 
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -218,15 +239,50 @@ export function HeatmapCanvas({
   //   cap が取れたら capture CSS px 空間で座標計算し、displayScale で実 px に縮小する。
   const cap = captureState.kind === 'ready' ? captureState.capture : null
   const ready = cap != null
-  // referenceWidth = capture の CSS px 基準幅 (= viewportWidth、DPR 非依存)。fallback は mockup 720。
-  const referenceWidth = cap ? cap.viewportWidth : PAGE_WIDTH
+
+  // 続128 (初回表示速度): screenshot は cold capture (Puppeteer) で数秒かかるが、tiles は先に届く。
+  //   従来は overlay を capture 確定まで描かず、ユーザーはスケルトンを数秒見続けていた。
+  //   provisional: tiles があれば「暫定座標系」で overlay を先行描画し、screenshot は背面に後乗せ。
+  //   referenceWidth に実 capture と同じ DEVICE_CAPTURE_WIDTH を使うため、y は ctx 路で生 click_y、
+  //   x は同一 referenceWidth → screenshot 差し替え時に blob は 1px も動かない (容器高さだけ refine)。
+  const provisionalActive = !cap && captureState.kind !== 'error' && tiles.length > 0
+  const provReferenceWidth = DEVICE_CAPTURE_WIDTH[device] ?? PAGE_WIDTH
+
+  // referenceWidth = capture の CSS px 基準幅 (= viewportWidth、DPR 非依存)。
+  //   real=cap.viewportWidth / provisional=DEVICE_CAPTURE_WIDTH / fallback=mockup 720。
+  const referenceWidth = cap ? cap.viewportWidth : provisionalActive ? provReferenceWidth : PAGE_WIDTH
   // pageCssHeight = DPR 除去後の screenshot CSS px 全高 (click_y と同じ document 絶対 CSS px 空間)。
   const pageCssHeight = cap
     ? computePageCssHeight(cap.naturalWidth, cap.naturalHeight, referenceWidth) || MOCK_PAGE_HEIGHT
     : MOCK_PAGE_HEIGHT
-  // outer .hm-page の最大幅: ready 時は referenceWidth で頭打ち (wide screenshot を column 幅に収め、
-  //   sp は native 390 に収める、それ以上 upscale しない)。fallback は mockup pageMaxWidth。
-  const displayMaxWidth = cap ? Math.min(pageMaxWidth, referenceWidth) : pageMaxWidth
+
+  // ── 続131 (実走査監査で根本特定): 切断スクショ検知ガード ─────────────────────
+  //   劣化経路 (Worker 失敗 → CF REST / Microlink) は fullPage を無視して **1 viewport 分
+  //   (例 800 CSS px)** の画像を返すことがある。従来はその高さを座標系の全高として採用し、
+  //   outlier guard (pageHeight*1.05) が**それ以深の全クリックを廃棄** → 「データはあるのに
+  //   『クリックデータがまだありません』」という嘘の空表示・「途中で切れる」の積年の正体。
+  //   対策: px 空間レイヤー (click/read) のデータ最大 y が画像高の 1.3 倍を超えるとき
+  //   capture を「部分画像」と判定し、座標系の全高をデータ範囲まで拡張する。画像は上部に
+  //   そのまま敷き、以深は中立背景 — **データは絶対に隠さない**。
+  const isPxSpaceLayer = meta?.heatmap_type === 'click' || meta?.heatmap_type === 'read'
+  const dataMaxDocY = useMemo(() => {
+    if (!isPxSpaceLayer) return 0
+    let max = 0
+    for (const t of tiles) for (const p of t.points) if (p.y > max) max = p.y
+    return max
+  }, [tiles, isPxSpaceLayer])
+  const captureTruncated = cap != null && isPxSpaceLayer && dataMaxDocY > pageCssHeight * 1.3
+  // 座標系・容器の全高 (CSS px)。通常は画像全高、部分画像時はデータ範囲 +8% まで拡張。
+  const renderPageHeight = captureTruncated
+    ? Math.max(Math.round(dataMaxDocY * 1.08), pageCssHeight)
+    : pageCssHeight
+  // outer .hm-page の最大幅: ready / provisional 時は referenceWidth で頭打ち (wide screenshot を
+  //   column 幅に収め、sp は native 390 に収める)。provisional と real で同値なので遷移時に幅が動かない。
+  const displayMaxWidth = cap
+    ? Math.min(pageMaxWidth, referenceWidth)
+    : provisionalActive
+      ? Math.min(pageMaxWidth, provReferenceWidth)
+      : pageMaxWidth
 
   // outer hm-page の実 rendered width (CSS で shrink された場合の実 px)。
   // 初期値は displayMaxWidth (ResizeObserver fire 前の暫定)、ResizeObserver で実 px に追従。
@@ -250,8 +306,24 @@ export function HeatmapCanvas({
   }, [ready, displayMaxWidth])
 
   // displayScale = <img width:100%> の実縮小率。overlay 各要素に掛けて画像と座標一致。
-  //   ready でない (mock fallback) 時は 1 (mockup 720/860 空間そのまま)。
-  const displayScale = cap ? computeDisplayScale(actualOuterWidth, referenceWidth) : 1
+  //   real / provisional は referenceWidth ベース、mock fallback (error) 時は 1。
+  const displayScale =
+    cap || provisionalActive ? computeDisplayScale(actualOuterWidth, referenceWidth) : 1
+
+  // 続128: provisional underlay の CSS px 高さ = 観測された最大 click_y (データのある範囲) + 余白。
+  //   screenshot 到着で実画像高さに refine される。pageHeightEstimate を上限に異常値で巨大化を防ぐ。
+  const provContentCssHeight = useMemo(() => {
+    if (!provisionalActive) return 0
+    let maxY = 0
+    for (const t of tiles) {
+      for (const p of t.points) if (p.y > maxY) maxY = p.y
+    }
+    const padded = maxY > 0 ? maxY * 1.08 : MOCK_PAGE_HEIGHT
+    return Math.min(padded, Math.max(_pageHeightEstimate, MOCK_PAGE_HEIGHT))
+  }, [provisionalActive, tiles, _pageHeightEstimate])
+
+  // 続124 ⑥: 他デバイス screenshot の先読み済み key (siteId|pageUrl|device)。重複発火防止。
+  const prefetchedRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     if (!pageUrl || !siteId) return
@@ -267,6 +339,21 @@ export function HeatmapCanvas({
         if (ctrl.signal.aborted) return
         if (res.success) {
           setCaptureState({ kind: 'ready', capture: res.data })
+          // 続124 ⑥ (Owner: 「タブを合わせてから取得は遅い、裏で先に」): 現在デバイスの
+          // capture が確定したら、残り 2 デバイスをバックグラウンドで先読みして server 側
+          // R2 cache を温める。タブ切替時は warm hit で即表示になる。失敗は無視 (非致命)。
+          const others = (['pc', 'sp', 'tab'] as const).filter((d) => d !== screenshotDevice)
+          others.forEach((d, i) => {
+            const key = `${siteId}|${pageUrl}|${d}`
+            if (prefetchedRef.current.has(key)) return
+            prefetchedRef.current.add(key)
+            setTimeout(
+              () => {
+                fetchHeatmapUnderlay({ siteId, pageUrl, device: d }).catch(() => {})
+              },
+              4000 * (i + 1),
+            )
+          })
         } else {
           setCaptureState({
             kind: 'error',
@@ -291,16 +378,27 @@ export function HeatmapCanvas({
     ? {
         sourceWidth: SOURCE_WIDTH,
         referenceWidth,
-        pageHeight: pageCssHeight,
+        // 続131: 部分画像時はデータ範囲まで拡張した全高 (outlier guard がデータを捨てない)
+        pageHeight: renderPageHeight,
       }
-    : undefined
+    : provisionalActive
+      ? {
+          // 続128: 暫定座標系。referenceWidth は実 capture と同値、pageHeight は outlier guard 用に
+          //   generous (= pageHeightEstimate)。blob 座標は real と同一になる (y は生 click_y)。
+          sourceWidth: SOURCE_WIDTH,
+          referenceWidth: provReferenceWidth,
+          pageHeight: Math.max(_pageHeightEstimate, MOCK_PAGE_HEIGHT),
+        }
+      : undefined
 
   // coordinateContext を primitive 依存に分解 (object 参照で useMemo が毎回 invalidate しないよう)
-  const ctxSig = cap ? `${SOURCE_WIDTH}|${referenceWidth}|${pageCssHeight}` : ''
+  const ctxSig = coordinateContext
+    ? `${coordinateContext.sourceWidth}|${coordinateContext.referenceWidth}|${coordinateContext.pageHeight}`
+    : ''
   const vm = useMemo(
-    () => buildHeatmapViewModel({ tiles, meta, coordinateContext }),
+    () => buildHeatmapViewModel({ tiles, meta, coordinateContext, elements }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tiles, meta, ctxSig],
+    [tiles, meta, ctxSig, elements],
   )
 
   // signal overlay は signals tab を開くと自動 ON (mockup 同等)
@@ -554,18 +652,39 @@ export function HeatmapCanvas({
               //   - overlay は `displayScale = actualOuterWidth / referenceWidth` で縮小
               //   - fallback (loading / error / 未取得) は mock underlay + 同 overlay (displayScale=1)
               const outerStyle: React.CSSProperties = cap
-                ? { maxWidth: displayMaxWidth, width: '100%', height: 'auto' }
-                : { maxWidth: displayMaxWidth, width: '100%', minHeight: MOCK_PAGE_HEIGHT }
+                ? captureTruncated
+                  ? {
+                      // 続131: 部分画像 — 容器はデータ全高、画像は normal flow で上部に乗る
+                      maxWidth: displayMaxWidth,
+                      width: '100%',
+                      height: Math.round(renderPageHeight * displayScale),
+                    }
+                  : { maxWidth: displayMaxWidth, width: '100%', height: 'auto' }
+                : provisionalActive
+                  ? {
+                      // 続128: 観測データ範囲に合わせた暫定高さ。screenshot 到着で実画像高さに refine。
+                      maxWidth: displayMaxWidth,
+                      width: '100%',
+                      height: Math.round(provContentCssHeight * displayScale),
+                    }
+                  : { maxWidth: displayMaxWidth, width: '100%', minHeight: MOCK_PAGE_HEIGHT }
               return (
                 <>
                   <div
                     ref={hmPageRef}
                     data-testid="hm-page"
                     data-underlay={
-                      cap ? 'screenshot' : captureState.kind === 'error' ? 'mock' : 'skeleton'
+                      cap
+                        ? 'screenshot'
+                        : captureState.kind === 'error'
+                          ? 'mock'
+                          : provisionalActive
+                            ? 'provisional'
+                            : 'skeleton'
                     }
                     data-capture-natural-width={cap?.naturalWidth ?? ''}
                     data-capture-natural-height={cap?.naturalHeight ?? ''}
+                    data-capture-truncated={captureTruncated ? '1' : '0'}
                     data-reference-width={referenceWidth}
                     data-page-css-height={cap ? pageCssHeight : ''}
                     data-display-width={displayMaxWidth}
@@ -588,16 +707,23 @@ export function HeatmapCanvas({
                     ) : captureState.kind === 'error' ? (
                       // 実 screenshot 取得不可: 仮 underlay にフォールバック (overlay は displayScale=1)
                       <MockProductPageUnderlay />
+                    ) : provisionalActive ? (
+                      // 続128: screenshot 取得中だが tiles は届いている。中立の (脈動しない) 背景の上に
+                      //   overlay を先行描画する。screenshot 到着で背面に実画像が後乗せされる。
+                      <div
+                        data-testid="heatmap-canvas-provisional-bg"
+                        aria-hidden
+                        className="absolute inset-0 bg-gradient-to-b from-[#f7f8fb] to-[#eef0f3]"
+                      />
                     ) : (
-                      // idle / loading: ダミーは出さず中立のスケルトン。
-                      // 実座標が無いため overlay も ready/error まで描画しない (差し替えチラつき防止)。
+                      // idle: tiles も無い。ダミーは出さず中立スケルトン (脈動)。
                       <div
                         data-testid="heatmap-canvas-skeleton"
                         aria-hidden
                         className="absolute inset-0 animate-pulse bg-gradient-to-b from-[#f4f5f7] to-[#eceef1]"
                       />
                     )}
-                    {cap || captureState.kind === 'error' ? (
+                    {cap || captureState.kind === 'error' || provisionalActive ? (
                       <>
                         <HeatOverlay
                           vm={vm}
@@ -623,7 +749,7 @@ export function HeatmapCanvas({
                         data-testid="screenshot-loading-badge"
                         className="absolute right-3 top-3 z-10 rounded-full border border-[var(--ug-border)] bg-white/90 px-2.5 py-1 font-mono text-[10.5px] text-[var(--ug-text-3)] shadow-sm"
                       >
-                        実 page 取得中…
+                        {provisionalActive ? '実ページ取得中・ヒートマップ先行表示' : '実 page 取得中…'}
                       </div>
                     ) : null}
                     {captureState.kind === 'error' ? (
@@ -634,6 +760,16 @@ export function HeatmapCanvas({
                         title={`${captureState.code}: ${captureState.message}`}
                       >
                         実 page 未取得 — 仮 underlay 表示中
+                      </div>
+                    ) : null}
+                    {captureTruncated ? (
+                      <div
+                        role="status"
+                        data-testid="capture-truncated-badge"
+                        className="absolute right-3 top-3 z-10 rounded-full border border-amber-400/40 bg-amber-100/95 px-2.5 py-1 font-mono text-[10.5px] text-amber-900 shadow-sm"
+                        title={`画像 ${Math.round(pageCssHeight)}px / データ範囲 ${Math.round(dataMaxDocY)}px`}
+                      >
+                        実ページ画像が上部のみ — ヒートマップは全域を表示中 (画像は再取得されます)
                       </div>
                     ) : null}
                   </div>
@@ -676,6 +812,8 @@ export function HeatmapCanvas({
             emotionSummary={vm.emotionSummary}
             hotspotCards={vm.hotspotCards}
             signalCards={vm.signalCards}
+            negativeSpots={vm.negativeSpots}
+            pageIssues={vm.pageIssues}
             enabledSignals={activeSignals}
             onToggleSignal={toggleSignal}
             onSelectHotspot={onSelectHotspot}

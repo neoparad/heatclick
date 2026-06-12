@@ -17,7 +17,7 @@ export type EmotionKey = 'frust' | 'hes' | 'cmp' | 'eng' | 'conf' | 'anx'
 
 export type SignalKey = 'rage' | 'dead' | 'hover' | 'copy' | 'backscroll' | 'hesitation'
 
-export type SideTab = 'hotspots' | 'signals' | 'summary' | 'sessions'
+export type SideTab = 'hotspots' | 'negative' | 'signals' | 'structure' | 'summary' | 'sessions'
 
 export type DeviceKind = 'pc' | 'sp' | 'tab'
 
@@ -55,6 +55,10 @@ export interface SignalMarker {
   type: SignalKey
   x: number
   y: number
+  /** 続123: 実データ marker 用 — その selector での発生回数 (tooltip 表示) */
+  count?: number
+  /** 続123: 実データ marker 用 — 要素テキスト等の人間可読ラベル (tooltip 表示) */
+  label?: string
 }
 
 export interface EndBand {
@@ -75,6 +79,8 @@ export interface ExitRow {
   sectionLabel: string
   exitPct: string
   level: 'lo' | 'mid' | 'hi' | 'ok'
+  /** 続125 ②: 数値 dropoff [0,1] (グラデーション描画用。旧 deploy 互換で optional) */
+  dropoff?: number
 }
 
 export interface EmotionDistribution {
@@ -139,6 +145,52 @@ export interface ScrollReachBand {
   reachLabel: string
 }
 
+/**
+ * 続125 (Owner ③): ネガティブスポット — dead_click / rage_click が観測された要素の
+ * ランキング。右パネルの専用タブに表示する (ホットスポットの負の対)。
+ */
+export interface NegativeSpot {
+  id: string
+  type: 'dead' | 'rage'
+  /** 人間可読ラベル (element_text or selector 由来) */
+  name: string
+  selector: string
+  /** 発生回数 */
+  count: number
+  /** capture CSS px の y (outlier guard で落ちた場合 null = 位置不明) */
+  y: number | null
+}
+
+/**
+ * 続126 ⑤: 画像視認スポット — canvas 上の hover 領域 + tooltip。
+ * 座標は capture CSS px 空間 (overlay 側で displayScale を掛ける)。
+ */
+export interface ImageSpot {
+  id: string
+  /** 領域上端 (capture CSS px) */
+  y: number
+  /** 領域高さ (capture CSS px) */
+  height: number
+  /** alt or src 末尾由来の人間可読ラベル */
+  name: string
+  /** このフィルタ条件でページに来たセッションのうち、この画像を視認した割合 [0,1] */
+  viewRate: number
+  /** 平均最大視認率 [0,1] */
+  ratio: number
+  /** 視認時間の中央値 (秒) */
+  medianSec: number
+  sessions: number
+}
+
+/** 続126 ★: クロール由来 issue (右パネル「構造」タブ表示用の生データ)。 */
+export interface PageIssueItem {
+  category: string
+  type: string
+  severity: string
+  count: number
+  recommendation: string
+}
+
 export interface HeatmapViewModel {
   blobs: HeatBlob[]
   tags: HeatTag[]
@@ -152,6 +204,12 @@ export interface HeatmapViewModel {
   emotionSummary: EmotionDistribution
   hotspotCards: HotspotCard[]
   signalCards: SignalCard[]
+  /** 続125 ③: ネガティブスポット (dead/rage 要素ランキング、右パネル専用タブ) */
+  negativeSpots: NegativeSpot[]
+  /** 続126 ⑤: 画像視認スポット (canvas hover 領域) */
+  imageSpots: ImageSpot[]
+  /** 続126 ★: クロール由来 issue (構造タブ) */
+  pageIssues: PageIssueItem[]
 }
 
 /**

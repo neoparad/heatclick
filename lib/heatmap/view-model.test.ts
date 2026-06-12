@@ -14,6 +14,7 @@
  */
 
 import type { HeatmapTile, HeatmapTileMeta } from '@/lib/api/heatmap'
+import type { HeatmapElementsData } from '@/lib/api/heatmap-elements'
 import { MOCKUP_VIEW_MODEL } from '@/lib/fixtures/heatmap-mockup'
 import { MOCK_PAGE_HEIGHT, PAGE_WIDTH } from '@/lib/heatmap/mockup-spec'
 import { buildHeatmapViewModel } from './view-model'
@@ -393,6 +394,28 @@ describe('buildHeatmapViewModel', () => {
       expect(t.x).toBeLessThanOrEqual(1254)
     })
 
+    it('続128: blob/tag 座標は ctx.pageHeight に依存しない (provisional→real で動かない不変条件)', () => {
+      // 暫定座標系 (pageHeight=66000、outlier guard generous) と 実 capture (pageHeight=8000) で
+      // referenceWidth が同じなら tag の x/y は完全一致する。= screenshot 差し替え時に blob が動かない。
+      const tiles = [tileWith([{ x: 640, y: 3200, count: 10, sessions: 5 }])]
+      const meta = metaWith('clickhouse_events')
+      const provisional = buildHeatmapViewModel({
+        tiles,
+        meta,
+        coordinateContext: { sourceWidth: 1280, referenceWidth: 1280, pageHeight: 66_000 },
+      })
+      const real = buildHeatmapViewModel({
+        tiles,
+        meta,
+        coordinateContext: { sourceWidth: 1280, referenceWidth: 1280, pageHeight: 8_000 },
+      })
+      expect(provisional.tags).toHaveLength(1)
+      expect(real.tags).toHaveLength(1)
+      // x も y も完全一致 (pageHeight は座標に効かない、outlier guard と容器高さのみ)
+      expect(provisional.tags[0].x).toBe(real.tags[0].x)
+      expect(provisional.tags[0].y).toBe(real.tags[0].y)
+    })
+
     it('Phase 1 path (no coordinateContext) still uses MOCK_PAGE_HEIGHT compression', () => {
       // Phase 1 backward compat: context 未指定なら旧 scale で動く
       const vm = buildHeatmapViewModel({
@@ -403,6 +426,252 @@ describe('buildHeatmapViewModel', () => {
       // y = 2049/30000 * 860 = 58.7、tag offset -28 → 31
       expect(t.y).toBeGreaterThanOrEqual(29)
       expect(t.y).toBeLessThanOrEqual(33)
+    })
+  })
+
+  // ── 続123: element-level (本物のホットスポット / シグナル) ───────────────
+  describe('element-level hotspots / signals (続123)', () => {
+    const elementsData: HeatmapElementsData = {
+      page_sessions: 870,
+      elements: [
+        {
+          selector: '#bihadashop-toc-container>div>nav>ul>li:nth-child(2)>a',
+          text: '【カバー力比較】カバー力が高いのはどれ？長いテキストは省略される想定の文章です',
+          tag: 'a',
+          href: '/entry/x',
+          clicks: 91,
+          sessions: 87,
+          x: 640,
+          y: 2404,
+        },
+        {
+          selector: '#nocopy>div>label',
+          text: '',
+          tag: 'label',
+          href: '',
+          clicks: 50,
+          sessions: 40,
+          x: 320,
+          y: 600,
+        },
+      ],
+      signals: [
+        {
+          type: 'dead',
+          count: 561,
+          sessions: 333,
+          top: [{ selector: '#dead-zone', text: '反応しない領域', count: 200, x: 100, y: 500 }],
+        },
+        { type: 'rage', count: 0, sessions: 0, top: [] },
+      ],
+      images: [
+        {
+          src: 'https://bihadashop.jp/wp-content/uploads/2025/03/hero.jpg',
+          alt: 'TIRTIR ヒーロー画像',
+          sessions: 575,
+          views: 767,
+          avg_ratio: 0.97,
+          median_ms: 4200,
+          y: 2400,
+          w: 710,
+          h: 532,
+        },
+      ],
+      issues: [
+        {
+          category: 'a11y',
+          type: 'image-alt-missing',
+          severity: 'high',
+          count: 3,
+          recommendation: 'alt 属性を追加してください。',
+        },
+      ],
+    }
+    const clickTiles = [tileWith([{ x: 100, y: 200, count: 10, sessions: 5 }])]
+
+    it('uses real element names + selectors for hotspot cards and tags', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+      })
+      expect(vm.hotspotCards[0].selector).toBe(
+        '#bihadashop-toc-container>div>nav>ul>li:nth-child(2)>a',
+      )
+      expect(vm.hotspotCards[0].name).toContain('カバー力比較')
+      // 26 字 + '…' = 27 字以内に省略
+      expect(vm.hotspotCards[0].name.length).toBeLessThanOrEqual(27)
+      expect(vm.hotspotCards[0].name.endsWith('…')).toBe(true)
+      expect(vm.hotspotCards[0].stats[0]).toEqual({ label: 'クリック', value: '91' })
+      // canvas 常時ラベル (tag) も要素名 + 実クリック数
+      expect(vm.tags[0].label).toContain('カバー力比較')
+      expect(vm.tags[0].count).toBe(91)
+    })
+
+    it('falls back to tag-type label when element_text is empty', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+      })
+      // text 空 + tag=label → 「選択肢 <selector末尾>」
+      expect(vm.hotspotCards[1].name.startsWith('選択肢')).toBe(true)
+    })
+
+    it('builds real signal cards + markers, skipping zero-count types', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+      })
+      // rage は count=0 → card/marker を出さない
+      expect(vm.signalCards).toHaveLength(1)
+      expect(vm.signalCards[0]).toMatchObject({ type: 'dead', count: 561 })
+      expect(vm.signalCards[0].whereLabel).toContain('反応しない領域')
+      expect(vm.signals).toHaveLength(1)
+      expect(vm.signals[0]).toMatchObject({ type: 'dead', count: 200 })
+    })
+
+    it('falls back to cluster placeholder cards when elements is null', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: null,
+      })
+      expect(vm.hotspotCards[0].selector).toBe('DOM selector 未取得')
+      expect(vm.signalCards).toHaveLength(0)
+    })
+
+    it('attaches signal cards AND hotspot cards to non-click layers too (read)', () => {
+      const readMeta: HeatmapTileMeta = {
+        ...metaWith('clickhouse_events'),
+        heatmap_type: 'read',
+      }
+      const vm = buildHeatmapViewModel({
+        tiles: [tileWith([{ x: 0, y: 200, count: 5, sessions: 5 }])],
+        meta: readMeta,
+        elements: elementsData,
+      })
+      expect(vm.signalCards).toHaveLength(1)
+      // 続124 ⑨: 右パネルは layer 非依存 — read 層でも要素カードが出る
+      expect(vm.hotspotCards.length).toBeGreaterThan(0)
+      expect(vm.hotspotCards[0].name).toContain('カバー力比較')
+      expect(vm.readBands.length).toBeGreaterThan(0)
+    })
+
+    it('marks dead-clicked elements as negative spots (warn intent + デッド stat)', () => {
+      const data: HeatmapElementsData = {
+        page_sessions: 100,
+        elements: [
+          {
+            selector: '#cta-cart',
+            text: 'カートに追加',
+            tag: 'button',
+            href: '',
+            clicks: 30,
+            sessions: 25,
+            x: 640,
+            y: 700,
+          },
+        ],
+        signals: [
+          {
+            type: 'dead',
+            count: 12,
+            sessions: 10,
+            top: [{ selector: '#cta-cart', text: 'カートに追加', count: 12, x: 640, y: 700 }],
+          },
+        ],
+        images: [],
+        issues: [],
+      }
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: data,
+      })
+      expect(vm.hotspotCards[0].intent).toBe('warn')
+      expect(
+        vm.hotspotCards[0].stats.some((s) => s.label === 'デッド' && s.tone === 'neg'),
+      ).toBe(true)
+      expect(vm.tags[0].intent).toBe('warn')
+    })
+
+    it('builds negativeSpots ranking from dead/rage tops (続125 ③)', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+      })
+      expect(vm.negativeSpots.length).toBeGreaterThan(0)
+      expect(vm.negativeSpots[0]).toMatchObject({ type: 'dead', count: 200 })
+      expect(vm.negativeSpots[0].name).toContain('反応しない領域')
+      // 回数降順
+      const counts = vm.negativeSpots.map((s) => s.count)
+      expect([...counts].sort((a, b) => b - a)).toEqual(counts)
+    })
+
+    it('adds click-rate stat from page_sessions (続126 ★ ボタンクリック率)', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+      })
+      // 87 sessions / 870 page sessions = 10%
+      const rateStat = vm.hotspotCards[0].stats.find((s) => s.label === 'クリック率')
+      expect(rateStat).toBeDefined()
+      expect(rateStat?.value).toBe('10%')
+    })
+
+    it('builds imageSpots with view rate from image_visibility (続126 ⑤)', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+        coordinateContext: { sourceWidth: 1280, referenceWidth: 720, pageHeight: 14_000 },
+      })
+      expect(vm.imageSpots).toHaveLength(1)
+      const spot = vm.imageSpots[0]
+      expect(spot.name).toContain('TIRTIR')
+      // 575/870 ≈ 66%
+      expect(Math.round(spot.viewRate * 100)).toBe(66)
+      expect(spot.y).toBe(2400) // ctx あり = raw px
+      expect(spot.height).toBe(532)
+      expect(spot.medianSec).toBe(4)
+    })
+
+    it('passes crawl issues through to pageIssues (続126 ★ 構造タブ)', () => {
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: elementsData,
+      })
+      expect(vm.pageIssues).toHaveLength(1)
+      expect(vm.pageIssues[0]).toMatchObject({ type: 'image-alt-missing', severity: 'high' })
+    })
+
+    it('exit layer emits continuous 0..95% slots (続125 ② — cannot visually cut off)', () => {
+      const exitMeta: HeatmapTileMeta = {
+        ...metaWith('clickhouse_events'),
+        heatmap_type: 'exit',
+      }
+      // 観測は 2 スロットのみ (10% と 90%) — それでも全 20 スロットが出る
+      const vm = buildHeatmapViewModel({
+        tiles: [
+          tileWith([
+            { x: 0, y: 10, count: 5, sessions: 5 },
+            { x: 0, y: 90, count: 3, sessions: 3 },
+          ]),
+        ],
+        meta: exitMeta,
+        coordinateContext: { sourceWidth: 1280, referenceWidth: 720, pageHeight: 10_000 },
+      })
+      expect(vm.exitRows).toHaveLength(20)
+      // 最初のスロットは 0px、最後のスロットは 95% 位置 = 9500px
+      expect(vm.exitRows[0].top).toBe(0)
+      expect(vm.exitRows[19].top).toBe(9500)
+      // 観測ありスロットは dropoff > 0、なしは 0
+      expect(vm.exitRows.filter((r) => (r.dropoff ?? 0) > 0)).toHaveLength(2)
     })
   })
 })

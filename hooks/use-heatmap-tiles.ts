@@ -66,8 +66,8 @@ export function useHeatmapTiles(query: HeatmapQuery): UseHeatmapTilesResult {
   const pointCountRef = useRef<number>(0)
   const abortRef = useRef<AbortController | null>(null)
 
-  // query の signature 文字列 (依存配列で primitive 比較したい)
-  const querySig = `${query.site_id}|${query.page_url}|${query.layer}|${query.start_date ?? ''}|${query.end_date ?? ''}|${query.device_type ?? ''}|${query.tile_size ?? ''}`
+  // query の signature 文字列 (依存配列で primitive 比較したい)。続125: segment 追加。
+  const querySig = `${query.site_id}|${query.page_url}|${query.layer}|${query.start_date ?? ''}|${query.end_date ?? ''}|${query.device_type ?? ''}|${query.tile_size ?? ''}|${query.segment ?? 'all'}`
 
   // 与えられた cursor から eager に連続取得する。1 回の呼び出しで最低 1 batch、
   // 上限 (cursor 尽き / batch 上限 / point 上限) まで辿る。

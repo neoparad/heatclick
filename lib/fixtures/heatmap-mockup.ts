@@ -242,4 +242,9 @@ export const MOCKUP_VIEW_MODEL: HeatmapViewModel = {
       uniqueBadge: true,
     },
   ],
+  // 続125 ③: fixture (dummy) モードはネガティブスポット空 (real mode 専用機能)
+  negativeSpots: [],
+  // 続126: 画像視認スポット / クロール issue も real mode 専用
+  imageSpots: [],
+  pageIssues: [],
 }

@@ -17,29 +17,32 @@
 import { NextResponse, type NextRequest } from 'next/server'
 
 import { getServerSession } from '@/lib/auth/server-session'
+import { emitScenarioAudit } from './audit'
 
 const SITE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 
 export interface ScenarioTenantContext {
-  /** JWT-verified tenant id (from x-tenant-id, injected by middleware). */
+  /** 検証済みセッション由来の tenant id (REQ-SEC-126: Layer 2 失効照合済み)。 */
   tenantId: string
-  /** Requested site id, validated to be a member of the JWT's site_ids. */
+  /** Requested site id, validated to be a member of the session's site_ids. */
   siteId: string
-  /** All site ids the JWT grants access to. */
+  /** All site ids the session grants access to. */
   siteIds: ReadonlyArray<string>
-  /** JWT-verified user id (from x-user-id), or 'system' if absent. */
+  /** 検証済みセッション由来の user id。 */
   userId: string
 }
 
 /**
  * Resolve the tenant context for a scenario request, validating that the caller-supplied
- * `siteId` is one the JWT actually grants.
+ * `siteId` is one the session actually grants.
  *
- * REQ-SEC-126 (Codex T1 / §13.7): tenant / site_ids は **`getServerSession()` 経由**で取得し、
- * Layer 2 失効照合 (session/membership version + tenant.status) を通す。これにより revoked /
- * suspended なセッションでは scenario CRUD も 401 になる (header 直読みでは効かなかった)。
- * `siteId` は唯一の caller-controlled 入力で、JWT の site_ids に含まれること必須 (REQ-SEC-004 維持)。
- * `_request` は署名互換のため残置 (tenant は header ではなく session から取るため未使用)。
+ * REQ-SEC-126 (Codex T1 / 続123 merge 再適用): tenant / site_ids は **`getServerSession()`
+ * 経由**で取得し、JWT 署名検証 + Layer 2 失効照合 (session/membership version +
+ * tenant.status) を通す。header 直読みは失効済みトークンを素通しするため使わない。
+ * `siteId` は唯一の caller-controlled 入力 (REQ-SEC-004 維持)。
+ *
+ * §3.8.1 (banner session / 続 M-x): cross-tenant アクセス試行 (403) は audit_events に
+ * best-effort 記録する。
  */
 export async function resolveScenarioTenantContext(
   _request: NextRequest,
@@ -64,6 +67,20 @@ export async function resolveScenarioTenantContext(
   const siteIds = session.user.site_ids
 
   if (!siteIds.includes(siteId)) {
+    // §3.8.1: cross-tenant アクセス試行は 403 で拒否 + audit_events に記録 (best-effort)。
+    // この層では scenario_id は未確定のため、resource として試行された site_id を記録する。
+    void emitScenarioAudit({
+      action: 'scenario.access_denied',
+      tenant_id: session.tenant_id,
+      scenario_id: siteId,
+      user_id: session.user_id,
+      response_status: 403,
+      metadata: {
+        reason: 'site_not_in_tenant',
+        attempted_site_id: siteId,
+        granted_site_ids: [...siteIds],
+      },
+    })
     return NextResponse.json(
       { error: 'forbidden', message: 'site_id is not in the authenticated tenant' },
       { status: 403 },

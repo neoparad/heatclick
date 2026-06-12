@@ -23,6 +23,7 @@
  */
 
 import type { HeatmapTile, HeatmapTileMeta } from '@/lib/api/heatmap'
+import type { HeatmapElementsData, HeatmapElementStat } from '@/lib/api/heatmap-elements'
 import { MOCKUP_VIEW_MODEL } from '@/lib/fixtures/heatmap-mockup'
 import { MOCK_PAGE_HEIGHT, PAGE_WIDTH } from '@/lib/heatmap/mockup-spec'
 import { logNormalize } from '@/lib/heatmap/normalize'
@@ -35,6 +36,8 @@ import type {
   HotspotCard,
   ReadBand,
   ScrollReachBand,
+  SignalCard,
+  SignalMarker,
 } from '@/lib/heatmap/types'
 
 const SOURCE_WIDTH = 1280
@@ -74,6 +77,13 @@ interface BuildOptions {
    * 未指定なら Phase 1 互換の y 圧縮 scale (mockup canvas) で配置する。
    */
   coordinateContext?: HeatmapCoordinateContext
+  /**
+   * 続123: `/api/heatmap/elements` の要素単位集計。提供時、real click mode の
+   * tag / hotspotCard を「クリック密集 #N」placeholder から **本物の要素名 + selector** に
+   * 置き換え、signals (rage/dead) の marker + card を実データ化する。
+   * null / 空なら従来の cluster ベース fallback (描画は止めない)。
+   */
+  elements?: HeatmapElementsData | null
 }
 
 interface RawPoint {
@@ -231,6 +241,9 @@ function emptyViewModel(): HeatmapViewModel {
     emotionSummary: EMPTY_EMOTION_SUMMARY,
     hotspotCards: [],
     signalCards: [],
+    negativeSpots: [],
+    imageSpots: [],
+    pageIssues: [],
   }
 }
 
@@ -382,20 +395,280 @@ function buildExitRows(
 
   if (bins.size === 0 || totalSessions === 0) return []
 
-  return Array.from(bins.entries())
-    .sort(([a], [b]) => a - b)
-    .map(([pct, sessions]) => {
-      const dropoff = sessions / totalSessions
-      const level: import('@/lib/heatmap/types').ExitRow['level'] =
-        dropoff >= 0.3 ? 'hi' : dropoff >= 0.15 ? 'mid' : dropoff >= 0.05 ? 'lo' : 'ok'
-      return {
-        top: Math.round((pct / 100) * targetHeight),
-        height: Math.max(4, Math.round((SCROLL_BIN_PCT / 100) * targetHeight)),
-        sectionLabel: `${pct}%`,
-        exitPct: `${Math.round(dropoff * 100)}%`,
-        level,
-      }
+  // 続125 ② (Owner: 「途中で切れる」): 観測バケットだけでなく **0..95% の全スロット**を
+  // 連続で出す (データ無しスロットは dropoff=0)。描画が構造的に全高をカバーし、
+  // 「切れて見える」状態を作れなくする。
+  const rows: import('@/lib/heatmap/types').ExitRow[] = []
+  for (let s = 0; s < 100; s += SCROLL_BIN_PCT) {
+    const sessions = bins.get(s) ?? 0
+    const dropoff = sessions / totalSessions
+    const level: import('@/lib/heatmap/types').ExitRow['level'] =
+      dropoff >= 0.3 ? 'hi' : dropoff >= 0.15 ? 'mid' : dropoff >= 0.05 ? 'lo' : 'ok'
+    rows.push({
+      top: Math.round((s / 100) * targetHeight),
+      height: Math.max(4, Math.round((SCROLL_BIN_PCT / 100) * targetHeight)),
+      sectionLabel: `${s}%`,
+      exitPct: `${Math.round(dropoff * 100)}%`,
+      level,
+      dropoff,
     })
+  }
+  return rows
+}
+
+// ── 続123: element-level (本物のホットスポット / シグナル) builders ────────────
+
+/** click と同じ座標変換: x = 1280 正規化 → reference 幅、y は ctx ありなら raw、なしなら圧縮。 */
+function scaleElementPoint(
+  x1280: number,
+  yDoc: number,
+  pageY: number,
+  ctx?: HeatmapCoordinateContext,
+): { x: number; y: number } | null {
+  if (ctx) {
+    const srcW = ctx.sourceWidth > 0 ? ctx.sourceWidth : SOURCE_WIDTH
+    const refW = ctx.referenceWidth > 0 ? ctx.referenceWidth : srcW
+    const y = yDoc
+    if (y < 0 || y > ctx.pageHeight * PAGE_HEIGHT_OUTLIER_SLACK) return null
+    return { x: (x1280 / srcW) * refW, y }
+  }
+  const y = pageY > 0 ? (yDoc / pageY) * MOCK_PAGE_HEIGHT : yDoc
+  if (y < 0 || y > MOCK_PAGE_HEIGHT * MOCK_Y_OUTLIER_FACTOR) return null
+  return { x: (x1280 / SOURCE_WIDTH) * PAGE_WIDTH, y }
+}
+
+const ELEMENT_TAG_LABELS: Record<string, string> = {
+  a: 'リンク',
+  button: 'ボタン',
+  img: '画像',
+  input: '入力欄',
+  textarea: '入力欄',
+  select: 'プルダウン',
+  label: '選択肢',
+  summary: '開閉見出し',
+  video: '動画',
+}
+
+/**
+ * 要素の人間可読ラベルを導出する。
+ *   1. element_text があればそれ (26 字で省略)
+ *   2. 無ければ tag 種別ラベル + selector 末尾セグメント
+ */
+export function deriveElementName(el: {
+  text: string
+  tag: string
+  selector: string
+}): string {
+  const t = el.text.trim().replace(/\s+/g, ' ')
+  if (t.length > 0) return t.length > 26 ? `${t.slice(0, 26)}…` : t
+  const tagLabel = ELEMENT_TAG_LABELS[el.tag.toLowerCase()] ?? '要素'
+  const seg = el.selector.split('>').pop()?.trim() ?? ''
+  if (!seg) return tagLabel
+  return `${tagLabel} ${seg.length > 22 ? `${seg.slice(0, 22)}…` : seg}`
+}
+
+/** 要素集計 → canvas 上の常時ラベル (heat-tag)。サーバー側で clicks DESC 済み。 */
+function buildElementTags(
+  els: HeatmapElementStat[],
+  pageY: number,
+  ctx: HeatmapCoordinateContext | undefined,
+  deadCounts: ReadonlyMap<string, number>,
+): HeatTag[] {
+  const out: HeatTag[] = []
+  for (const el of els) {
+    const p = scaleElementPoint(el.x, el.y, pageY, ctx)
+    if (!p) continue
+    out.push({
+      id: `el-tag-${out.length + 1}`,
+      rank: out.length + 1,
+      label: deriveElementName(el),
+      count: el.clicks,
+      x: Math.max(0, Math.round(p.x - 28)),
+      y: Math.max(0, Math.round(p.y - 28)),
+      // 続124 ⑨: dead_click が出ている要素は「ネガティブスポット」= warn (赤)
+      intent: (deadCounts.get(el.selector) ?? 0) > 0 ? 'warn' : 'neutral',
+    })
+    if (out.length >= MAX_HOTSPOTS) break
+  }
+  return out
+}
+
+/**
+ * 要素集計 → 右パネルの本物ホットスポットカード。
+ * 続124 ⑨ (Owner: 「ネガティブスポットもあるべき」): dead_click が観測された要素は
+ * intent='warn' (赤枠) + デッド回数を stats に出す = ネガティブスポットの可視化。
+ * 続126 ★ (Owner: 「ボタンのクリック率も可視化」): pageSessions を分母にした
+ * クリック率% (その要素をクリックしたセッション / ページ全セッション) を表示。
+ */
+function buildElementHotspotCards(
+  els: HeatmapElementStat[],
+  deadCounts: ReadonlyMap<string, number>,
+  pageSessions: number,
+): HotspotCard[] {
+  return els.slice(0, MAX_HOTSPOTS).map((el, i) => {
+    const dead = deadCounts.get(el.selector) ?? 0
+    const stats: HotspotCard['stats'] = [
+      { label: 'クリック', value: el.clicks.toLocaleString() },
+      { label: 'セッション', value: el.sessions.toLocaleString() },
+    ]
+    if (pageSessions > 0) {
+      const rate = (el.sessions / pageSessions) * 100
+      stats.push({
+        label: 'クリック率',
+        value: `${rate >= 10 ? Math.round(rate) : rate.toFixed(1)}%`,
+        tone: 'pos',
+      })
+    }
+    if (dead > 0) {
+      stats.push({ label: 'デッド', value: dead.toLocaleString(), tone: 'neg' })
+    }
+    return {
+      id: `el-hs-${i + 1}`,
+      rank: i + 1,
+      intent: dead > 0 ? ('warn' as const) : ('neutral' as const),
+      name: deriveElementName(el),
+      selector: el.selector,
+      emotionLabel: 'cmp' as const,
+      emotionPercents: [],
+      stats,
+    }
+  })
+}
+
+/**
+ * 続126 ⑤: 画像視認率 → canvas hover 領域。
+ * y/h は document CSS px (median) → click と同じ座標変換。w は領域幅に使わず
+ * full-width hover 帯にする (記事画像はカラム幅が支配的、x 列は未収集のため)。
+ */
+function buildImageSpots(
+  elements: HeatmapElementsData | null | undefined,
+  pageY: number,
+  ctx: HeatmapCoordinateContext | undefined,
+  pageSessions: number,
+): import('@/lib/heatmap/types').ImageSpot[] {
+  const images = elements?.images ?? []
+  const out: import('@/lib/heatmap/types').ImageSpot[] = []
+  for (const img of images) {
+    const p = scaleElementPoint(0, img.y, pageY, ctx)
+    if (!p) continue
+    // 高さも y と同じ空間 (ctx あり = raw px / なし = 圧縮率を掛ける)
+    const height = ctx
+      ? img.h
+      : pageY > 0
+        ? (img.h / pageY) * MOCK_PAGE_HEIGHT
+        : img.h
+    const name = img.alt.trim() || decodeURIComponentSafe(img.src.split('/').pop() ?? '画像')
+    out.push({
+      id: `img-${out.length + 1}`,
+      y: Math.round(p.y),
+      height: Math.max(24, Math.round(height)),
+      name: name.length > 30 ? `${name.slice(0, 30)}…` : name,
+      viewRate: pageSessions > 0 ? Math.min(1, img.sessions / pageSessions) : 0,
+      ratio: img.avg_ratio,
+      medianSec: Math.round(img.median_ms / 1000),
+      sessions: img.sessions,
+    })
+  }
+  return out
+}
+
+function decodeURIComponentSafe(s: string): string {
+  try {
+    return decodeURIComponent(s)
+  } catch {
+    return s
+  }
+}
+
+/** dead_click の selector → 回数 map (ネガティブスポット判定用)。 */
+function buildDeadCountMap(
+  elements: HeatmapElementsData | null | undefined,
+): ReadonlyMap<string, number> {
+  const map = new Map<string, number>()
+  const dead = elements?.signals.find((s) => s.type === 'dead')
+  for (const t of dead?.top ?? []) {
+    map.set(t.selector, (map.get(t.selector) ?? 0) + t.count)
+  }
+  return map
+}
+
+/**
+ * 続125 ③ (Owner: 「ネガティブスポットのタブを作るべき」):
+ * dead_click / rage_click の selector 別上位を統合し、回数降順のランキングにする。
+ * 右パネルの「ネガティブ」タブが表示する (ホットスポットの負の対)。
+ */
+function buildNegativeSpots(
+  elements: HeatmapElementsData | null | undefined,
+  pageY: number,
+  ctx?: HeatmapCoordinateContext,
+): import('@/lib/heatmap/types').NegativeSpot[] {
+  if (!elements) return []
+  const out: import('@/lib/heatmap/types').NegativeSpot[] = []
+  for (const sig of elements.signals) {
+    for (const t of sig.top) {
+      const p = scaleElementPoint(t.x, t.y, pageY, ctx)
+      out.push({
+        id: `neg-${sig.type}-${out.length + 1}`,
+        type: sig.type,
+        name: deriveElementName({ text: t.text, tag: '', selector: t.selector }),
+        selector: t.selector,
+        count: t.count,
+        y: p ? Math.round(p.y) : null,
+      })
+    }
+  }
+  return out.sort((a, b) => b.count - a.count).slice(0, 8)
+}
+
+/** rage/dead シグナル → canvas marker + 右パネル card。データが無い type は出さない。 */
+function buildSignalExtras(
+  elements: HeatmapElementsData | null | undefined,
+  pageY: number,
+  ctx?: HeatmapCoordinateContext,
+): { signals: SignalMarker[]; signalCards: SignalCard[] } {
+  if (!elements || elements.signals.length === 0) return { signals: [], signalCards: [] }
+
+  const META: Record<'rage' | 'dead', { name: string; description: string }> = {
+    rage: {
+      name: 'レイジクリック',
+      description: '短時間に同じ要素を連打 — 反応しない UI への苛立ちシグナル。',
+    },
+    dead: {
+      name: 'デッドクリック',
+      description: 'クリックしても何も起きない要素 — リンク切れ / クリック可能と誤認させる装飾の疑い。',
+    },
+  }
+
+  const signals: SignalMarker[] = []
+  const signalCards: SignalCard[] = []
+  for (const sig of elements.signals) {
+    if (sig.count <= 0) continue
+    const meta = META[sig.type]
+    const top = sig.top[0]
+    signalCards.push({
+      id: `real-sig-${sig.type}`,
+      type: sig.type,
+      name: meta.name,
+      count: sig.count,
+      description: meta.description,
+      whereLabel: top
+        ? `最多: ${deriveElementName({ text: top.text, tag: '', selector: top.selector })} (${top.count}回) · ${sig.sessions} セッション`
+        : `${sig.sessions} セッションで発生`,
+    })
+    for (const [i, t] of sig.top.entries()) {
+      const p = scaleElementPoint(t.x, t.y, pageY, ctx)
+      if (!p) continue
+      signals.push({
+        id: `real-sig-${sig.type}-${i + 1}`,
+        type: sig.type,
+        x: Math.round(p.x),
+        y: Math.round(p.y),
+        count: t.count,
+        label: deriveElementName({ text: t.text, tag: '', selector: t.selector }),
+      })
+    }
+  }
+  return { signals, signalCards }
 }
 
 export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
@@ -413,12 +686,40 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
     return MOCKUP_VIEW_MODEL
   }
 
+  // 続123: rage/dead シグナル (要素集計由来)。全 real layer の view に同梱する
+  // (シグナルタブは layer に依らず実データを表示する)。
+  const signalExtras = buildSignalExtras(opts.elements, pageY, opts.coordinateContext)
+
+  // 続124 ⑨: 要素ホットスポットカードも全 real layer に同梱 (右パネルは layer 非依存)。
+  // Codex T1 MEDIUM fix: 座標 outlier guard で弾かれた要素が tag に出ない一方 card に
+  // 残ると rank がズレるため、**同一の filter 済みリスト**を tag / card 両方に使う。
+  const els = (opts.elements?.elements ?? []).filter(
+    (el) => scaleElementPoint(el.x, el.y, pageY, opts.coordinateContext) !== null,
+  )
+  const deadCounts = buildDeadCountMap(opts.elements)
+  const pageSessions = opts.elements?.page_sessions ?? 0
+  const elementCards =
+    els.length > 0 ? buildElementHotspotCards(els, deadCounts, pageSessions) : []
+  // 続125 ③: ネガティブスポット (dead/rage 要素ランキング) も全 real layer に同梱
+  const negativeSpots = buildNegativeSpots(opts.elements, pageY, opts.coordinateContext)
+  // 続126 ⑤/★: 画像視認スポット + クロール issue も全 real layer に同梱
+  const imageSpots = buildImageSpots(opts.elements, pageY, opts.coordinateContext, pageSessions)
+  const pageIssues = opts.elements?.issues ?? []
+  const elementExtras = {
+    ...signalExtras,
+    hotspotCards: elementCards,
+    negativeSpots,
+    imageSpots,
+    pageIssues,
+  }
+
   // ── read (熟読 / attention) ─────────────────────────────────────────────
   if (heatmapType === 'read') {
     const readBands = buildReadBands(opts.tiles, pageY, opts.coordinateContext)
-    if (readBands.length === 0) return emptyViewModel()
+    if (readBands.length === 0) return { ...emptyViewModel(), ...elementExtras }
     return {
       ...emptyViewModel(),
+      ...elementExtras,
       readBands,
     }
   }
@@ -426,9 +727,10 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
   // ── scroll (スクロール到達率) ────────────────────────────────────────────
   if (heatmapType === 'scroll') {
     const scrollReachBands = buildScrollReachBands(opts.tiles, pageY, opts.coordinateContext)
-    if (scrollReachBands.length === 0) return emptyViewModel()
+    if (scrollReachBands.length === 0) return { ...emptyViewModel(), ...elementExtras }
     return {
       ...emptyViewModel(),
+      ...elementExtras,
       scrollReachBands,
     }
   }
@@ -436,9 +738,10 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
   // ── exit (終了 / 離脱) ──────────────────────────────────────────────────
   if (heatmapType === 'exit') {
     const exitRows = buildExitRows(opts.tiles, pageY, opts.coordinateContext)
-    if (exitRows.length === 0) return emptyViewModel()
+    if (exitRows.length === 0) return { ...emptyViewModel(), ...elementExtras }
     return {
       ...emptyViewModel(),
+      ...elementExtras,
       exitRows,
     }
   }
@@ -449,25 +752,34 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
   const hasRealClickData = flat.length >= 1
   if (!hasRealClickData) {
     // 実 data 0 点 — empty state (dummy fixture には戻さない、DoD)
-    return emptyViewModel()
+    return { ...emptyViewModel(), ...elementExtras }
   }
 
   // density field: 上位 MAX_DENSITY_BLOBS cluster を blob 化 (連続的な heat 表現)。
   const clusters = clusterTop(flat, MAX_DENSITY_BLOBS)
   const maxCount = clusters.length > 0 ? clusters[0].count : 1
-  // label / card: 上位 MAX_HOTSPOTS のみ (clutter 回避、clusters は count 降順なので先頭を流用)。
+
+  // 続123: 要素集計があれば tag / card を「本物の要素名 + selector」で出す。
+  // 無ければ従来の cluster ベース placeholder (クリック密集 #N) に fallback。
+  const elementTags =
+    els.length > 0 ? buildElementTags(els, pageY, opts.coordinateContext, deadCounts) : []
+  const useElements = elementTags.length > 0
+  // cluster fallback 用: 上位 MAX_HOTSPOTS (clusters は count 降順)。
   const hotspots = clusters.slice(0, MAX_HOTSPOTS)
-  // mockup emotion / attention / signal / endBand / exitRow / signalCard は混ぜない。
+
   return {
     blobs: buildRealClickBlobs(clusters, maxCount),
-    tags: buildRealTags(hotspots),
-    signals: [],
+    tags: useElements ? elementTags : buildRealTags(hotspots),
+    signals: signalExtras.signals,
     endBands: [],
     exitRows: [],
     readBands: [],
     scrollReachBands: [],
     emotionSummary: EMPTY_EMOTION_SUMMARY,
-    hotspotCards: buildRealHotspotCards(hotspots),
-    signalCards: [],
+    hotspotCards: useElements ? elementCards : buildRealHotspotCards(hotspots),
+    signalCards: signalExtras.signalCards,
+    negativeSpots,
+    imageSpots,
+    pageIssues,
   }
 }

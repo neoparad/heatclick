@@ -44,6 +44,24 @@ export function layerToHeatmapType(layer: HeatmapLayer): HeatmapApiType {
   }
 }
 
+/**
+ * 続125 (Owner ①): 行動セグメント — 観測データから直接導出するルールベースの
+ * クラスタ分け (偽 ML ではない、D-07 'observed')。
+ *   - all       : 全セッション
+ *   - deep_read : 熟読層 (そのページで max scroll >= 70%)
+ *   - bounce    : 浅読・直帰層 (max scroll <= 20%)
+ *   - ad        : 広告流入 (gclid / fbclid 付きセッション)
+ * 将来 ML ペルソナ (persona_sessions) が ClickHouse に配管されたら同じ UI に追加する。
+ */
+export type HeatmapSegment = 'all' | 'deep_read' | 'bounce' | 'ad'
+
+export const SEGMENT_LABELS: ReadonlyArray<{ key: HeatmapSegment; label: string }> = [
+  { key: 'all', label: '全体' },
+  { key: 'deep_read', label: '熟読層' },
+  { key: 'bounce', label: '浅読・直帰層' },
+  { key: 'ad', label: '広告流入' },
+]
+
 export interface HeatmapQuery {
   site_id: string
   page_url: string
@@ -52,6 +70,8 @@ export interface HeatmapQuery {
   layer: HeatmapLayer
   device_type?: 'desktop' | 'mobile' | 'tablet' | 'unknown'
   tile_size?: number // 800 - 6000, default 2400
+  /** 続125: 行動セグメント (未指定 = all) */
+  segment?: HeatmapSegment
 }
 
 export interface HeatmapPoint {
@@ -132,6 +152,7 @@ export async function fetchHeatmapTile(
   if (query.start_date) params.set('start_date', query.start_date)
   if (query.end_date) params.set('end_date', query.end_date)
   if (query.device_type) params.set('device_type', query.device_type)
+  if (query.segment && query.segment !== 'all') params.set('segment', query.segment)
   const tileSize = clamp(query.tile_size ?? TILE_DEFAULT, TILE_MIN, TILE_MAX)
   params.set('tile_size', String(tileSize))
   if (cursor) params.set('cursor', cursor)

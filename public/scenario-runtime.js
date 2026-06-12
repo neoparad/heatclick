@@ -259,9 +259,14 @@
       evaluation_ms: evalMs || 0,
     }
     try {
-      var blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
+      // CORS: cross-origin の event-ingest worker は ACAO:* を返すため、credentialed な
+      // sendBeacon で 'application/json' (non-simple) を送ると preflight が走り blocked になる。
+      // tracking.js (public/v2/tracking.js) と同じく 'text/plain' (CORS simple request、
+      // preflight 無し) で送る。worker は body を JSON parse するので content-type 非依存。
+      var blob = new Blob([JSON.stringify(payload)], { type: 'text/plain' })
       var ok = navigator.sendBeacon && navigator.sendBeacon(TRACK_URL, blob)
       if (!ok) {
+        // fallback も text/plain blob のため simple request (preflight 無し)。
         fetch(TRACK_URL, { method: 'POST', body: blob, keepalive: true }).catch(function () {})
       }
     } catch (e) { /* noop */ }
@@ -507,26 +512,166 @@
     } catch (e) { /* noop */ }
   }
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // Phase 2.1: Frequency cap (per_period: 'session' | 'day' | 'week') + Schedule
+  // ──────────────────────────────────────────────────────────────────────────
+  //
+  // 設計:
+  //   - server が schedule で期間外 scenario を payload から除外する (authoritative)
+  //   - browser 側は ±5min clock skew tolerance で再チェック (端末時計ずれ吸収)
+  //   - frequency cap カウントは localStorage に「scenario_id × period bucket」で保存
+  //   - render 前に「cap 超過していないか」を確認、render 後に count++
+  //   - JSON parse 失敗時は fail-closed (render しない) を選択 (cap 超過誤判定を避けるため)
+  //
+  // clock skew tolerance: 5 分。あまり広げると「期間前/後」が緩くなりすぎる。
+  var SCHEDULE_SKEW_MS = 5 * 60 * 1000
+
+  function _isScenarioInSchedule(sc, nowMs) {
+    if (!sc || !sc.schedule) return true
+    if (sc.schedule.start_at) {
+      var t0 = Date.parse(sc.schedule.start_at)
+      if (!isFinite(t0)) return false
+      if (nowMs + SCHEDULE_SKEW_MS < t0) return false
+    }
+    if (sc.schedule.end_at) {
+      var t1 = Date.parse(sc.schedule.end_at)
+      if (!isFinite(t1)) return false
+      if (nowMs - SCHEDULE_SKEW_MS >= t1) return false
+    }
+    return true
+  }
+
+  function _isoWeekKey(d) {
+    // ISO 8601 week (Mon 始まり)。test されやすいよう UTC 基準。
+    var date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
+    var dayNum = date.getUTCDay() === 0 ? 7 : date.getUTCDay()
+    date.setUTCDate(date.getUTCDate() + 4 - dayNum)
+    var yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1))
+    var weekNum = Math.ceil((((date - yearStart) / 86400000) + 1) / 7)
+    return date.getUTCFullYear() + '-W' + (weekNum < 10 ? '0' : '') + weekNum
+  }
+
+  function _periodBucket(period, nowMs) {
+    var d = new Date(nowMs)
+    if (period === 'day') {
+      return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0')
+    }
+    if (period === 'week') return _isoWeekKey(d)
+    // 'session' は sessionStorage 側で扱うので別経路 (_wasMatchedInSession を流用)
+    return 'session'
+  }
+
+  function _capStorageKey(scenarioId, period, bucket) {
+    return 'ugk_cap:' + scenarioId + ':' + period + ':' + bucket
+  }
+
+  // session max>=2 のときは既存 per-session dedup (_wasMatchedInSession) を **使わない**:
+  // dedup は max=1 と等価の挙動なので、2 回目以降の表示に到達できないため。
+  // この helper は evaluateAll で session-dedup ガードを通すかどうかの判定に使う。
+  function _usesSessionDedup(sc) {
+    var cap = sc && sc.frequency_cap
+    if (!cap) return true
+    if (cap.per_period !== 'session') return true
+    return ((cap.max_impressions | 0) < 2)
+  }
+
+  function _isFrequencyCapExceeded(sc, nowMs) {
+    var cap = sc && sc.frequency_cap
+    if (!cap) return false
+    var period = cap.per_period
+    var max = cap.max_impressions | 0
+    if (max <= 0) return true // 0 cap = 配信しない
+    if (period === 'session') {
+      // session 単位 cap: 既存の per-session dedup で max=1 と等価のため
+      // max>=2 のときだけ追加ストレージで count する。
+      if (max >= 2) {
+        try {
+          var rawS = sessionStorage.getItem('ugk_cap_s:' + sc.id) || '0'
+          var nS = parseInt(rawS, 10) || 0
+          return nS >= max
+        } catch (e) { return true }
+      }
+      // max=1 のときは _wasMatchedInSession が後段で弾く (二重 dedup OK)
+      return false
+    }
+    var bucket = _periodBucket(period, nowMs)
+    try {
+      var key = _capStorageKey(sc.id, period, bucket)
+      var raw = localStorage.getItem(key) || '0'
+      var n = parseInt(raw, 10) || 0
+      return n >= max
+    } catch (e) {
+      // localStorage 不可 → fail-closed (cap 越え誤判定を避ける)
+      return true
+    }
+  }
+
+  function _bumpFrequencyCap(sc, nowMs) {
+    var cap = sc && sc.frequency_cap
+    if (!cap) return
+    var period = cap.per_period
+    if (period === 'session') {
+      try {
+        var rawS = sessionStorage.getItem('ugk_cap_s:' + sc.id) || '0'
+        var nS = (parseInt(rawS, 10) || 0) + 1
+        sessionStorage.setItem('ugk_cap_s:' + sc.id, String(nS))
+      } catch (e) { /* noop */ }
+      return
+    }
+    var bucket = _periodBucket(period, nowMs)
+    try {
+      var key = _capStorageKey(sc.id, period, bucket)
+      var raw = localStorage.getItem(key) || '0'
+      var n = (parseInt(raw, 10) || 0) + 1
+      localStorage.setItem(key, String(n))
+    } catch (e) { /* noop */ }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Dispatch decision (§1.7.1 Path 区分): status → { measure, render }
+  //   live         : 計測 + 描画
+  //   measure_only : 計測のみ (描画しない = variant execution しない。§1.7.1 準拠の
+  //                  「実行せず計測」パス)。従来 client が status!=='live' で measure_only を
+  //                  素通りしていたため計測ゼロだったバグを修正 (match イベントは送る)。
+  //   その他        : 何もしない (draft / paused / archived、及び万一届いた preview)。
+  //                  preview は server が public payload から除外済 (REQ-SEC-006)。
+  // ──────────────────────────────────────────────────────────────────────────
+  function _dispatchDecision(status) {
+    if (status === 'live') return { measure: true, render: true }
+    if (status === 'measure_only') return { measure: true, render: false }
+    return { measure: false, render: false }
+  }
+
   function evaluateAll(scenarios) {
     // REQ-SEC-013: fail-closed consent gate — no consent → no evaluation, no render, no events.
     if (!_consentAllowsRender()) return
     var ctx = buildCtx()
     if (!ctx.session_id || !ctx.visitor_id) return
+    var nowMs = Date.now()
     for (var i = 0; i < scenarios.length; i++) {
       var sc = scenarios[i]
-      // Only 'live' is rendered. The server gates 'preview' out of the public payload
-      // (REQ-SEC-006), so it should never reach here; defensively render 'live' only.
-      if (sc.status !== 'live') continue
-      if (_wasMatchedInSession(sc.id, ctx.session_id)) continue
+      // §1.7.1: live=計測+描画 / measure_only=計測のみ / その他=無視。
+      var disp = _dispatchDecision(sc.status)
+      if (!disp.measure) continue
+      // Phase 2.1: schedule (clock skew tolerance ±5min)。server-side でも除外済だが
+      // payload を改ざんされたりキャッシュ差分があった場合の defense-in-depth。
+      if (!_isScenarioInSchedule(sc, nowMs)) continue
+      // session-dedup は session cap max>=2 のときだけ skip (Codex T2 fix: 既存 dedup が
+      // max>=2 の 2 回目以降の表示を握り潰すバグを解消)
+      if (_usesSessionDedup(sc) && _wasMatchedInSession(sc.id, ctx.session_id)) continue
+      // Phase 2.1: frequency cap (day/week は localStorage、session は sessionStorage)
+      if (_isFrequencyCapExceeded(sc, nowMs)) continue
       var t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now())
       var matched = false
       try { matched = evaluate(sc.condition_ast, ctx) } catch (e) { matched = false }
       var t1 = (typeof performance !== 'undefined' ? performance.now() : Date.now())
       if (matched) {
-        _markMatched(sc.id, ctx.session_id)
+        if (_usesSessionDedup(sc)) _markMatched(sc.id, ctx.session_id)
+        _bumpFrequencyCap(sc, nowMs)
         var variant = pickVariant(sc, ctx.visitor_id)
         sendMatchEvent(sc, variant, 'match', Math.round(t1 - t0))
-        if (variant) {
+        // measure_only は disp.render=false: match イベントだけ送り DOM 描画はしない。
+        if (disp.render && variant) {
           renderVariant(sc, variant)
         }
       }
@@ -566,18 +711,24 @@
       }, 10000)
     })
   }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init)
-  } else {
-    init()
+  // window.UGOKI_SCENARIO_DISABLE_AUTOINIT=true で自動 init を抑止できる (unit test 用に
+  // 実ファイルを副作用なしでロードして内部関数を検証するためのフック)。
+  if (!window.UGOKI_SCENARIO_DISABLE_AUTOINIT) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init)
+    } else {
+      init()
+    }
   }
 
-  // Expose minimal API for debugging
+  // Expose minimal API for debugging / unit tests
   window.UGOKI_SCENARIO_RUNTIME = {
     evaluate: evaluate,
+    evaluateAll: evaluateAll,
     buildCtx: buildCtx,
     pickVariant: pickVariant,
+    _dispatch: _dispatchDecision,
     _hash: _hash,
-    version: '0.2.0+phase1',
+    version: '0.3.0+measure-only',
   }
 })()

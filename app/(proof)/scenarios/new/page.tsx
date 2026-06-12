@@ -1,16 +1,25 @@
 /**
- * /scenarios/new — 新規シナリオ作成 skeleton (M-Director 続 M-6 §C、2026-05-25)
+ * /scenarios/new — 新規シナリオ作成 (Phase 2.1 完成版、M-Director、2026-06-07)
  *
- * Phase 1 は CRUD なしのため、本 page は Phase 2 disclaimer + form skeleton のみ。
- * 「新規バナー」ボタン経由で到達。Phase 2 で react-hook-form + Zod + /api/scenarios POST 統合予定。
+ * Server component で getServerSession() を呼び、JWT 由来の site_ids を client view に渡す。
+ * middleware は tenant-protected region で header inject しないため、headers() 直読不可。
+ * getServerSession() (cookie/JWT) が SSOT (Codex T2 dual review フォローアップ反映)。
  *
  * 親 SSOT: linkscrawl/docs/fusion/team/m-director/prd.md §6 (Phase 2 機能要件)
  */
 
-import { ScenarioNewSkeleton } from '@/components/scenarios/scenario-new-skeleton'
+import { redirect } from 'next/navigation'
+
+import { ScenarioNewView } from '@/components/scenarios/scenario-new-view'
+import { getServerSession } from '@/lib/auth/server-session'
 
 export const dynamic = 'force-dynamic'
 
-export default function ScenarioNewPage() {
-  return <ScenarioNewSkeleton />
+export default async function ScenarioNewPage() {
+  const session = await getServerSession()
+  if (!session) {
+    redirect('/auth/sign-in?next=/scenarios/new')
+  }
+  const availableSiteIds = session.user.site_ids ?? []
+  return <ScenarioNewView availableSiteIds={availableSiteIds} />
 }

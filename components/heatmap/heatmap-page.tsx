@@ -24,9 +24,16 @@ import { ChevronDown } from 'lucide-react'
 
 import { SegmentChip } from '@/components/ui/segment-chip'
 import { EvidenceBadge } from '@/components/dashboard/evidence-badge'
+import { useHeatmapElements } from '@/hooks/use-heatmap-elements'
 import { useHeatmapTiles } from '@/hooks/use-heatmap-tiles'
 import { pageStatsToLabels, usePageStats } from '@/hooks/use-page-stats'
-import type { HeatmapLayer, HeatmapPoint, HeatmapTile } from '@/lib/api/heatmap'
+import {
+  SEGMENT_LABELS,
+  type HeatmapLayer,
+  type HeatmapPoint,
+  type HeatmapSegment,
+  type HeatmapTile,
+} from '@/lib/api/heatmap'
 
 // 直接 import (旧: dynamic({ssr:false}))。本コンポーネントは route 側で既に ssr:false の
 // 配下にあり、二重 dynamic は client チャンクの待ちを増やすだけで利点が無いため統合。
@@ -39,8 +46,20 @@ interface HeatmapPageProps {
   pageOptions: Array<{ url: string; label: string }>
 }
 
-type DeviceFilter = 'all' | 'desktop' | 'mobile'
 type PeriodDays = 7 | 14 | 30
+
+/**
+ * 続124: デバイス座標系の統一。
+ * PC のページと SP のページは縦の長さ・レイアウトが別物 (座標系が別)。混ぜて 1 枚の
+ * screenshot に重ねると「途中で切れる / ズレる / 空白」になる (Owner 報告 ①④⑦)。
+ * 業界標準 (Hotjar 等) と同じく **デバイス別ヒートマップ** とし、canvas の PC/SP/TAB
+ * タブが screenshot と行動データの両方を同時に切替える。
+ */
+export type CanvasDevice = 'pc' | 'sp' | 'tab'
+
+function deviceToEventFilter(d: CanvasDevice): 'desktop' | 'mobile' | 'tablet' {
+  return d === 'pc' ? 'desktop' : d === 'sp' ? 'mobile' : 'tablet'
+}
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10)
@@ -57,18 +76,23 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
   // 変更時に heatmapQuery が変わり useHeatmapTiles が再 fetch する。
   const [layer, setLayer] = useState<HeatmapLayer>('click')
   const [pageUrl, setPageUrl] = useState(initialPageUrl)
-  const [deviceFilter, setDeviceFilter] = useState<DeviceFilter>('all')
+  // 続124: device は canvas の PC/SP/TAB タブと同一 state (screenshot + データ両方を切替)
+  const [device, setDevice] = useState<CanvasDevice>('pc')
   const [periodDays, setPeriodDays] = useState<PeriodDays>(7)
+  // 続125 (Owner ①): 行動セグメント — 観測ベースのクラスタ分け (熟読層/浅読層/広告流入)
+  const [segment, setSegment] = useState<HeatmapSegment>('all')
   const [selected, setSelected] = useState<{ point: HeatmapPoint; tile: HeatmapTile } | null>(null)
 
   const dateRange = useMemo(() => periodToRange(periodDays), [periodDays])
+  const deviceFilter = deviceToEventFilter(device)
 
   const heatmapQuery = useMemo(
     () => ({
       site_id: siteId,
       page_url: pageUrl,
       layer,
-      device_type: deviceFilter === 'all' ? undefined : (deviceFilter as 'desktop' | 'mobile'),
+      device_type: deviceFilter,
+      segment,
       start_date: dateRange.start,
       end_date: dateRange.end,
       // 続 117 v2: tile_size = 1 tile がカバーする縦 y-px 窓 (800-6000, 既定 2400)。最大の 6000 に
@@ -77,7 +101,7 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
       //  tile を細切れにすると最初の数枚しか描画されなかった = bug #5)。
       tile_size: 6000,
     }),
-    [siteId, pageUrl, layer, deviceFilter, dateRange.start, dateRange.end],
+    [siteId, pageUrl, layer, deviceFilter, segment, dateRange.start, dateRange.end],
   )
 
   const { tiles, loading, hasMore, pageHeightEstimate, meta, error, loadMore } =
@@ -91,6 +115,16 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
     deviceType: deviceFilter,
   })
   const statsLabels = pageStatsToLabels(pageStats)
+
+  // 続123: 要素単位クリック集計 + rage/dead シグナル (本物のホットスポットカード用)。
+  // tiles と独立 fetch。失敗時 null = cluster fallback で描画継続 (非致命)。
+  const { elements } = useHeatmapElements({
+    siteId,
+    pageUrl,
+    dateRange,
+    deviceType: deviceFilter,
+    segment,
+  })
 
   return (
     <div className="relative space-y-3">
@@ -107,37 +141,9 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
       >
         <PageSelector value={pageUrl} options={pageOptions} onChange={setPageUrl} />
 
-        <span className="hidden h-4 w-px bg-[var(--ug-border)] md:block" aria-hidden />
-
-        <div role="radiogroup" aria-label="デバイス絞り込み" className="flex items-center gap-1.5">
-          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
-            Device
-          </span>
-          <SegmentChip
-            asRadio
-            active={deviceFilter === 'all'}
-            onClick={() => setDeviceFilter('all')}
-            data-testid="segment-chip-device-all"
-          >
-            PC + SP
-          </SegmentChip>
-          <SegmentChip
-            asRadio
-            active={deviceFilter === 'desktop'}
-            onClick={() => setDeviceFilter('desktop')}
-            data-testid="segment-chip-device-desktop"
-          >
-            PC
-          </SegmentChip>
-          <SegmentChip
-            asRadio
-            active={deviceFilter === 'mobile'}
-            onClick={() => setDeviceFilter('mobile')}
-            data-testid="segment-chip-device-mobile"
-          >
-            SP
-          </SegmentChip>
-        </div>
+        {/* 続124: Device chips は撤去。デバイスは canvas の PC/SP/TAB タブに一本化
+            (screenshot とデータの座標系を常に一致させるため。混在表示は座標が合わず
+            「切れる/ズレる/空白」の原因だった = Owner 報告 ①④⑦)。 */}
 
         <span className="hidden h-4 w-px bg-[var(--ug-border)] md:block" aria-hidden />
 
@@ -169,6 +175,28 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
           >
             直近 30 日
           </SegmentChip>
+        </div>
+
+        <span className="hidden h-4 w-px bg-[var(--ug-border)] md:block" aria-hidden />
+
+        {/* 続125 (Owner ①): 行動セグメント — 観測データから直接導出するクラスタ分け。
+            熟読層 = max scroll>=70% / 浅読・直帰層 = <=20% / 広告流入 = gclid・fbclid。
+            ML ペルソナ (persona_sessions) が ClickHouse に配管されたら同じ列に追加する。 */}
+        <div role="radiogroup" aria-label="行動セグメント" className="flex items-center gap-1.5">
+          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
+            Segment
+          </span>
+          {SEGMENT_LABELS.map((s) => (
+            <SegmentChip
+              key={s.key}
+              asRadio
+              active={segment === s.key}
+              onClick={() => setSegment(s.key)}
+              data-testid={`segment-chip-segment-${s.key}`}
+            >
+              {s.label}
+            </SegmentChip>
+          ))}
         </div>
 
         <div className="ml-auto">
@@ -206,6 +234,9 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
         pvLabel={statsLabels.pvLabel}
         ctrLabel={statsLabels.ctrLabel}
         scrollLabel={statsLabels.scrollLabel}
+        elements={elements}
+        device={device}
+        onDeviceChange={setDevice}
         onHotspotSelect={(point, tile) => setSelected({ point, tile })}
       />
 

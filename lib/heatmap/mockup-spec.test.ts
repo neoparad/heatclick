@@ -59,7 +59,14 @@ describe('mockup-spec', () => {
   })
 
   it('exposes 4 side tabs', () => {
-    expect(SIDE_TABS.map((t) => t.key)).toEqual(['hotspots', 'signals', 'summary', 'sessions'])
+    expect(SIDE_TABS.map((t) => t.key)).toEqual([
+      'hotspots',
+      'negative',
+      'signals',
+      'structure',
+      'summary',
+      'sessions',
+    ])
   })
 
   it('marks 3 signals as UGOKY-only (mockup `UGOKY ONLY` badges)', () => {

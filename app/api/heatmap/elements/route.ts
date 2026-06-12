@@ -1,0 +1,394 @@
+/**
+ * GET /api/heatmap/elements — 要素単位クリック集計 + 行動シグナル (続123)
+ *
+ * 親 SSOT §3.6.5 / §3.8.1 / mockup `01_heatmap_canvas.html` (.hs-card / .sig-marker)
+ *
+ * 目的: 右パネルの「ホットスポット (強度順)」を仮置き (クリック密集 #N / DOM selector 未取得)
+ * から **本物の要素カード** (element_selector + element_text + 実クリック数) に置き換える。
+ * 併せて rage_click / dead_click をページ単位で集計し、シグナルタブ + キャンバスマーカーを
+ * 実データ化する。
+ *
+ * データ実在確認 (2026-06-10 probe): tirtir ページ 14d で click 649 件全件に element_selector、
+ * 71% に element_text。dead_click 561 (333 sessions) / rage_click 10 (selector 付き 99%)。
+ *
+ * 座標系: x = 1280 正規化 (tile API click と同一)、y = document 絶対 CSS px。
+ * tenant isolation: getServerSession (Layer 2 失効照合, REQ-SEC-126) + site_ids 包含 +
+ * 全クエリ parameter binding で tenant_id 強制。
+ */
+
+import { NextResponse } from 'next/server'
+import { z } from 'zod'
+
+import { getServerSession } from '@/lib/auth/server-session'
+import { getClickHouseClient } from '@/lib/clickhouse'
+
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+
+const querySchema = z.object({
+  site_id: z.string().min(1).max(128),
+  page_url: z.string().url().max(2000),
+  start_date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+  end_date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+  device_type: z.enum(['desktop', 'mobile', 'tablet', 'unknown']).optional(),
+  // 続125: 行動セグメント (tile API と同一定義)
+  segment: z.enum(['all', 'deep_read', 'bounce', 'ad']).default('all'),
+})
+
+/**
+ * 続125: 行動セグメントの session 絞り込み SQL 断片 (app/api/heatmap/route.ts と同一規約:
+ * 定数断片 + parameter binding のみ、ユーザー入力の文字列連結なし)。
+ */
+function segmentFilterSql(segment: 'all' | 'deep_read' | 'bounce' | 'ad'): string {
+  if (segment === 'all') return ''
+  if (segment === 'ad') {
+    return `AND session_id IN (
+      SELECT DISTINCT session_id FROM clickinsight.events
+      WHERE tenant_id = {tenant_id:String}
+        AND site_id = {site_id:String}
+        AND url = {page_url:String}
+        AND is_agent = 0
+        AND ((gclid IS NOT NULL AND gclid != '') OR (fbclid IS NOT NULL AND fbclid != ''))
+        AND timestamp >= toDateTime({start:String})
+        AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+    )`
+  }
+  const havingCond =
+    segment === 'deep_read' ? 'max(scroll_percentage) >= 70' : 'max(scroll_percentage) <= 20'
+  return `AND session_id IN (
+    SELECT session_id FROM clickinsight.events
+    WHERE tenant_id = {tenant_id:String}
+      AND site_id = {site_id:String}
+      AND url = {page_url:String}
+      AND is_agent = 0
+      AND timestamp >= toDateTime({start:String})
+      AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+    GROUP BY session_id
+    HAVING ${havingCond}
+  )`
+}
+
+const TOP_ELEMENTS_LIMIT = 6
+/** signal selector 上位 (マーカー描画 + whereLabel)。type 毎にこの件数まで。 */
+const TOP_SIGNALS_PER_TYPE = 12
+/** 画像視認率 (続126 ⑤): 上位画像の件数 */
+const TOP_IMAGES_LIMIT = 12
+/** 構造 issue (続126 ★クロール価値): 上位 issue の件数 */
+const TOP_ISSUES_LIMIT = 8
+
+interface ElementRow {
+  selector: string
+  text: string
+  tag: string
+  href: string
+  clicks: number
+  sessions: number
+  x: number
+  y: number
+}
+
+interface SignalRow {
+  event_type: 'rage_click' | 'dead_click'
+  selector: string
+  text: string
+  count: number
+  sessions: number
+  x: number
+  y: number
+}
+
+export async function GET(request: Request) {
+  const url = new URL(request.url)
+  const parsed = querySchema.safeParse({
+    site_id: url.searchParams.get('site_id') ?? undefined,
+    page_url: url.searchParams.get('page_url') ?? undefined,
+    start_date: url.searchParams.get('start_date') ?? undefined,
+    end_date: url.searchParams.get('end_date') ?? undefined,
+    device_type: url.searchParams.get('device_type') ?? undefined,
+    segment: url.searchParams.get('segment') ?? undefined,
+  })
+  if (!parsed.success) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: { code: 'BAD_REQUEST', message: parsed.error.issues[0]?.message ?? 'invalid request' },
+      },
+      { status: 400 },
+    )
+  }
+  const params = parsed.data
+
+  // tenant 検証 — REQ-SEC-126: getServerSession 経由で Layer 2 失効照合を通す
+  const session = await getServerSession()
+  if (!session) {
+    return NextResponse.json(
+      { success: false, error: { code: 'UNAUTHORIZED', message: 'tenant context missing' } },
+      { status: 401 },
+    )
+  }
+  if (!session.user.site_ids.includes(params.site_id)) {
+    return NextResponse.json(
+      { success: false, error: { code: 'TENANT_FORBIDDEN', message: 'site not in tenant' } },
+      { status: 403 },
+    )
+  }
+
+  const deviceFilter = params.device_type ? `AND device_type = {device_type:String}` : ''
+  const segmentFilter = segmentFilterSql(params.segment)
+  const queryParams: Record<string, string> = {
+    tenant_id: session.tenant_id,
+    site_id: params.site_id,
+    page_url: params.page_url,
+    start: params.start_date ?? '1970-01-01',
+    end: params.end_date ?? '2099-12-31',
+  }
+  if (params.device_type) queryParams.device_type = params.device_type
+
+  try {
+    const ch = getClickHouseClient('analytics_reader')
+
+    // 1) 要素単位 click 集計 (上位 N)。x は 1280 正規化 / y は document 絶対 CSS px。
+    const elementsRs = await ch.query({
+      query: `
+        SELECT
+          element_selector AS selector,
+          anyLast(element_text) AS text,
+          anyLast(element_tag_name) AS tag,
+          anyLast(element_href) AS href,
+          count() AS clicks,
+          uniqExact(session_id) AS sessions,
+          toUInt16(least(1280, greatest(0, round(avg(if(viewport_width > 0, click_x * 1280 / viewport_width, click_x)))))) AS x,
+          toUInt32(round(avg(click_y))) AS y
+        FROM clickinsight.events
+        WHERE tenant_id = {tenant_id:String}
+          AND site_id = {site_id:String}
+          AND url = {page_url:String}
+          AND event_type = 'click'
+          AND is_agent = 0
+          AND element_selector != ''
+          AND timestamp >= toDateTime({start:String})
+          AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+          ${deviceFilter}
+          ${segmentFilter}
+        GROUP BY selector
+        ORDER BY clicks DESC
+        LIMIT ${TOP_ELEMENTS_LIMIT}
+      `,
+      query_params: queryParams,
+      format: 'JSONEachRow',
+    })
+    const elementRows = (await elementsRs.json()) as ElementRow[]
+
+    // 2) シグナル (rage_click / dead_click) selector 別上位
+    const signalsRs = await ch.query({
+      query: `
+        SELECT
+          event_type,
+          element_selector AS selector,
+          anyLast(element_text) AS text,
+          count() AS count,
+          uniqExact(session_id) AS sessions,
+          toUInt16(least(1280, greatest(0, round(avg(if(viewport_width > 0, click_x * 1280 / viewport_width, click_x)))))) AS x,
+          toUInt32(round(avg(click_y))) AS y
+        FROM clickinsight.events
+        WHERE tenant_id = {tenant_id:String}
+          AND site_id = {site_id:String}
+          AND url = {page_url:String}
+          AND event_type IN ('rage_click', 'dead_click')
+          AND is_agent = 0
+          AND timestamp >= toDateTime({start:String})
+          AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+          ${deviceFilter}
+          ${segmentFilter}
+        GROUP BY event_type, selector
+        ORDER BY count DESC
+        LIMIT 100
+      `,
+      query_params: queryParams,
+      format: 'JSONEachRow',
+    })
+    const signalRows = (await signalsRs.json()) as SignalRow[]
+
+    const signals = (['rage_click', 'dead_click'] as const).map((et) => {
+      const rows = signalRows.filter((r) => r.event_type === et)
+      return {
+        type: et === 'rage_click' ? ('rage' as const) : ('dead' as const),
+        count: rows.reduce((s, r) => s + Number(r.count), 0),
+        sessions: rows.reduce((s, r) => s + Number(r.sessions), 0),
+        top: rows.slice(0, TOP_SIGNALS_PER_TYPE).map((r) => ({
+          selector: r.selector,
+          text: r.text,
+          count: Number(r.count),
+          x: Number(r.x),
+          y: Number(r.y),
+        })),
+      }
+    })
+
+    // 3) ページ全体セッション数 (続126 ★: 要素クリック率の分母)
+    const pageSessionsRs = await ch.query({
+      query: `
+        SELECT uniqExact(session_id) AS sessions
+        FROM clickinsight.events
+        WHERE tenant_id = {tenant_id:String}
+          AND site_id = {site_id:String}
+          AND url = {page_url:String}
+          AND is_agent = 0
+          AND timestamp >= toDateTime({start:String})
+          AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+          ${deviceFilter}
+          ${segmentFilter}
+      `,
+      query_params: queryParams,
+      format: 'JSONEachRow',
+    })
+    const pageSessions = Number(
+      ((await pageSessionsRs.json()) as Array<{ sessions: number }>)[0]?.sessions ?? 0,
+    )
+
+    // 4) 画像視認率 (続126 ⑤): image_visibility 専用テーブル。
+    //    座標は median (混在 viewport の外れ値に強い)。duration は median (累積計測のため
+    //    avg は跳ねる)。segment は session 単位サブクエリがそのまま適用可能。
+    //
+    // 続130: enhancement 系 (images / issues) は **個別 try/catch で [] に degrade**。
+    //    本番 analytics_reader に image_visibility の SELECT grant が無く 497 が出ると
+    //    route 全体が 502 になり、要素カード/ネガティブ/構造タブまで巻き添え全滅していた
+    //    (query_log 実証)。core (elements/signals) は enhancement の欠落で死なない。
+    type ImageRow = {
+      src: string
+      alt: string
+      sessions: number
+      views: number
+      avg_ratio: number
+      median_ms: number
+      y: number
+      w: number
+      h: number
+    }
+    let imageRows: ImageRow[] = []
+    try {
+      const imagesRs = await ch.query({
+        query: `
+          SELECT
+            image_src AS src,
+            anyLast(image_alt) AS alt,
+            uniqExact(session_id) AS sessions,
+            count() AS views,
+            round(avg(max_visible_ratio), 3) AS avg_ratio,
+            toUInt32(round(quantile(0.5)(visible_duration_ms))) AS median_ms,
+            toUInt32(round(quantile(0.5)(image_y))) AS y,
+            toUInt16(round(quantile(0.5)(image_width))) AS w,
+            toUInt16(round(quantile(0.5)(image_height))) AS h
+          FROM clickinsight.image_visibility
+          WHERE tenant_id = {tenant_id:String}
+            AND site_id = {site_id:String}
+            AND page_url = {page_url:String}
+            AND created_at >= toDateTime({start:String})
+            AND created_at < toDateTime({end:String}) + INTERVAL 1 DAY
+            ${params.device_type ? 'AND device_type = {device_type:String}' : ''}
+            ${segmentFilter}
+          GROUP BY src
+          ORDER BY sessions DESC
+          LIMIT ${TOP_IMAGES_LIMIT}
+        `,
+        query_params: queryParams,
+        format: 'JSONEachRow',
+      })
+      imageRows = (await imagesRs.json()) as ImageRow[]
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message.split('\n')[0] : 'unknown'
+      console.error(`[heatmap/elements] image_visibility degraded to []: ${msg}`)
+    }
+
+    // 5) 構造 issue (続126 ★クロール価値): UGOKI Crawl が取り込んだ page_issues。
+    //    クロール未取込ページは 0 行 = UI は「クロール未取込」を表示 (graceful)。
+    //    続130: images と同様、grant 欠落等は [] に degrade (core を巻き込まない)。
+    type IssueRow = {
+      issue_category: string
+      issue_type: string
+      severity: string | number
+      n: number
+      recommendation: string
+    }
+    let issueRows: IssueRow[] = []
+    try {
+      const issuesRs = await ch.query({
+        query: `
+          SELECT
+            issue_category,
+            issue_type,
+            severity,
+            count() AS n,
+            anyLast(substring(recommendation, 1, 200)) AS recommendation
+          FROM clickinsight.page_issues
+          WHERE tenant_id = {tenant_id:String}
+            AND site_id = {site_id:String}
+            AND page_url = {page_url:String}
+          GROUP BY issue_category, issue_type, severity
+          ORDER BY severity DESC, n DESC
+          LIMIT ${TOP_ISSUES_LIMIT}
+        `,
+        query_params: queryParams,
+        format: 'JSONEachRow',
+      })
+      issueRows = (await issuesRs.json()) as IssueRow[]
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message.split('\n')[0] : 'unknown'
+      console.error(`[heatmap/elements] page_issues degraded to []: ${msg}`)
+    }
+
+    return NextResponse.json(
+      {
+        success: true,
+        data: {
+          page_sessions: pageSessions,
+          elements: elementRows.map((r) => ({
+            selector: r.selector,
+            text: r.text,
+            tag: r.tag,
+            href: r.href,
+            clicks: Number(r.clicks),
+            sessions: Number(r.sessions),
+            x: Number(r.x),
+            y: Number(r.y),
+          })),
+          signals,
+          images: imageRows.map((r) => ({
+            src: r.src,
+            alt: r.alt,
+            sessions: Number(r.sessions),
+            views: Number(r.views),
+            avg_ratio: Number(r.avg_ratio),
+            median_ms: Number(r.median_ms),
+            y: Number(r.y),
+            w: Number(r.w),
+            h: Number(r.h),
+          })),
+          issues: issueRows.map((r) => ({
+            category: r.issue_category,
+            type: r.issue_type,
+            severity: String(r.severity),
+            count: Number(r.n),
+            recommendation: r.recommendation,
+          })),
+        },
+      },
+      // 集計はリアルタイム性不要。ブラウザ private cache 2 分で再ナビを軽くする。
+      { headers: { 'Cache-Control': 'private, max-age=120' } },
+    )
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'unknown'
+    // ClickHouse error 詳細は client に漏らさない (credentials を含む経路を遮断)
+    console.error(`[heatmap/elements] query failed: ${msg}`)
+    return NextResponse.json(
+      { success: false, error: { code: 'INTERNAL', message: 'elements query failed' } },
+      { status: 502 },
+    )
+  }
+}
