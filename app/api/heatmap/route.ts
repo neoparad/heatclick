@@ -363,14 +363,20 @@ async function fetchRealHeatmapPoints(input: {
     // click_x を 1280 基準に正規化、[0,1280] に clamp。
     // click_y = document 絶対 CSS px (UInt32 で wrap を避ける)。
     // viewport_width <= 0 の malformed row は生 click_x をそのまま使う (worst-case)。
-    sql = `
-      SELECT
-        toUInt16(least(1280, greatest(0, if(viewport_width > 0, click_x * 1280 / viewport_width, click_x)))) AS x,
-        toUInt32(click_y) AS y,
-        count() AS count,
-        uniqExact(session_id) AS sessions
-      FROM clickinsight.events
-      WHERE tenant_id = {tenant_id:String}
+    //
+    // 続129 (本番障害 fix): 旧実装は GROUP BY が「生 px (x 1280 × y tile全域)」+
+    //   uniqExact (厳密セット) で、再タグ後のデータ量 (3倍) で server の総メモリ上限
+    //   (6.81GiB) を超過し MEMORY_LIMIT_EXCEEDED → heatmap 全滅していた。
+    //   実測の学び: 8px ビン化 + uniq(HLL) でも最大 ~133万 bin × HLL 状態 ~2.5KB ≈ 5GB で
+    //   依然超過する (live 検証済)。よって **2パス方式**:
+    //     pass1 (subquery): count のみで上位 500 bin を選抜 — counter だけなので ~数十MB。
+    //     pass2 (outer)   : その 500 bin に該当する行だけ uniq(session_id) — HLL 500 個 ≈ 1MB。
+    //   座標 8px グリッド (bin 中心 +4) は view-model の 48px クラスタ半径より十分細かく視覚差ゼロ。
+    //   sessions の uniq() 誤差 ~1% は blob 強度/tooltip 用途で無影響 (observed であることは不変)。
+    const binnedX = `toUInt16(least(1280, greatest(0, floor(if(viewport_width > 0, click_x * 1280 / viewport_width, click_x) / 8) * 8 + 4)))`
+    const binnedY = `toUInt32(intDiv(click_y, 8) * 8 + 4)`
+    const clickWhere = `
+        tenant_id = {tenant_id:String}
         AND site_id = {site_id:String}
         AND url = {page_url:String}
         AND event_type = 'click'
@@ -380,7 +386,24 @@ async function fetchRealHeatmapPoints(input: {
         AND timestamp >= toDateTime({start:String})
         AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
         ${deviceFilter}
-        ${segmentFilter}
+        ${segmentFilter}`
+    sql = `
+      SELECT x, y, count() AS count, uniq(session_id) AS sessions
+      FROM (
+        SELECT ${binnedX} AS x, ${binnedY} AS y, session_id
+        FROM clickinsight.events
+        WHERE ${clickWhere}
+      )
+      WHERE (x, y) IN (
+        SELECT x, y FROM (
+          SELECT ${binnedX} AS x, ${binnedY} AS y, count() AS c
+          FROM clickinsight.events
+          WHERE ${clickWhere}
+          GROUP BY x, y
+          ORDER BY c DESC
+          LIMIT 500
+        )
+      )
       GROUP BY x, y
       HAVING count >= 1
       ORDER BY count DESC
@@ -485,6 +508,9 @@ async function fetchRealHeatmapPoints(input: {
   const rs = await client.query({
     query: sql,
     query_params: queryParams,
+    // 続129: heatmap クエリ単体のメモリ上限 (1.5GB)。万一クエリ形状が悪化しても
+    // server 全体 (他テナント/チャット) を巻き込まず、この 1 クエリだけが失敗する。
+    clickhouse_settings: { max_memory_usage: '1500000000' },
     format: 'JSONEachRow',
   })
   const rows = (await rs.json()) as Array<{

@@ -56,7 +56,9 @@ const KEY_PREFIX = 'heatmap-screenshots'
 //   旧 v5 (CF REST で lazy 画像が依然空になりうる) を全 cache miss にして再撮影させる。
 // 続121: SCREENSHOT_WORKER_URL を本番投入。Microlink 時代の空画像キャッシュ (v6) を全 miss に
 //   して Worker 経由で再撮影させるため v7。provider は cache key に含まれないため version bump で flush。
-const CAPTURE_VERSION = 'v7'
+// 続129: SCREENSHOT_WORKER_URL/TOKEN の本番 env 投入 (3日前) より前に v7 で撮られた
+//   CF REST 経路の空画像キャッシュが凍結残存していたため v8 で全 miss にし、Worker 経由で再撮影。
+const CAPTURE_VERSION = 'v8'
 
 /** TTL (capturedAt 比較) */
 const FRESH_TTL_MS = 24 * 60 * 60 * 1000 // 24h: これ以内なら即返す
