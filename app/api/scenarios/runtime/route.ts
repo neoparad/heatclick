@@ -39,6 +39,7 @@ import {
 } from '@/lib/scenarios/kill-switch'
 import { CloudflareKvError } from '@/lib/scenarios/kv-storage'
 import { ScenarioValidationError, createScenarioRepository } from '@/lib/scenarios/repository'
+import { isScenarioInSchedule } from '@/lib/scenarios/schedule-utils'
 import {
   ScenarioRuntimePayloadSchema,
   type Scenario,
@@ -124,7 +125,14 @@ export async function GET(request: Request): Promise<NextResponse> {
 
   // REQ-SEC-006: per-tenant / per-scenario kill-switch — drop killed scenarios at serve time,
   // independent of any cache (route is no-store, so this takes effect on the next request).
-  const scenarios = merged.filter((s) => !isDeliveryKilled(tenant_id, s.id))
+  const killFiltered = merged.filter((s) => !isDeliveryKilled(tenant_id, s.id))
+
+  // Phase 2.1: schedule (start_at/end_at) で期間外の scenario を除外。
+  // scenario-runtime.js が browser side で再度チェックするが (clock skew 耐性)、
+  // server side で落とすことで「期間前/後」の variant HTML が一切 client に届かなくする
+  // (REQ-SEC 整合: 必要外の payload は出さない)。
+  const nowMs = Date.now()
+  const scenarios = killFiltered.filter((s) => isScenarioInSchedule(s.schedule, nowMs))
 
   if (scenarios.length === 0) {
     // 404 (not 403) to avoid leaking tenant existence.
@@ -141,6 +149,10 @@ export async function GET(request: Request): Promise<NextResponse> {
       variants: s.variants,
       status: s.status,
       matched_condition_hash: await sha256Hex(canonicalizeAst(s.condition_ast)),
+      // Phase 2.1: browser side 二重チェック用に frequency_cap / schedule を payload に含める。
+      // schedule は ±5min clock skew tolerance を browser 側で吸収する。
+      ...(s.frequency_cap ? { frequency_cap: s.frequency_cap } : {}),
+      ...(s.schedule ? { schedule: s.schedule } : {}),
     })),
   )
 
@@ -192,3 +204,6 @@ function mergeForRuntime(kv: Scenario[], poc: ReadonlyArray<Scenario>): Scenario
   }
   return [...byId.values()].sort((a, b) => (a.updated_at > b.updated_at ? -1 : 1))
 }
+
+// isScenarioInSchedule は lib/scenarios/schedule-utils.ts に切り出し済 (Next.js route.ts は
+// named export を制限するため)。
