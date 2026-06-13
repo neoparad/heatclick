@@ -116,6 +116,18 @@ function isStatic(pathname: string): boolean {
  * route 自身が site_id/tenant_id query を Zod validate し、`live` status のみを
  * 返す (preview/draft/cross-tenant は gate 済み、REQ-SEC-006 no-store + kill-switch)。
  * 他の /api/scenarios/* (list / CRUD / stats) は api-tenant に留まり JWT 必須。
+ *
+ * /api/experiments/assign も同型の公開エンドポイント (宝プロジェクト M2b、続126)。
+ * customer タグが visitor_id 付きで叩き、running+window 内の実験の **server-arm** を返す。
+ * route 自身が tenant_id/site_id/visitor_id を Zod validate、no-store、PII なし、
+ * cross-tenant probe は 404。他の /api/experiments/* (CRUD 等) は api-tenant で JWT 必須。
+ *
+ * /api/experiments/pool は Vercel Cron 起動経路 (宝プロジェクト 残タスク④)。cron は JWT を
+ * 持たないため公開し、route 自身が認証する — GET = x-vercel-cron (VERCEL runtime のみ信頼) /
+ * x-cron-secret (CRON_SECRET)、POST = JWT session (getServerSession は cookie 直検証で
+ * middleware 非依存) + owner/admin + EXPERIMENTS_POOL_OPERATORS allowlist。応答は件数サマリのみ
+ * (inngest / billing/webhook と同型)。⚠️ prefix 一致のため /api/experiments/pool/* も公開になる —
+ * **この下に子 route を追加しないこと** (追加するなら exact-match 化が先、Codex LOW 文書化)。
  */
 const API_PUBLIC_PATHS: ReadonlyArray<string> = [
   '/api/track',
@@ -123,6 +135,8 @@ const API_PUBLIC_PATHS: ReadonlyArray<string> = [
   '/api/inngest',
   '/api/billing/webhook',
   '/api/scenarios/runtime',
+  '/api/experiments/assign',
+  '/api/experiments/pool',
 ]
 
 /**
