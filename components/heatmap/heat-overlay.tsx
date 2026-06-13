@@ -312,16 +312,19 @@ function ScrollReachOverlay({
       {labeled.map((band, i) => (
         <div
           key={`scroll-reach-label-${i}`}
-          className="absolute left-[10px] font-mono text-[10.5px] font-bold"
+          className="absolute left-[10px] flex items-center gap-1 font-mono text-[10.5px] font-bold"
           style={{
             top: (band.top + band.height / 2) * displayScale - 7,
             color: 'rgba(10,40,90,.85)',
             textShadow: '0 1px 1px rgba(255,255,255,.7)',
           }}
           data-testid={`scroll-reach-band-${i}`}
+          title={`訪問者の${band.reachLabel}がこの深さまでスクロールして到達`}
           aria-hidden
         >
-          {band.reachLabel}
+          {/* 続133: 「75%」単体だと何の率か不明だったため「到達」を明示 */}
+          <span className="font-normal opacity-70">到達</span>
+          <span>{band.reachLabel}</span>
         </div>
       ))}
     </div>
@@ -376,7 +379,7 @@ function ExitGradientOverlay({
       {labeled.map((row, i) => (
         <div
           key={`exit-label-${i}`}
-          className="absolute right-[10px] rounded px-1.5 py-px font-mono text-[10.5px] font-bold"
+          className="absolute right-[10px] flex items-center gap-1 rounded px-1.5 py-px font-mono text-[10.5px] font-bold"
           style={{
             top: (row.top + row.height / 2) * displayScale - 8,
             color: '#fff',
@@ -384,9 +387,13 @@ function ExitGradientOverlay({
             textShadow: '0 1px 2px rgba(0,0,0,.3)',
           }}
           data-testid={`exit-row-${row.level}`}
+          title={`ページの${row.sectionLabel}の深さまで見た位置。訪問者の${row.exitPct}がここで離脱（これ以上スクロールせず）`}
           aria-hidden
         >
-          {row.sectionLabel} 離脱 {row.exitPct}
+          {/* 続133: 「75% 離脱 10%」の二重% が不明瞭だったため、各値にラベルを付ける。
+              深さ(位置) は控えめ、離脱率(本命の指標) を強調。 */}
+          <span className="font-normal opacity-80">深さ{row.sectionLabel}</span>
+          <span>離脱 {row.exitPct}</span>
         </div>
       ))}
     </div>

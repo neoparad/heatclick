@@ -13,12 +13,14 @@
  *   2. SSRF guard — only public http/https URLs are accepted; private IPs, loopback,
  *      link-local, metadata endpoints, and .localhost/.local hostnames are blocked.
  *
- * Lazy-load strategy:
- *   1. goto(url, { waitUntil: 'networkidle0', timeout: 30s })
- *   2. autoScroll: scroll in 600px steps to bottom, pausing 150ms per step to trigger
- *      IntersectionObserver / native lazy / scroll-event listeners
- *   3. After scroll: evaluate that all <img> are `.complete` (or wait 5s max)
- *   4. Scroll back to top, then take fullPage screenshot
+ * Lazy-load strategy (続133 強化):
+ *   1. goto(url, { waitUntil: 'networkidle0', timeout: 25s })
+ *   2. promote data-src/data-lazy-src → src + loading=eager (属性遅延読込サイト対策)
+ *   3. autoScroll: 800px steps, 90ms pause, **scrollHeight を毎ステップ読み直す** (伸びるページ追従)、
+ *      MAX_SCROLL_PX で打ち切り
+ *   4. 可視 <img> が naturalWidth>0 になるまで待機 (img.complete は src 未設定でも true のため)
+ *   5. Scroll back to top → 撮影。**面積が MAX_CAPTURE_AREA_PX 超なら上端から clip** (巨大ページの
+ *      timeout→劣化 fallback→空白画像 を防ぐ。続131 アプリ側 truncation guard が以深を全域描画)
  *
  * Constraints:
  *   - deviceScaleFactor is always 1 (overlay coordinate alignment — DO NOT change)
@@ -45,19 +47,35 @@ export interface Env {
 const TOTAL_TIMEOUT_MS = 55_000;
 
 /** puppeteer.launch goto timeout (ms). Included within TOTAL_TIMEOUT_MS. */
-const GOTO_TIMEOUT_MS = 30_000;
+const GOTO_TIMEOUT_MS = 25_000;
 
 /** Maximum time to wait for images to complete after scrolling (ms). */
-const IMAGES_COMPLETE_TIMEOUT_MS = 5_000;
+const IMAGES_COMPLETE_TIMEOUT_MS = 4_000;
 
 /** autoScroll step in px. Large enough to be fast, small enough to trigger lazy loaders. */
-const SCROLL_STEP_PX = 600;
+const SCROLL_STEP_PX = 800;
 
 /** Pause between each scroll step (ms). Gives IntersectionObserver / lazy loaders time to fire. */
-const SCROLL_STEP_DELAY_MS = 150;
+const SCROLL_STEP_DELAY_MS = 90;
 
 /** JPEG quality (matches the main app SCREENSHOT_QUALITY). */
 const JPEG_QUALITY = 75;
+
+/**
+ * 続133 (本番空白画像の根本 fix): 撮影の最大ピクセル面積。
+ *
+ * 事象: bihadashop の縦長記事は ~50,000px / 4MB。fullPage 撮影を 55s 以内に終えられず
+ *   Worker がタイムアウト → アプリが劣化プロバイダ (autoScroll しない) に fallback →
+ *   lazy 画像が空白、というのが「画像が表示されない」の正体 (ローカル実走査で確定)。
+ *
+ * 対策: 面積上限を設け、超過時は上端から `MAX_CAPTURE_AREA_PX / width` 高さに clip する。
+ *   width=1280 → 約 20,300px、width=390(SP) → 約 66,000px (実質無制限) と幅に応じて適応。
+ *   超過ページは「上部のみ画像 + 以深はヒートマップを全域描画」(アプリ側 続131 ガードが処理)。
+ */
+const MAX_CAPTURE_AREA_PX = 26_000_000;
+
+/** autoScroll の最大走査高さ (px)。これ以上は撮影対象外なのでスクロールも打ち切る。 */
+const MAX_SCROLL_PX = 60_000;
 
 // ── SSRF guard ─────────────────────────────────────────────────────────────────
 
@@ -229,47 +247,62 @@ function jsonError(status: number, message: string): Response {
  * then scrolls back to the top so fullPage screenshot captures from y=0.
  */
 async function autoScroll(page: puppeteer.Page): Promise<void> {
-  // Scroll to bottom in steps
+  // 続133: lazy 画像を確実に出すための 3 段強化。
+  //   (1) data-src / data-lazy-src / data-original を src に昇格し loading=eager 化
+  //       (一部のサイトは IntersectionObserver でなく独自属性で遅延読込するため、
+  //        スクロールだけでは src が swap されず空白のままになる)。
+  await page.evaluate(() => {
+    for (const im of Array.from(document.querySelectorAll('img'))) {
+      im.loading = 'eager';
+      const ds =
+        im.getAttribute('data-src') ||
+        im.getAttribute('data-lazy-src') ||
+        im.getAttribute('data-original');
+      if (ds && im.src !== ds) im.src = ds;
+      const dss = im.getAttribute('data-srcset') || im.getAttribute('data-lazy-srcset');
+      if (dss) im.srcset = dss;
+    }
+  });
+
+  //   (2) scrollHeight を毎回読み直すループ (lazy で伸びるページに追従)。MAX_SCROLL_PX で打ち切り。
   await page.evaluate(
-    async (stepPx: number, delayMs: number) => {
+    async (stepPx: number, delayMs: number, maxScroll: number) => {
       await new Promise<void>((resolve) => {
         let currentY = 0;
-        const maxY = document.body.scrollHeight;
-
         function step() {
+          const maxY = Math.min(document.body.scrollHeight, maxScroll); // 毎回読み直す
           currentY = Math.min(currentY + stepPx, maxY);
           window.scrollTo(0, currentY);
-
+          window.dispatchEvent(new Event('scroll'));
           if (currentY >= maxY) {
             resolve();
             return;
           }
           setTimeout(step, delayMs);
         }
-
-        // Also dispatch a scroll event to wake lazy loaders that listen on window
-        window.dispatchEvent(new Event('scroll'));
         setTimeout(step, delayMs);
       });
     },
     SCROLL_STEP_PX,
     SCROLL_STEP_DELAY_MS,
+    MAX_SCROLL_PX,
   );
 
-  // Wait for all <img> elements to finish loading (or timeout)
+  //   (3) 可視 <img> が naturalWidth>0 になるまで待つ (img.complete は src 未設定でも true を
+  //       返すため、worker の旧実装は未ロードでも撮影していた。naturalWidth で実ロードを確認)。
   const imagesCompleteDeadline = Date.now() + IMAGES_COMPLETE_TIMEOUT_MS;
   await page.waitForFunction(
     () => {
       const imgs = Array.from(document.querySelectorAll('img'));
-      return imgs.every((img) => img.complete);
+      const visible = imgs.filter((img) => img.getBoundingClientRect().width > 0);
+      return visible.length === 0 || visible.every((img) => img.complete && img.naturalWidth > 0);
     },
     { timeout: Math.max(imagesCompleteDeadline - Date.now(), 500) },
   ).catch(() => {
-    // Best-effort: if some images still haven't loaded by the timeout, continue anyway.
     console.warn('[screenshot-worker] Some images did not complete within timeout; continuing.');
   });
 
-  // Scroll back to top so fullPage screenshot starts from y=0
+  // Scroll back to top so the screenshot starts from y=0
   await page.evaluate(() => window.scrollTo(0, 0));
 }
 
@@ -378,11 +411,27 @@ export default {
       // autoScroll to trigger lazy-loaded images
       await autoScroll(page);
 
-      const screenshotBytes = await page.screenshot({
-        fullPage: true,
-        type: 'jpeg',
-        quality: JPEG_QUALITY,
-      });
+      // 続133: 巨大ページ対策 — document 全高を測り、面積上限を超えるなら上端から clip する。
+      //   fullPage の代わりに clip {0,0,width,capHeight} にすることで、5万px 級の縦長記事でも
+      //   Worker が timeout せず確実に撮り切れる (= 劣化 fallback に落ちず lazy 画像が出る)。
+      const fullHeight = await page.evaluate(() =>
+        Math.max(
+          document.body.scrollHeight,
+          document.documentElement.scrollHeight,
+          document.body.offsetHeight,
+        ),
+      );
+      const maxHeightByArea = Math.floor(MAX_CAPTURE_AREA_PX / parsed.width);
+      const capHeight = Math.min(fullHeight, maxHeightByArea);
+      const capped = fullHeight > capHeight;
+
+      const screenshotBytes = capped
+        ? await page.screenshot({
+            type: 'jpeg',
+            quality: JPEG_QUALITY,
+            clip: { x: 0, y: 0, width: parsed.width, height: capHeight },
+          })
+        : await page.screenshot({ fullPage: true, type: 'jpeg', quality: JPEG_QUALITY });
 
       const bytes =
         screenshotBytes instanceof Uint8Array
@@ -391,7 +440,13 @@ export default {
 
       return new Response(bytes, {
         status: 200,
-        headers: { 'content-type': 'image/jpeg' },
+        headers: {
+          'content-type': 'image/jpeg',
+          // 観測用: 上限で切ったか / 実際の全高 (アプリ側 truncation guard と突合できる)
+          'x-capture-capped': capped ? '1' : '0',
+          'x-capture-full-height': String(fullHeight),
+          'x-capture-height': String(capHeight),
+        },
       });
     })();
 

@@ -106,14 +106,14 @@ const INPUT = {
 }
 
 describe('buildR2Keys (key schema + tenant isolation)', () => {
-  it('uses heatmap-screenshots/v8/{tenant}/{site}/{device}/{urlHash}/v8 + .jpg/.json', () => {
-    // CAPTURE_VERSION (現行 v8) で key prefix が決まる。bump 時は本テストも追従更新する。
+  it('uses heatmap-screenshots/v9/{tenant}/{site}/{device}/{urlHash}/v9 + .jpg/.json', () => {
+    // CAPTURE_VERSION (現行 v9) で key prefix が決まる。bump 時は本テストも追従更新する。
     const keys = buildR2Keys(INPUT)
     expect(keys.imageKey).toMatch(
-      /^heatmap-screenshots\/v8\/tenant-A\/site-1\/pc\/[0-9a-f]{32}\/v8\.jpg$/,
+      /^heatmap-screenshots\/v9\/tenant-A\/site-1\/pc\/[0-9a-f]{32}\/v9\.jpg$/,
     )
     expect(keys.metaKey).toMatch(
-      /^heatmap-screenshots\/v8\/tenant-A\/site-1\/pc\/[0-9a-f]{32}\/v8\.json$/,
+      /^heatmap-screenshots\/v9\/tenant-A\/site-1\/pc\/[0-9a-f]{32}\/v9\.json$/,
     )
   })
 

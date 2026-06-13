@@ -58,7 +58,10 @@ const KEY_PREFIX = 'heatmap-screenshots'
 //   して Worker 経由で再撮影させるため v7。provider は cache key に含まれないため version bump で flush。
 // 続129: SCREENSHOT_WORKER_URL/TOKEN の本番 env 投入 (3日前) より前に v7 で撮られた
 //   CF REST 経路の空画像キャッシュが凍結残存していたため v8 で全 miss にし、Worker 経由で再撮影。
-const CAPTURE_VERSION = 'v8'
+// 続133: Worker に高さ上限 (面積 clip) + lazy 強化 (data-src 昇格 / naturalWidth 待ち) を投入。
+//   旧 v8 (巨大ページで Worker timeout → 劣化 fallback → lazy 画像が空白) を全 miss にし、
+//   新 Worker で撮り直す。**worker の wrangler deploy 後に**この bump 版を deploy すること。
+const CAPTURE_VERSION = 'v9'
 
 /** TTL (capturedAt 比較) */
 const FRESH_TTL_MS = 24 * 60 * 60 * 1000 // 24h: これ以内なら即返す

@@ -779,7 +779,10 @@ export function HeatmapCanvas({
                       className="mx-auto mt-2 max-w-[720px] text-center font-mono text-[10px] leading-relaxed text-[var(--ug-text-3)]"
                     >
                       実ページ取得: {formatCapturedAt(cap.capturedAt)}
-                      {cap.cached ? ' (cache)' : ''} · レイアウトは閲覧時と異なる場合があります
+                      {cap.cached ? ' (cache)' : ''}
+                      {/* 続133: どのプロバイダで撮れたか可視化 (worker = lazy画像対応、
+                          microlink/cloudflare = 劣化経路で空白になりうる、の切り分け用) */}
+                      {cap.provider ? ` · ${cap.provider}` : ''} · レイアウトは閲覧時と異なる場合があります
                     </p>
                   ) : null}
                 </>
