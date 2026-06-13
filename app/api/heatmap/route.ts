@@ -430,12 +430,16 @@ async function fetchRealHeatmapPoints(input: {
     //   sessions の uniq() 誤差 ~1% は blob 強度/tooltip 用途で無影響 (observed であることは不変)。
     const binnedX = `toUInt16(least(1280, greatest(0, floor(if(viewport_width > 0, click_x * 1280 / viewport_width, click_x) / 8) * 8 + 4)))`
     const binnedY = `toUInt32(intDiv(click_y, 8) * 8 + 4)`
+    // 続134 (1-4 fix): viewport_width<=0 の malformed 行で click_x>1280 のものは正規化不能で
+    //   右端 (1280) に clamp され device 混同を起こす。**out-of-range な malformed のみ除外**し、
+    //   well-formed 行と「malformed でも x が範囲内 (clamp 無害)」な行は残す (データを失わない安全側)。
     const clickWhere = `
         tenant_id = {tenant_id:String}
         AND site_id = {site_id:String}
         AND url = {page_url:String}
         AND event_type = 'click'
         AND is_agent = 0
+        AND (viewport_width > 0 OR click_x <= 1280)
         AND click_y >= {y_start:UInt32}
         AND click_y < {y_end:UInt32}
         AND timestamp >= toDateTime({start:String})
@@ -443,14 +447,22 @@ async function fetchRealHeatmapPoints(input: {
         ${deviceFilter}
         ${segmentFilter}`
     // 続131 (allBands): per-band top-500 を LIMIT BY で 1 クエリに集約 (band = intDiv(y, tile_px))。
-    //   pass1 は counter のみ (~数十MB)、pass2 は選抜 bin (≤500×11) の uniq のみ — メモリ安全は不変。
+    //   pass1 は counter のみ (~数十MB)、pass2 は選抜 bin の uniq のみ。
+    // 続134 (1-1 fix): 旧実装は `LIMIT 500 BY band` の後に **グローバル LIMIT 6000** を掛けており、
+    //   band 数 × 500 が 6000 を超える縦長ページ (66000px / 2400px tile = 28 band × 500 = 14000)
+    //   で、pass1 が band 昇順ソートのため**深いバンドの hotspot が落ちていた**。
+    //   per-band 上限 (500) が既に1バンドあたりを縛るので、グローバル上限は既定 tile_size の
+    //   実バンド数 (66000/2400≒28 band × 500 = 14000) を余裕で超える 20000 まで引き上げる
+    //   (旧 6000 では深部バンドが落ちていた)。応答サイズ/描画の暴走防止として 20000 は維持。
+    //   pass2 の uniq は ≤ 20000 個 HLL で max_memory_usage=2GB ガード内 (実測 数十MB)。
+    const ALLBANDS_HARD_CAP = 20000
     const pass1Limit = input.allBands
       ? `ORDER BY intDiv(y, {tile_px:UInt32}) ASC, c DESC
           LIMIT 500 BY intDiv(y, {tile_px:UInt32})
-          LIMIT 6000`
+          LIMIT ${ALLBANDS_HARD_CAP}`
       : `ORDER BY c DESC
           LIMIT 500`
-    const outerLimit = input.allBands ? 6000 : 500
+    const outerLimit = input.allBands ? ALLBANDS_HARD_CAP : 500
     sql = `
       SELECT x, y, count() AS count, uniq(session_id) AS sessions
       FROM (

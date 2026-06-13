@@ -56,3 +56,10 @@ migrations/_state/
 # Local development
 .cache/
 tmp/
+
+# 続134: 一時診断/開発の残骸 (作業ツリーに残りやすいもの)
+_tmp_*
+*.pid
+test.jpg
+_tmp_audit/
+workers/screenshot/package-lock.json

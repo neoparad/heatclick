@@ -175,8 +175,16 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
     for (const r of rows) {
       if (r === null) continue
       const parsed = ScenarioSchema.safeParse(r)
-      if (parsed.success) valid.push(parsed.data)
-      // If parse fails, skip silently to avoid crashing list. Phase 3 で migrator 追加検討。
+      if (!parsed.success) continue // parse 失敗は list を壊さないよう skip。Phase 3 で migrator 検討。
+      // 続134 (1-5): REQ-SEC-004 防御の二重化 — getScenario と同じく key だけ信頼せず行自身の
+      //   tenant/site を確認する。key/data drift で混入した他テナント行を公開配信 (runtime) に
+      //   流さないため、所有権不一致の行は list から除外する (1 行の不整合で list を落とさない)。
+      try {
+        assertScenarioOwnership(parsed.data, tenantId, siteId)
+      } catch {
+        continue
+      }
+      valid.push(parsed.data)
     }
     valid.sort((a, b) => (a.updated_at > b.updated_at ? -1 : 1))
     return valid

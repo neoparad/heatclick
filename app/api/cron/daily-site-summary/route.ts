@@ -27,24 +27,13 @@
 
 import { NextResponse } from 'next/server'
 
+import { isCronAuthorized } from '@/lib/cron-auth'
 import { assertLLMRuntimeConfig, LLMRuntimeConfigError } from '@/lib/llm/gateway'
 import { regenerateAllDailySummaries } from '@/lib/llm/daily-summary'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300 // 5 min (Vercel function 上限内、site 数 × 2 query で十分)
-
-function isAuthorized(request: Request): boolean {
-  // Vercel Cron は `x-vercel-cron: 1` header を自動付与
-  const cronHeader = request.headers.get('x-vercel-cron')
-  if (cronHeader === '1') return true
-
-  // 手動 invoke 用に CRON_SECRET header もサポート
-  const secret = process.env.CRON_SECRET
-  if (secret && request.headers.get('x-cron-secret') === secret) return true
-
-  return false
-}
 
 export async function POST(request: Request): Promise<NextResponse> {
   // 0. LLM runtime config fail-fast (続 64 §2a 継承、production 起動時の二重防御)
@@ -61,8 +50,8 @@ export async function POST(request: Request): Promise<NextResponse> {
     throw err
   }
 
-  // 1. 認証
-  if (!isAuthorized(request)) {
+  // 1. 認証 (続134: CRON_SECRET 設定時は secret 必須、spoofable な x-vercel-cron 単体を廃止)
+  if (!isCronAuthorized(request)) {
     return NextResponse.json(
       { success: false, error: { code: 'UNAUTHORIZED' } },
       { status: 401 },

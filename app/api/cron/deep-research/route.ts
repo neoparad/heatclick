@@ -19,22 +19,16 @@
 
 import { NextResponse } from 'next/server'
 
+import { isCronAuthorized } from '@/lib/cron-auth'
 import { runPendingDeepResearchJobs } from '@/lib/llm/deep-research'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300 // 5 min (1 stage 上限。1 回で最大 5 job 処理)
 
-function isAuthorized(request: Request): boolean {
-  const cronHeader = request.headers.get('x-vercel-cron')
-  if (cronHeader === '1') return true
-  const secret = process.env.CRON_SECRET
-  if (secret && request.headers.get('x-cron-secret') === secret) return true
-  return false
-}
-
 export async function POST(request: Request): Promise<NextResponse> {
-  if (!isAuthorized(request)) {
+  // 続134: CRON_SECRET 設定時は secret 必須 (spoofable な x-vercel-cron 単体を廃止)
+  if (!isCronAuthorized(request)) {
     return NextResponse.json({ success: false, error: { code: 'UNAUTHORIZED' } }, { status: 401 })
   }
 
