@@ -133,7 +133,7 @@ export function ScenarioNewView({ availableSiteIds }: ScenarioNewViewProps) {
     <>
       <PageMeta title="新規バナー" eyebrow="M Agent · Scenarios" />
 
-      <div className="px-8 pt-4 pb-16">
+      <div className="ug-page-scroll">
         {/* Header */}
         <div className="flex items-center gap-2 mb-3">
           <Link

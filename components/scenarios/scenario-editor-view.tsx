@@ -59,7 +59,7 @@ export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewP
     <>
       <PageMeta title="ターゲティングバナー" eyebrow="M Agent · Editor" />
 
-      <div className="px-7 pt-5 pb-16">
+      <div className="ug-page-scroll">
         {/* Header */}
         <div className="grid grid-cols-[1fr_auto] gap-4 items-end mb-5">
           <div>
