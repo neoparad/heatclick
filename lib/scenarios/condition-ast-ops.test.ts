@@ -15,11 +15,48 @@ import {
   makeDefaultGroup,
   makeDefaultLeaf,
   opChangeAltersValue,
+  operatorLabel,
+  operatorsForField,
   totalLeafCount,
   updateChildAt,
   valueKindForLeaf,
 } from './condition-ast-ops'
 import { ConditionNodeSchema, type CompositeNode, type LeafComparison } from './types'
+
+describe('operatorLabel (演算子の日本語ラベル)', () => {
+  it('returns symbol + Japanese for comparison operators', () => {
+    expect(operatorLabel('GTE')).toBe('≥ 以上')
+    expect(operatorLabel('EQ')).toBe('＝ 等しい')
+    expect(operatorLabel('NOT_VISITED')).toBe('未訪問')
+  })
+})
+
+describe('operatorsForField (field 型別の演算子候補)', () => {
+  it('number field offers numeric comparisons, not text ops', () => {
+    const ops = operatorsForField('session_duration_sec')
+    expect(ops).toEqual(expect.arrayContaining(['EQ', 'GT', 'GTE', 'LTE']))
+    expect(ops).not.toContain('CONTAINS')
+    expect(ops).not.toContain('MATCHES_REGEX')
+    expect(ops).not.toContain('VISITED')
+  })
+
+  it('string field offers text ops, not numeric comparisons', () => {
+    const ops = operatorsForField('utm_source')
+    expect(ops).toEqual(expect.arrayContaining(['EQ', 'CONTAINS', 'STARTS_WITH']))
+    expect(ops).not.toContain('GTE')
+    expect(ops).not.toContain('GT')
+  })
+
+  it('boolean field offers only equality/existence', () => {
+    expect(operatorsForField('is_first_visit')).toEqual(['EQ', 'NEQ', 'EXISTS', 'NOT_EXISTS'])
+  })
+
+  it('always includes the current op even if outside the field-type set (legacy safety)', () => {
+    const ops = operatorsForField('session_duration_sec', 'CONTAINS')
+    expect(ops[0]).toBe('CONTAINS')
+    expect(ops).toContain('GTE')
+  })
+})
 
 describe('fieldMeta', () => {
   it('returns label + hint for a known field', () => {

@@ -26,7 +26,6 @@ import { Input } from '@/components/ui/input'
 import {
   ALLOWED_FIELDS,
   GROUP_OPERATORS_ALL,
-  LEAF_OPERATORS,
   addGroupAt,
   addLeafAt,
   canUseNot,
@@ -38,6 +37,8 @@ import {
   makeDefaultGroup,
   makeDefaultLeaf,
   opChangeAltersValue,
+  operatorLabel,
+  operatorsForField,
   removeLeafAt,
   setGroupOp,
   totalLeafCount,
@@ -323,7 +324,7 @@ function LeafRow({ leaf, disabled, canRemove, onChange, onRemove }: LeafRowProps
 
   return (
     <div>
-      <div className="grid grid-cols-[1.1fr_104px_1fr_24px] gap-1.5 items-center">
+      <div className="grid grid-cols-[1.1fr_148px_1fr_24px] gap-1.5 items-center">
         {/* Field select (日本語ラベル) */}
         <select
           value={leaf.field}
@@ -348,12 +349,12 @@ function LeafRow({ leaf, disabled, canRemove, onChange, onRemove }: LeafRowProps
           value={leaf.op}
           onChange={(e) => changeOp(e.target.value as LeafOperator)}
           disabled={disabled}
-          className="h-8 px-2 text-[10.5px] font-mono text-indigo-700 bg-indigo-50 border border-indigo-200 rounded font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-200 disabled:opacity-100 disabled:cursor-not-allowed"
+          className="h-8 px-2 text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-200 disabled:opacity-100 disabled:cursor-not-allowed"
           aria-label="operator"
         >
-          {LEAF_OPERATORS.map((op) => (
+          {operatorsForField(leaf.field, leaf.op).map((op) => (
             <option key={op} value={op}>
-              {op}
+              {operatorLabel(op)}
             </option>
           ))}
         </select>
