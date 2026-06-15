@@ -54,7 +54,11 @@ export async function fetchPagesUncached(
   siteId: string,
   limit: number,
 ): Promise<PageOption[]> {
-  const ch = getClickHouseClient()
+  // 続134 (RT-01 hardening): events を読むだけの集計なので read 専用ロールで実行する。
+  //   旧: 引数なし = 'default'（superuser）。これだと default を Vercel から遠隔使用する必要があり、
+  //   git 露出した default creds を localhost 限定で無力化できなかった。analytics_reader に移して
+  //   default を完全にローカル専用にできるようにする (アプリは default を遠隔使用しない)。
+  const ch = getClickHouseClient('analytics_reader')
   // tenant_id parameter binding は必須 (§3.8.1)。文字列連結は禁止 (Codex Round 8 Fix 5)。
   const result = await ch.query({
     query: `
