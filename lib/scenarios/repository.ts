@@ -20,7 +20,7 @@ import { randomUUID } from 'node:crypto'
 
 import { emitScenarioAudit } from './audit'
 import { HtmlSanitizationError, sanitizeHtmlVariant } from './html-sanitizer'
-import { getDefaultStorage, type KvStorage } from './kv-storage'
+import { CloudflareKvError, getDefaultStorage, type KvStorage } from './kv-storage'
 import {
   ScenarioSchema,
   type Scenario,
@@ -85,6 +85,22 @@ export function scenarioPrefix(tenantId: string, siteId: string): string {
   assertTenantId(tenantId)
   assertSiteId(siteId)
   return `scenarios/${tenantId}/${siteId}/`
+}
+
+/**
+ * Per-(tenant,site) scenario index key — KV list 結果整合バグ対策 (runtime 断続配信落ち修正)。
+ *
+ * Cloudflare KV の list(/keys) は **結果整合** で、書きたてキーが list に出てこない/出たり消えたり
+ * する。配信 runtime はこの list に依存していたため、管理画面で作った live シナリオが断続的に配信
+ * から落ちていた。対策として write 時に「サイトごとの scenario_id 配列」を 1 キーで保持し、read は
+ * 直接 get (getScenario と同じ信頼性) で引く。
+ *
+ * `scenarios/` とは別 prefix のため listKeys('scenarios/{t}/{s}/') には拾われない。
+ */
+export function scenarioIndexKey(tenantId: string, siteId: string): string {
+  assertTenantId(tenantId)
+  assertSiteId(siteId)
+  return `scenario-index/${tenantId}/${siteId}`
 }
 
 function assertTenantId(tenantId: string): void {
@@ -162,21 +178,60 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
 
   async function listScenarios(tenantId: string, siteId: string): Promise<Scenario[]> {
     const prefix = scenarioPrefix(tenantId, siteId)
-    const keys = await storage.listKeys(prefix)
-    if (keys.length === 0) return []
-    // KV list 順序は CF が保証しないので、updated_at desc で client sort
-    const rows = await Promise.all(
-      keys.map(async (k) => {
-        const v = await storage.getJson<Scenario>(k)
-        return v
-      }),
-    )
+    // Cloudflare KV の list(/keys) は **結果整合** で書きたてキーを取りこぼす (= 新規/更新
+    // シナリオが配信から断続的に落ちる重大バグの原因)。そこで index キー (直接 get・信頼性◎) を
+    // primary、listKeys を best-effort の保険 (移行 / index 取りこぼし) として **union** する。
+    // どちらか一方が読めれば配信を継続できる。
+    const keySet = new Set<string>()
+    let anySourceOk = false
+
+    // primary: index (reliable direct get)
+    try {
+      for (const id of await readScenarioIndex(storage, tenantId, siteId)) {
+        try {
+          keySet.add(scenarioKey(tenantId, siteId, id))
+        } catch {
+          // index に紛れた不正 id は無視 (index drift 耐性)
+        }
+      }
+      anySourceOk = true
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[scenarios] index read failed, relying on listKeys: ${(e as Error).message}`)
+    }
+
+    // best-effort: listKeys (結果整合。index 未登録の legacy key を拾う保険)
+    try {
+      for (const k of await storage.listKeys(prefix)) keySet.add(k)
+      anySourceOk = true
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[scenarios] listKeys failed, relying on index: ${(e as Error).message}`)
+    }
+
+    // 両系統とも読めない = KV 自体ダウン → 呼出元 (runtime route) が POC fallback + log できるよう throw
+    if (!anySourceOk) {
+      throw new CloudflareKvError('scenario list failed: both index and listKeys reads errored')
+    }
+    if (keySet.size === 0) return []
+
+    // 直接 get で各 scenario を読む (getScenario と同じ信頼性)。KV list 順序は保証されないので
+    // updated_at desc で client sort。
+    const rows = await Promise.all([...keySet].map((k) => storage.getJson<Scenario>(k)))
     const valid: Scenario[] = []
     for (const r of rows) {
       if (r === null) continue
       const parsed = ScenarioSchema.safeParse(r)
-      if (parsed.success) valid.push(parsed.data)
-      // If parse fails, skip silently to avoid crashing list. Phase 3 で migrator 追加検討。
+      if (!parsed.success) continue // parse 失敗は list を壊さないよう skip。Phase 3 で migrator 検討。
+      // 続134 (1-5): REQ-SEC-004 防御の二重化 — getScenario と同じく key だけ信頼せず行自身の
+      //   tenant/site を確認する。key/data drift で混入した他テナント行を公開配信 (runtime) に
+      //   流さないため、所有権不一致の行は list から除外する (1 行の不整合で list を落とさない)。
+      try {
+        assertScenarioOwnership(parsed.data, tenantId, siteId)
+      } catch {
+        continue
+      }
+      valid.push(parsed.data)
     }
     valid.sort((a, b) => (a.updated_at > b.updated_at ? -1 : 1))
     return valid
@@ -234,6 +289,8 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
     }
     const key = scenarioKey(parsed.data.tenant_id, parsed.data.site_id, parsed.data.id)
     await storage.putJson(key, parsed.data)
+    // KV list 結果整合バグ対策: 配信 read が list に依存しないよう index に id を登録 (best-effort)。
+    await addToScenarioIndex(storage, parsed.data.tenant_id, parsed.data.site_id, parsed.data.id)
     void emitScenarioAudit({
       action: 'scenario.created',
       tenant_id: parsed.data.tenant_id,
@@ -283,6 +340,9 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
     }
     const key = scenarioKey(tenantId, siteId, scenarioId)
     await storage.putJson(key, parsed.data)
+    // KV list 結果整合バグ対策: index を冪等に更新。index 未登録の legacy 行はここで backfill される
+    // (再保存 1 回で確実に配信に乗る)。
+    await addToScenarioIndex(storage, tenantId, siteId, scenarioId)
     void emitScenarioAudit({
       action: 'scenario.updated',
       tenant_id: parsed.data.tenant_id,
@@ -306,6 +366,8 @@ export function createScenarioRepository(opts: ScenarioRepositoryOptions = {}) {
     const key = scenarioKey(tenantId, siteId, scenarioId)
     const existed = await storage.delete(key)
     if (existed) {
+      // KV list 結果整合バグ対策: index からも id を除去 (best-effort)。
+      await removeFromScenarioIndex(storage, tenantId, siteId, scenarioId)
       void emitScenarioAudit({
         action: 'scenario.deleted',
         tenant_id: tenantId,
@@ -365,6 +427,61 @@ function assertScenarioOwnership(
   if (scenario.tenant_id !== tenantId || scenario.site_id !== siteId) {
     // Treat an ownership mismatch as "not found" to avoid confirming the resource exists.
     throw new ScenarioNotFoundError(scenario.id)
+  }
+}
+
+// ── Scenario index helpers (KV list 結果整合バグ対策) ─────────────────────────
+//
+// write 時に「サイトごとの scenario_id 配列」を 1 キー (scenarioIndexKey) で保持し、配信 read を
+// 結果整合な listKeys に依存させない。index への書込みは **best-effort**: scenario 本体の write は
+// 既に成功しているので、index 失敗で全体を落とさず warn に留める (listScenarios の best-effort
+// listKeys が安全網)。
+//
+// 並行性: addToScenarioIndex は read-modify-write のため同時 create で lost-update し得る
+// (Phase 1 dogfood は低並行で許容、listKeys union が保険)。Phase 3 で per-id index key / CAS 化検討。
+
+async function readScenarioIndex(
+  storage: KvStorage,
+  tenantId: string,
+  siteId: string,
+): Promise<string[]> {
+  const raw = await storage.getJson<unknown>(scenarioIndexKey(tenantId, siteId))
+  if (!Array.isArray(raw)) return []
+  return raw.filter((v): v is string => typeof v === 'string')
+}
+
+async function addToScenarioIndex(
+  storage: KvStorage,
+  tenantId: string,
+  siteId: string,
+  scenarioId: string,
+): Promise<void> {
+  try {
+    const ids = await readScenarioIndex(storage, tenantId, siteId)
+    if (ids.includes(scenarioId)) return
+    await storage.putJson(scenarioIndexKey(tenantId, siteId), [...ids, scenarioId])
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`[scenarios] index add failed for ${scenarioId}: ${(e as Error).message}`)
+  }
+}
+
+async function removeFromScenarioIndex(
+  storage: KvStorage,
+  tenantId: string,
+  siteId: string,
+  scenarioId: string,
+): Promise<void> {
+  try {
+    const ids = await readScenarioIndex(storage, tenantId, siteId)
+    if (!ids.includes(scenarioId)) return
+    await storage.putJson(
+      scenarioIndexKey(tenantId, siteId),
+      ids.filter((id) => id !== scenarioId),
+    )
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`[scenarios] index remove failed for ${scenarioId}: ${(e as Error).message}`)
   }
 }
 
