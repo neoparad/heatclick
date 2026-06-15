@@ -280,6 +280,17 @@ function NestedGroupEditor({
 // Leaf row (field + operator + value)。onChange は更新後の leaf を返す。
 // ───────────────────────────────────────────────────────────────────────────
 
+// visited_paths で意味をなす演算子だけ (evaluator.ts VISITED/NOT_VISITED の実装に対応)
+const _VISITED_VALID_OPS = new Set(['VISITED', 'NOT_VISITED', 'EXISTS', 'NOT_EXISTS'])
+
+// ReDoS リスク判定 (server validateConditionAst / evaluator.ts と同一ポリシー)
+const _REGEX_MAX_LEN = 200
+const _REDOS_PATTERNS = [/\([^)]*[+*]\)\s*[+*{]/, /\([^)]*\+[^)]*\)\s*\+/]
+function _isUnsafeRegex(pattern: string): boolean {
+  if (pattern.length > _REGEX_MAX_LEN) return true
+  return _REDOS_PATTERNS.some((p) => p.test(pattern))
+}
+
 interface LeafRowProps {
   leaf: LeafComparison
   disabled: boolean
@@ -293,6 +304,11 @@ function LeafRow({ leaf, disabled, canRemove, onChange, onRemove }: LeafRowProps
   // E: operator / field 変更で値が失われるときの警告 (次の編集で消える)。
   const [castNote, setCastNote] = useState<string | null>(null)
   const meta = fieldMeta(leaf.field)
+  const isLegacyVisitedPathsOp = leaf.field === 'visited_paths' && !_VISITED_VALID_OPS.has(leaf.op)
+  const regexWarning =
+    leaf.op === 'MATCHES_REGEX' && typeof leaf.value === 'string' && leaf.value.length > 0 && _isUnsafeRegex(leaf.value)
+      ? 'MATCHES_REGEX パターンが長すぎるか ReDoS の恐れがあります（保存時にエラーになります）'
+      : null
 
   function patchLeaf(patch: Partial<LeafComparison>): void {
     setCastNote(null)
@@ -352,11 +368,14 @@ function LeafRow({ leaf, disabled, canRemove, onChange, onRemove }: LeafRowProps
           className="h-8 px-2 text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-200 disabled:opacity-100 disabled:cursor-not-allowed"
           aria-label="operator"
         >
-          {operatorsForField(leaf.field, leaf.op).map((op) => (
-            <option key={op} value={op}>
-              {operatorLabel(op)}
-            </option>
-          ))}
+          {operatorsForField(leaf.field, leaf.op).map((op) => {
+            const isLegacyOp = leaf.field === 'visited_paths' && !_VISITED_VALID_OPS.has(op)
+            return (
+              <option key={op} value={op} disabled={isLegacyOp}>
+                {operatorLabel(op)}{isLegacyOp ? ' (非対応)' : ''}
+              </option>
+            )
+          })}
         </select>
 
         {/* Value input (type depends on operator) */}
@@ -431,7 +450,7 @@ function LeafRow({ leaf, disabled, canRemove, onChange, onRemove }: LeafRowProps
             value={String(leaf.value ?? '')}
             onChange={(e) => patchLeaf({ value: e.target.value })}
             disabled={disabled}
-            className="h-8 text-xs"
+            className={`h-8 text-xs${regexWarning ? ' border-red-400 focus-visible:ring-red-200' : ''}`}
             aria-label="value"
           />
         )}
@@ -453,10 +472,16 @@ function LeafRow({ leaf, disabled, canRemove, onChange, onRemove }: LeafRowProps
         </button>
       </div>
 
-      {/* field ヒント + cast 警告 */}
-      <div className="pl-0.5 mt-0.5 flex gap-2 items-center min-h-[14px]">
+      {/* field ヒント + cast 警告 + visited_paths レガシー op 警告 + MATCHES_REGEX ReDoS 警告 */}
+      <div className="pl-0.5 mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 items-center min-h-[14px]">
         <span className="text-[10px] text-slate-400">{meta.hint}</span>
         {castNote ? <span className="text-[10px] text-amber-600">⚠️ {castNote}</span> : null}
+        {isLegacyVisitedPathsOp ? (
+          <span className="text-[10px] text-amber-600">
+            ⚠️ visited_paths には VISITED / NOT_VISITED / EXISTS / NOT_EXISTS のみ有効です（現在の演算子は機能しません）
+          </span>
+        ) : null}
+        {regexWarning ? <span className="text-[10px] text-red-600">🚫 {regexWarning}</span> : null}
       </div>
     </div>
   )

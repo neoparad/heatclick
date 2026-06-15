@@ -130,7 +130,7 @@ export const FIELD_META: Record<AllowedField, FieldMeta> = {
   utm_medium: { label: '流入媒体 (utm_medium)', hint: '例: organic, cpc', valueType: 'string' },
   utm_campaign: { label: 'キャンペーン (utm_campaign)', hint: '例: spring_sale', valueType: 'string' },
   device_type: { label: 'デバイス種別', hint: 'desktop / mobile / tablet', valueType: 'string' },
-  visited_paths: { label: '訪問済パス一覧', hint: 'VISITED/NOT_VISITED で使用', valueType: 'string' },
+  visited_paths: { label: '訪問済パス一覧', hint: '過去に訪問したURLパス一覧。VISITED / NOT_VISITED のみ有効 (EQ / CONTAINS 等は機能しません)', valueType: 'string' },
   scroll_depth_max_pct: { label: '最大スクロール率(%)', hint: '例: 80', valueType: 'number' },
   cart_value: { label: 'カート金額', hint: '例: 5000', valueType: 'number' },
   language: { label: '言語', hint: '例: ja, en', valueType: 'string' },

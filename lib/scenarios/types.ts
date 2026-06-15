@@ -382,9 +382,30 @@ export function countLeaves(node: ConditionNode): number {
 }
 
 export interface AstValidationError {
-  code: 'depth_exceeded' | 'leaf_count_exceeded' | 'unsupported_field' | 'invalid_not_arity'
+  code: 'depth_exceeded' | 'leaf_count_exceeded' | 'unsupported_field' | 'invalid_not_arity' | 'unsafe_regex'
   message: string
   field?: string
+}
+
+// ── MATCHES_REGEX ReDoS 検証 ─────────────────────────────────────────────────
+// 自前パターンは代表的な catastrophic backtracking 形 ((a+)+, (.*)* 等) を捕捉する。
+// 完全ではないため「可能性があります」と柔らかく表現し、誤検知時のユーザー混乱を防ぐ。
+const REDOS_DANGER_PATTERNS: RegExp[] = [
+  /\([^)]*[+*]\)\s*[+*{]/,  // (a+)+ / (a*)* / (a+){n}
+  /\([^)]*\+[^)]*\)\s*\+/,  // (a+b+)+ 形
+]
+const MAX_REGEX_LENGTH = 200
+
+function _hasDangerousRegexPattern(pattern: string): boolean {
+  if (pattern.length > MAX_REGEX_LENGTH) return true
+  return REDOS_DANGER_PATTERNS.some((p) => p.test(pattern))
+}
+
+function _collectRegexPatterns(node: ConditionNode): string[] {
+  if (isLeaf(node)) {
+    return node.op === 'MATCHES_REGEX' && typeof node.value === 'string' ? [node.value] : []
+  }
+  return node.children.flatMap((c) => _collectRegexPatterns(c))
 }
 
 export function validateConditionAst(node: ConditionNode): AstValidationError[] {
@@ -398,6 +419,14 @@ export function validateConditionAst(node: ConditionNode): AstValidationError[] 
   for (const field of collectFields(node)) {
     if (!isAllowedField(field)) {
       errors.push({ code: 'unsupported_field', message: `field "${field}" is not allowed`, field })
+    }
+  }
+  for (const pattern of _collectRegexPatterns(node)) {
+    if (_hasDangerousRegexPattern(pattern)) {
+      errors.push({
+        code: 'unsafe_regex',
+        message: `MATCHES_REGEX パターンに ReDoS の脆弱性がある可能性があります: "${pattern.slice(0, 50)}"`,
+      })
     }
   }
   return errors

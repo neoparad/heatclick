@@ -794,7 +794,16 @@
       }, 10000)
       // M-1: SPA 対応 — pushState / popstate をフックして URL 変更時に再評価する。
       // React Router / Next.js App Router の クライアントナビゲーションに対応。
+      // page_views_in_session: sessionStorage (ci_spv) を SSOT として直接インクリメント。
+      // tracking.js が初回ロード時に書いた値を引き継ぎ、SPA ナビ毎に +1 する (Gemini 指摘採用)。
+      function _incrementSpaPageViews() {
+        try {
+          var current = parseInt(sessionStorage.getItem('ci_spv') || '0', 10) || 0
+          sessionStorage.setItem('ci_spv', String(current + 1))
+        } catch (e) { /* sessionStorage 不可時は無視 */ }
+      }
       function _onSpaNav() {
+        _incrementSpaPageViews()
         _appendVisitedPath()
         evaluateAll(_scenarios)
       }
