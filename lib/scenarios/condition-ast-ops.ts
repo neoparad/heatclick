@@ -190,8 +190,17 @@ const STRING_OPS: readonly LeafOperator[] = [
 /**
  * field の型に応じた候補演算子。現在の op (currentOp) が候補外でも必ず含める
  * (既存データの op で select が空にならないように)。
+ *
+ * visited_paths は runtime ctx では string[] 配列型のため、EQ/CONTAINS 等の文字列演算子は
+ * 機能しない (runtime の evalLeaf は配列に対して indexOf を使う VISITED/NOT_VISITED のみ動く)。
+ * Codex レビュー反映: 配列フィールドは専用演算子のみ表示してユーザーの誤設定を防ぐ。
  */
 export function operatorsForField(field: string, currentOp?: LeafOperator): LeafOperator[] {
+  if (field === 'visited_paths') {
+    const base: LeafOperator[] = ['VISITED', 'NOT_VISITED', 'EXISTS', 'NOT_EXISTS']
+    if (currentOp && !base.includes(currentOp)) return [currentOp, ...base]
+    return base
+  }
   const t = fieldValueType(field)
   const base = t === 'number' ? NUMBER_OPS : t === 'boolean' ? BOOLEAN_OPS : STRING_OPS
   const list = [...base]
@@ -305,15 +314,26 @@ export function castLeafValueForOp(current: LeafComparison, newOp: LeafOperator)
 }
 
 /**
- * leaf の field を変えたとき、value を新 field (+ 現 op) の kind に合わせて変換する。
- * boolean/number field に切替えた際に string 値が残り、runtime で永久に不一致になるのを防ぐ (E)。
+ * leaf の field を変えたとき、op と value を新 field に合わせて変換する。
+ * boolean/number field に切替えた際に string 値が残り runtime で永久に不一致になるのを防ぐ (E)。
+ * visited_paths など配列フィールドに切替えた際、EQ 等の無効 op も自動的に先頭有効 op に変換 (Codex 指摘)。
  */
 export function castLeafForField(current: LeafComparison, newField: string): LeafComparison {
+  // 新フィールドで有効な演算子リストを取得 (legacy currentOp 挿入なし)
+  const validOps = _baseOpsForField(newField)
+  const newOp: LeafOperator = validOps.includes(current.op) ? current.op : validOps[0]
   return {
-    op: current.op,
+    op: newOp,
     field: newField,
-    value: coerceValueForKind(current.value, valueKindForLeaf(newField, current.op)),
+    value: coerceValueForKind(current.value, valueKindForLeaf(newField, newOp)),
   }
+}
+
+/** operatorsForField の legacy currentOp 挿入なし版 (castLeafForField で op 強制変換に使用)。 */
+function _baseOpsForField(field: string): readonly LeafOperator[] {
+  if (field === 'visited_paths') return ['VISITED', 'NOT_VISITED', 'EXISTS', 'NOT_EXISTS']
+  const t = fieldValueType(field)
+  return t === 'number' ? NUMBER_OPS : t === 'boolean' ? BOOLEAN_OPS : STRING_OPS
 }
 
 /**

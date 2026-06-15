@@ -112,6 +112,7 @@ function evaluateLeaf(node: LeafComparison, ctx: EvaluationContext): boolean {
       return typeof v === 'string' && typeof target === 'string' && v.endsWith(target)
     case 'MATCHES_REGEX':
       if (typeof target !== 'string' || typeof v !== 'string') return false
+      if (target.length > 200) return false // ReDoS 緩和: 過長パターン拒否 (runtime と同一ポリシー)
       try {
         return new RegExp(target).test(v)
       } catch {

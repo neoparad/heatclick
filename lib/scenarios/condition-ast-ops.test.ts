@@ -56,6 +56,21 @@ describe('operatorsForField (field 型別の演算子候補)', () => {
     expect(ops[0]).toBe('CONTAINS')
     expect(ops).toContain('GTE')
   })
+
+  it('visited_paths offers only array-aware operators (VISITED/NOT_VISITED/EXISTS/NOT_EXISTS)', () => {
+    const ops = operatorsForField('visited_paths')
+    expect(ops).toEqual(['VISITED', 'NOT_VISITED', 'EXISTS', 'NOT_EXISTS'])
+    expect(ops).not.toContain('EQ')
+    expect(ops).not.toContain('CONTAINS')
+    expect(ops).not.toContain('STARTS_WITH')
+    expect(ops).not.toContain('MATCHES_REGEX')
+  })
+
+  it('visited_paths still includes a legacy currentOp at head', () => {
+    const ops = operatorsForField('visited_paths', 'EQ')
+    expect(ops[0]).toBe('EQ')
+    expect(ops).toContain('VISITED')
+  })
 })
 
 describe('fieldMeta', () => {

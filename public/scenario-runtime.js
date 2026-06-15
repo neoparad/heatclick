@@ -126,6 +126,11 @@
       if (_cs && _cs.src) {
         try { return new URL(_cs.src).origin } catch (e) { /* noop */ }
       }
+      // defer スクリプトでは document.currentScript が null になるため querySelectorAll でフォールバック。
+      var els = document.querySelectorAll('script[src*="scenario-runtime.js"]')
+      for (var i = els.length - 1; i >= 0; i--) {
+        try { return new URL(els[i].src).origin } catch (e) { /* noop */ }
+      }
       return ''
     })()
     RUNTIME_URL = (origin || '') + '/api/scenarios/runtime'
@@ -190,6 +195,11 @@
   // ──────────────────────────────────────────────────────────────────────────
   // AST evaluator
   // ──────────────────────────────────────────────────────────────────────────
+
+  // Phase 2/3 フィールドは buildCtx() 未実装。条件が設定されても常に false を返す。
+  // 「NEQ/NOT_EXISTS が undefined と比較して意図せず true になる」リスクを防ぐ (Codex 指摘)。
+  var _UNIMPLEMENTED_FIELDS = { cart_value: 1, persona_label: 1, predicted_intent: 1 }
+
   var LEAF_OPS = {
     EQ: 1, NEQ: 1, GT: 1, GTE: 1, LT: 1, LTE: 1,
     IN: 1, NOT_IN: 1,
@@ -206,6 +216,10 @@
     return false
   }
   function evalLeaf(n, ctx) {
+    if (_UNIMPLEMENTED_FIELDS[n.field]) {
+      console.warn('[scenario-runtime] field "' + n.field + '" は未実装です (Phase 2/3 予定)。条件をスキップします。')
+      return false
+    }
     var v = ctx[n.field]
     var t = n.value
     switch (n.op) {
@@ -222,6 +236,7 @@
       case 'ENDS_WITH': return typeof v === 'string' && typeof t === 'string' && v.lastIndexOf(t) === v.length - t.length
       case 'MATCHES_REGEX':
         if (typeof t !== 'string' || typeof v !== 'string') return false
+        if (t.length > 200) { console.warn('[scenario-runtime] MATCHES_REGEX パターンが長すぎます (200文字超)。ReDoS防止のためスキップします。'); return false }
         try { return new RegExp(t).test(v) } catch (e) { return false }
       case 'VISITED': return Array.isArray(ctx.visited_paths) && typeof t === 'string' && ctx.visited_paths.indexOf(t) !== -1
       case 'NOT_VISITED': return typeof t === 'string' && (!Array.isArray(ctx.visited_paths) || ctx.visited_paths.indexOf(t) === -1)
@@ -341,6 +356,7 @@
     if (node && node.parentNode) node.parentNode.removeChild(node)
     var overlay = document.querySelector('.ugk-overlay[data-ugk-scenario="' + scenario.id + '"]')
     if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay)
+    if (_activeRenders > 0) _activeRenders--
     sendMatchEvent(scenario, variant, 'dismiss', 0)
   }
   function _onCtaClick(scenario, variant, ctaUrl, e) {
@@ -452,6 +468,8 @@
   }
 
   function renderVariant(scenario, variant) {
+    if (_activeRenders >= MAX_CONCURRENT_BANNERS) return false
+    _activeRenders++
     var host = _ensureHost()
     var pos = _effectivePosition(variant)
     var isCenter = !pos || pos === 'center'
@@ -536,7 +554,15 @@
     }
 
     sendMatchEvent(scenario, variant, 'impression', 0)
+    return true
   }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // 同時バナー表示上限 (center overlay 1 + corner/footer 合計 2 まで)
+  // ──────────────────────────────────────────────────────────────────────────
+  var _activeRenders = 0
+  var MAX_CONCURRENT_BANNERS = (typeof window.UGOKI_MAX_BANNERS === 'number' && window.UGOKI_MAX_BANNERS >= 1)
+    ? window.UGOKI_MAX_BANNERS : 2
 
   // ──────────────────────────────────────────────────────────────────────────
   // Per-session dedup
@@ -715,13 +741,18 @@
       try { matched = evaluate(sc.condition_ast, ctx) } catch (e) { matched = false }
       var t1 = (typeof performance !== 'undefined' ? performance.now() : Date.now())
       if (matched) {
-        if (_usesSessionDedup(sc)) _markMatched(sc.id, ctx.session_id)
-        _bumpFrequencyCap(sc, nowMs)
         var variant = pickVariant(sc, ctx.visitor_id)
         sendMatchEvent(sc, variant, 'match', Math.round(t1 - t0))
         // measure_only は disp.render=false: match イベントだけ送り DOM 描画はしない。
+        // live の場合は実描画成功時のみ cap/dedup を更新する (Codex 指摘: 上限スキップ時に
+        // cap 消費してしまい再試行不能になるバグを修正)。measure_only は描画しないが計測済扱い。
+        var didRender = false
         if (disp.render && variant) {
-          renderVariant(sc, variant)
+          didRender = renderVariant(sc, variant)
+        }
+        if (!disp.render || didRender) {
+          if (_usesSessionDedup(sc)) _markMatched(sc.id, ctx.session_id)
+          _bumpFrequencyCap(sc, nowMs)
         }
       }
     }
@@ -753,12 +784,33 @@
         var pct = Math.min(100, Math.round((window.scrollY + window.innerHeight) * 100 / (document.documentElement.scrollHeight || 1)))
         if (pct >= lastScroll + 10) { lastScroll = pct; evaluateAll(_scenarios) }
       }, { passive: true })
+      // M-2: Page Visibility API — タブが非表示のときはポーリングをスキップして無駄な評価を防ぐ。
       var intervalCount = 0
       var intervalId = setInterval(function () {
+        if (document.visibilityState === 'hidden') return
         intervalCount++
         evaluateAll(_scenarios)
         if (intervalCount > 360) clearInterval(intervalId)
       }, 10000)
+      // M-1: SPA 対応 — pushState / popstate をフックして URL 変更時に再評価する。
+      // React Router / Next.js App Router の クライアントナビゲーションに対応。
+      function _onSpaNav() {
+        _appendVisitedPath()
+        evaluateAll(_scenarios)
+      }
+      window.addEventListener('popstate', _onSpaNav)
+      try {
+        var _origPushState = history.pushState
+        history.pushState = function () {
+          _origPushState.apply(history, arguments)
+          setTimeout(_onSpaNav, 0) // マイクロタスク後に URL 確定してから評価
+        }
+        var _origReplaceState = history.replaceState
+        history.replaceState = function () {
+          _origReplaceState.apply(history, arguments)
+          setTimeout(_onSpaNav, 0) // Next.js の query 更新等に対応
+        }
+      } catch (e) { /* history API が封鎖されている環境では無視 */ }
     })
   }
   // window.UGOKI_SCENARIO_DISABLE_AUTOINIT=true で自動 init を抑止できる (unit test 用に
@@ -781,6 +833,6 @@
     _hash: _hash,
     _sessionCount: _resolveSessionCount,
     _resolvePosition: _resolvePosition,
-    version: '0.5.0+responsive-position',
+    version: '0.6.0+runtime-guards',
   }
 })()
