@@ -1,0 +1,32 @@
+{
+  "_comment": "Dogfood banner scenario for bihadashop (tenant=linkth_internal, site=CIP_EcwUTHEZdIOAUqum).",
+  "_usage": "POST https://ugokimap.com/api/scenarios  body=this file's 'body' field  Authorization: Bearer <your-JWT>",
+  "_status_note": "Created with status='draft'. Owner MUST explicitly PATCH status to 'live' to activate delivery.",
+  "_security_note": "html is a plain coupon bar. No <script>, no <iframe>, no on*=, no javascript: — passes server-side sanitizer.",
+  "body": {
+    "site_id": "CIP_EcwUTHEZdIOAUqum",
+    "name": "bihadashop dogfood — coupon bar (Stage 2 delivery test)",
+    "description": "Stage 2 dogfood: シンプルなクーポンバー。全 visitor に表示 (条件なし — is_first_visit=EQ false|true でテスト)。Owner 動作確認後に status を live に変更して実配信を開始する。",
+    "condition_ast": {
+      "op": "EQ",
+      "field": "site_id",
+      "value": "CIP_EcwUTHEZdIOAUqum"
+    },
+    "variants": [
+      {
+        "id": "A",
+        "content_type": "html",
+        "html": "<div style=\"font-family:system-ui,sans-serif;text-align:center;padding:10px 16px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;\"><strong style=\"font-size:14px;color:#c2410c;\">期間限定 10% OFF</strong><span style=\"font-size:13px;color:#7c3aed;font-weight:700;background:#ede9fe;padding:3px 10px;border-radius:4px;margin:0 8px;\">FIRST10</span><span style=\"font-size:12px;color:#6b7280;\">初回ご購入のお客様限定</span></div>",
+        "cta_url": "https://bihadashop.jp/products?promo=FIRST10",
+        "position": "top",
+        "traffic_split": 100
+      }
+    ],
+    "status": "draft",
+    "evidence_level": "planned",
+    "evidence_data": {
+      "basis": "Stage 2 dogfood — Owner 動作確認用。live 化は Owner が明示的に PATCH する。",
+      "created_by": "operator/bihadashop-dogfood-banner.json"
+    }
+  }
+}

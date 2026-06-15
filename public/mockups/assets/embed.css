@@ -1,0 +1,7 @@
+/* Injected into each mock iframe so only the parent UGOKI MAP shell shows the sidebar.
+   Keeps each mock self-runnable when opened directly. */
+
+.app { grid-template-columns: 0 1fr !important; }
+aside.sb, .sb,
+aside.sidebar, .sidebar { display: none !important; border: 0 !important; }
+.main { border-left: 0 !important; }

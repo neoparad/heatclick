@@ -1,0 +1,87 @@
+name: contracts-test
+
+# Phase 2A Banner Engine — dispatch-04 配備 (2026-05-26)
+# 続 41 §4.2 #1 Codex 必須改善: ugokimap-contracts と ugokimap-saas (UGOKI MAP) の
+# interface drift 検出。Worker / Frontend が import する TypeScript 型と
+# JSON Schema の整合を CI level で保証する。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  contracts-test:
+    name: ugokimap-contracts × ugokimap-saas integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout ugokimap-saas
+        uses: actions/checkout@v4
+        with:
+          path: ugokimap-saas
+
+      - name: Checkout ugokimap-contracts (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: linkth/ugokimap-contracts
+          path: ugokimap-contracts
+          # token: ${{ secrets.UGOKIMAP_CONTRACTS_PAT }}  # private repo の場合は PAT を設定
+        continue-on-error: true  # repo URL 確定までの暫定。確定後 continue-on-error: false に格上げ
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install ajv-cli + json-schema-to-typescript
+        run: npm install -g ajv-cli@5 ajv-formats@3 json-schema-to-typescript@15
+
+      - name: Validate fixtures against schemas
+        if: ${{ hashFiles('ugokimap-contracts/scripts/validate-fixtures.sh') != '' }}
+        run: |
+          cd ugokimap-contracts
+          bash scripts/validate-fixtures.sh
+
+      - name: Regenerate TS types and check drift
+        if: ${{ hashFiles('ugokimap-contracts/scripts/generate-types.sh') != '' }}
+        run: |
+          cd ugokimap-contracts
+          bash scripts/generate-types.sh ts
+          if ! git diff --quiet -- types/ts/; then
+            echo "::error::ugokimap-contracts/types/ts is out of sync with schemas/. Run scripts/generate-types.sh ts and commit."
+            git diff -- types/ts/ | head -200
+            exit 1
+          fi
+
+      - name: TypeScript type-check against ugokimap-saas worker
+        if: ${{ hashFiles('ugokimap-saas/workers/banner-runtime/tsconfig.json') != '' }}
+        working-directory: ugokimap-saas/workers/banner-runtime
+        run: |
+          # Phase 2A dispatch-05 配備時に workers/banner-runtime/ が出現したら有効化
+          npm ci
+          npx tsc --noEmit
+
+      - name: Smoke test — TS type import path
+        if: ${{ hashFiles('ugokimap-contracts/types/ts/index.ts') != '' }}
+        run: |
+          # ugokimap-contracts/types/ts/index.ts が正しく re-export していることを確認
+          cd ugokimap-contracts
+          npm install
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const idx = fs.readFileSync('types/ts/index.ts', 'utf8');
+            const required = ['rule_bundle', 'banner_config', 'member_attribute', 'audience_proposal', 'worker_response'];
+            for (const r of required) {
+              if (!idx.includes(\`from './\${r}'\`) && !idx.includes(\`from \\\"./\${r}\\\"\`)) {
+                console.error('::error::index.ts missing export for', r);
+                process.exit(1);
+              }
+            }
+            console.log('TS barrel index.ts: all 5 modules re-exported OK');
+          "

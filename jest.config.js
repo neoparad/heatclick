@@ -1,20 +1,24 @@
+/**
+ * Jest config for ugokimap-saas
+ *
+ * Phase 1 (mockup parity rebuild): node 環境で pure function の unit test だけ動かす。
+ * 将来 jest-environment-jsdom を追加して component test を増やす予定。
+ */
+
+const nextJest = require('next/jest')
+
+const createJestConfig = nextJest({
+  dir: './',
+})
+
 /** @type {import('jest').Config} */
-const config = {
+const customJestConfig = {
   testEnvironment: 'node',
-  transform: {
-    '^.+\\.tsx?$': ['ts-jest', { tsconfig: 'tsconfig.json' }],
-    '^.+\\.js$': ['ts-jest', { tsconfig: 'tsconfig.json' }],
-  },
-  transformIgnorePatterns: [
-    'node_modules/(?!(jose)/)',
-  ],
+  testMatch: ['**/?(*.)+(test).[jt]s?(x)'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/$1',
   },
-  testMatch: ['**/__tests__/**/*.test.ts'],
-  setupFiles: ['<rootDir>/__tests__/setup.ts'],
-  // rate-limit.tsのsetIntervalタイマー対策
-  fakeTimers: { enableGlobally: false },
+  testPathIgnorePatterns: ['<rootDir>/.next/', '<rootDir>/node_modules/', '<rootDir>/tests/e2e/'],
 }
 
-module.exports = config
+module.exports = createJestConfig(customJestConfig)

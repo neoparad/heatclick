@@ -1,7 +1,20 @@
 'use client'
 
+/**
+ * Route-segment error boundary (続 117 white-screen root-fix)
+ *
+ * これまでエラー境界が一切無く、描画中に例外が出ると本番で画面が真っ白になっていた。
+ * 本境界は:
+ *   1. ChunkLoadError (旧デプロイの古いチャンク参照) なら自動で最新を取り直す (自己修復)
+ *   2. それ以外は Sentry に通報しつつ、白画面ではなく復旧 UI を表示する
+ *
+ * UI は inline style のみで構成する (CSS チャンク自体の読み込み失敗時でも表示できるように)。
+ */
+
 import { useEffect } from 'react'
 import * as Sentry from '@sentry/nextjs'
+
+import { recoverFromStaleChunk } from '@/lib/chunk-recovery'
 
 export default function Error({
   error,
@@ -11,28 +24,98 @@ export default function Error({
   reset: () => void
 }) {
   useEffect(() => {
+    // 古いチャンク由来なら自動 reload で自己修復し、Sentry ノイズも出さない
+    if (recoverFromStaleChunk(error)) return
     Sentry.captureException(error)
   }, [error])
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="text-center max-w-md mx-auto p-6">
-        <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
-          <svg className="w-8 h-8 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
-          </svg>
-        </div>
-        <h2 className="text-xl font-bold text-gray-900 mb-2">エラーが発生しました</h2>
-        <p className="text-sm text-gray-500 mb-6">
-          予期しないエラーが発生しました。問題が続く場合はサポートにお問い合わせください。
-        </p>
+    <div
+      role="alert"
+      style={{
+        minHeight: '60vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 16,
+        padding: '48px 24px',
+        textAlign: 'center',
+        fontFamily:
+          'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif',
+        color: '#0f1117',
+      }}
+    >
+      <div
+        aria-hidden
+        style={{
+          width: 48,
+          height: 48,
+          borderRadius: 12,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: 'linear-gradient(135deg, #4cb782, #2c8f5f)',
+          color: '#fff',
+          fontSize: 24,
+          fontWeight: 700,
+        }}
+      >
+        !
+      </div>
+      <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>
+        画面の読み込みでエラーが発生しました
+      </h1>
+      <p style={{ fontSize: 14, color: '#525866', margin: 0, maxWidth: 420, lineHeight: 1.6 }}>
+        一時的な問題の可能性があります。再読み込みしてもう一度お試しください。
+        繰り返し表示される場合はサポートまでご連絡ください。
+      </p>
+      <div style={{ display: 'flex', gap: 12, marginTop: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
         <button
-          onClick={reset}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
+          type="button"
+          onClick={() => {
+            // reset() で segment 再描画、ダメなら hard reload で最新取得
+            reset()
+            if (typeof window !== 'undefined') window.location.reload()
+          }}
+          style={{
+            padding: '10px 18px',
+            borderRadius: 8,
+            border: 0,
+            background: 'linear-gradient(135deg, #4cb782, #2c8f5f)',
+            color: '#fff',
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
         >
-          もう一度試す
+          再読み込み
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            // 壊れた client 状態から確実に抜けるため full navigation でトップへ
+            if (typeof window !== 'undefined') window.location.assign('/')
+          }}
+          style={{
+            padding: '10px 18px',
+            borderRadius: 8,
+            border: '1px solid #d8dce3',
+            background: '#fff',
+            color: '#0f1117',
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
+        >
+          トップへ戻る
         </button>
       </div>
+      {error.digest ? (
+        <p style={{ fontSize: 11, color: '#9aa1ad', marginTop: 8, fontFamily: 'ui-monospace, monospace' }}>
+          参照コード: {error.digest}
+        </p>
+      ) : null}
     </div>
   )
 }

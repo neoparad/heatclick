@@ -1,98 +1,102 @@
-// 認証ユーティリティ関数
+/**
+ * Authentication client utilities (browser side)
+ *
+ * 親 SSOT §3.6 / §3.8.1
+ * Sprint 0 S0-03 完成版。
+ *
+ * ugokimap/lib/auth.ts から流用 + tenant_id / plan 対応。
+ * Server side 認証は middleware.ts + lib/jwt.ts で完結。
+ */
+
+import type { Plan } from './jwt'
 
 export interface User {
   id: string
   email: string
   name: string
-  plan?: string
-  status?: string
+  tenant_id: string
+  plan: Plan
+  site_ids: string[]
+  role?: 'owner' | 'admin' | 'member' | 'viewer'
+  status?: 'active' | 'suspended' | 'deleted'
   created_at?: string
 }
 
-// クライアント側でユーザー情報を取得
+const STORAGE_KEY_USER = 'ugokimap_saas_user'
+const STORAGE_KEY_AUTHENTICATED = 'ugokimap_saas_isAuthenticated'
+
 export function getCurrentUser(): User | null {
   if (typeof window === 'undefined') return null
-
   try {
-    const userStr = sessionStorage.getItem('user')
+    const userStr = sessionStorage.getItem(STORAGE_KEY_USER)
     if (!userStr) return null
-    return JSON.parse(userStr)
+    return JSON.parse(userStr) as User
   } catch {
     return null
   }
 }
 
-// クライアント側で認証状態を確認
 export function isAuthenticated(): boolean {
   if (typeof window === 'undefined') return false
-  return sessionStorage.getItem('isAuthenticated') === 'true'
+  return sessionStorage.getItem(STORAGE_KEY_AUTHENTICATED) === 'true'
 }
 
-// ログイン処理（JWT対応）
-export async function login(email: string, password: string): Promise<{ success: boolean; error?: string; user?: User }> {
+/**
+ * Magic link request (passwordless、Sprint 1 S1-01)
+ * server 側で email にトークン送信 → /auth/verify?token=... で確定
+ */
+export async function requestMagicLink(email: string): Promise<{ success: boolean; error?: string }> {
   try {
-    const res = await fetch('/api/auth/login', {
+    const res = await fetch('/api/auth/magic-link', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-      credentials: 'include', // Cookieを受け取る
+      body: JSON.stringify({ email }),
+      credentials: 'include',
     })
-
     const data = await res.json()
-
     if (!res.ok || !data.success) {
-      return { success: false, error: data.error || 'Login failed' }
+      return { success: false, error: data.error || 'Magic link request failed' }
     }
-
-    // sessionStorageにユーザー情報を保存（UIの表示用、認証の根拠はCookie内のJWT）
-    sessionStorage.setItem('user', JSON.stringify(data.user))
-    sessionStorage.setItem('isAuthenticated', 'true')
-
-    return { success: true, user: data.user }
+    return { success: true }
   } catch {
     return { success: false, error: 'Network error' }
   }
 }
 
-// サーバーサイドでトークンを検証してユーザー情報を取得
 export async function verifySession(): Promise<User | null> {
   try {
-    const res = await fetch('/api/auth/me', {
-      credentials: 'include',
-    })
-
+    const res = await fetch('/api/auth/me', { credentials: 'include' })
     if (!res.ok) {
-      // トークン無効 → セッションをクリア
-      sessionStorage.removeItem('user')
-      sessionStorage.removeItem('isAuthenticated')
+      clearSession()
       return null
     }
-
     const data = await res.json()
     if (data.success && data.user) {
-      sessionStorage.setItem('user', JSON.stringify(data.user))
-      sessionStorage.setItem('isAuthenticated', 'true')
-      return data.user
+      sessionStorage.setItem(STORAGE_KEY_USER, JSON.stringify(data.user))
+      sessionStorage.setItem(STORAGE_KEY_AUTHENTICATED, 'true')
+      return data.user as User
     }
-
     return null
   } catch {
     return null
   }
 }
 
-// ログアウト（JWT対応）
 export async function logout(): Promise<void> {
   if (typeof window === 'undefined') return
-
   try {
-    await fetch('/api/auth/logout', {
-      method: 'POST',
-      credentials: 'include',
-    })
-  } catch { /* silent */ }
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
+  } catch {
+    /* silent */
+  }
+  clearSession()
+  // Director 続 74 Task E: ログアウト後 404 解消 (旧 `/` 遷移 →
+  // `/auth/sign-in` に変更、サインアウト直後の再ログイン導線を維持)
+  window.location.href = '/auth/sign-in?signed-out=1'
+}
 
-  sessionStorage.removeItem('user')
-  sessionStorage.removeItem('isAuthenticated')
-  window.location.href = '/'
+function clearSession(): void {
+  if (typeof window === 'undefined') return
+  sessionStorage.removeItem(STORAGE_KEY_USER)
+  sessionStorage.removeItem(STORAGE_KEY_AUTHENTICATED)
 }
