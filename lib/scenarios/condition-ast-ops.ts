@@ -154,6 +154,51 @@ export function fieldValueType(field: string): FieldValueType {
   return fieldMeta(field).valueType
 }
 
+// ── operator UI ラベル + field 型別の候補 (わかりやすさ向上) ──────────────────
+
+/** 演算子の日本語ラベル (記号付き)。LEAF_OPERATORS と lockstep (tsc が網羅性強制)。 */
+const OPERATOR_LABELS: Record<LeafOperator, string> = {
+  EQ: '＝ 等しい',
+  NEQ: '≠ 等しくない',
+  GT: '＞ より大きい',
+  GTE: '≥ 以上',
+  LT: '＜ 未満',
+  LTE: '≤ 以下',
+  IN: 'いずれかに一致',
+  NOT_IN: 'いずれにも該当しない',
+  CONTAINS: '含む',
+  STARTS_WITH: 'で始まる',
+  ENDS_WITH: 'で終わる',
+  MATCHES_REGEX: '正規表現に一致',
+  VISITED: '訪問済み',
+  NOT_VISITED: '未訪問',
+  EXISTS: '値あり',
+  NOT_EXISTS: '値なし',
+}
+
+export function operatorLabel(op: LeafOperator): string {
+  return OPERATOR_LABELS[op] ?? op
+}
+
+// field の値型ごとに「意味の通る演算子」だけに絞る (数値項目に「含む/正規表現」等を出さない)。
+const NUMBER_OPS: readonly LeafOperator[] = ['EQ', 'NEQ', 'GT', 'GTE', 'LT', 'LTE', 'IN', 'NOT_IN', 'EXISTS', 'NOT_EXISTS']
+const BOOLEAN_OPS: readonly LeafOperator[] = ['EQ', 'NEQ', 'EXISTS', 'NOT_EXISTS']
+const STRING_OPS: readonly LeafOperator[] = [
+  'EQ', 'NEQ', 'CONTAINS', 'STARTS_WITH', 'ENDS_WITH', 'MATCHES_REGEX', 'IN', 'NOT_IN', 'VISITED', 'NOT_VISITED', 'EXISTS', 'NOT_EXISTS',
+]
+
+/**
+ * field の型に応じた候補演算子。現在の op (currentOp) が候補外でも必ず含める
+ * (既存データの op で select が空にならないように)。
+ */
+export function operatorsForField(field: string, currentOp?: LeafOperator): LeafOperator[] {
+  const t = fieldValueType(field)
+  const base = t === 'number' ? NUMBER_OPS : t === 'boolean' ? BOOLEAN_OPS : STRING_OPS
+  const list = [...base]
+  if (currentOp && !list.includes(currentOp)) list.unshift(currentOp)
+  return list
+}
+
 // ── group operators (Phase 2 = AND/OR。E で NOT を children=1 のとき有効化) ──
 
 export const GROUP_OPERATORS_UI: readonly CompositeOperator[] = ['AND', 'OR'] as const
