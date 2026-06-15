@@ -29,6 +29,19 @@ import { VARIANT_POSITIONS, type Variant } from '@/lib/scenarios/types'
 
 import { VariantImageUpload } from './variant-image-upload'
 
+/** 表示位置の日本語ラベル (ドロップダウン表示用)。VARIANT_POSITIONS と lockstep。 */
+const POSITION_LABELS: Record<string, string> = {
+  center: '中央（モーダル）',
+  footer: 'フッター（全幅バー）',
+  'bottom-right': '右下',
+  'bottom-left': '左下',
+  'top-right': '右上',
+  'top-left': '左上',
+  top: '上（中央）',
+  bottom: '下（中央）',
+  inline: 'ページ内に差し込み',
+}
+
 export interface VariantSetEditorProps {
   variants: Variant[]
   onChange: (next: Variant[]) => void
@@ -322,7 +335,7 @@ function SingleVariantEditor({
           className="h-9 text-xs"
         />
 
-        <span className="text-[11.5px] text-slate-500 font-medium">表示位置</span>
+        <span className="text-[11.5px] text-slate-500 font-medium">表示位置 (PC)</span>
         <select
           value={variant.position}
           onChange={(e) => onChange({ position: e.target.value as Variant['position'] } as Partial<Variant>)}
@@ -331,10 +344,51 @@ function SingleVariantEditor({
         >
           {VARIANT_POSITIONS.map((p) => (
             <option key={p} value={p}>
-              {p}
+              {POSITION_LABELS[p] ?? p}
             </option>
           ))}
         </select>
+
+        <span className="text-[11.5px] text-slate-500 font-medium">表示位置 (SP)</span>
+        <select
+          value={variant.position_mobile ?? ''}
+          onChange={(e) =>
+            onChange({
+              position_mobile: e.target.value ? (e.target.value as Variant['position']) : undefined,
+            } as Partial<Variant>)
+          }
+          disabled={disabled}
+          className="h-9 text-xs px-3 border border-slate-200 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400"
+        >
+          <option value="">（PC と同じ）</option>
+          {VARIANT_POSITIONS.map((p) => (
+            <option key={p} value={p}>
+              {POSITION_LABELS[p] ?? p}
+            </option>
+          ))}
+        </select>
+
+        <span className="text-[11.5px] text-slate-500 font-medium">オフセット(px)</span>
+        <div className="flex items-center gap-1.5">
+          <Input
+            type="number"
+            min={0}
+            max={512}
+            value={String(variant.position_offset ?? '')}
+            onChange={(e) => {
+              const n = Number.parseInt(e.target.value, 10)
+              onChange({
+                position_offset: Number.isFinite(n) && n > 0 ? n : undefined,
+              } as Partial<Variant>)
+            }}
+            placeholder="0"
+            disabled={disabled}
+            className="h-9 text-xs w-24"
+          />
+          <span className="text-[10.5px] text-slate-400">
+            フッター/隅を端からずらす（サイト独自フッター回避）
+          </span>
+        </div>
       </div>
     </div>
   )

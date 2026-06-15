@@ -125,3 +125,40 @@ describe('buildVariantPreviewSrcDoc — cta', () => {
     expect(doc).not.toContain('href="http://shop.example/buy"')
   })
 })
+
+describe('buildVariantPreviewSrcDoc — position & responsive (PC/SP)', () => {
+  it('renders a full-width footer bar for footer position', () => {
+    const doc = buildVariantPreviewSrcDoc(
+      htmlVariant({ position: 'footer' } as Partial<Variant>),
+      stubSanitize,
+    )
+    expect(doc).toContain('class="footerbar"')
+    expect(doc).toContain('<body class="footer-body">')
+  })
+
+  it('mobile preview uses position_mobile when set (PC=右下 → SP=フッター)', () => {
+    const v = imageVariant({ position: 'bottom-right', position_mobile: 'footer' } as Partial<Variant>)
+    expect(buildVariantPreviewSrcDoc(v, stubSanitize, 'desktop')).toContain('class="corner"')
+    expect(buildVariantPreviewSrcDoc(v, stubSanitize, 'mobile')).toContain('class="footerbar"')
+  })
+
+  it('mobile falls back to position when position_mobile is not set', () => {
+    const v = htmlVariant({ position: 'center' } as Partial<Variant>)
+    const mobile = buildVariantPreviewSrcDoc(v, stubSanitize, 'mobile')
+    expect(mobile).toContain('class="card"')
+    expect(mobile).toContain('<body class="overlay">')
+  })
+
+  it('applies offset (margin-bottom) for footer position', () => {
+    const doc = buildVariantPreviewSrcDoc(
+      htmlVariant({ position: 'footer', position_offset: 60 } as Partial<Variant>),
+      stubSanitize,
+    )
+    expect(doc).toContain('margin-bottom:60px')
+  })
+
+  it('defaults to desktop when the device arg is omitted (backward compatible)', () => {
+    const v = imageVariant({ position: 'bottom-right', position_mobile: 'footer' } as Partial<Variant>)
+    expect(buildVariantPreviewSrcDoc(v, stubSanitize)).toContain('class="corner"')
+  })
+})

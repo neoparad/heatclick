@@ -375,6 +375,7 @@ function describeField(f: AllowedField): string {
     visitor_id: '訪問者 ID (cookie 由来)',
     session_id: 'セッション ID',
     is_first_visit: '初回訪問か (boolean)。再訪との分岐に使う。',
+    session_count: '累計訪問回数 = セッション数 (number)。「N 回目の訪問」「3 回目以降」は GTE/EQ で N を指定。30 分以上空くと新セッション扱い。',
     session_duration_sec: 'セッション継続秒数 (number)。「N 分以上」は GTE で N*60 を指定。',
     page_views_in_session: 'セッション内 PV 数 (number)。離脱ユーザ・興味ユーザの分岐に使う。',
     url_path: '現在の URL pathname (例 "/products/abc")。STARTS_WITH / CONTAINS が便利。',

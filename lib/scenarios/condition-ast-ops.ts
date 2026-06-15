@@ -120,6 +120,7 @@ export const FIELD_META: Record<AllowedField, FieldMeta> = {
   visitor_id: { label: '訪問者ID', hint: 'Cookie ベースの匿名ID', valueType: 'string' },
   session_id: { label: 'セッションID', hint: '1 回の訪問', valueType: 'string' },
   is_first_visit: { label: '初回訪問か', hint: 'true / false', valueType: 'boolean' },
+  session_count: { label: '訪問回数(セッション数)', hint: '例: 3 (3回目の訪問)。30分以上空くと新セッション', valueType: 'number' },
   session_duration_sec: { label: '滞在秒数', hint: '例: 60 (秒)', valueType: 'number' },
   page_views_in_session: { label: 'PV数(セッション)', hint: '例: 3', valueType: 'number' },
   url_path: { label: 'URLパス', hint: '例: /entry/foo', valueType: 'string' },

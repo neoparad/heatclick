@@ -36,6 +36,8 @@ body.overlay{background:rgba(15,17,23,.55)}
 .ugk-img{display:block;max-width:100%;height:auto;border-radius:8px}
 .ugk-cta{display:inline-block;margin-top:12px;padding:10px 20px;background:linear-gradient(135deg,#4f6bff 0%,#a855f7 100%);color:#fff;text-decoration:none;border-radius:6px;font-size:13.5px;font-weight:600}
 .ugk-warn{padding:22px;color:#b91c1c;font-size:13px;line-height:1.5}
+body.footer-body{align-items:flex-end;justify-content:stretch;padding:0}
+.footerbar{position:relative;width:100%;background:#fff;box-shadow:0 -8px 30px rgba(15,17,23,.18);padding:12px 16px;display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap}
 `.trim()
 
 /**
@@ -47,12 +49,19 @@ body.overlay{background:rgba(15,17,23,.55)}
 export function buildVariantPreviewSrcDoc(
   variant: Variant,
   sanitizeHtml: (raw: string) => string,
+  device: 'desktop' | 'mobile' = 'desktop',
 ): string {
-  const position = variant.position || 'center'
+  // SP プレビュー時、position_mobile が設定されていればそれを使う (runtime と同じ解決)。
+  const position =
+    device === 'mobile' && variant.position_mobile ? variant.position_mobile : variant.position || 'center'
   const isCenter = position === 'center'
   const isInline = position === 'inline'
-  const containerClass = isCenter ? 'card' : isInline ? 'inline' : 'corner'
-  const bodyClass = isCenter ? 'overlay' : ''
+  const isFooter = position === 'footer'
+  const containerClass = isCenter ? 'card' : isFooter ? 'footerbar' : isInline ? 'inline' : 'corner'
+  const bodyClass = isCenter ? 'overlay' : isFooter ? 'footer-body' : ''
+  const offset =
+    typeof variant.position_offset === 'number' && variant.position_offset > 0 ? variant.position_offset : 0
+  const containerStyle = isFooter && offset ? ` style="margin-bottom:${offset}px"` : ''
 
   let inner: string
   if (variant.content_type === 'image') {
@@ -80,6 +89,6 @@ export function buildVariantPreviewSrcDoc(
     `<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width,initial-scale=1">` +
     `<style>${PREVIEW_STYLES}</style></head>` +
-    `<body class="${bodyClass}"><div class="${containerClass}">${inner}${cta}</div></body></html>`
+    `<body class="${bodyClass}"><div class="${containerClass}"${containerStyle}>${inner}${cta}</div></body></html>`
   )
 }

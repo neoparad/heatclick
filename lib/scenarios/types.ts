@@ -117,6 +117,7 @@ export const ALLOWED_FIELDS = [
   'visitor_id',
   'session_id',
   'is_first_visit',
+  'session_count',
   'session_duration_sec',
   'page_views_in_session',
   'url_path',
@@ -161,6 +162,7 @@ export const VARIANT_POSITIONS = [
   'top-right',
   'bottom-left',
   'bottom-right',
+  'footer',
   'inline',
 ] as const
 export type VariantPosition = (typeof VARIANT_POSITIONS)[number]
@@ -183,6 +185,9 @@ const ImageVariantSchema = z.object({
   image_height: z.number().int().min(1).max(4096).optional(),
   cta_url: SafeHttpsUrlSchema.optional(),
   position: z.enum(VARIANT_POSITIONS).default('center'),
+  // 表示位置のレスポンシブ出し分け + オフセット (PC/SP 別位置、サイト独自固定フッターの回避)。
+  position_mobile: z.enum(VARIANT_POSITIONS).optional(),
+  position_offset: z.number().int().min(0).max(512).optional(),
   traffic_split: z.number().int().min(0).max(100), // 0-100, sum across variants must be 100
 })
 
@@ -192,6 +197,8 @@ const HtmlVariantSchema = z.object({
   html: z.string().max(8192), // sanitized at server boundary (lib/scenarios/html-sanitizer.ts)
   cta_url: SafeHttpsUrlSchema.optional(),
   position: z.enum(VARIANT_POSITIONS).default('center'),
+  position_mobile: z.enum(VARIANT_POSITIONS).optional(),
+  position_offset: z.number().int().min(0).max(512).optional(),
   traffic_split: z.number().int().min(0).max(100),
 })
 
