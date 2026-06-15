@@ -62,6 +62,27 @@
   function _lsGet(key) {
     try { return window.localStorage ? window.localStorage.getItem(key) : null } catch (e) { return null }
   }
+  function _lsSet(key, val) {
+    try { if (window.localStorage) window.localStorage.setItem(key, val) } catch (e) { /* noop */ }
+  }
+  // ── 訪問回数 (= セッション数) カウンタ — condition field `session_count` 用 ───────────
+  // 「N回目の訪問」で出し分けるため、訪問者ごとに累計セッション数を localStorage (ugk_ namespace,
+  // tracking.js の ci_* とは別) で数える。30 分以上アクセスが空いたら新セッションとして +1 (GA 風)。
+  // 1 ページ表示につき最大 1 回だけ評価 (_sessionCountMemo)。localStorage 不可なら 1 に degrade。
+  var SESSION_GAP_MS = 30 * 60 * 1000
+  var _sessionCountMemo = null
+  function _resolveSessionCount() {
+    if (_sessionCountMemo !== null) return _sessionCountMemo
+    var stored = parseInt(_lsGet('ugk_session_count') || '0', 10) || 0
+    var lastActive = parseInt(_lsGet('ugk_last_active_ms') || '0', 10) || 0
+    var now = Date.now()
+    var isNewSession = !lastActive || (now - lastActive) > SESSION_GAP_MS
+    var count = isNewSession ? stored + 1 : (stored > 0 ? stored : 1)
+    _lsSet('ugk_session_count', String(count))
+    _lsSet('ugk_last_active_ms', String(now))
+    _sessionCountMemo = count
+    return count
+  }
   function _consentAllowsRender() {
     try {
       // Opt-out wins regardless of consent mode (localStorage OR cookie).
@@ -139,6 +160,7 @@
       is_first_visit: sessionStorage.getItem('ci_first_visit') === '1',
       session_duration_sec: Math.max(0, nowSec - Math.floor(startTs / 1000)),
       page_views_in_session: parseInt(sessionStorage.getItem('ci_spv') || '0', 10),
+      session_count: _resolveSessionCount(),
       url_path: window.location.pathname,
       url_query: window.location.search,
       referrer_host: (function () { try { return document.referrer ? new URL(document.referrer).host : '' } catch (e) { return '' } })(),
@@ -308,6 +330,9 @@
       '.ugk-img{display:block;max-width:100%;height:auto;border-radius:8px;cursor:pointer;}',
       '.ugk-cta{display:inline-block;margin-top:12px;padding:10px 20px;background:linear-gradient(135deg,#4f6bff 0%,#a855f7 100%);color:#fff;text-decoration:none;border-radius:6px;font-size:13.5px;font-weight:600;cursor:pointer;border:0;box-shadow:0 2px 8px rgba(79,107,255,.25);}',
       '.ugk-cta:hover{filter:brightness(1.06);}',
+      '.ugk-footerbar{position:fixed;left:0;right:0;bottom:0;background:#fff;box-shadow:0 -8px 30px rgba(15,17,23,.18);padding:12px 44px 12px 16px;padding-bottom:calc(12px + env(safe-area-inset-bottom,0px));pointer-events:auto;animation:ugk-rise .25s ease;z-index:2;}',
+      '.ugk-footerbar > div{max-width:680px;margin:0 auto;display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;}',
+      '@media (max-width:600px){.ugk-corner{max-width:calc(100vw - 24px)}}',
     ].join('\n')
     document.head.appendChild(s)
   }
@@ -414,10 +439,25 @@
     return frag
   }
 
+  // 表示位置のレスポンシブ解決: SP (<=768px) で position_mobile が設定されていればそれを使う。
+  function _resolvePosition(variant, isMobile) {
+    if (isMobile && variant && variant.position_mobile) return variant.position_mobile
+    return (variant && variant.position) || 'center'
+  }
+  function _isMobileViewport() {
+    try { return !!(window.matchMedia && window.matchMedia('(max-width: 768px)').matches) } catch (e) { return false }
+  }
+  function _effectivePosition(variant) {
+    return _resolvePosition(variant, _isMobileViewport())
+  }
+
   function renderVariant(scenario, variant) {
     var host = _ensureHost()
-    var isCenter = !variant.position || variant.position === 'center'
-    var isInline = variant.position === 'inline'
+    var pos = _effectivePosition(variant)
+    var isCenter = !pos || pos === 'center'
+    var isInline = pos === 'inline'
+    var isFooter = pos === 'footer'
+    var offset = (typeof variant.position_offset === 'number' && variant.position_offset > 0) ? variant.position_offset : 0
 
     // Build inner content
     var content = document.createElement('div')
@@ -481,8 +521,17 @@
       var sentinel = document.querySelector('[data-ugk-inline-slot]') || document.body.firstChild
       content.style.cssText = 'background:#fff;border:1px solid #e6e8ef;border-radius:10px;padding:14px;margin:12px 0;'
       sentinel.parentNode.insertBefore(content, sentinel)
+    } else if (isFooter) {
+      // 全幅フッターバー。offset(px) でサイト独自の固定フッターを避けられる。
+      content.className = 'ugk-footerbar'
+      if (offset) content.style.bottom = offset + 'px'
+      host.appendChild(content)
     } else {
-      content.className = 'ugk-corner pos-' + variant.position
+      content.className = 'ugk-corner pos-' + pos
+      if (offset) {
+        if (pos.indexOf('bottom') === 0) content.style.bottom = 16 + offset + 'px'
+        else if (pos.indexOf('top') === 0) content.style.top = 16 + offset + 'px'
+      }
       host.appendChild(content)
     }
 
@@ -696,6 +745,7 @@
     // scenario config at all. evaluateAll() re-checks consent before each render as well.
     if (!_consentAllowsRender()) return
     _appendVisitedPath()
+    _resolveSessionCount() // 訪問回数を 1 ページ表示につき 1 回数える (consent 後)
     fetchScenarios().then(function () {
       evaluateAll(_scenarios)
       var lastScroll = 0
@@ -729,6 +779,8 @@
     pickVariant: pickVariant,
     _dispatch: _dispatchDecision,
     _hash: _hash,
-    version: '0.3.0+measure-only',
+    _sessionCount: _resolveSessionCount,
+    _resolvePosition: _resolvePosition,
+    version: '0.5.0+responsive-position',
   }
 })()

@@ -10,7 +10,7 @@
  *   - server 往復なし (draft state をそのまま描画)
  */
 
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { X } from 'lucide-react'
 
 import { sanitizePreviewHtml } from '@/lib/scenarios/preview-html-sanitize'
@@ -24,10 +24,14 @@ interface VariantPreviewProps {
 }
 
 export function VariantPreview({ variant, onClose }: VariantPreviewProps) {
+  const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop')
   const srcDoc = useMemo(
-    () => buildVariantPreviewSrcDoc(variant, sanitizePreviewHtml),
-    [variant],
+    () => buildVariantPreviewSrcDoc(variant, sanitizePreviewHtml, device),
+    [variant, device],
   )
+  // 表示中デバイスの実効 position (SP で position_mobile があればそれ)。
+  const effectivePosition =
+    device === 'mobile' && variant.position_mobile ? variant.position_mobile : variant.position
 
   return (
     <div
@@ -45,26 +49,48 @@ export function VariantPreview({ variant, onClose }: VariantPreviewProps) {
           <div className="text-sm font-semibold flex items-center gap-2">
             variant {variant.id} プレビュー
             <span className="font-mono text-[10px] text-slate-400 uppercase tracking-wider">
-              {variant.content_type} · {variant.position}
+              {variant.content_type} · {effectivePosition}
             </span>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="閉じる"
-            className="p-1 rounded hover:bg-slate-100 text-slate-500"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <div className="inline-flex rounded-md border border-slate-200 overflow-hidden text-[11px]">
+              <button
+                type="button"
+                onClick={() => setDevice('desktop')}
+                className={`px-2.5 py-1 ${device === 'desktop' ? 'bg-indigo-50 text-indigo-700 font-semibold' : 'text-slate-500 hover:bg-slate-50'}`}
+              >
+                PC
+              </button>
+              <button
+                type="button"
+                onClick={() => setDevice('mobile')}
+                className={`px-2.5 py-1 border-l border-slate-200 ${device === 'mobile' ? 'bg-indigo-50 text-indigo-700 font-semibold' : 'text-slate-500 hover:bg-slate-50'}`}
+              >
+                SP
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="閉じる"
+              className="p-1 rounded hover:bg-slate-100 text-slate-500"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
-        <iframe
-          title={`variant ${variant.id} preview`}
-          // sandbox="" = 全制限 (script 実行不可・null origin・form/popup/top-nav 不可)。
-          sandbox=""
-          srcDoc={srcDoc}
-          className="w-full h-[440px] border-0 bg-slate-100"
-        />
+        <div className="bg-slate-100 flex justify-center">
+          <iframe
+            title={`variant ${variant.id} preview`}
+            // sandbox="" = 全制限 (script 実行不可・null origin・form/popup/top-nav 不可)。
+            sandbox=""
+            srcDoc={srcDoc}
+            className={`h-[440px] border-0 bg-white ${
+              device === 'mobile' ? 'w-[390px] my-3 rounded-xl shadow-sm' : 'w-full'
+            }`}
+          />
+        </div>
 
         <div className="px-4 py-2.5 text-[11px] text-slate-500 border-t border-slate-100 bg-slate-50 leading-relaxed">
           概算プレビューです。実配信は <code className="font-mono">scenario-runtime.js</code> が描画し、
