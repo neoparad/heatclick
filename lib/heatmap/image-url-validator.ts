@@ -1,12 +1,13 @@
 /**
  * Screenshot image URL validator
  *
- * セキュリティ: API が返した imageUrl が信頼できるソースか検証。
- * data/blob URL は同一オリジン安全。外部 URL は whitelist host のみ許可。
+ * 診断目的: API が返した imageUrl がどのソースか分類する。
+ * セキュリティ目的ではなく、あくまで診断ログ付与・origin 分類のための pure utility。
+ * (ロードの可否判断は呼び出し元で行う)
  */
 
 const TRUSTED_HOSTS = [
-  // R2 (Cloudflare) — ワイルドカードは * で表現しない、endsWith で prefix check
+  // R2 (Cloudflare) — サブドメイン含む
   'r2.ugoki.jp',
   'r2.ugoki.com',
 
@@ -14,18 +15,19 @@ const TRUSTED_HOSTS = [
   'cdn.microlink.io',
   'microlink.io',
 
-  // Cloudflare CDN
-  'cdn.example.com', // 環境に応じて実際の CDN host に置換
-
-  // localhost / development
+  // localhost / development (http も許可)
   'localhost',
   '127.0.0.1',
 ]
 
+const SAFE_DATA_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif']
+
 /**
- * imageUrl が信頼できるソースであるかチェック。
- * data: / blob: は同一オリジン安全。
- * https: は TRUSTED_HOSTS に含まれるか確認。
+ * imageUrl の信頼度を分類して返す。pure function (副作用なし)。
+ * - data: URL は許可された MIME type のみ trusted
+ * - blob: URL は呼び出し元コンテキスト依存のため untrusted として記録のみ
+ * - https: は TRUSTED_HOSTS 内か確認。サブドメインも許可。
+ * - http: は localhost / 127.0.0.1 のみ開発環境許可
  */
 export function isImageUrlTrusted(url: string): { trusted: boolean; reason?: string } {
   if (!url) {
@@ -33,30 +35,31 @@ export function isImageUrlTrusted(url: string): { trusted: boolean; reason?: str
   }
 
   try {
-    // data URL / blob URL は同一オリジン → 安全
+    // data URL — 安全な画像 MIME type のみ許可、SVG は script injection の懸念で除外
     if (url.startsWith('data:')) {
-      return { trusted: true }
+      const mime = url.slice(5, url.indexOf(';'))
+      if (SAFE_DATA_IMAGE_TYPES.includes(mime)) return { trusted: true }
+      return { trusted: false, reason: `data URL with unsupported MIME: ${mime}` }
     }
+
+    // blob URL — 一時 preview などで使われる可能性。origin は trusted とみなしログのみ
     if (url.startsWith('blob:')) {
       return { trusted: true }
     }
 
     const u = new URL(url)
 
-    // https のみ許可
+    // localhost / 127.0.0.1 は http/https 両方許可 (開発環境)
+    if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+      return { trusted: true }
+    }
+
+    // 外部 URL は https のみ
     if (u.protocol !== 'https:') {
       return { trusted: false, reason: `protocol not https: ${u.protocol}` }
     }
 
-    // ホスト名をチェック
     const trusted = TRUSTED_HOSTS.some((host) => {
-      if (host === 'localhost' && u.hostname === 'localhost') return true
-      if (host === '127.0.0.1' && u.hostname === '127.0.0.1') return true
-      // 正式なホスト名は完全一致またはサブドメイン許可（*.r2.ugoki.jp など）
-      if (host.startsWith('*.')) {
-        const domain = host.slice(2)
-        return u.hostname === domain || u.hostname.endsWith('.' + domain)
-      }
       return u.hostname === host || u.hostname.endsWith('.' + host)
     })
 

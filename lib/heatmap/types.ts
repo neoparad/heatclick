@@ -240,6 +240,13 @@ export interface HeatmapUnderlayCapture {
   /** capture を撮った provider (cloudflare = Browser Rendering、microlink = fallback) */
   provider: ScreenshotProvider
   cached: boolean
+  /** 診断情報 (開発/staging のみ、本番は ?debug=1 で opt-in) */
+  _diagnostics?: {
+    fetchDurationMs: number
+    providerAttempts: Array<{ provider: string; statusCode?: number; error?: string }>
+    lazyLoadIssue?: string
+    truncatedAt?: number
+  }
 }
 
 /**

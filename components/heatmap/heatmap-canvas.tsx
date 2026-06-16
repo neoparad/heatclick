@@ -225,6 +225,7 @@ export function HeatmapCanvas({
   type CaptureState =
     | { kind: 'idle' }
     | { kind: 'loading' }
+    | { kind: 'loading-stale'; capture: HeatmapUnderlayCapture }
     | { kind: 'ready'; capture: HeatmapUnderlayCapture }
     | { kind: 'error'; code: string; message: string }
 
@@ -237,7 +238,10 @@ export function HeatmapCanvas({
 
   // ── 続 117 v2: capture geometry (transform stage 廃止、native img + displayScale) ──
   //   cap が取れたら capture CSS px 空間で座標計算し、displayScale で実 px に縮小する。
-  const cap = captureState.kind === 'ready' ? captureState.capture : null
+  const cap =
+    captureState.kind === 'ready' || captureState.kind === 'loading-stale'
+      ? captureState.capture
+      : null
   const ready = cap != null
 
   // 続128 (初回表示速度): screenshot は cold capture (Puppeteer) で数秒かかるが、tiles は先に届く。
@@ -328,7 +332,12 @@ export function HeatmapCanvas({
   useEffect(() => {
     if (!pageUrl || !siteId) return
     const ctrl = new AbortController()
-    setCaptureState({ kind: 'loading' })
+    // keepPreviousData: 既存 capture がある場合は loading-stale に遷移し旧画像を表示し続ける
+    setCaptureState((prev) =>
+      prev.kind === 'ready' || prev.kind === 'loading-stale'
+        ? { kind: 'loading-stale', capture: prev.capture }
+        : { kind: 'loading' }
+    )
     fetchHeatmapUnderlay({
       siteId,
       pageUrl,
@@ -742,14 +751,16 @@ export function HeatmapCanvas({
                         <HeatmapLegend layers={activeLayers} />
                       </>
                     ) : null}
-                    {captureState.kind === 'loading' ? (
+                    {captureState.kind === 'loading' || captureState.kind === 'loading-stale' ? (
                       <div
                         role="status"
                         aria-live="polite"
                         data-testid="screenshot-loading-badge"
                         className="absolute right-3 top-3 z-10 rounded-full border border-[var(--ug-border)] bg-white/90 px-2.5 py-1 font-mono text-[10.5px] text-[var(--ug-text-3)] shadow-sm"
                       >
-                        {provisionalActive ? '実ページ取得中・ヒートマップ先行表示' : '実 page 取得中…'}
+                        {provisionalActive || captureState.kind === 'loading-stale'
+                          ? '実ページ取得中・ヒートマップ先行表示'
+                          : '実 page 取得中…'}
                       </div>
                     ) : null}
                     {captureState.kind === 'error' ? (
