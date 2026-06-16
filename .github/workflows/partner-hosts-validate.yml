@@ -1,0 +1,57 @@
+# partner-hosts-validate
+#
+# config/partner-hosts.json が config/partner-hosts.schema.json に整合しているか
+# CI で機械的に検証する (Reviewer B-1 WARN: build 時 rejection は有効だが
+# CI level の validate job 未配備で誤コミットが main に流れるリスクあり)。
+#
+# 起点: docs/infra/cross-cutting-concerns.md §1.3.2 + Reviewer T1 dual 2026-05-17 B-1
+# 起票: Infrastructure Engineer 2026-05-17 (深夜・続)
+#
+# CODEOWNERS と同 PR で配備推奨 (Infra §6 提案文面、本ファイルが配備されたら CODEOWNERS PR と整合)。
+
+name: partner-hosts-validate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'config/partner-hosts.json'
+      - 'config/partner-hosts.schema.json'
+      - '.github/workflows/partner-hosts-validate.yml'
+  pull_request:
+    paths:
+      - 'config/partner-hosts.json'
+      - 'config/partner-hosts.schema.json'
+      - '.github/workflows/partner-hosts-validate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      # SHA pin (E-1): actions/checkout@v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # SHA pin (E-1): actions/setup-node@v4.1.0
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
+        with:
+          node-version: '20'
+
+      - name: Install ajv-cli
+        run: npm install --no-save ajv-cli@5.0.0 ajv-formats@3.0.1
+
+      - name: Validate partner-hosts.json against schema
+        run: |
+          npx ajv validate \
+            --spec=draft2020 \
+            --strict=true \
+            -s config/partner-hosts.schema.json \
+            -d config/partner-hosts.json \
+            -c ajv-formats
+
+      - name: Check JSON-schema $schema reference
+        run: |
+          # partner-hosts.json の "$schema" 値が partner-hosts.schema.json への相対参照になっているか確認
+          jq -e '.["$schema"] | test("partner-hosts.schema.json$")' config/partner-hosts.json

@@ -1,21 +1,30 @@
 name = "ugokimap-event-ingest"
+# AC-22-2 (Operator 続 22 root cause): 旧 ugokimap project の Workers と同名にして
+# `npx wrangler deploy` 時に既存 endpoint (https://ugokimap-event-ingest.linkth.workers.dev)
+# を上書きする方針。SaaS 化整理の cosmetic な name 変更より、tracking.js 既 install サイト
+# (bihadashop / nvrseen / dogfood) との URL 整合を優先 (Operator 続 22 推奨案 A 採用)。
 main = "src/worker.ts"
 compatibility_date = "2024-12-01"
 
-# Durable Objects for buffering (optional, Queues preferred if available)
-# For now, use in-memory batching + waitUntil for flush
+# B-2 (Operator 続 14 §3.1 BLOCKER B-2 + Infra 続 15 §4.3 Step 1-9):
+# 旧 ugokimap/workers/event-ingest/ から流用 + tenant_id 統合 (Codex B-4 §6 SSOT)
+# wrangler deploy は Owner SSH 経由で実行 (Cloudflare アカウント認可必要、Step 7 Owner runbook 別起票)
 
 [vars]
 # Overridden by secrets in production
 # Dev: localhost via SSH tunnel (ssh -L 8123:127.0.0.1:8123)
-# Production: set CLICKHOUSE_URL via `wrangler secret put CLICKHOUSE_URL`
-# CLICKHOUSE_URL is set via `wrangler secret put CLICKHOUSE_URL` in production
 CLICKHOUSE_DB = "clickinsight"
 ALLOWED_ORIGINS = "*"
-# Maximum events to buffer before flushing
 BATCH_SIZE = "50"
-# Maximum ms to wait before flushing (via alarm / scheduled)
 FLUSH_INTERVAL_MS = "5000"
+
+# B-2 新規 secrets (Owner デプロイ前に投入必要)
+#
+# wrangler secret put CLICKHOUSE_URL    # http://user:pass@host:port
+# wrangler secret put MAGIC_LINK_SECRET # ugokimap-saas/lib/auth/magic-link.ts と同値 (HS256 共通)
+#
+# 注意: MAGIC_LINK_SECRET は ugokimap-saas Vercel project env の MAGIC_LINK_SECRET と
+# 必ず同値にする (JWT 署名/検証の鍵共有)。値ローテーション時は両方同時に更新。
 
 # Dev: wrangler dev --local
 [dev]

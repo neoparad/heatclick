@@ -1,0 +1,16 @@
+# Operator GTM 撮影資産 — 撮影完了まで未配置
+# README.md / .gitignore のみコミット、PNG/MP4 は別 PR で追加
+
+# 撮影中の一時ファイル（OBS recording、編集 project ファイル）
+*.mkv
+*.flv
+*.obs
+*.osp
+*.tmp.mp4
+
+# プレビュー / 提案用低解像度版
+*-preview.png
+*-preview.mp4
+
+# Loom など外部ホスティングからダウンロードした raw 動画
+*-raw.mp4

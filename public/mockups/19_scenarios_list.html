@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UGOKI MAP — ターゲティングバナー (一覧)</title>
+<script>if (window.self !== window.top) document.documentElement.classList.add('embedded');</script>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/ugokimap.css">
+<style>
+  .sc-body { overflow-y: auto; padding: 24px 32px 60px; }
+  .sc-inner { max-width: 1280px; margin: 0 auto; }
+
+  .sc-head { margin-bottom: 22px; }
+  .sc-head .eyebrow { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 500; margin-bottom: 6px; }
+  .sc-head-row { display: flex; align-items: flex-end; gap: 16px; }
+  .sc-head h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.025em; }
+  .sc-head .sub { font-size: 12.5px; color: var(--text-2); margin-top: 6px; max-width: 760px; }
+  .sc-head .actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel); color: var(--text-1); font-size: 12.5px; font-weight: 500; cursor: pointer; transition: all .12s; }
+  .btn:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+  .btn.primary { background: var(--brand-grad-h); color: #fff; border-color: transparent; box-shadow: 0 2px 8px rgba(79,107,255,.2); }
+  .btn.primary:hover { filter: brightness(1.06); }
+  .btn.sm { padding: 5px 10px; font-size: 11.5px; }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--text-2); }
+  .btn.ghost:hover { background: var(--bg-hover); color: var(--text-1); }
+  .btn svg { width: 13px; height: 13px; }
+
+  .path-banner {
+    display: grid; grid-template-columns: 48px 1fr auto; gap: 14px; align-items: center;
+    padding: 14px 18px; margin-bottom: 18px;
+    background: linear-gradient(135deg, rgba(79,107,255,.10), rgba(168,85,247,.05));
+    border: 1px solid rgba(79,107,255,.3); border-radius: var(--r-md);
+  }
+  .path-banner .ic { width: 40px; height: 40px; border-radius: 10px; background: var(--brand-grad-h); color: #fff; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(79,107,255,.3); }
+  .path-banner .ic svg { width: 18px; height: 18px; }
+  .path-banner h3 { font-size: 14px; font-weight: 700; color: var(--brand-1); margin-bottom: 3px; }
+  .path-banner .body { font-size: 12.5px; color: var(--text-1); line-height: 1.55; }
+  .path-banner .body b { font-weight: 600; }
+  .path-banner .body .mono { font-family: var(--mono); font-size: 11.5px; padding: 1px 6px; background: var(--bg-2); border-radius: 3px; }
+
+  /* KPI strip */
+  .kpi-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 22px; }
+  .kpi-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); padding: 16px 18px; }
+  .kpi-card .lbl { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 500; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+  .kpi-card .lbl .badge { font-size: 9.5px; padding: 1px 5px; border-radius: 3px; background: var(--accent-bg); color: var(--brand-1); border: 1px solid rgba(79,107,255,.2); font-weight: 600; text-transform: none; letter-spacing: 0; }
+  .kpi-card .v { font-family: var(--mono); font-size: 22px; font-weight: 700; color: var(--text-1); letter-spacing: -0.02em; }
+  .kpi-card .v .unit { font-size: 13px; color: var(--text-3); font-weight: 500; margin-left: 4px; }
+  .kpi-card .delta { font-size: 11.5px; color: var(--text-3); margin-top: 4px; }
+  .kpi-card .delta.up { color: var(--green); }
+
+  /* Filter row */
+  .filter-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .filter-row .search { flex: 1; max-width: 380px; position: relative; }
+  .filter-row .search input { width: 100%; padding: 8px 12px 8px 32px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel); font-size: 12.5px; font-family: var(--font); }
+  .filter-row .search input:focus { outline: none; border-color: var(--brand-1); }
+  .filter-row .search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: var(--text-3); }
+  .filter-row .seg { display: inline-flex; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 2px; }
+  .filter-row .seg button { padding: 5px 10px; font-size: 11.5px; font-weight: 500; border: 0; background: transparent; color: var(--text-2); border-radius: 4px; cursor: pointer; }
+  .filter-row .seg button.on { background: var(--panel); color: var(--text-1); box-shadow: 0 1px 2px rgba(15,17,23,.06); }
+
+  /* Scenario table */
+  .sc-table { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; box-shadow: var(--shadow-sm); }
+  .sc-table-head { display: grid; grid-template-columns: 24px 1fr 110px 90px 90px 100px 100px 100px 88px; padding: 11px 16px; background: var(--bg-subtle); border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 10.5px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; gap: 10px; }
+  .sc-table-head .num { text-align: right; }
+
+  .sc-row { display: grid; grid-template-columns: 24px 1fr 110px 90px 90px 100px 100px 100px 88px; padding: 13px 16px; border-bottom: 1px solid var(--border-2); gap: 10px; align-items: center; transition: background .12s; }
+  .sc-row:hover { background: var(--bg-subtle); }
+  .sc-row .toggle { cursor: pointer; color: var(--text-3); display: flex; align-items: center; justify-content: center; transition: transform .15s; }
+  .sc-row .toggle svg { width: 14px; height: 14px; }
+  .sc-row.expanded .toggle { transform: rotate(90deg); color: var(--brand-1); }
+  .sc-row .name { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .sc-row .name .t { font-size: 13.5px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sc-row .name .meta { display: flex; gap: 6px; align-items: center; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); flex-wrap: wrap; }
+  .sc-row .name .meta .site { padding: 1px 5px; background: var(--bg-2); border-radius: 3px; }
+  .sc-row .name .meta .var-count { padding: 1px 5px; background: rgba(168,85,247,.10); color: #8a4fc4; border-radius: 3px; font-weight: 600; }
+  .sc-row .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; font-family: var(--mono); font-size: 10px; font-weight: 600; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.06em; width: fit-content; }
+  .status-pill.measure { background: var(--accent-bg); color: var(--brand-1); border: 1px solid rgba(79,107,255,.25); }
+  .status-pill.preview { background: rgba(242,201,76,.12); color: #b48512; border: 1px solid rgba(242,201,76,.4); }
+  .status-pill.live { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+  .status-pill.draft { background: var(--bg-2); color: var(--text-3); border: 1px solid var(--border); }
+  .status-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .ab-pill { display: inline-flex; align-items: center; gap: 3px; font-family: var(--mono); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 3px; background: rgba(168,85,247,.10); color: #8a4fc4; border: 1px solid rgba(168,85,247,.3); }
+  .ab-pill.solo { background: var(--bg-2); color: var(--text-3); border-color: var(--border); }
+  .sc-row .num { font-family: var(--mono); font-size: 13px; font-weight: 600; text-align: right; color: var(--text-1); }
+  .sc-row .num .em { display: block; font-size: 10.5px; color: var(--text-3); font-weight: 500; margin-top: 1px; }
+  .sc-row .actions { display: flex; gap: 4px; justify-content: flex-end; }
+  .sc-row .actions button { width: 26px; height: 26px; border: 1px solid var(--border); background: var(--panel); border-radius: 5px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; color: var(--text-2); }
+  .sc-row .actions button:hover { background: var(--bg-hover); color: var(--text-1); border-color: var(--border-strong); }
+  .sc-row .actions button svg { width: 13px; height: 13px; }
+
+  /* Expanded panel */
+  .sc-expand { padding: 0 16px 18px; background: var(--bg-subtle); border-bottom: 1px solid var(--border-2); display: none; }
+  .sc-row.expanded + .sc-expand { display: block; }
+  .expand-section-h { display: flex; align-items: center; gap: 8px; margin: 14px 0 8px; }
+  .expand-section-h .label { font-family: var(--mono); font-size: 10px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; }
+  .expand-section-h .hint { font-size: 11px; color: var(--text-3); }
+  .expand-section-h::before { content: ''; width: 3px; height: 12px; background: var(--brand-1); border-radius: 2px; }
+
+  /* Variant performance table */
+  .var-table { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+  .var-table-head { display: grid; grid-template-columns: 36px 1fr 90px 80px 90px 90px 90px 90px 90px; padding: 9px 14px; background: var(--bg-2); border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 10px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; gap: 8px; }
+  .var-table-head .num { text-align: right; }
+  .var-row { display: grid; grid-template-columns: 36px 1fr 90px 80px 90px 90px 90px 90px 90px; padding: 10px 14px; border-bottom: 1px solid var(--border-2); gap: 8px; align-items: center; }
+  .var-row:last-child { border-bottom: 0; }
+  .var-row .badge { width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11px; font-weight: 700; color: #fff; }
+  .var-row .badge.a { background: var(--brand-1); }
+  .var-row .badge.b { background: #8a4fc4; }
+  .var-row .badge.c { background: var(--green); }
+  .var-row .vname { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .var-row .vname .t { font-size: 12.5px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .var-row .vname .meta { font-family: var(--mono); font-size: 10px; color: var(--text-3); }
+  .var-row .split-bar { height: 6px; background: var(--bg-2); border-radius: 3px; overflow: hidden; position: relative; }
+  .var-row .split-bar .fill { height: 100%; background: var(--brand-1); }
+  .var-row .split-bar.a .fill { background: var(--brand-1); }
+  .var-row .split-bar.b .fill { background: #8a4fc4; }
+  .var-row .split-bar.c .fill { background: var(--green); }
+  .var-row .split-label { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 3px; text-align: center; font-weight: 600; }
+  .var-row .num { font-family: var(--mono); font-size: 12.5px; font-weight: 600; text-align: right; color: var(--text-1); }
+  .var-row .num .em { display: block; font-size: 10px; color: var(--text-3); font-weight: 500; }
+  .var-row .num.win { color: var(--green); }
+  .var-row .num.win::after { content: ' ▲'; font-size: 9px; }
+
+  /* Variant cards (image / HTML preview) */
+  .var-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 8px; }
+  .var-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+  .var-card .vc-head { padding: 8px 12px; background: var(--bg-2); border-bottom: 1px solid var(--border-2); display: flex; align-items: center; gap: 8px; }
+  .var-card .vc-head .badge { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 10px; font-weight: 700; color: #fff; }
+  .var-card.a .vc-head .badge { background: var(--brand-1); }
+  .var-card.b .vc-head .badge { background: #8a4fc4; }
+  .var-card.c .vc-head .badge { background: var(--green); }
+  .var-card .vc-head .type-tag { font-family: var(--mono); font-size: 9px; padding: 1px 5px; border-radius: 2px; background: var(--bg-subtle); color: var(--text-3); border: 1px solid var(--border-2); font-weight: 600; }
+  .var-card .vc-head .name { font-size: 11.5px; font-weight: 600; flex: 1; }
+  .var-card .vc-body { padding: 12px; min-height: 86px; display: flex; align-items: center; justify-content: center; background: #f7f8fb; }
+  .var-card.image .vc-body { background: linear-gradient(135deg, #e0e7ff, #ede9fe); position: relative; }
+  .var-card.image .vc-body::after { content: '画像 (R2)'; position: absolute; bottom: 6px; right: 8px; font-family: var(--mono); font-size: 9px; color: var(--text-3); }
+  .var-card.html .vc-body code { font-family: var(--mono); font-size: 9.5px; color: var(--text-2); line-height: 1.4; white-space: pre; overflow: hidden; }
+  .var-card .vc-foot { padding: 6px 10px; font-size: 10.5px; color: var(--text-3); border-top: 1px solid var(--border-2); display: flex; justify-content: space-between; }
+  .var-card .vc-foot .cv { color: var(--green); font-weight: 600; font-family: var(--mono); }
+
+  .ev { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: 9.5px; font-weight: 600; padding: 1px 5px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .ev.planned { background: var(--bg-2); color: var(--text-3); border: 1px solid var(--border); }
+  .ev.observed { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+
+  /* Phase-C disclaimer */
+  .phase-note { margin-top: 18px; padding: 12px 14px; background: var(--bg-subtle); border: 1px dashed var(--border); border-radius: var(--r-sm); font-size: 11.5px; color: var(--text-2); line-height: 1.6; }
+  .phase-note b { color: var(--text-1); font-weight: 600; }
+  .phase-note .mono { font-family: var(--mono); font-size: 10.5px; padding: 1px 5px; background: var(--bg-2); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#fef3c7;color:#92400e;border-bottom:1px solid #f59e0b;padding:8px 16px;text-align:center;font-family:system-ui,-apple-system,sans-serif;font-size:12px;font-weight:600;">
+  🎨 MOCKUP — このページはデザイン確認用の静的モックです。production 機能ではありません (M-Director、Sprint M-1 Phase 1)
+</div>
+<div class="app" id="app" style="padding-top:36px;">
+
+  <!-- ─── Sidebar ─── -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-mark">U</div>
+      <div class="sidebar-brand-text"><span class="pname">UGOKI MAP</span><span class="psub">m agent · v0.1</span></div>
+    </div>
+    <div class="site-switcher"><div class="s-dot">美</div><div class="s-meta"><b>bihadashop.jp</b><span>site_b1h4d4 · 7d</span></div><div class="chevron">⌄</div></div>
+
+    <div class="product-switcher" aria-label="ページ切り替え">
+      <a href="10_ai_chat.html" title="行動分析" data-product="behavior">
+        <span class="ps-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l4-4 4 4 5-6"/></svg></span>
+        <span class="ps-meta"><span class="ps-title">行動分析</span><span class="ps-sub">Behavior / CVR</span></span>
+      </a>
+      <a href="19_scenarios_list.html" class="active" title="M Agent" data-product="m-agent">
+        <span class="ps-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="9" width="16" height="11" rx="2"/><path d="M9 9V6a3 3 0 0 1 6 0v3"/><circle cx="9" cy="14" r="1"/><circle cx="15" cy="14" r="1"/></svg></span>
+        <span class="ps-meta"><span class="ps-title">M Agent</span><span class="ps-sub">Marketing AI</span></span>
+      </a>
+      <a href="#" class="coming-soon" title="AISEO (Phase 3 予定)" data-product="aiseo" aria-disabled="true">
+        <span class="ps-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/><path d="M8 11h6"/><path d="M11 8v6"/></svg></span>
+        <span class="ps-meta"><span class="ps-title">AISEO</span><span class="ps-sub">SEO / AIO</span></span>
+        <span class="coming-soon-badge">Coming soon</span>
+      </a>
+      <a href="#" class="coming-soon" title="カスタムBI (追加プラン)" data-product="custom-bi" aria-disabled="true">
+        <span class="ps-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="12" width="4" height="8" rx="1"/><rect x="10" y="7" width="4" height="13" rx="1"/><rect x="17" y="4" width="4" height="16" rx="1"/></svg></span>
+        <span class="ps-meta"><span class="ps-title">カスタムBI</span><span class="ps-sub">Client reports</span></span>
+        <span class="coming-soon-badge">Coming soon</span>
+      </a>
+    </div>
+
+    <nav class="side-nav" style="padding-top: 8px;">
+      <a href="19_scenarios_list.html" class="active" data-nav="targeting-banner">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+        <span class="lbl">ターゲティングバナー</span>
+        <span class="count">1</span>
+      </a>
+    </nav>
+
+    <div class="side-flex"></div>
+
+    <div class="section-label"><span class="lbl">アカウント</span></div>
+    <nav class="side-nav">
+      <a href="15_install_settings.html" data-nav="install-settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">設定 / タグ設置</span></a>
+      <a href="16_login.html" data-nav="logout"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg><span class="lbl">ログアウト</span></a>
+    </nav>
+
+    <div class="footer-user"><div class="avatar-chip">H</div><div><div class="u-name">hiroki</div><div class="u-org">org_ugoki_internal</div></div><span class="kbd">⌘K</span></div>
+  </aside>
+
+  <!-- ─── Main ─── -->
+  <main class="sc-body">
+    <div class="sc-inner">
+
+      <div class="sc-head">
+        <div class="eyebrow">M AGENT · ターゲティングバナー</div>
+        <div class="sc-head-row">
+          <div>
+            <h1>ターゲティングバナー</h1>
+            <div class="sub">行動データで条件発火する POP / バナー / インライン枠を管理。各シナリオで <b>A/B/C 最大 3 バリアント</b>を登録し traffic split で配信比率を制御。Phase 1 = <b>1 シナリオ実配信</b>、Phase 2 で GUI 作成解放、Phase 3 は AI 自動提案 (厳密設計後)。</div>
+          </div>
+          <div class="actions">
+            <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>更新</button>
+            <a class="btn primary" href="20_scenarios_editor.html">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+              新規バナー
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <div class="path-banner">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg></div>
+        <div>
+          <h3>Phase 1 配信中 (1 シナリオ × A/B/C 3 variants)</h3>
+          <div class="body">
+            条件が真になった visitor に対し <b>A/B/C のうち traffic split で決定された 1 variant</b> を実画面に表示。
+            同 visitor は常に同じ variant が当たる (visitor_id hash で決定論的)。impression / click / dismiss / conversion を計測。
+          </div>
+        </div>
+        <div><a class="btn sm" href="20_scenarios_editor.html">編集</a></div>
+      </div>
+
+      <div class="kpi-strip">
+        <div class="kpi-card">
+          <div class="lbl">稼働シナリオ <span class="badge">7日</span></div>
+          <div class="v">1<span class="unit">/ 100</span></div>
+          <div class="delta">プラン上限 100、Phase 2 で UI 解放</div>
+        </div>
+        <div class="kpi-card">
+          <div class="lbl">match 件数 <span class="badge">7日</span></div>
+          <div class="v">847</div>
+          <div class="delta up">↑ 12.4% vs 前週</div>
+        </div>
+        <div class="kpi-card">
+          <div class="lbl">対象ビジター <span class="badge">unique</span></div>
+          <div class="v">612</div>
+          <div class="delta">cart 未到達条件</div>
+        </div>
+        <div class="kpi-card">
+          <div class="lbl">推定 CVR (計測ベース)</div>
+          <div class="v">4.3<span class="unit">%</span></div>
+          <div class="delta up">vs サイト平均 2.1%、+2.2pt</div>
+        </div>
+      </div>
+
+      <div class="filter-row">
+        <div class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          <input type="text" placeholder="バナー名 / 条件で絞り込み...">
+        </div>
+        <div class="seg">
+          <button class="on">すべて</button>
+          <button>measure_only</button>
+          <button>preview</button>
+          <button>live</button>
+          <button>archived</button>
+        </div>
+      </div>
+
+      <div class="sc-table">
+        <div class="sc-table-head">
+          <div></div>
+          <div>シナリオ / 条件サマリ</div>
+          <div>ステータス</div>
+          <div>A/B/C</div>
+          <div>Evidence</div>
+          <div class="num">match</div>
+          <div class="num">click</div>
+          <div class="num">CVR</div>
+          <div style="text-align:right;">操作</div>
+        </div>
+
+        <!-- Row 1: expanded -->
+        <div class="sc-row expanded">
+          <div class="toggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg></div>
+          <div class="name">
+            <div class="t">初回 + organic + 60s 滞在 + cart 未到達</div>
+            <div class="meta">
+              <span class="site">bihadashop.jp</span>
+              <span class="var-count">A/B/C · 3 variants</span>
+              <span>· AND 条件 5 件</span>
+            </div>
+          </div>
+          <div><span class="status-pill live"><span class="dot"></span>live</span></div>
+          <div><span class="ab-pill">A/B/C</span></div>
+          <div><span class="ev observed">observed</span></div>
+          <div class="num">847<span class="em">/ 7日</span></div>
+          <div class="num">36<span class="em">/ 7日</span></div>
+          <div class="num">4.3%<span class="em">計測値</span></div>
+          <div class="actions">
+            <button title="編集"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/></svg></button>
+            <button title="複製"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+            <button title="アーカイブ"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg></button>
+          </div>
+        </div>
+        <div class="sc-expand">
+          <div class="expand-section-h">
+            <span class="label">バリアント別パフォーマンス</span>
+            <span class="hint">過去 7 日 · split = 34 / 33 / 33%</span>
+          </div>
+          <div class="var-table">
+            <div class="var-table-head">
+              <div></div>
+              <div>バリアント</div>
+              <div>種別</div>
+              <div>split</div>
+              <div class="num">表示</div>
+              <div class="num">click</div>
+              <div class="num">CTR</div>
+              <div class="num">CV</div>
+              <div class="num">CVR</div>
+            </div>
+            <div class="var-row">
+              <div class="badge a">A</div>
+              <div class="vname"><div class="t">10% OFF 全画面 POP (画像)</div><div class="meta">banner_a_2026-05-25.png · 480×320</div></div>
+              <div><span class="ab-pill" style="background:var(--bg-2);color:var(--text-3);border-color:var(--border);font-weight:500;">画像</span></div>
+              <div>
+                <div class="split-bar a"><div class="fill" style="width:34%"></div></div>
+                <div class="split-label">34%</div>
+              </div>
+              <div class="num">288</div>
+              <div class="num">36<span class="em">/ 7日</span></div>
+              <div class="num">—</div>
+              <div class="num">14</div>
+              <div class="num win">4.9%</div>
+            </div>
+            <div class="var-row">
+              <div class="badge b">B</div>
+              <div class="vname"><div class="t">10% OFF テキスト POP (HTML)</div><div class="meta">&lt;div class="promo"&gt;...&lt;/div&gt; · インライン</div></div>
+              <div><span class="ab-pill" style="background:rgba(168,85,247,.10);color:#8a4fc4;border-color:rgba(168,85,247,.3);font-weight:500;">HTML</span></div>
+              <div>
+                <div class="split-bar b"><div class="fill" style="width:33%"></div></div>
+                <div class="split-label">33%</div>
+              </div>
+              <div class="num">279</div>
+              <div class="num">36<span class="em">/ 7日</span></div>
+              <div class="num">—</div>
+              <div class="num">11</div>
+              <div class="num">3.9%</div>
+            </div>
+            <div class="var-row">
+              <div class="badge c">C</div>
+              <div class="vname"><div class="t">FIRST10 サイドバナー (画像)</div><div class="meta">banner_c_2026-05-25.jpg · 320×240</div></div>
+              <div><span class="ab-pill" style="background:var(--bg-2);color:var(--text-3);border-color:var(--border);font-weight:500;">画像</span></div>
+              <div>
+                <div class="split-bar c"><div class="fill" style="width:33%"></div></div>
+                <div class="split-label">33%</div>
+              </div>
+              <div class="num">280</div>
+              <div class="num">36<span class="em">/ 7日</span></div>
+              <div class="num">—</div>
+              <div class="num">9</div>
+              <div class="num">3.2%</div>
+            </div>
+          </div>
+
+          <div class="expand-section-h">
+            <span class="label">バリアントプレビュー</span>
+            <span class="hint">クリックで編集</span>
+          </div>
+          <div class="var-cards">
+            <div class="var-card a image">
+              <div class="vc-head"><div class="badge">A</div><div class="name">10% OFF 全画面 POP</div><div class="type-tag">画像</div></div>
+              <div class="vc-body"></div>
+              <div class="vc-foot"><span>34% / 288 imp</span><span class="cv">CVR 4.9% ▲</span></div>
+            </div>
+            <div class="var-card b html">
+              <div class="vc-head"><div class="badge">B</div><div class="name">10% OFF テキスト</div><div class="type-tag">HTML</div></div>
+              <div class="vc-body"><code>&lt;div class="promo"&gt;
+  &lt;h3&gt;初回 10% OFF&lt;/h3&gt;
+  &lt;p&gt;コード: &lt;b&gt;FIRST10&lt;/b&gt;&lt;/p&gt;
+  &lt;a href="..."&gt;使う&lt;/a&gt;
+&lt;/div&gt;</code></div>
+              <div class="vc-foot"><span>33% / 279 imp</span><span class="cv">CVR 3.9%</span></div>
+            </div>
+            <div class="var-card c image">
+              <div class="vc-head"><div class="badge">C</div><div class="name">FIRST10 サイドバナー</div><div class="type-tag">画像</div></div>
+              <div class="vc-body"></div>
+              <div class="vc-foot"><span>33% / 280 imp</span><span class="cv">CVR 3.2%</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 2: collapsed -->
+        <div class="sc-row" style="opacity:.6;">
+          <div class="toggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg></div>
+          <div class="name">
+            <div class="t">3PV + scroll 80% リピーター → 関連記事レコメンド (準備中)</div>
+            <div class="meta">
+              <span class="site">bihadashop.jp</span>
+              <span class="var-count">A · 1 variant</span>
+              <span>· is_first_visit=false + scroll≥80%</span>
+            </div>
+          </div>
+          <div><span class="status-pill draft"><span class="dot"></span>draft</span></div>
+          <div><span class="ab-pill solo">A only</span></div>
+          <div><span class="ev planned">planned</span></div>
+          <div class="num">—</div>
+          <div class="num">—</div>
+          <div class="num">—</div>
+          <div class="actions">
+            <button title="編集"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/></svg></button>
+            <button title="複製"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+            <button title="削除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m5 0V4a2 2 0 0 1 2-2h0a2 2 0 0 1 2 2v2"/></svg></button>
+          </div>
+        </div>
+        <div class="sc-expand"></div>
+
+        <!-- Row 3: collapsed -->
+        <div class="sc-row" style="opacity:.6;">
+          <div class="toggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg></div>
+          <div class="name">
+            <div class="t">モバイル + cpc + cart 到達済 → 残カートリマインダー (準備中)</div>
+            <div class="meta">
+              <span class="site">bihadashop.jp</span>
+              <span class="var-count">A/B · 2 variants</span>
+              <span>· device=mobile + utm_medium=cpc + VISITED /cart</span>
+            </div>
+          </div>
+          <div><span class="status-pill draft"><span class="dot"></span>draft</span></div>
+          <div><span class="ab-pill">A/B</span></div>
+          <div><span class="ev planned">planned</span></div>
+          <div class="num">—</div>
+          <div class="num">—</div>
+          <div class="num">—</div>
+          <div class="actions">
+            <button title="編集"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/></svg></button>
+            <button title="複製"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+            <button title="削除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m5 0V4a2 2 0 0 1 2-2h0a2 2 0 0 1 2 2v2"/></svg></button>
+          </div>
+        </div>
+        <div class="sc-expand"></div>
+
+      </div>
+
+      <div class="phase-note">
+        <b>Phase 1 (現在 = 配信中)</b>: hard-code 1 シナリオ + variant A/B/C (画像 / HTML) を実画面に表示。impression / click / dismiss / conversion を計測。<br>
+        <b>variant 種別</b>: <span class="ab-pill" style="background:var(--bg-2);color:var(--text-3);border-color:var(--border);font-weight:500;">画像</span>(Cloudflare R2) または <span class="ab-pill" style="background:rgba(168,85,247,.10);color:#8a4fc4;border-color:rgba(168,85,247,.3);font-weight:500;">HTML</span>(インライン HTML) の 2 択。サイト毎にデザインが異なるため汎用フィールドは持ちません。<br>
+        <b>A/B/C 配信</b>: visitor_id hash で決定論的に振り分け、同 visitor は常に同 variant。<br>
+        <b>Phase 2</b>: GUI でシナリオ作成 (自然言語 + visual builder + 画像/HTML upload UI、+2〜3 日)。 <b>Phase 3</b>: AI 自動提案 + 勝者自動学習 (厳密設計後)。
+      </div>
+
+    </div>
+  </main>
+
+</div>
+
+<script>
+  // Toggle row expansion
+  document.querySelectorAll('.sc-row .toggle').forEach((tog) => {
+    tog.addEventListener('click', (e) => {
+      const row = tog.closest('.sc-row');
+      row.classList.toggle('expanded');
+    });
+  });
+</script>
+</body>
+</html>

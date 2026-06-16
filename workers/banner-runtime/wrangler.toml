@@ -1,0 +1,50 @@
+name = "ugokimap-banner-runtime"
+main = "src/worker.ts"
+compatibility_date = "2024-12-01"
+
+# Phase 2A Banner Engine — dispatch-05 配備 (2026-05-26)
+# PRD: linkscrawl/docs/banner-engine/REQUIREMENTS.md
+# 旧 event-ingest worker (ugokimap-event-ingest) とは別 worker、bundle size を gzip ≤ 20KB
+# に収めるため独立 deploy 方針 (PRD §2 F1 / dispatch-05 §1 選択肢 B 採用)。
+#
+# Endpoint: GET https://ugokimap-banner-runtime.linkth.workers.dev/v1/decision?cid=&site_id=&tenant_id=
+# Health:   GET /health
+#
+# KV namespaces は Owner が `wrangler kv:namespace create` で事前作成、
+# 下記 id を実際の値で置換してから deploy する (Owner runbook で別起票)。
+
+[[kv_namespaces]]
+binding = "RULE_BUNDLES_KV"
+id = "e956e76f604b4e6d803cbaf80d86fc75"
+preview_id = "05b491cb09264be19fc9363876a8c60e"
+
+[[kv_namespaces]]
+binding = "MEMBER_ATTRIBUTES_KV"
+id = "24894863086a4040a0ebaf9111d7a35e"
+preview_id = "b8d75689bdf8486ab4e25421be5ba87e"
+
+[vars]
+ALLOWED_ORIGINS = "*"
+CLICKHOUSE_DB = "clickinsight"
+WORKER_NAME = "ugokimap-banner-runtime"
+
+# Secrets (wrangler secret put で投入):
+#   wrangler secret put CLICKHOUSE_URL          # http://user:pass@host:port
+#   wrangler secret put MAGIC_LINK_SECRET       # event-ingest worker と同値
+#
+# 重要: MAGIC_LINK_SECRET は ugokimap-saas/lib/auth/magic-link.ts + ugokimap-event-ingest
+# と必ず同値にする (HS256 共通)。
+
+[dev]
+port = 8788
+local_protocol = "http"
+
+# observability (Cloudflare Workers Logs)
+[observability]
+enabled = true
+
+# routes は Owner が Cloudflare Dashboard で確定後設定 (workers.dev サブドメインから
+# 独自ドメイン banner.ugokimap.com へ切替時に追記)。
+# [[routes]]
+# pattern = "banner.ugokimap.com/v1/*"
+# zone_name = "ugokimap.com"

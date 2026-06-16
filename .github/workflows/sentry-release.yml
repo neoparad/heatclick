@@ -1,0 +1,55 @@
+# Sentry Release Finalize
+#
+# Vercel Production deploy 完了 → `deployment_status` event を契機に
+# Sentry へ release を `production` environment で finalize + commits 紐付け。
+#
+# 設計 doc: docs/infra/cross-cutting-concerns.md §3.2.5 (Vercel deploy hook 経由の release finalize)
+# 必要 secrets (Settings → Secrets and variables → Actions):
+#   - SENTRY_AUTH_TOKEN: scopes = project:releases + org:read のみ (NFR-SEC-01 / §1.7 最小権限)
+#   - SENTRY_ORG:        org slug (例: linkth-org)
+#   - SENTRY_PROJECT:    project slug (例: ugokimap-saas)
+#
+# Preview deploy では起動しない (`environment == 'Production'` フィルタで除外)。
+# source map upload は build 時に next.config.js `withSentryConfig` 経由で完了済 (本 workflow では行わない)。
+
+name: Sentry Release Finalize
+
+on:
+  deployment_status:
+
+jobs:
+  finalize:
+    if: >-
+      github.event.deployment_status.state == 'success' &&
+      github.event.deployment.environment == 'Production'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: read
+    steps:
+      # SHA pin (E-1 Reviewer T1 dual 2026-05-17): supply chain 攻撃対策。
+      # tag 表示用コメントに併記、SHA が固有・version が明示的に追跡可能。
+      # Phase 2 で Dependabot による SHA pin の自動更新を検討。
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0   # set_commits: auto が前回 release との diff を取るために必要
+
+      - name: Compute 12-char SHA prefix (next.config.js と整合)
+        id: sha
+        run: echo "SHA12=$(echo '${{ github.event.deployment.sha }}' | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Sentry Release
+        # SHA pin (E-1): getsentry/action-release v1.7.0
+        uses: getsentry/action-release@526942b68292201ac6bbb99b9a0747d4abee354c # v1.7.0
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG:        ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT:    ${{ secrets.SENTRY_PROJECT }}
+        with:
+          environment: production
+          # next.config.js withSentryConfig.release + sentry.*.config.ts NEXT_PUBLIC_SENTRY_RELEASE と完全一致
+          # (`ugokimap-saas@${VERCEL_GIT_COMMIT_SHA[:12]}`)
+          # `deployment.sha` を採用 (Production deploy 対象 commit を確実に参照)
+          version: ugokimap-saas@${{ steps.sha.outputs.SHA12 }}
+          finalize: true
+          set_commits: auto

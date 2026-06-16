@@ -1,18 +1,21 @@
 {
-  "framework": "nextjs",
-  "headers": [
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
     {
-      "source": "/api/(.*)",
-      "headers": [
-        { "key": "Cache-Control", "value": "no-store, no-cache, must-revalidate, max-age=0" },
-        { "key": "Pragma", "value": "no-cache" }
-      ]
+      "path": "/api/cron/daily-site-summary",
+      "schedule": "0 17 * * *"
     },
     {
-      "source": "/heatmap",
-      "headers": [
-        { "key": "Cache-Control", "value": "no-store, no-cache, must-revalidate, max-age=0" }
-      ]
+      "path": "/api/cron/deep-research",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/fusion-ingest",
+      "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/experiments/pool",
+      "schedule": "0 18 * * *"
     }
   ]
 }
