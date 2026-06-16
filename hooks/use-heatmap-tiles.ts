@@ -41,6 +41,8 @@ export interface UseHeatmapTilesResult {
   pageHeightEstimate: number
   meta: HeatmapTileMeta | null
   error: string | null
+  /** true: 表示中の tiles は旧 query のものです (新 query をフェッチ中)。keepPreviousData パターン。 */
+  stale: boolean
   loadMore: () => void
   reset: () => void
 }
@@ -60,6 +62,10 @@ export function useHeatmapTiles(query: HeatmapQuery): UseHeatmapTilesResult {
   const [pageHeightEstimate, setPageHeightEstimate] = useState(DEFAULT_PAGE_HEIGHT)
   const [meta, setMeta] = useState<HeatmapTileMeta | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // keepPreviousData: true = 表示中 tiles は旧 query のもの (新 query フェッチ中)。
+  // ref は fetchFrom 内 (render サイクル外) からも読む必要があるため ref + state の二重管理。
+  const [stale, setStale] = useState(false)
+  const staleRef = useRef(false)
 
   // tile キャッシュ (重複 fetch 防止) + 累積 point 数 (MAX_POINTS 判定用、render を跨いで保持)
   const seenStartsRef = useRef<Set<number>>(new Set())
@@ -92,10 +98,12 @@ export function useHeatmapTiles(query: HeatmapQuery): UseHeatmapTilesResult {
           if (ctrl.signal.aborted) return
 
           if (!response.success) {
-            // CURSOR_INVALID → cursor を破棄して頭から
+            // CURSOR_INVALID → cursor を破棄して頭から。stale tiles も廃棄 (再 fetch の起点をリセット)
             if (response.error.code === 'CURSOR_INVALID') {
               seenStartsRef.current = new Set()
               pointCountRef.current = 0
+              staleRef.current = false
+              setStale(false)
               setTiles([])
               setCursor(null)
               setHasMore(true)
@@ -115,7 +123,12 @@ export function useHeatmapTiles(query: HeatmapQuery): UseHeatmapTilesResult {
             pointCountRef.current += t.points.length
           }
 
-          if (fresh.length > 0) {
+          if (staleRef.current) {
+            // keepPreviousData: 新 query の最初のバッチ到着 → 旧 tiles を丸ごと入れ替え
+            setTiles([...fresh].sort((a, b) => a.y_start - b.y_start))
+            staleRef.current = false
+            setStale(false)
+          } else if (fresh.length > 0) {
             setTiles((prev) => [...prev, ...fresh].sort((a, b) => a.y_start - b.y_start))
           }
           setMeta(response.meta)
@@ -149,11 +162,14 @@ export function useHeatmapTiles(query: HeatmapQuery): UseHeatmapTilesResult {
     [querySig],
   )
 
-  // query 変更時: reset + eager 初回 fetch
+  // query 変更時: keepPreviousData で旧 tiles を即時消去しない (画面切替の白紙防止)。
+  // staleRef を true にして fetchFrom 内で「最初のバッチ = 丸ごと入れ替え」に切替える。
   useEffect(() => {
     seenStartsRef.current = new Set()
     pointCountRef.current = 0
-    setTiles([])
+    staleRef.current = true
+    setStale(true)
+    // setTiles([]) は呼ばない — 旧 tiles を keepPreviousData として表示し続ける
     setCursor(null)
     setHasMore(true)
     setError(null)
@@ -174,6 +190,8 @@ export function useHeatmapTiles(query: HeatmapQuery): UseHeatmapTilesResult {
   const reset = useCallback(() => {
     seenStartsRef.current = new Set()
     pointCountRef.current = 0
+    staleRef.current = false
+    setStale(false)
     setTiles([])
     setCursor(null)
     setHasMore(true)
@@ -181,5 +199,5 @@ export function useHeatmapTiles(query: HeatmapQuery): UseHeatmapTilesResult {
     void fetchFrom(null)
   }, [fetchFrom])
 
-  return { tiles, loading, hasMore, pageHeightEstimate, meta, error, loadMore, reset }
+  return { tiles, loading, hasMore, pageHeightEstimate, meta, error, stale, loadMore, reset }
 }

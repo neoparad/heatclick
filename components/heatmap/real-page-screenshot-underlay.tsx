@@ -14,7 +14,13 @@
  *   - エラー image は親 (HeatmapCanvas) 側で onError → fallback MockProductPageUnderlay 切替
  */
 
+'use client'
+
+import { useEffect } from 'react'
+import * as Sentry from '@sentry/nextjs'
+
 import type { HeatmapUnderlayCapture } from '@/lib/heatmap/types'
+import { isImageUrlTrusted } from '@/lib/heatmap/image-url-validator'
 
 interface RealPageScreenshotUnderlayProps {
   capture: HeatmapUnderlayCapture
@@ -25,6 +31,51 @@ export function RealPageScreenshotUnderlay({
   capture,
   onImageError,
 }: RealPageScreenshotUnderlayProps) {
+  // 診断: imageUrl の origin 分類 (pure function、副作用なし)
+  const urlValidation = isImageUrlTrusted(capture.imageUrl)
+
+  // render 副作用のある警告ログは useEffect に分離 (Strict Mode 二重発火を防ぐ)
+  useEffect(() => {
+    if (!urlValidation.trusted) {
+      console.warn('[heatmap] screenshot image URL: untrusted origin', {
+        reason: urlValidation.reason,
+        provider: capture.provider,
+        // URL 全体は機微情報の可能性があるため hostname のみ記録
+        hostname: (() => { try { return new URL(capture.imageUrl).hostname } catch { return 'unknown' } })(),
+      })
+    }
+  }, [capture.imageUrl, capture.provider, urlValidation.trusted, urlValidation.reason])
+
+  const handleImageError = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget
+    const errorDetails = {
+      provider: capture.provider,
+      cached: capture.cached,
+      // capture 側の期待サイズ vs 実際の <img> サイズ（失敗時は 0x0 になる）
+      expectedSize: `${capture.naturalWidth}x${capture.naturalHeight}`,
+      actualSize: `${img.naturalWidth}x${img.naturalHeight}`,
+      // URL 全体ではなく scheme のみ（機微情報除去）
+      urlScheme: capture.imageUrl.startsWith('data:')
+        ? 'data-url'
+        : capture.imageUrl.startsWith('blob:')
+          ? 'blob'
+          : (() => { try { return new URL(capture.imageUrl).protocol.replace(':', '') } catch { return 'unknown' } })(),
+      urlTrusted: urlValidation.trusted,
+      urlReason: urlValidation.reason,
+      _diagnostics: capture._diagnostics,
+    }
+
+    console.error('[heatmap] screenshot image failed to load', errorDetails)
+
+    Sentry.captureMessage('heatmap: screenshot image load failed', {
+      level: 'warning',
+      contexts: { heatmap: errorDetails },
+      tags: { provider: capture.provider, cached: String(capture.cached) },
+    })
+
+    onImageError?.()
+  }
+
   return (
     <div
       className="real-page-underlay block w-full"
@@ -54,7 +105,7 @@ export function RealPageScreenshotUnderlay({
         decoding="async"
         fetchPriority="high"
         referrerPolicy="no-referrer"
-        onError={onImageError}
+        onError={handleImageError}
         data-testid="real-page-screenshot-img"
       />
     </div>
