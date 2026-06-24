@@ -17,14 +17,33 @@ import { unstable_cache } from 'next/cache'
 
 import { getClickHouseClient } from '@/lib/clickhouse'
 
+/** canvas のデバイスタブ。ClickHouse の device_type を UI 表現に写像した値。 */
+export type PageTopDevice = 'pc' | 'sp' | 'tab'
+
 export interface PageOption {
   url: string
   label: string
+  /**
+   * このページで最も計測イベントが多いデバイス (続135)。
+   * 実トラフィックがモバイル主体のサイトで PC 既定だと device_type='desktop' 絞りに
+   * モバイルのクリックが当たらず「データなし」誤表示になるため、初期デバイスを
+   * ページごとの最多デバイスに合わせる。不明時は 'sp' (モバイル優勢の安全側)。
+   */
+  topDevice: PageTopDevice
 }
 
 interface PageRow {
   url: string
   events: number
+  top_device_type: string | null
+}
+
+/** ClickHouse `device_type` (desktop/mobile/tablet/null) を canvas デバイスに写像。 */
+function toTopDevice(deviceType: string | null): PageTopDevice {
+  if (deviceType === 'desktop') return 'pc'
+  if (deviceType === 'tablet') return 'tab'
+  // mobile / null / unknown は 'sp' (モバイル優勢の安全側)
+  return 'sp'
 }
 
 /**
@@ -60,14 +79,24 @@ export async function fetchPagesUncached(
   //   default を完全にローカル専用にできるようにする (アプリは default を遠隔使用しない)。
   const ch = getClickHouseClient('analytics_reader')
   // tenant_id parameter binding は必須 (§3.8.1)。文字列連結は禁止 (Codex Round 8 Fix 5)。
+  // 続135: ページごとの最多デバイスも返す。内側で (url, device_type) 件数を出し、
+  //   外側で argMax(device_type, dc) = そのページで最もイベントの多い device_type を選ぶ。
+  //   これで初期デバイスをページ実態に合わせ「モバイル主体なのに PC 既定で空表示」を防ぐ。
   const result = await ch.query({
     query: `
-      SELECT url, count() AS events
-      FROM clickinsight.events
-      WHERE tenant_id = {tenant_id:String}
-        AND site_id = {site_id:String}
-        AND timestamp >= now() - INTERVAL 7 DAY
-        AND url != ''
+      SELECT
+        url,
+        sum(dc) AS events,
+        argMax(device_type, dc) AS top_device_type
+      FROM (
+        SELECT url, device_type, count() AS dc
+        FROM clickinsight.events
+        WHERE tenant_id = {tenant_id:String}
+          AND site_id = {site_id:String}
+          AND timestamp >= now() - INTERVAL 7 DAY
+          AND url != ''
+        GROUP BY url, device_type
+      )
       GROUP BY url
       ORDER BY events DESC
       LIMIT {limit:UInt32}
@@ -80,7 +109,11 @@ export async function fetchPagesUncached(
     format: 'JSONEachRow',
   })
   const rows = await result.json<PageRow>()
-  return rows.map((r) => ({ url: r.url, label: deriveLabelFromUrl(r.url) }))
+  return rows.map((r) => ({
+    url: r.url,
+    label: deriveLabelFromUrl(r.url),
+    topDevice: toTopDevice(r.top_device_type),
+  }))
 }
 
 /**

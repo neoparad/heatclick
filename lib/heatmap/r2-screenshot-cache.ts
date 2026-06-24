@@ -61,7 +61,9 @@ const KEY_PREFIX = 'heatmap-screenshots'
 // 続133: Worker に高さ上限 (面積 clip) + lazy 強化 (data-src 昇格 / naturalWidth 待ち) を投入。
 //   旧 v8 (巨大ページで Worker timeout → 劣化 fallback → lazy 画像が空白) を全 miss にし、
 //   新 Worker で撮り直す。**worker の wrangler deploy 後に**この bump 版を deploy すること。
-const CAPTURE_VERSION = 'v9'
+// 続135: Microlink fallback の waitUntil='networkidle2' を撤去 (ビジーページで上部1枚しか
+//   撮れていなかった = 症状①)。旧 v9 で凍結した短尺 Microlink 画像を全 miss にして撮り直す。
+const CAPTURE_VERSION = 'v10'
 
 /** TTL (capturedAt 比較) */
 const FRESH_TTL_MS = 24 * 60 * 60 * 1000 // 24h: これ以内なら即返す
