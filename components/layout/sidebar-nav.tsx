@@ -78,11 +78,11 @@ const PRIMARY_NAV: ReadonlyArray<NavItem> = [
     disabled: true,
   },
   {
+    // CV経路分析 Phase 1 配備で enabled 化 (docs/cv-journey-implementation-plan.md)
     navKey: 'cv-journey',
     href: '/cv-journey',
     label: 'CV経路分析',
     icon: <GitBranch className="h-4 w-4" aria-hidden />,
-    disabled: true,
   },
   {
     // 続 75 Task B: paths/page.tsx 配備で enabled 化、href は /paths (user-specified)
