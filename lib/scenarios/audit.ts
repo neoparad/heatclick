@@ -22,6 +22,11 @@ export type ScenarioAuditAction =
   | 'scenario.archived'
   // §3.8.1: cross-tenant アクセス試行 (site_id が JWT の範囲外) の拒否記録。
   | 'scenario.access_denied'
+  // 経路分析 比較セット (lib/paths/repository.ts) — audit_events を共用 (同 tenant 隔離契約)。
+  | 'pathset.created'
+  | 'pathset.updated'
+  | 'pathset.deleted'
+  | 'pathset.access_denied'
 
 export interface ScenarioAuditEvent {
   action: ScenarioAuditAction

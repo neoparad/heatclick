@@ -1,113 +1,42 @@
 /**
- * Path Analysis dummy fixture — 経路分析エージェント (続 75 Task B)
+ * lib/paths/poc-pathset.ts — POC seed (経路分析 比較セット)
  *
- * 親 SSOT mockup `linkscrawl/docs/fusion/mockups/11_path_analysis.html`
- * 親 SSOT §3.6.5 / Part V P-11 / D-07
+ * 旧 `lib/fixtures/path-analysis.ts` の dummy (`商品購入 · 3 経路比較`) を、永続化エンティティ
+ * PathSet 1 件として表現したもの。Phase 1 dogfood では KV が空でも一覧/詳細がショーケースとして
+ * 成立するよう、scenarios の POC_SCENARIOS と同じく list / detail に merge する。
  *
- * Sprint 3 W2-A 範囲:
- *   - 全 path/branch/node は Marketer dummy 草案ベース (isDummy=true)
- *   - 実 ML 結線は Sprint 3 W2 後 (ML 続 68 orchestrator が path_analysis tool 配備時)
- *   - 数値は inferred 扱い、断定表現禁止 (D-07)、UI 側で DummyBanner 常時表示
+ * D-07: isDummy=true / evidence_level='inferred' (dummy 数値入り)。UI は INFERRED バッジを出し、
+ * 断定数値を避ける。Sprint 4 で events MV 由来の observed_approx に置換予定。
  *
- * Sprint 4 想定 (続 76+):
- *   - `/api/paths?site_id=<id>&period_days=<n>` で実 ClickHouse path_sessions
- *     mat-view から取得 (Infra 配備待ち)
- *   - Branch 自動検出は ML が経路 frequency mining で生成
+ * tenant/site: scenarios POC と同じ linkth_internal + CIP_EcwUTHEZdIOAUqum 固定。
  */
 
-export type BranchSeverity = 'ok' | 'warn' | 'crit'
-export type NodeBand = 'warn' | 'win' | undefined
-export type EdgeBand = 'warn' | 'crit' | undefined
+import type { PathSet } from './types'
 
-export interface PathNodeStat {
-  /** 表示 label (例: '通過'、'離脱'、'CV率') */
-  k: string
-  /** 値 (例: '7,128'、'88%'、'6.1%') */
-  v: string
-  /** 値の severity (pos = 緑強調 / neg = 赤強調 / 未指定 = neutral) */
-  tone?: 'pos' | 'neg'
-}
+const POC_TENANT = 'linkth_internal'
+const POC_SITE = 'CIP_EcwUTHEZdIOAUqum'
+const POC_TS = '2026-05-24T00:00:00.000Z'
 
-export interface PathNodePerf {
-  /** PageSpeed score 0-100 */
-  score: number
-  /** LCP 文字列 ('1.8s' 等) */
-  lcp: string
-  /** node の perf severity (ok / warn / bad) — bar 色 + bg tint に反映 */
-  band: 'ok' | 'warn' | 'bad'
-}
+export const POC_PATHSET_ID = '00000000-0000-4000-8000-0000000000a1'
 
-export interface PathNode {
-  id: string
-  /** ステップ番号 (例: 'A1', 'B2', 'CV') */
-  step: string
-  title: string
-  url: string
-  /** node の severity (warn / win が強調枠線になる、未指定なら neutral) */
-  band?: NodeBand
-  stats: ReadonlyArray<PathNodeStat>
-  perf?: PathNodePerf
-  /** Compare 用 selected (mockup の A/B 帯) — Phase 1 では ring 強調のみ */
-  selected?: 'A' | 'B' | 'C'
-}
-
-export interface PathEdge {
-  /** edge label (例: '通過 18%'、'迷い時間 +75%') */
-  label: string
-  band?: EdgeBand
-}
-
-export interface PathBranch {
-  id: string
-  name: string
-  description: string
-  severity: BranchSeverity
-  /** nodes は順序通り、edges は nodes.length - 1 個 (各 node 間に 1 つ) */
-  nodes: ReadonlyArray<PathNode>
-  edges: ReadonlyArray<PathEdge>
-  summary: {
-    cvRate: string
-    delta: string
-    deltaTone: 'pos' | 'neg'
-  }
-}
-
-export interface PathAiInsight {
-  id: string
-  label: string
-  body: string
-  severity: 'info' | 'warn' | 'crit'
-}
-
-export interface PathAnalysisData {
-  isDummy: boolean
-  /** breadcrumb / h1 表示用の workflow 名 */
-  workflowName: string
-  trigger: {
-    title: string
-    url: string
-    sessions: string
-    periodLabel: string
-  }
-  branches: ReadonlyArray<PathBranch>
-  insights: ReadonlyArray<PathAiInsight>
-  meta: {
-    siteName: string
-    siteId: string
-    periodDays: number
-    averageCvRate: string
-  }
-}
-
-export function getDummyPathAnalysis(): PathAnalysisData {
-  return {
+export const POC_PATHSETS: ReadonlyArray<PathSet> = [
+  {
+    id: POC_PATHSET_ID,
+    tenant_id: POC_TENANT,
+    site_id: POC_SITE,
+    name: '商品購入 · 3 経路比較',
+    description:
+      'TOP 訪問をトリガーに、商品購入までの 3 経路 (直行 / ランキング / FAQ) を比較監視。',
+    status: 'monitoring',
     isDummy: true,
-    workflowName: '商品購入 · 3 経路比較',
+    evidence_level: 'inferred',
+    evidence_data: {},
+    averageCvRate: '4.3%',
     trigger: {
       title: 'トリガー · TOP 訪問',
       url: '/',
+      periodDays: 30,
       sessions: '12,450',
-      periodLabel: '30 日',
     },
     branches: [
       {
@@ -274,7 +203,11 @@ export function getDummyPathAnalysis(): PathAnalysisData {
           { label: '通過 6%', band: 'crit' },
           { label: '通過 30%' },
         ],
-        summary: { cvRate: '2.1%', delta: '▼ -3.5pt 前週比 ⚠', deltaTone: 'neg' },
+        summary: {
+          cvRate: '2.1%',
+          delta: '▼ -3.5pt 前週比 ⚠',
+          deltaTone: 'neg',
+        },
       },
     ],
     insights: [
@@ -297,11 +230,30 @@ export function getDummyPathAnalysis(): PathAnalysisData {
           'FAQ 内の「定期解約の自由度」セクション追加を推奨。',
       },
     ],
-    meta: {
-      siteName: 'bihadashop.jp',
-      siteId: 'CIP_EcwUTHEZdIOAUqum',
-      periodDays: 30,
-      averageCvRate: '4.3%',
-    },
+    created_at: POC_TS,
+    updated_at: POC_TS,
+    created_by: 'poc',
+    archived_at: null,
+  },
+]
+
+/** list ページ用の軽量サマリ (一覧の各行に表示する派生値)。 */
+export interface PathSetListSummary {
+  branchCount: number
+  stepCount: number
+  worstSeverity: 'ok' | 'warn' | 'crit'
+  analyzed: boolean
+}
+
+export function summarizePathSet(pset: PathSet): PathSetListSummary {
+  const branchCount = pset.branches.length
+  const stepCount = pset.branches.reduce((acc, b) => acc + b.nodes.length, 0)
+  const order = { ok: 0, warn: 1, crit: 2 } as const
+  let worst: 'ok' | 'warn' | 'crit' = 'ok'
+  for (const b of pset.branches) {
+    if (order[b.severity] > order[worst]) worst = b.severity
   }
+  // 1 ノードでも stats があれば「分析済み」とみなす
+  const analyzed = pset.branches.some((b) => b.nodes.some((n) => n.stats.length > 0))
+  return { branchCount, stepCount, worstSeverity: worst, analyzed }
 }
