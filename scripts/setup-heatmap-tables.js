@@ -2,10 +2,17 @@
 const { createClient } = require('@clickhouse/client');
 
 async function setupTables() {
+  // secrets はハードコードしない (git 露出禁止)。env 必須・未設定なら fail-fast。
+  const url = process.env.CLICKHOUSE_URL;
+  const password = process.env.CLICKHOUSE_PASSWORD;
+  if (!url || !password) {
+    console.error('CLICKHOUSE_URL と CLICKHOUSE_PASSWORD を環境変数で設定してください (ハードコード fallback は廃止)。');
+    process.exit(1);
+  }
   const client = createClient({
-    url: process.env.CLICKHOUSE_URL || 'http://default:RVnmpNYIoOYiUxVUP4Q9R3S0@159.69.95.59:8123/clickinsight',
+    url,
     username: process.env.CLICKHOUSE_USER || 'default',
-    password: process.env.CLICKHOUSE_PASSWORD || 'RVnmpNYIoOYiUxVUP4Q9R3S0',
+    password,
     database: process.env.CLICKHOUSE_DATABASE || 'clickinsight',
   });
 
