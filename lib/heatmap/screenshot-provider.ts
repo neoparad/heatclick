@@ -366,10 +366,15 @@ async function fetchFromMicrolink(input: {
     // 続 116 perf: jpeg + quality=75 で size 5-10x 削減 (WP underlay 用途で視認性十分)
     'screenshot.type': SCREENSHOT_FORMAT,
     'screenshot.quality': String(SCREENSHOT_QUALITY),
-    // 続 119 (B) スクショ切れ修正: 'load' は遅延読み込み(lazy)前に発火し、長い記事ページの
-    //   下部が撮れず上部だけの短いスクショになる。'networkidle2' でネットワークが概ね落ち着く
-    //   まで待ち、fullPage の自動スクロールで下部の lazy コンテンツも読み込ませてから撮影する。
-    waitUntil: 'networkidle2',
+    // 続135 (①スクショ上部のみ 実測根拠): 続119 で入れた waitUntil='networkidle2' は逆効果だった。
+    //   広告/計測ビーコンが鳴り続ける実ページでは networkidle2 が時間内に成立せず、Microlink は
+    //   fullPage の自動スクロールに入る前に初期 viewport 1 枚 (上部のみ ~1 画面) で打ち切る。
+    //   実測: wakegai/akiya5 (実 scrollHeight 15,103px / 全高30,206@DPR2) で
+    //     fullPage=true + networkidle2 → 2560x1600 (上部5.3%)
+    //     fullPage=true (waitUntil 無し)  → 2560x30206 (全高)
+    //   よって waitUntil は付けず、Microlink 既定の fullPage 自動スクロールに全高撮影を任せる。
+    //   (lazy 画像の確実な読込が要る本線は Screenshot Worker = autoScroll+data-src昇格 が担当。
+    //    Microlink はあくまで Worker 不在時の fallback。)
   })
   const endpoint = `${MICROLINK_ENDPOINT}/?${params.toString()}`
   const headers: Record<string, string> = { accept: 'application/json' }

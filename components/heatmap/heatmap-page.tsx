@@ -19,7 +19,7 @@
 
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown } from 'lucide-react'
 
 import { SegmentChip } from '@/components/ui/segment-chip'
@@ -37,13 +37,15 @@ import {
 
 // 直接 import (旧: dynamic({ssr:false}))。本コンポーネントは route 側で既に ssr:false の
 // 配下にあり、二重 dynamic は client チャンクの待ちを増やすだけで利点が無いため統合。
+import type { PageOption } from '@/lib/pages/fetch-pages'
+
 import { HeatmapCanvas } from './heatmap-canvas'
 import { HotspotDetail } from './hotspot-detail'
 
 interface HeatmapPageProps {
   siteId: string
   initialPageUrl: string
-  pageOptions: Array<{ url: string; label: string }>
+  pageOptions: PageOption[]
 }
 
 type PeriodDays = 7 | 14 | 30
@@ -76,8 +78,25 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
   // 変更時に heatmapQuery が変わり useHeatmapTiles が再 fetch する。
   const [layer, setLayer] = useState<HeatmapLayer>('click')
   const [pageUrl, setPageUrl] = useState(initialPageUrl)
+  // 続135: 初期デバイスは「そのページで最もイベントが多いデバイス」。
+  //   旧 'pc' 固定は、モバイル主体サイトで device_type='desktop' 絞りにモバイルの
+  //   クリックが当たらず「クリックデータなし」誤表示になっていた (Owner 報告 ④⑧)。
+  const topDeviceForUrl = useCallback(
+    (u: string): CanvasDevice => pageOptions.find((p) => p.url === u)?.topDevice ?? 'sp',
+    [pageOptions],
+  )
   // 続124: device は canvas の PC/SP/TAB タブと同一 state (screenshot + データ両方を切替)
-  const [device, setDevice] = useState<CanvasDevice>('pc')
+  const [device, setDevice] = useState<CanvasDevice>(() => topDeviceForUrl(initialPageUrl))
+  // ページ切替時はそのページの最多デバイスへ自動追従 (手動タブ変更はページ切替まで保持)。
+  //   初回 mount では init 値と同一なので skip (不要な再 fetch を避ける)。
+  const didMountRef = useRef(false)
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true
+      return
+    }
+    setDevice(topDeviceForUrl(pageUrl))
+  }, [pageUrl, topDeviceForUrl])
   const [periodDays, setPeriodDays] = useState<PeriodDays>(7)
   // 続125 (Owner ①): 行動セグメント — 観測ベースのクラスタ分け (熟読層/浅読層/広告流入)
   const [segment, setSegment] = useState<HeatmapSegment>('all')
