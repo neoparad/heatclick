@@ -71,7 +71,9 @@ function spyLogger() {
 }
 
 const FAKE_URL = 'http://localhost:8123/?database=clickinsight&query=INSERT%20INTO%20audit_events%20FORMAT%20JSONEachRow';
-const FAKE_AUTH = 'Basic ZGVmYXVsdDpSVm5tcE5ZSW9PWWlVeFZVUDRRSnJTM1Mw';
+// 実 credentials は埋め込まない (git 露出禁止)。テスト専用のダミー secret を base64 化。
+const FAKE_SECRET = 'TEST_FAKE_SECRET_DO_NOT_USE';
+const FAKE_AUTH = 'Basic ' + Buffer.from(`default:${FAKE_SECRET}`).toString('base64');
 
 // ── tests ──
 
@@ -118,7 +120,7 @@ test('resp.ok=false (HTTP 500) → structured error log + status / statusText / 
     assert.match(msg, /statusText=Internal Server Error/);
     assert.match(msg, /rows=3/);
     assert.match(msg, /body_head="Code: 60/);
-    assert.doesNotMatch(msg, /RVnmpNYIoOYiUxVUP4Q9R3S0/, 'log に credentials 含まない');
+    assert.doesNotMatch(msg, new RegExp(FAKE_SECRET), 'log に credentials 含まない');
     assert.doesNotMatch(msg, /Basic Z/, 'log に Authorization header 含まない');
   } finally {
     globalThis.fetch = origFetch;
