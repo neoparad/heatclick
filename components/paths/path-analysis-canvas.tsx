@@ -27,7 +27,9 @@
 
 import { useState } from 'react'
 import type { ReactNode } from 'react'
+import Link from 'next/link'
 import {
+  ArrowLeft,
   ArrowRight,
   Bot,
   Check,
@@ -44,15 +46,18 @@ import {
 } from 'lucide-react'
 
 import type {
+  EvidenceLevel,
   PathAnalysisData,
   PathBranch,
   PathEdge,
   PathNode,
   PathNodePerf,
-} from '@/lib/fixtures/path-analysis'
+} from '@/lib/paths/types'
 
 interface PathAnalysisCanvasProps {
   data: PathAnalysisData
+  /** 編集画面への href。POC / dummy セットなど編集不可のときは undefined (編集ボタン disabled)。 */
+  editHref?: string
 }
 
 const TABS = [
@@ -65,12 +70,12 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]['id']
 
-export function PathAnalysisCanvas({ data }: PathAnalysisCanvasProps) {
+export function PathAnalysisCanvas({ data, editHref }: PathAnalysisCanvasProps) {
   const [tab, setTab] = useState<TabId>('flow')
 
   return (
     <div className="flex h-full flex-col">
-      <HeadStrip data={data} tab={tab} onTabChange={setTab} />
+      <HeadStrip data={data} tab={tab} onTabChange={setTab} editHref={editHref} />
 
       <div className="grid flex-1 min-h-0 grid-cols-[1fr_340px] overflow-hidden">
         <CanvasArea data={data} tab={tab} />
@@ -86,10 +91,12 @@ function HeadStrip({
   data,
   tab,
   onTabChange,
+  editHref,
 }: {
   data: PathAnalysisData
   tab: TabId
   onTabChange: (id: TabId) => void
+  editHref?: string
 }) {
   return (
     <header className="border-b border-[color:var(--ug-border)] bg-[color:var(--ug-panel)] px-6 pb-3 pt-3">
@@ -100,6 +107,14 @@ function HeadStrip({
         (mockup `11_path_analysis.html` の "workflows / 商品購入 · 3 経路" crumb 相当)。
       */}
       <div className="flex flex-wrap items-center gap-3">
+        <Link
+          href="/paths"
+          className="inline-flex items-center gap-1.5 rounded border border-[color:var(--ug-border)] bg-[color:var(--ug-panel)] px-2.5 py-1.5 text-xs font-medium text-[color:var(--ug-text-2)] hover:border-[color:var(--ug-border-strong,#d4d8e1)] hover:text-[color:var(--ug-text)]"
+          aria-label="経路登録一覧へ戻る"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
+          一覧
+        </Link>
         <WorkflowPulldown
           workflowName={data.workflowName}
           periodDays={data.meta.periodDays}
@@ -107,13 +122,25 @@ function HeadStrip({
           averageCvRate={data.meta.averageCvRate}
         />
         <div className="ml-auto flex gap-2">
-          <button
-            type="button"
-            className="inline-flex items-center gap-1.5 rounded border border-[color:var(--ug-border)] bg-[color:var(--ug-panel)] px-3 py-1.5 text-xs font-medium hover:border-[color:var(--ug-border-strong,#d4d8e1)]"
-          >
-            <Edit3 className="h-3.5 w-3.5" aria-hidden />
-            編集
-          </button>
+          {editHref ? (
+            <Link
+              href={editHref}
+              className="inline-flex items-center gap-1.5 rounded border border-[color:var(--ug-border)] bg-[color:var(--ug-panel)] px-3 py-1.5 text-xs font-medium hover:border-[color:var(--ug-border-strong,#d4d8e1)]"
+            >
+              <Edit3 className="h-3.5 w-3.5" aria-hidden />
+              編集
+            </Link>
+          ) : (
+            <button
+              type="button"
+              disabled
+              title="このセット (POC / dummy) は編集できません"
+              className="inline-flex cursor-not-allowed items-center gap-1.5 rounded border border-[color:var(--ug-border)] bg-[color:var(--ug-panel)] px-3 py-1.5 text-xs font-medium opacity-50"
+            >
+              <Edit3 className="h-3.5 w-3.5" aria-hidden />
+              編集
+            </button>
+          )}
           <button
             type="button"
             className="inline-flex items-center gap-1.5 rounded bg-gradient-to-br from-[color:var(--brand-1,#4f6bff)] to-[color:var(--brand-2,#9b5cff)] px-3 py-1.5 text-xs font-medium text-white"
@@ -198,9 +225,7 @@ function WorkflowPulldown({
       </button>
       <span className="text-[11.5px] text-[color:var(--ug-text-2)]">
         過去 {periodDays} 日 · {branchesCount} 経路同時監視 ·{' '}
-        <span className="font-mono text-[color:var(--ug-text-3)]">
-          平均 CV 率 {averageCvRate}
-        </span>
+        <span className="font-mono text-[color:var(--ug-text-3)]">平均 CV 率 {averageCvRate}</span>
       </span>
     </div>
   )
@@ -222,8 +247,7 @@ function CanvasArea({ data, tab }: { data: PathAnalysisData; tab: TabId }) {
     <div className="relative overflow-auto bg-[color:var(--ug-bg)]">
       <div className="sticky top-0 z-10 flex items-center gap-3 bg-gradient-to-b from-[color:var(--ug-bg)] via-[color:var(--ug-bg)] to-transparent px-5 pb-2 pt-3.5">
         <span className="font-mono text-[11px] text-[color:var(--ug-text-3)]">
-          <strong className="text-[color:var(--ug-text)]">workflows</strong> /{' '}
-          {data.workflowName}
+          <strong className="text-[color:var(--ug-text)]">workflows</strong> / {data.workflowName}
         </span>
         <span className="ml-auto inline-flex items-center gap-1.5 rounded border border-[color:var(--ug-green)]/30 bg-[color:var(--ug-green)]/10 px-2 py-1 font-mono text-[10.5px] text-[color:var(--ug-green)]">
           <span
@@ -411,26 +435,33 @@ function NodeCard({ node }: { node: PathNode }) {
         <div className="mb-1.5 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[10px] text-[color:var(--ug-text-2)]">
           {node.url}
         </div>
-        <div className="flex gap-3">
-          {node.stats.map((s) => (
-            <div key={s.k}>
-              <div className="mb-0.5 font-mono text-[8.5px] font-semibold uppercase tracking-[0.05em] text-[color:var(--ug-text-3)]">
-                {s.k}
+        {node.stats.length > 0 ? (
+          <div className="flex gap-3">
+            {node.stats.map((s) => (
+              <div key={s.k}>
+                <div className="mb-0.5 font-mono text-[8.5px] font-semibold uppercase tracking-[0.05em] text-[color:var(--ug-text-3)]">
+                  {s.k}
+                </div>
+                <div
+                  className={`font-mono text-[11.5px] font-bold ${
+                    s.tone === 'pos'
+                      ? 'text-[color:var(--ug-green)]'
+                      : s.tone === 'neg'
+                        ? 'text-[color:var(--ug-red,#d64545)]'
+                        : 'text-[color:var(--ug-text)]'
+                  }`}
+                >
+                  {s.v}
+                </div>
               </div>
-              <div
-                className={`font-mono text-[11.5px] font-bold ${
-                  s.tone === 'pos'
-                    ? 'text-[color:var(--ug-green)]'
-                    : s.tone === 'neg'
-                    ? 'text-[color:var(--ug-red,#d64545)]'
-                    : 'text-[color:var(--ug-text)]'
-                }`}
-              >
-                {s.v}
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        ) : (
+          /* D-07: 未分析ノードは数値を捏造せず「未分析」を表示 (Sprint 4 で events MV 由来に置換) */
+          <div className="inline-flex items-center rounded bg-[color:var(--ug-bg-2)] px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-[0.06em] text-[color:var(--ug-text-3)]">
+            未分析
+          </div>
+        )}
       </div>
       {node.perf ? <NodePerfBar perf={node.perf} /> : null}
     </div>
@@ -442,17 +473,19 @@ function NodePerfBar({ perf }: { perf: PathNodePerf }) {
     perf.band === 'ok'
       ? 'text-[color:var(--ug-green)] bg-[color:var(--ug-bg-subtle,rgba(0,0,0,0.02))]'
       : perf.band === 'warn'
-      ? 'text-[color:var(--ug-yellow)] bg-[color:var(--ug-yellow)]/5'
-      : 'text-[color:var(--ug-red,#d64545)] bg-[color:var(--ug-red,#d64545)]/5'
+        ? 'text-[color:var(--ug-yellow)] bg-[color:var(--ug-yellow)]/5'
+        : 'text-[color:var(--ug-red,#d64545)] bg-[color:var(--ug-red,#d64545)]/5'
   const barBg =
     perf.band === 'ok'
       ? 'bg-[color:var(--ug-green)]'
       : perf.band === 'warn'
-      ? 'bg-[color:var(--ug-yellow)]'
-      : 'bg-[color:var(--ug-red,#d64545)]'
+        ? 'bg-[color:var(--ug-yellow)]'
+        : 'bg-[color:var(--ug-red,#d64545)]'
 
   return (
-    <div className={`flex items-center gap-2 border-t border-[color:var(--ug-border)] px-3 py-1.5 ${tone}`}>
+    <div
+      className={`flex items-center gap-2 border-t border-[color:var(--ug-border)] px-3 py-1.5 ${tone}`}
+    >
       <Zap className="h-3 w-3" aria-hidden />
       <span className="font-mono text-[11px] font-bold">{perf.score}</span>
       <span className="relative h-[3px] flex-1 overflow-hidden rounded-sm bg-[color:var(--ug-bg-2)]">
@@ -470,24 +503,27 @@ function EdgeArrow({ label, band }: { label: string; band?: PathEdge['band'] }) 
     band === 'warn'
       ? 'bg-[color:var(--ug-yellow)]'
       : band === 'crit'
-      ? 'bg-[color:var(--ug-red,#d64545)]'
-      : 'bg-[color:var(--ug-border-strong,#d4d8e1)]'
+        ? 'bg-[color:var(--ug-red,#d64545)]'
+        : 'bg-[color:var(--ug-border-strong,#d4d8e1)]'
   const labelTone =
     band === 'warn'
       ? 'border-[color:var(--ug-yellow)]/40 bg-[color:var(--ug-yellow)]/10 text-[color:var(--ug-yellow)]'
       : band === 'crit'
-      ? 'border-[color:var(--ug-red,#d64545)]/40 bg-[color:var(--ug-red,#d64545)]/10 text-[color:var(--ug-red,#d64545)]'
-      : 'border-[color:var(--ug-border)] bg-[color:var(--ug-panel)] text-[color:var(--ug-text-2)]'
+        ? 'border-[color:var(--ug-red,#d64545)]/40 bg-[color:var(--ug-red,#d64545)]/10 text-[color:var(--ug-red,#d64545)]'
+        : 'border-[color:var(--ug-border)] bg-[color:var(--ug-panel)] text-[color:var(--ug-text-2)]'
   const arrowColor =
     band === 'warn'
       ? 'text-[color:var(--ug-yellow)]'
       : band === 'crit'
-      ? 'text-[color:var(--ug-red,#d64545)]'
-      : 'text-[color:var(--ug-border-strong,#d4d8e1)]'
+        ? 'text-[color:var(--ug-red,#d64545)]'
+        : 'text-[color:var(--ug-border-strong,#d4d8e1)]'
   return (
     <div className="flex min-w-[56px] flex-col items-center px-1.5">
       <span className={`relative h-[2px] w-full ${lineColor}`}>
-        <ArrowRight className={`absolute -right-1 -top-1.5 h-3.5 w-3.5 ${arrowColor}`} aria-hidden />
+        <ArrowRight
+          className={`absolute -right-1 -top-1.5 h-3.5 w-3.5 ${arrowColor}`}
+          aria-hidden
+        />
       </span>
       <span
         className={`mt-1 whitespace-nowrap rounded border px-1.5 py-px font-mono text-[9.5px] ${labelTone}`}
@@ -503,8 +539,8 @@ function BranchSum({ branch }: { branch: PathBranch }) {
     branch.severity === 'ok'
       ? 'text-[color:var(--ug-green)]'
       : branch.severity === 'warn'
-      ? 'text-[color:var(--ug-yellow)]'
-      : 'text-[color:var(--ug-red,#d64545)]'
+        ? 'text-[color:var(--ug-yellow)]'
+        : 'text-[color:var(--ug-red,#d64545)]'
   const deltaColor =
     branch.summary.deltaTone === 'pos'
       ? 'text-[color:var(--ug-green)]'
@@ -554,27 +590,38 @@ function AgentRail({ data }: { data: PathAnalysisData }) {
         <div className="mt-2 flex flex-wrap gap-1.5">
           <Tag>LIVE</Tag>
           <Tag>{data.branches.length} BRANCHES</Tag>
-          <Tag>D-07 {data.isDummy ? 'INFERRED' : 'OBSERVED'}</Tag>
+          {/* D-07: evidence level を明示 (planned/inferred は断定数値禁止) */}
+          <Tag>D-07 {evidenceBadge(data.evidenceLevel)}</Tag>
         </div>
       </header>
 
       <section className="flex-1 overflow-y-auto">
-        {data.insights.map((insight) => (
-          <article
-            key={insight.id}
-            className="border-b border-[color:var(--ug-border)] bg-gradient-to-b from-[color:var(--brand-1,#4f6bff)]/[0.03] to-transparent px-4 py-3"
-          >
-            <div
-              className={`mb-1.5 flex items-center gap-1.5 font-mono text-[9.5px] font-bold uppercase tracking-[0.08em] ${insightLabelColor(
-                insight.severity,
-              )}`}
+        {data.insights.length > 0 ? (
+          data.insights.map((insight) => (
+            <article
+              key={insight.id}
+              className="border-b border-[color:var(--ug-border)] bg-gradient-to-b from-[color:var(--brand-1,#4f6bff)]/[0.03] to-transparent px-4 py-3"
             >
-              <Sparkles className="h-3 w-3" aria-hidden />
-              {insight.label}
-            </div>
-            <p className="text-[12px] leading-relaxed text-[color:var(--ug-text)]">{insight.body}</p>
-          </article>
-        ))}
+              <div
+                className={`mb-1.5 flex items-center gap-1.5 font-mono text-[9.5px] font-bold uppercase tracking-[0.08em] ${insightLabelColor(
+                  insight.severity,
+                )}`}
+              >
+                <Sparkles className="h-3 w-3" aria-hidden />
+                {insight.label}
+              </div>
+              <p className="text-[12px] leading-relaxed text-[color:var(--ug-text)]">
+                {insight.body}
+              </p>
+            </article>
+          ))
+        ) : (
+          <div className="px-4 py-8 text-center text-[12px] leading-relaxed text-[color:var(--ug-text-3)]">
+            まだ分析結果がありません。
+            <br />
+            計測データが蓄積されると AI Insight がここに表示されます。
+          </div>
+        )}
       </section>
 
       <footer className="border-t border-[color:var(--ug-border)] bg-[color:var(--ug-bg-subtle,rgba(0,0,0,0.02))] px-3.5 py-2.5">
@@ -643,6 +690,20 @@ function nodeIconBg(b: PathNode['band']): string {
       return 'border border-[color:var(--ug-green)]/30 bg-[color:var(--ug-green)]/10 text-[color:var(--ug-green)]'
     default:
       return 'border border-[color:var(--ug-border)] bg-[color:var(--ug-bg-2)] text-[color:var(--ug-text)]'
+  }
+}
+
+/** D-07: evidence_level を rail バッジ用の短い英大文字に変換。 */
+function evidenceBadge(level: EvidenceLevel): string {
+  switch (level) {
+    case 'proven':
+      return 'PROVEN'
+    case 'observed':
+      return 'OBSERVED'
+    case 'inferred':
+      return 'INFERRED'
+    case 'planned':
+      return 'PLANNED'
   }
 }
 

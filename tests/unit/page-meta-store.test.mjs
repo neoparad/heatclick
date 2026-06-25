@@ -39,9 +39,11 @@ const PROOF_PAGES = [
   'app/(proof)/heatmap/page.tsx',
   'app/(proof)/personas/page.tsx',
   'app/(proof)/chat/page.tsx',
-  // 続 75 Task B + Task D: 新規配備 page
-  'app/(proof)/paths/page.tsx',
+  // 続 75 Task D: 新規配備 page
   'app/(proof)/install/page.tsx',
+  // 注: app/(proof)/paths/page.tsx は登録一覧化に伴い PathsListView へ delegate する
+  //     server component になったため (PageMeta は view 側)、本ループ対象外。
+  //     paths 系の PageMeta 配線は専用テスト (後述) で検証する。
 ]
 
 // 続 75 Task A: 各 page の title 文字列に対する整合チェック
@@ -50,7 +52,6 @@ const EXPECTED_TITLES = {
   'app/(proof)/heatmap/page.tsx': /title=["']ヒートマップ["']/,
   'app/(proof)/personas/page.tsx': /title=["']Persona クラスタ["']/,
   'app/(proof)/chat/page.tsx': /title=["']UGOKIMAP AI["']/,
-  'app/(proof)/paths/page.tsx': /title=["']経路分析エージェント["']/,
   'app/(proof)/install/page.tsx': /title=["']設定 \/ タグ設置["']/,
 }
 
@@ -74,38 +75,93 @@ for (const rel of PROOF_PAGES) {
   })
 }
 
-// 続 75 Task B: paths page (Server entry) + PathAnalysisCanvas + fixture の 3 段構成
-test('app/(proof)/paths/page.tsx delegates to PathAnalysisCanvas + dummy fixture', () => {
+// 経路分析 登録一覧化: /paths は一覧 (PathsListView)、/paths/[id] が詳細 (PathAnalysisCanvas)
+test('app/(proof)/paths/page.tsx delegates to PathsListView (登録一覧)', () => {
   const src = readSrc('app/(proof)/paths/page.tsx')
-  assert.match(src, /PathAnalysisCanvas/, 'paths page must render PathAnalysisCanvas')
-  assert.match(src, /getDummyPathAnalysis/, 'paths page must use getDummyPathAnalysis fixture')
+  assert.match(src, /PathsListView/, 'paths list page must render PathsListView')
+  assert.match(src, /createPathSetRepository/, 'paths list page must load PathSets from KV repository')
+  assert.match(src, /POC_PATHSETS/, 'paths list page must merge POC_PATHSETS fallback')
 })
 
-test('lib/fixtures/path-analysis.ts declares 3 branches (A/B/C) + trigger + 2 insights', () => {
-  const src = readSrc('lib/fixtures/path-analysis.ts')
-  // 3 branch IDs
-  for (const id of ["'A'", "'B'", "'C'"]) {
-    assert.ok(src.includes(`id: ${id}`), `fixture must declare branch id ${id}`)
+test('components/paths/paths-list-view.tsx renders PageMeta title 経路分析エージェント + 新規登録導線', () => {
+  const src = readSrc('components/paths/paths-list-view.tsx')
+  assert.match(
+    src,
+    /import\s+{[^}]*\bPageMeta\b[^}]*}\s+from\s+['"]@\/components\/layout\/page-meta['"]/,
+    'paths-list-view must import PageMeta',
+  )
+  assert.match(src, /title=["']経路分析エージェント["']/, 'list view must set topbar title 経路分析エージェント')
+  assert.match(src, /href=["']\/paths\/new["']/, 'list view must link to /paths/new (新規登録)')
+})
+
+test('app/(proof)/paths/[id]/page.tsx delegates to PathAnalysisCanvas + pathSetToAnalysisData', () => {
+  const src = readSrc('app/(proof)/paths/[id]/page.tsx')
+  assert.match(src, /PathAnalysisCanvas/, 'detail page must render PathAnalysisCanvas')
+  assert.match(src, /pathSetToAnalysisData/, 'detail page must project PathSet → PathAnalysisData')
+  assert.match(src, /createPathSetRepository/, 'detail page must load PathSet from KV repository')
+})
+
+test('lib/paths/poc-pathset.ts declares POC_PATHSETS with 3 branches (A/B/C) + trigger + isDummy', () => {
+  const src = readSrc('lib/paths/poc-pathset.ts')
+  assert.match(src, /export\s+const\s+POC_PATHSETS/, 'must export POC_PATHSETS')
+  for (const id of ['A', 'B', 'C']) {
+    assert.match(
+      src,
+      new RegExp(`id:\\s*["']${id}["']`),
+      `POC pathset must declare branch id ${id}`,
+    )
   }
-  assert.match(src, /trigger:\s*\{/, 'fixture must declare trigger object')
-  assert.match(
-    src,
-    /isDummy:\s*true/,
-    'fixture must mark isDummy=true (D-07 inferred 表示の根拠)',
-  )
-  assert.match(
-    src,
-    /export\s+function\s+getDummyPathAnalysis/,
-    'fixture must export getDummyPathAnalysis()',
-  )
+  assert.match(src, /trigger:\s*\{/, 'POC pathset must declare trigger object')
+  assert.match(src, /isDummy:\s*true/, 'POC pathset must mark isDummy=true (D-07 inferred 表示の根拠)')
 })
 
-test('components/paths/path-analysis-canvas.tsx renders branches + AgentRail + DummyBanner', () => {
+test('components/paths/path-analysis-canvas.tsx renders branches + AgentRail + evidence badge', () => {
   const src = readSrc('components/paths/path-analysis-canvas.tsx')
   assert.match(src, /AgentRail/, 'canvas must render AgentRail (right pane)')
-  assert.match(src, /DummyBanner/, 'canvas must render DummyBanner (D-07 inferred 明示)')
-  assert.match(src, /BranchRow/, 'canvas must render BranchRow (3 branches grid)')
+  assert.match(src, /evidenceBadge/, 'canvas must render D-07 evidence badge (planned/inferred 明示)')
+  assert.match(src, /BranchRow/, 'canvas must render BranchRow (branches grid)')
   assert.match(src, /NodePerfBar/, 'canvas must render NodePerfBar (各 node の LCP mini-bar)')
+  assert.match(src, /未分析/, 'canvas must show 未分析 placeholder for empty-stats nodes (D-07)')
+})
+
+// 編集 UI: /paths/[id]/edit + PathEditView + 共有ビルダー (path-builder-form)
+test('app/(proof)/paths/[id]/edit/page.tsx delegates to PathEditView (KV-only load)', () => {
+  const src = readSrc('app/(proof)/paths/[id]/edit/page.tsx')
+  assert.match(src, /PathEditView/, 'edit page must render PathEditView')
+  assert.match(src, /createPathSetRepository/, 'edit page must load PathSet from KV (POC は対象外)')
+  assert.ok(
+    !src.includes('POC_PATHSETS'),
+    'edit page must NOT fall back to POC_PATHSETS (POC は read-only)',
+  )
+})
+
+test('components/paths/path-edit-view.tsx PUTs to /api/paths/[id] + DELETE + status select', () => {
+  const src = readSrc('components/paths/path-edit-view.tsx')
+  assert.match(src, /method:\s*["']PUT["']/, 'edit view must PUT update')
+  assert.match(src, /method:\s*["']DELETE["']/, 'edit view must support DELETE')
+  assert.match(src, /PathBuilderFields/, 'edit view must reuse shared PathBuilderFields')
+  assert.match(src, /pathSetToDraft/, 'edit view must restore form state from PathSet')
+})
+
+test('components/paths/path-builder-form.tsx is shared by new + edit views', () => {
+  const builder = readSrc('components/paths/path-builder-form.tsx')
+  assert.match(builder, /export function usePathBuilder/, 'must export usePathBuilder hook')
+  assert.match(builder, /export function PathBuilderFields/, 'must export PathBuilderFields')
+  const newView = readSrc('components/paths/path-new-view.tsx')
+  const editView = readSrc('components/paths/path-edit-view.tsx')
+  for (const [label, src] of [['new', newView], ['edit', editView]]) {
+    assert.match(
+      src,
+      /from ["']@\/components\/paths\/path-builder-form["']/,
+      `${label} view must import the shared path-builder-form`,
+    )
+  }
+})
+
+test('app/(proof)/paths/[id]/page.tsx passes editHref only for non-dummy sets', () => {
+  const src = readSrc('app/(proof)/paths/[id]/page.tsx')
+  assert.match(src, /editHref/, 'detail page must compute editHref')
+  assert.match(src, /pset\.isDummy/, 'detail page must gate editHref on isDummy (POC 編集不可)')
 })
 
 // 続 78 Task A regression: title block を content area から削除し、workflow 切替
