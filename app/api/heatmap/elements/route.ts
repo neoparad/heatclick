@@ -42,6 +42,26 @@ const querySchema = z.object({
   segment: z.enum(['all', 'deep_read', 'bounce', 'ad', 'returning', 'new']).default('all'),
 })
 
+/**
+ * ClickHouse エラー文字列を、credentials を含まない安全な分類コードに変換する (続135 P0 可視化)。
+ * raw メッセージは password 等を含み得るため UI/response には出さない。
+ */
+function classifyChError(msg: string): string {
+  const m = msg.toLowerCase()
+  if (m.includes('not enough privileges') || m.includes('access_denied') || m.includes('grant')) {
+    return 'permission'
+  }
+  if (m.includes('authentication') || m.includes('password')) return 'auth'
+  if (m.includes('timeout') || m.includes('timed out') || m.includes('max_execution')) {
+    return 'timeout'
+  }
+  if (m.includes("doesn't exist") || m.includes('unknown table') || m.includes('unknown_table')) {
+    return 'missing_table'
+  }
+  if (m.includes('memory') || m.includes('memory_limit')) return 'memory'
+  return 'query_error'
+}
+
 const TOP_ELEMENTS_LIMIT = 6
 /** signal selector 上位 (マーカー描画 + whereLabel)。type 毎にこの件数まで。 */
 const TOP_SIGNALS_PER_TYPE = 12
@@ -240,6 +260,7 @@ export async function GET(request: Request) {
       h: number
     }
     let imageRows: ImageRow[] = []
+    let imagesError: string | null = null
     try {
       const imagesRs = await ch.query({
         query: `
@@ -271,6 +292,10 @@ export async function GET(request: Request) {
       imageRows = (await imagesRs.json()) as ImageRow[]
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message.split('\n')[0] : 'unknown'
+      // 続135 (P0 可視化): 失敗を silent [] にせず分類コードで surface する。
+      //   「画像が出ない」が image_visibility クエリ失敗 (overlay) なのか、本当にデータ0 なのかを
+      //   実機 Network で切り分け可能にする。raw msg は credentials 流出経路になり得るため出さない。
+      imagesError = classifyChError(msg)
       console.error(`[heatmap/elements] image_visibility degraded to []: ${msg}`)
     }
 
@@ -345,6 +370,13 @@ export async function GET(request: Request) {
             count: Number(r.n),
             recommendation: r.recommendation,
           })),
+          // 続135 (P0 可視化): enhancement の失敗/空を UI と実機 Network で区別可能にする診断。
+          //   imagesError != null = image_visibility クエリ自体が失敗 (overlay 欠落の真因)。
+          //   imagesError == null かつ images=[] = 当該条件で実データ 0 件 (正常な空)。
+          diagnostics: {
+            imagesError,
+            imagesCount: imageRows.length,
+          },
         },
       },
       // 集計はリアルタイム性不要。ブラウザ private cache 2 分で再ナビを軽くする。

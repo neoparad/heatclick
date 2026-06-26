@@ -71,6 +71,17 @@ export interface HeatmapPageIssue {
   recommendation: string
 }
 
+/**
+ * 続135 (P0 可視化): enhancement の失敗/空を区別する診断。silent [] degrade をやめ、
+ * 「クエリ失敗 (overlay 欠落の真因)」か「実データ 0 件 (正常な空)」かを UI/実機で切り分ける。
+ */
+export interface HeatmapElementsDiagnostics {
+  /** image_visibility クエリ失敗の分類コード (permission/auth/timeout/missing_table/memory/query_error)。成功時 null。 */
+  imagesError: string | null
+  /** 取得できた画像視認率の件数 */
+  imagesCount: number
+}
+
 export interface HeatmapElementsData {
   /** クリック率の分母: フィルタ適用後のページ全セッション数 */
   page_sessions: number
@@ -80,6 +91,8 @@ export interface HeatmapElementsData {
   images: HeatmapImageStat[]
   /** クロール由来の構造 issue (クロール未取込ページは []) */
   issues: HeatmapPageIssue[]
+  /** 続135: enhancement 診断 (旧 response には無いため optional) */
+  diagnostics?: HeatmapElementsDiagnostics
 }
 
 export interface HeatmapElementsQuery {
