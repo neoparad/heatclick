@@ -23,13 +23,16 @@ describe('segmentFilterSql', () => {
 
   it('生のユーザー入力を連結しない (parameter placeholder のみ)', () => {
     // どのセグメントの SQL も {name:Type} 形式の placeholder 以外に裸のリテラル注入が無いこと。
-    // ざっくり: 文字列の中にシングルクオートで囲まれた値リテラル ('xxx') は
-    // gclid/fbclid の空文字比較 ('') と scroll 閾値の数値のみ許容。
+    // 許容するのは**コンパイル時定数**のみ:
+    //   - '' : 空文字比較 (gclid/fbclid/visitor_id != '')
+    //   - '[?#].*$' : canonical_url 正規化 (続135、canonicalUrlSql の固定正規表現)
+    // いずれもユーザー入力ではないため SQL injection リスクなし。
+    const ALLOWED_LITERALS = ["''", "'[?#].*$'"]
     for (const seg of ['deep_read', 'bounce', 'ad', 'returning', 'new'] as const) {
       const sql = segmentFilterSql(seg)
       const singleQuoted = sql.match(/'[^']*'/g) ?? []
       for (const lit of singleQuoted) {
-        expect(lit).toBe("''") // 空文字比較のみ (gclid/fbclid/visitor_id != '')
+        expect(ALLOWED_LITERALS).toContain(lit)
       }
     }
   })

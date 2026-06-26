@@ -26,6 +26,7 @@ import { getServerSession } from '@/lib/auth/server-session'
 import { getClickHouseClient } from '@/lib/clickhouse'
 import type { HeatmapSegment } from '@/lib/api/heatmap'
 import { segmentFilterSql } from '@/lib/heatmap/segment-filter'
+import { canonicalizeHeatmapUrl, canonicalUrlSql } from '@/lib/heatmap/canonical-url'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -154,6 +155,9 @@ export async function GET(request: Request) {
   }
 
   const params = parsed.data
+  // 続135: URL を canonical 化 (query/fragment 除去)。variant 分散による「クリック0」誤表示を防ぐ。
+  //   cursor hash / queryParams / SQL の page_url を全て canonical で揃える (一貫性が崩れると 0 件)。
+  params.page_url = canonicalizeHeatmapUrl(params.page_url)
 
   // tenant 検証 — REQ-SEC-126 (§13.7): header 直読みをやめ getServerSession 経由で
   // Layer 2 失効照合 (session/membership version + tenant.status) を通す。失効済みは null。
@@ -436,7 +440,7 @@ async function fetchRealHeatmapPoints(input: {
     const clickWhere = `
         tenant_id = {tenant_id:String}
         AND site_id = {site_id:String}
-        AND url = {page_url:String}
+        AND ${canonicalUrlSql('url')} = {page_url:String}
         AND event_type = 'click'
         AND is_agent = 0
         AND (viewport_width > 0 OR click_x <= 1280)
@@ -498,7 +502,7 @@ async function fetchRealHeatmapPoints(input: {
       FROM clickinsight.events
       WHERE tenant_id = {tenant_id:String}
         AND site_id = {site_id:String}
-        AND url = {page_url:String}
+        AND ${canonicalUrlSql('url')} = {page_url:String}
         AND event_type = 'read_area'
         AND is_agent = 0
         AND read_y >= {y_start:UInt32}
@@ -526,7 +530,7 @@ async function fetchRealHeatmapPoints(input: {
         FROM clickinsight.events
         WHERE tenant_id = {tenant_id:String}
           AND site_id = {site_id:String}
-          AND url = {page_url:String}
+          AND ${canonicalUrlSql('url')} = {page_url:String}
           AND is_agent = 0
           AND timestamp >= toDateTime({start:String})
           AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
@@ -559,7 +563,7 @@ async function fetchRealHeatmapPoints(input: {
         FROM clickinsight.events
         WHERE tenant_id = {tenant_id:String}
           AND site_id = {site_id:String}
-          AND url = {page_url:String}
+          AND ${canonicalUrlSql('url')} = {page_url:String}
           AND is_agent = 0
           AND timestamp >= toDateTime({start:String})
           AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY

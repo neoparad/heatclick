@@ -31,8 +31,8 @@ import { getServerSession } from '@/lib/auth/server-session'
 
 import { getClickHouseClient } from '@/lib/clickhouse'
 import { getHeatmapUnderlayWithR2Cache } from '@/lib/heatmap/r2-screenshot-cache'
+import { canonicalizeHeatmapUrl, canonicalUrlSql } from '@/lib/heatmap/canonical-url'
 import {
-  canonicalizePageUrl,
   ScreenshotProviderError,
   validateExternalUrl,
 } from '@/lib/heatmap/screenshot-provider'
@@ -71,7 +71,7 @@ async function tenantTracksUrl(input: {
       FROM clickinsight.events
       WHERE tenant_id = {tenant_id:String}
         AND site_id = {site_id:String}
-        AND url = {page_url:String}
+        AND ${canonicalUrlSql('url')} = {page_url:String}
         AND timestamp >= now() - INTERVAL 30 DAY
       LIMIT 1
     `,
@@ -129,8 +129,9 @@ export async function GET(request: Request) {
   try {
     validateExternalUrl(params.page_url)
     // CRITICAL: cache key と ownership lookup の両方で **同一の canonical 文字列**を使う。
-    // 1 箇所で正準化し、以降 canonicalUrl を一貫して渡すことで両者が乖離しないことを保証する。
-    canonicalUrl = canonicalizePageUrl(params.page_url)
+    // 続135: tile/elements/page-stats と同一規則 (canonicalizeHeatmapUrl = query/fragment 除去) に統一。
+    //   旧 canonicalizePageUrl は query を残すため events 生 url(query付き)と ownership 照合がズレていた。
+    canonicalUrl = canonicalizeHeatmapUrl(params.page_url)
   } catch (err) {
     if (err instanceof ScreenshotProviderError) {
       return NextResponse.json(

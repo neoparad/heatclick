@@ -29,6 +29,7 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
 import { getClickHouseClient } from '@/lib/clickhouse'
+import { canonicalizeHeatmapUrl, canonicalUrlSql } from '@/lib/heatmap/canonical-url'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -84,6 +85,8 @@ export async function GET(request: Request) {
     )
   }
   const params = parsed.data
+  // 続135: URL を canonical 化 (query/fragment 除去)。PV/CTR/到達率の variant 分散を防ぐ。
+  params.page_url = canonicalizeHeatmapUrl(params.page_url)
 
   // tenant 検証 — REQ-SEC-126 (§13.7): getServerSession 経由で Layer 2 失効照合を通す
   const session = await getServerSession()
@@ -129,7 +132,7 @@ export async function GET(request: Request) {
       FROM clickinsight.events
       WHERE tenant_id = {tenant_id:String}
         AND site_id = {site_id:String}
-        AND url = {page_url:String}
+        AND ${canonicalUrlSql('url')} = {page_url:String}
         AND timestamp >= toDateTime({start:String})
         AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
         ${deviceFilter}
@@ -186,7 +189,7 @@ export async function GET(request: Request) {
           FROM clickinsight.events
           WHERE tenant_id = {tenant_id:String}
             AND site_id = {site_id:String}
-            AND url = {page_url:String}
+            AND ${canonicalUrlSql('url')} = {page_url:String}
             AND timestamp >= toDateTime({start:String})
             AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
         `
