@@ -22,6 +22,7 @@ import { z } from 'zod'
 import { getServerSession } from '@/lib/auth/server-session'
 import { getClickHouseClient } from '@/lib/clickhouse'
 import { segmentFilterSql } from '@/lib/heatmap/segment-filter'
+import { canonicalizeHeatmapUrl, canonicalUrlSql } from '@/lib/heatmap/canonical-url'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -111,6 +112,8 @@ export async function GET(request: Request) {
     )
   }
   const params = parsed.data
+  // 続135: URL を canonical 化 (query/fragment 除去)。variant 分散で要素/画像視認率が空になるのを防ぐ。
+  params.page_url = canonicalizeHeatmapUrl(params.page_url)
 
   // tenant 検証 — REQ-SEC-126: getServerSession 経由で Layer 2 失効照合を通す
   const session = await getServerSession()
@@ -156,7 +159,7 @@ export async function GET(request: Request) {
         FROM clickinsight.events
         WHERE tenant_id = {tenant_id:String}
           AND site_id = {site_id:String}
-          AND url = {page_url:String}
+          AND ${canonicalUrlSql('url')} = {page_url:String}
           AND event_type = 'click'
           AND is_agent = 0
           AND element_selector != ''
@@ -187,7 +190,7 @@ export async function GET(request: Request) {
         FROM clickinsight.events
         WHERE tenant_id = {tenant_id:String}
           AND site_id = {site_id:String}
-          AND url = {page_url:String}
+          AND ${canonicalUrlSql('url')} = {page_url:String}
           AND event_type IN ('rage_click', 'dead_click')
           AND is_agent = 0
           AND timestamp >= toDateTime({start:String})
@@ -226,7 +229,7 @@ export async function GET(request: Request) {
         FROM clickinsight.events
         WHERE tenant_id = {tenant_id:String}
           AND site_id = {site_id:String}
-          AND url = {page_url:String}
+          AND ${canonicalUrlSql('url')} = {page_url:String}
           AND is_agent = 0
           AND timestamp >= toDateTime({start:String})
           AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
@@ -277,7 +280,7 @@ export async function GET(request: Request) {
           FROM clickinsight.image_visibility
           WHERE tenant_id = {tenant_id:String}
             AND site_id = {site_id:String}
-            AND page_url = {page_url:String}
+            AND ${canonicalUrlSql('page_url')} = {page_url:String}
             AND created_at >= toDateTime({start:String})
             AND created_at < toDateTime({end:String}) + INTERVAL 1 DAY
             ${params.device_type ? 'AND device_type = {device_type:String}' : ''}
@@ -322,7 +325,7 @@ export async function GET(request: Request) {
           FROM clickinsight.page_issues
           WHERE tenant_id = {tenant_id:String}
             AND site_id = {site_id:String}
-            AND page_url = {page_url:String}
+            AND ${canonicalUrlSql('page_url')} = {page_url:String}
           GROUP BY issue_category, issue_type, severity
           ORDER BY severity DESC, n DESC
           LIMIT ${TOP_ISSUES_LIMIT}

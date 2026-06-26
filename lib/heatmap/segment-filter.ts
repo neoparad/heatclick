@@ -24,6 +24,7 @@
  */
 
 import type { HeatmapSegment } from '@/lib/api/heatmap'
+import { canonicalUrlSql } from '@/lib/heatmap/canonical-url'
 
 /**
  * returning / new の共通サブクエリ。`comparator` だけ差し替える。
@@ -39,7 +40,7 @@ function visitorRecencyFilter(comparator: '<' | '>='): string {
       FROM clickinsight.events
       WHERE tenant_id = {tenant_id:String}
         AND site_id = {site_id:String}
-        AND url = {page_url:String}
+        AND ${canonicalUrlSql('url')} = {page_url:String}
         AND is_agent = 0
         AND visitor_id != ''
         AND timestamp >= toDateTime({start:String})
@@ -67,7 +68,7 @@ export function segmentFilterSql(segment: HeatmapSegment): string {
         SELECT DISTINCT session_id FROM clickinsight.events
         WHERE tenant_id = {tenant_id:String}
           AND site_id = {site_id:String}
-          AND url = {page_url:String}
+          AND ${canonicalUrlSql('url')} = {page_url:String}
           AND is_agent = 0
           AND ((gclid IS NOT NULL AND gclid != '') OR (fbclid IS NOT NULL AND fbclid != ''))
           AND timestamp >= toDateTime({start:String})
@@ -81,7 +82,7 @@ export function segmentFilterSql(segment: HeatmapSegment): string {
         SELECT session_id FROM clickinsight.events
         WHERE tenant_id = {tenant_id:String}
           AND site_id = {site_id:String}
-          AND url = {page_url:String}
+          AND ${canonicalUrlSql('url')} = {page_url:String}
           AND is_agent = 0
           AND timestamp >= toDateTime({start:String})
           AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY

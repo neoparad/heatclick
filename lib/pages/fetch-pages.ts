@@ -16,6 +16,7 @@
 import { unstable_cache } from 'next/cache'
 
 import { getClickHouseClient } from '@/lib/clickhouse'
+import { canonicalUrlSql } from '@/lib/heatmap/canonical-url'
 
 /** canvas のデバイスタブ。ClickHouse の device_type を UI 表現に写像した値。 */
 export type PageTopDevice = 'pc' | 'sp' | 'tab'
@@ -83,21 +84,23 @@ export async function fetchPagesUncached(
   //   外側で argMax(device_type, dc) = そのページで最もイベントの多い device_type を選ぶ。
   //   これで初期デバイスをページ実態に合わせ「モバイル主体なのに PC 既定で空表示」を防ぐ。
   const result = await ch.query({
+    // 続135: canonical_url (query/fragment 除去) で集約。variant 分散による「同一ページが複数行に
+    //   割れてクリック0に見える」を防ぐ。tile/elements/page-stats の WHERE 正規化と同一規則。
     query: `
       SELECT
-        url,
+        canon AS url,
         sum(dc) AS events,
         argMax(device_type, dc) AS top_device_type
       FROM (
-        SELECT url, device_type, count() AS dc
+        SELECT ${canonicalUrlSql('url')} AS canon, device_type, count() AS dc
         FROM clickinsight.events
         WHERE tenant_id = {tenant_id:String}
           AND site_id = {site_id:String}
           AND timestamp >= now() - INTERVAL 7 DAY
           AND url != ''
-        GROUP BY url, device_type
+        GROUP BY canon, device_type
       )
-      GROUP BY url
+      GROUP BY canon
       ORDER BY events DESC
       LIMIT {limit:UInt32}
     `,
