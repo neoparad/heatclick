@@ -10,7 +10,6 @@ import {
   ScreenshotProviderError,
   _resetScreenshotMemoryCache,
   buildCacheKey,
-  canonicalizePageUrl,
   fetchHeatmapUnderlay,
   validateExternalUrl,
 } from './screenshot-provider'
@@ -152,51 +151,12 @@ describe('buildCacheKey', () => {
   })
 })
 
-describe('canonicalizePageUrl', () => {
-  it('lowercases scheme and host only', () => {
-    expect(canonicalizePageUrl('HTTPS://Example.COM/Path')).toBe('https://example.com/Path')
-  })
-
-  it('drops default ports (80 / 443) but keeps non-default ports', () => {
-    expect(canonicalizePageUrl('http://example.com:80/x')).toBe('http://example.com/x')
-    expect(canonicalizePageUrl('https://example.com:443/x')).toBe('https://example.com/x')
-    expect(canonicalizePageUrl('https://example.com:8443/x')).toBe('https://example.com:8443/x')
-  })
-
-  it('drops the fragment', () => {
-    expect(canonicalizePageUrl('https://example.com/p#section-2')).toBe('https://example.com/p')
-  })
-
-  it('preserves path case (does NOT lowercase path)', () => {
-    expect(canonicalizePageUrl('https://example.com/Entry/TirTir')).toBe(
-      'https://example.com/Entry/TirTir',
-    )
-  })
-
-  it('preserves query params and their order (does NOT reorder/strip)', () => {
-    expect(canonicalizePageUrl('https://example.com/?b=2&a=1')).toBe('https://example.com/?b=2&a=1')
-    // 別順序は別文字列 (= 別ページ扱い)
-    expect(canonicalizePageUrl('https://example.com/?a=1&b=2')).not.toBe(
-      canonicalizePageUrl('https://example.com/?b=2&a=1'),
-    )
-  })
-
-  it('preserves trailing slash distinction (/foo !== /foo/)', () => {
-    expect(canonicalizePageUrl('https://example.com/foo')).not.toBe(
-      canonicalizePageUrl('https://example.com/foo/'),
-    )
-  })
-
-  it('is idempotent', () => {
-    const once = canonicalizePageUrl('HTTPS://Example.com:443/A?x=1#frag')
-    expect(canonicalizePageUrl(once)).toBe(once)
-  })
-
-  it('cache key is identical when the same canonical URL feeds both paths (invariant)', () => {
-    // route は canonicalizePageUrl の結果を ownership lookup と cache key の両方に渡す。
-    // ここでは「同一 canonical 文字列 → 同一 cache key」を担保する。
-    const raw = 'HTTPS://Example.com:443/Entry?b=2&a=1#frag'
-    const canonical = canonicalizePageUrl(raw)
+describe('buildCacheKey determinism', () => {
+  // 続135: URL 正準化は canonicalizeHeatmapUrl (lib/heatmap/canonical-url.ts) に一元化。
+  //   ここでは buildCacheKey が「同一入力 → 同一キー」であることのみ担保する
+  //   (canonical 化の契約は canonical-url.test.ts が固定)。
+  it('same canonical URL feeds → identical cache key', () => {
+    const canonical = 'https://example.com/Entry'
     const keyA = buildCacheKey({ tenantId: 't1', siteId: 's1', pageUrl: canonical, device: 'pc' })
     const keyB = buildCacheKey({ tenantId: 't1', siteId: 's1', pageUrl: canonical, device: 'pc' })
     expect(keyA).toBe(keyB)
