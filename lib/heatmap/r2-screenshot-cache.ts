@@ -238,7 +238,14 @@ async function captureStoreAndCacheL1(
     const served = await toR2ServedCapture(input, capture, r2)
     setMemoryCachedUnderlay(cacheKey, served)
     return served
-  } catch {
+  } catch (err) {
+    // P3 (③⑦ root cause): R2 PUT/sign の失敗を握り潰すと R2 に永続せず L1 (per-instance memory)
+    //   のみになり、別インスタンス/TTL 失効で「毎回 cold capture」に戻る。可用性は保ちつつ
+    //   (capture は返す)、静かな失敗を必ず可視化して運用で気づけるようにする。
+    console.error(
+      '[heatmap-cache] R2 store failed; capture served but NOT persisted (will re-capture next time):',
+      err instanceof Error ? `${err.name}: ${err.message}` : err,
+    )
     setMemoryCachedUnderlay(cacheKey, capture)
     return capture
   }
@@ -273,6 +280,13 @@ function scheduleRevalidate(
       await storeInR2(input, capture, image, r2, hooks.fetchImpl)
       const served = await toR2ServedCapture(input, capture, r2)
       setMemoryCachedUnderlay(cacheKey, served)
+    } catch (err) {
+      // P3 (③⑦): SWR background の静かな失敗を可視化。stale capture は既に返済済みのため
+      //   ユーザー影響は無い (致命ではない) が、永続更新が止まり続けるのを運用で検知できるようにする。
+      console.error(
+        '[heatmap-cache] background revalidate failed (stale capture kept, R2 not refreshed):',
+        err instanceof Error ? `${err.name}: ${err.message}` : err,
+      )
     } finally {
       await release(lockKey).catch(() => undefined)
     }
