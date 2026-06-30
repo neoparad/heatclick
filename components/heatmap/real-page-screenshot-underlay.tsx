@@ -83,6 +83,7 @@ export function RealPageScreenshotUnderlay({
       data-data-source="screenshot"
       data-provider={capture.provider}
       data-cached={capture.cached ? '1' : '0'}
+      data-capped={capture.capped ? '1' : '0'}
       aria-hidden
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}

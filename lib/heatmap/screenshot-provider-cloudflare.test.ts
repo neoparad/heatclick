@@ -16,14 +16,30 @@ import {
   ScreenshotProviderError,
   buildCloudflareBRRequestBody,
   captureScreenshot,
+  captureViaScreenshotWorker,
   fetchFromCloudflareBR,
+  fetchFromScreenshotWorker,
   getCloudflareBRConfig,
   type CloudflareBRConfig,
+  type ScreenshotWorkerConfig,
 } from './screenshot-provider'
 
 const CF_CONFIG: CloudflareBRConfig = {
   accountId: 'acct-123',
   apiToken: 'cf-token-xyz',
+}
+
+const WORKER_CONFIG: ScreenshotWorkerConfig = {
+  workerUrl: 'https://shot.example.workers.dev',
+  workerToken: 'worker-token-abc',
+}
+
+/** JPEG Response に任意のヘッダ (x-capture-*) を付けて返す。 */
+function jpegResponseWithHeaders(bytes: Uint8Array, extra: Record<string, string>): Response {
+  return new Response(bytes as BodyInit, {
+    status: 200,
+    headers: { 'content-type': 'image/jpeg', ...extra },
+  })
 }
 
 /** SOI + SOF0 で width/height を持つ最小 JPEG を作る。 */
@@ -177,6 +193,105 @@ describe('fetchFromCloudflareBR', () => {
         fetchImpl: fakeFetch,
       }),
     ).rejects.toBeInstanceOf(ScreenshotProviderError)
+  })
+})
+
+describe('fetchFromScreenshotWorker — P2 capped / full-height headers', () => {
+  it('reads x-capture-capped=1 + x-capture-full-height into capped/fullPageCssHeight', async () => {
+    // capped 画像: 上端 9000px のみ撮影、実ページ全高は 52000px
+    const jpeg = makeJpeg(1280, 9000)
+    const fakeFetch: typeof fetch = async () =>
+      jpegResponseWithHeaders(jpeg, {
+        'x-capture-capped': '1',
+        'x-capture-full-height': '52000',
+        'x-capture-height': '9000',
+      })
+    const out = await fetchFromScreenshotWorker({
+      pageUrl: 'https://example.com/very-long',
+      device: 'pc',
+      config: WORKER_CONFIG,
+      fetchImpl: fakeFetch,
+    })
+    expect(out.naturalHeight).toBe(9000)
+    expect(out.capped).toBe(true)
+    expect(out.fullPageCssHeight).toBe(52000)
+  })
+
+  it('non-capped (x-capture-capped=0) → capped=false, fullPageCssHeight undefined', async () => {
+    const jpeg = makeJpeg(1280, 4000)
+    const fakeFetch: typeof fetch = async () =>
+      jpegResponseWithHeaders(jpeg, { 'x-capture-capped': '0', 'x-capture-full-height': '4000' })
+    const out = await fetchFromScreenshotWorker({
+      pageUrl: 'https://example.com/short',
+      device: 'pc',
+      config: WORKER_CONFIG,
+      fetchImpl: fakeFetch,
+    })
+    expect(out.capped).toBe(false)
+    expect(out.fullPageCssHeight).toBeUndefined()
+  })
+
+  it('ignores full-height that is not greater than the captured image (guard)', async () => {
+    const jpeg = makeJpeg(1280, 9000)
+    const fakeFetch: typeof fetch = async () =>
+      jpegResponseWithHeaders(jpeg, { 'x-capture-capped': '1', 'x-capture-full-height': '8000' })
+    const out = await fetchFromScreenshotWorker({
+      pageUrl: 'https://example.com/x',
+      device: 'pc',
+      config: WORKER_CONFIG,
+      fetchImpl: fakeFetch,
+    })
+    expect(out.capped).toBe(true)
+    expect(out.fullPageCssHeight).toBeUndefined()
+  })
+
+  it('ignores absurd full-height beyond the sanity ceiling (200k px)', async () => {
+    const jpeg = makeJpeg(1280, 9000)
+    const fakeFetch: typeof fetch = async () =>
+      jpegResponseWithHeaders(jpeg, { 'x-capture-capped': '1', 'x-capture-full-height': '999999' })
+    const out = await fetchFromScreenshotWorker({
+      pageUrl: 'https://example.com/x',
+      device: 'pc',
+      config: WORKER_CONFIG,
+      fetchImpl: fakeFetch,
+    })
+    expect(out.fullPageCssHeight).toBeUndefined()
+  })
+})
+
+describe('captureViaScreenshotWorker — threads capped into the capture', () => {
+  it('sets capture.capped + capture.fullPageCssHeight from worker headers', async () => {
+    const jpeg = makeJpeg(1280, 9000)
+    const fakeFetch: typeof fetch = async () =>
+      jpegResponseWithHeaders(jpeg, { 'x-capture-capped': '1', 'x-capture-full-height': '40000' })
+    const { capture } = await captureViaScreenshotWorker({
+      tenantId: 't1',
+      siteId: 's1',
+      pageUrl: 'https://example.com/long',
+      device: 'pc',
+      config: WORKER_CONFIG,
+      fetchImpl: fakeFetch,
+    })
+    expect(capture.provider).toBe('cloudflare')
+    expect(capture.capped).toBe(true)
+    expect(capture.fullPageCssHeight).toBe(40000)
+    expect(capture.naturalHeight).toBe(9000)
+  })
+
+  it('omits capped fields for a normal (non-capped) capture', async () => {
+    const jpeg = makeJpeg(1280, 7000)
+    const fakeFetch: typeof fetch = async () =>
+      jpegResponseWithHeaders(jpeg, { 'x-capture-capped': '0', 'x-capture-full-height': '7000' })
+    const { capture } = await captureViaScreenshotWorker({
+      tenantId: 't1',
+      siteId: 's1',
+      pageUrl: 'https://example.com/normal',
+      device: 'pc',
+      config: WORKER_CONFIG,
+      fetchImpl: fakeFetch,
+    })
+    expect(capture.capped).toBeUndefined()
+    expect(capture.fullPageCssHeight).toBeUndefined()
   })
 })
 

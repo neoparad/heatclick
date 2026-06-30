@@ -276,10 +276,26 @@ export function HeatmapCanvas({
     return max
   }, [tiles, isPxSpaceLayer])
   const captureTruncated = cap != null && isPxSpaceLayer && dataMaxDocY > pageCssHeight * 1.3
-  // 座標系・容器の全高 (CSS px)。通常は画像全高、部分画像時はデータ範囲 +8% まで拡張。
-  const renderPageHeight = captureTruncated
-    ? Math.max(Math.round(dataMaxDocY * 1.08), pageCssHeight)
-    : pageCssHeight
+  // ── P2 (⑤⑥ scroll/exit 途切れ): Worker が capped した capture は実 document 全高 (fullPageCssHeight)
+  //   を返す。続131 のデータ駆動検知 (click/read 限定) と違い、capped は **データの有無に依らず**
+  //   全レイヤー (scroll/exit 含む) を真の全高にマップする。これが無いと scroll/exit は capped 画像高で
+  //   頭打ちになり「最下部まで描画されない」(= ⑤⑥ の正体)。DPR=1 固定のため fullPageCssHeight は
+  //   pageCssHeight と同一空間で直接比較できる。
+  const cappedFullCss =
+    cap != null &&
+    cap.capped === true &&
+    typeof cap.fullPageCssHeight === 'number' &&
+    cap.fullPageCssHeight > pageCssHeight
+      ? cap.fullPageCssHeight
+      : 0
+  // 容器/座標系を実画像高より伸ばすべきか (部分画像 or capped)。
+  const isExtended = captureTruncated || cappedFullCss > 0
+  // 座標系・容器の全高 (CSS px)。通常は画像全高、部分画像時はデータ範囲 +8%、capped 時は実全高まで拡張。
+  const renderPageHeight = Math.max(
+    pageCssHeight,
+    captureTruncated ? Math.round(dataMaxDocY * 1.08) : 0,
+    cappedFullCss,
+  )
   // outer .hm-page の最大幅: ready / provisional 時は referenceWidth で頭打ち (wide screenshot を
   //   column 幅に収め、sp は native 390 に収める)。provisional と real で同値なので遷移時に幅が動かない。
   const displayMaxWidth = cap
@@ -661,9 +677,10 @@ export function HeatmapCanvas({
               //   - overlay は `displayScale = actualOuterWidth / referenceWidth` で縮小
               //   - fallback (loading / error / 未取得) は mock underlay + 同 overlay (displayScale=1)
               const outerStyle: React.CSSProperties = cap
-                ? captureTruncated
+                ? isExtended
                   ? {
-                      // 続131: 部分画像 — 容器はデータ全高、画像は normal flow で上部に乗る
+                      // 続131 / P2: 部分画像 or capped — 容器は実全高、画像は normal flow で上部に乗り
+                      //   画像下は容器の bg-white (中立背景) になる。overlay は全高に渡って描画される。
                       maxWidth: displayMaxWidth,
                       width: '100%',
                       height: Math.round(renderPageHeight * displayScale),
@@ -694,6 +711,8 @@ export function HeatmapCanvas({
                     data-capture-natural-width={cap?.naturalWidth ?? ''}
                     data-capture-natural-height={cap?.naturalHeight ?? ''}
                     data-capture-truncated={captureTruncated ? '1' : '0'}
+                    data-capture-capped={cappedFullCss > 0 ? '1' : '0'}
+                    data-render-page-height={cap ? Math.round(renderPageHeight) : ''}
                     data-reference-width={referenceWidth}
                     data-page-css-height={cap ? pageCssHeight : ''}
                     data-display-width={displayMaxWidth}
@@ -781,6 +800,17 @@ export function HeatmapCanvas({
                         title={`画像 ${Math.round(pageCssHeight)}px / データ範囲 ${Math.round(dataMaxDocY)}px`}
                       >
                         実ページ画像が上部のみ — ヒートマップは全域を表示中 (画像は再取得されます)
+                      </div>
+                    ) : cappedFullCss > 0 ? (
+                      // P2: capped — 巨大ページを面積上限で上端のみ撮影。ヒートマップ (scroll/exit 含む)
+                      //   は実全高に渡って正しく描画され、画像下は中立背景。捏造でなく正直に明示する。
+                      <div
+                        role="status"
+                        data-testid="capture-capped-badge"
+                        className="absolute right-3 top-3 z-10 rounded-full border border-sky-400/40 bg-sky-100/95 px-2.5 py-1 font-mono text-[10.5px] text-sky-900 shadow-sm"
+                        title={`画像 ${Math.round(pageCssHeight)}px / 実ページ全高 ${Math.round(cappedFullCss)}px`}
+                      >
+                        長いページのため画像は上部のみ — ヒートマップは全域を表示中
                       </div>
                     ) : null}
                   </div>
