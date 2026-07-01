@@ -517,7 +517,14 @@ export async function fetchFromScreenshotWorker(input: {
   device: HeatmapDevice
   config: ScreenshotWorkerConfig
   fetchImpl?: typeof fetch
-}): Promise<{ bytes: Uint8Array; contentType: string; naturalWidth: number; naturalHeight: number }> {
+}): Promise<{
+  bytes: Uint8Array
+  contentType: string
+  naturalWidth: number
+  naturalHeight: number
+  capped: boolean
+  fullPageCssHeight?: number
+}> {
   const width = CAPTURE_WIDTH_FOR_DEVICE[input.device]
   const endpoint = `${input.config.workerUrl.replace(/\/$/, '')}/screenshot`
   const body = JSON.stringify({
@@ -594,7 +601,17 @@ export async function fetchFromScreenshotWorker(input: {
   const dims = readImageDimensions(bytes)
   const naturalWidth = sanitizeDimension(dims?.width, width)
   const naturalHeight = sanitizeDimension(dims?.height, width * 2)
-  return { bytes, contentType, naturalWidth, naturalHeight }
+  // P2: Worker は巨大ページを面積上限で上端 clip したとき capped=1 と実 document 全高を返す。
+  //   x-capture-full-height は CSS px @viewport幅 = overlay の pageCssHeight と同一空間 (DPR=1 固定)。
+  //   sanitizeDimension は SCREENSHOT_DIM_MAX で clamp してしまい巨大全高 (5万px 級) を握り潰すため
+  //   ここでは使わず、独自の sanity ceiling (20万px) で検証する。
+  const capped = res.headers.get('x-capture-capped') === '1'
+  const rawFullHeight = Number(res.headers.get('x-capture-full-height'))
+  const fullPageCssHeight =
+    capped && Number.isFinite(rawFullHeight) && rawFullHeight > naturalHeight && rawFullHeight <= 200_000
+      ? Math.round(rawFullHeight)
+      : undefined
+  return { bytes, contentType, naturalWidth, naturalHeight, capped, fullPageCssHeight }
 }
 
 /** Worker error response から error field を best-effort で取り出す。 */
@@ -644,6 +661,9 @@ export async function captureViaScreenshotWorker(input: {
       imageUrl: dataUrl,
       naturalWidth: fetched.naturalWidth,
       naturalHeight: fetched.naturalHeight,
+      // P2: Worker のみ capped/full-height を返す (CF REST / Microlink fallback は未対応)。
+      capped: fetched.capped,
+      fullPageCssHeight: fetched.fullPageCssHeight,
     },
     cacheKey,
     'cloudflare',
@@ -1022,7 +1042,13 @@ async function runMicrolinkFetch(
 
 function buildUnderlayCapture(
   input: { pageUrl: string; device: HeatmapDevice },
-  fetched: { imageUrl: string; naturalWidth: number; naturalHeight: number },
+  fetched: {
+    imageUrl: string
+    naturalWidth: number
+    naturalHeight: number
+    capped?: boolean
+    fullPageCssHeight?: number
+  },
   cacheKey: string,
   provider: ScreenshotProvider,
   capturedAt?: string,
@@ -1039,6 +1065,9 @@ function buildUnderlayCapture(
     cacheKey,
     provider,
     cached: false,
+    // P2: capped 時のみ実全高を載せる (省略時は naturalHeight を全高とみなす後方互換)。
+    ...(fetched.capped ? { capped: true } : {}),
+    ...(fetched.fullPageCssHeight ? { fullPageCssHeight: fetched.fullPageCssHeight } : {}),
   }
 }
 

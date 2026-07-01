@@ -63,7 +63,10 @@ const KEY_PREFIX = 'heatmap-screenshots'
 //   新 Worker で撮り直す。**worker の wrangler deploy 後に**この bump 版を deploy すること。
 // 続135: Microlink fallback の waitUntil='networkidle2' を撤去 (ビジーページで上部1枚しか
 //   撮れていなかった = 症状①)。旧 v9 で凍結した短尺 Microlink 画像を全 miss にして撮り直す。
-const CAPTURE_VERSION = 'v10'
+// P2 (⑤⑥ full-height): Worker の x-capture-capped / x-capture-full-height を capture+metadata に
+//   通すようになった。旧 v10 cache は capped 情報を持たないため (= capped ページの scroll/exit が
+//   画像高で頭打ちのまま) v11 に bump し、Worker 経由で metadata 付きに撮り直す。
+const CAPTURE_VERSION = 'v11'
 
 /** TTL (capturedAt 比較) */
 const FRESH_TTL_MS = 24 * 60 * 60 * 1000 // 24h: これ以内なら即返す
@@ -100,6 +103,10 @@ export interface R2ScreenshotMetadata {
   captureVersion: string
   /** R2 object content-type (.jpg / .png / .webp) */
   imageContentType: string
+  /** P2: Worker が巨大ページを上端 clip したか (capped 画像) */
+  capped?: boolean
+  /** P2: 実ページの CSS px 全高 (capped 時の真の document 高) */
+  fullPageCssHeight?: number
 }
 
 export type R2CacheTier = 'l1' | 'r2-fresh' | 'r2-stale' | 'capture' | 'degraded'
@@ -321,6 +328,9 @@ async function readFromR2(
     cacheKey: buildCacheKey(input),
     provider: metadata.provider,
     cached: true,
+    // P2: cache HIT でも capped 情報を復元しないと scroll/exit が画像高で頭打ちに戻る。
+    ...(metadata.capped ? { capped: true } : {}),
+    ...(metadata.fullPageCssHeight ? { fullPageCssHeight: metadata.fullPageCssHeight } : {}),
   }
   return { capture, metadata }
 }
@@ -364,6 +374,9 @@ async function storeInR2(
     provider: capture.provider,
     captureVersion: CAPTURE_VERSION,
     imageContentType: image.contentType,
+    // P2: undefined のフィールドは JSON.stringify で省略される (後方互換)。
+    capped: capture.capped,
+    fullPageCssHeight: capture.fullPageCssHeight,
   }
   const metaSigned = await signR2PutUrl({
     key: keys.metaKey,
@@ -498,6 +511,12 @@ function parseMetadata(raw: unknown): R2ScreenshotMetadata {
     provider: o.provider === 'cloudflare' ? 'cloudflare' : 'microlink',
     captureVersion: typeof o.captureVersion === 'string' ? o.captureVersion : '',
     imageContentType: typeof o.imageContentType === 'string' ? o.imageContentType : 'image/jpeg',
+    // P2: 欠落 (旧 cache) は undefined → 後方互換 (naturalHeight を全高とみなす)。
+    capped: o.capped === true ? true : undefined,
+    fullPageCssHeight:
+      typeof o.fullPageCssHeight === 'number' && Number.isFinite(o.fullPageCssHeight)
+        ? o.fullPageCssHeight
+        : undefined,
   }
 }
 

@@ -240,6 +240,19 @@ export interface HeatmapUnderlayCapture {
   /** capture を撮った provider (cloudflare = Browser Rendering、microlink = fallback) */
   provider: ScreenshotProvider
   cached: boolean
+  /**
+   * P2: Worker が巨大ページを面積上限で上端 clip した (capped) か。
+   *   true のとき画像は上部のみで、`fullPageCssHeight` が実ページの全高を表す。
+   *   capped でない / Microlink fallback では undefined (naturalHeight を全高とみなす)。
+   */
+  capped?: boolean
+  /**
+   * P2: 実ページの CSS px 全高 (capped 時の真の document 高)。
+   *   Worker の `x-capture-full-height` 由来。DPR=1 固定のため `pageCssHeight`
+   *   (= naturalHeight * referenceWidth / naturalWidth) と同一空間で直接比較できる。
+   *   scroll/exit を画像高でなく真の全高にマップするために使う。
+   */
+  fullPageCssHeight?: number
   /** 診断情報 (開発/staging のみ、本番は ?debug=1 で opt-in) */
   _diagnostics?: {
     fetchDurationMs: number
