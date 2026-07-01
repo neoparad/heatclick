@@ -342,6 +342,26 @@ export function HeatmapCanvas({
     return Math.min(padded, Math.max(_pageHeightEstimate, MOCK_PAGE_HEIGHT))
   }, [provisionalActive, tiles, _pageHeightEstimate])
 
+  // ── P3 (③⑦ 正直ローディングUX): cold 初回生成の白画面放置をやめる ─────────────────
+  //   screenshot は cold capture (Puppeteer) で数秒〜30秒かかる。tiles も無い真の初回
+  //   (= provisional 先行描画もできない) のときだけ、経過秒 + 進捗バーの正直パネルを出す。
+  //   stale/provisional 時は既にヒートマップが見えているので小バッジのみ (下記)。
+  const coldFirstLoad = captureState.kind === 'loading' && !provisionalActive
+  const [loadingElapsedSec, setLoadingElapsedSec] = useState(0)
+  useEffect(() => {
+    if (!coldFirstLoad) {
+      setLoadingElapsedSec(0)
+      return
+    }
+    const startedAt = Date.now()
+    setLoadingElapsedSec(0)
+    const id = setInterval(() => {
+      setLoadingElapsedSec(Math.floor((Date.now() - startedAt) / 1000))
+    }, 1000)
+    return () => clearInterval(id)
+    // pageUrl/device も依存に含め、cold のままページ/デバイス切替が起きたら経過秒を 0 から測り直す。
+  }, [coldFirstLoad, pageUrl, siteId, screenshotDevice])
+
   // 続124 ⑥: 他デバイス screenshot の先読み済み key (siteId|pageUrl|device)。重複発火防止。
   const prefetchedRef = useRef<Set<string>>(new Set())
 
@@ -770,16 +790,53 @@ export function HeatmapCanvas({
                         <HeatmapLegend layers={activeLayers} />
                       </>
                     ) : null}
-                    {captureState.kind === 'loading' || captureState.kind === 'loading-stale' ? (
+                    {/* P3: stale/provisional 時のみ小バッジ (ヒートマップは既に見えている)。
+                        真の cold 初回は下の中央パネルが担当するので小バッジは出さない。 */}
+                    {captureState.kind === 'loading-stale' ||
+                    (captureState.kind === 'loading' && provisionalActive) ? (
                       <div
                         role="status"
                         aria-live="polite"
                         data-testid="screenshot-loading-badge"
                         className="absolute right-3 top-3 z-10 rounded-full border border-[var(--ug-border)] bg-white/90 px-2.5 py-1 font-mono text-[10.5px] text-[var(--ug-text-3)] shadow-sm"
                       >
-                        {provisionalActive || captureState.kind === 'loading-stale'
-                          ? '実ページ取得中・ヒートマップ先行表示'
-                          : '実 page 取得中…'}
+                        実ページ取得中・ヒートマップ先行表示
+                      </div>
+                    ) : null}
+                    {/* P3: cold 初回生成の正直パネル — 白画面放置を避け、初回のみ最大30秒/次回即時を明示。
+                        経過秒 + 30秒目安の進捗バー (95%で頭打ち=完了に見せない) で進捗感を出す。 */}
+                    {coldFirstLoad ? (
+                      <div
+                        role="status"
+                        aria-live="polite"
+                        data-testid="screenshot-first-gen-panel"
+                        className="absolute inset-x-0 top-1/2 z-10 mx-auto flex max-w-sm -translate-y-1/2 flex-col items-center gap-3 rounded-xl border border-[var(--ug-border)] bg-white/95 px-6 py-5 text-center shadow-md backdrop-blur"
+                      >
+                        <div
+                          aria-hidden
+                          className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--ug-border)] border-t-sky-500"
+                        />
+                        <p className="text-sm font-semibold text-[var(--ug-text-1)]">
+                          実ページの画像を初回生成しています
+                        </p>
+                        <p className="text-xs leading-relaxed text-[var(--ug-text-2)]">
+                          このページは初回のみ生成に最大 30 秒ほどかかります。
+                          次回以降はキャッシュから即時表示されます。
+                        </p>
+                        <div
+                          aria-hidden
+                          className="h-1.5 w-full overflow-hidden rounded-full bg-black/10"
+                        >
+                          <div
+                            className="h-full rounded-full bg-sky-500 transition-[width] duration-1000 ease-linear"
+                            style={{
+                              width: `${Math.min(95, Math.round((loadingElapsedSec / 30) * 100))}%`,
+                            }}
+                          />
+                        </div>
+                        <p className="font-mono text-[10.5px] text-[var(--ug-text-3)]">
+                          {loadingElapsedSec}s 経過
+                        </p>
                       </div>
                     ) : null}
                     {captureState.kind === 'error' ? (
