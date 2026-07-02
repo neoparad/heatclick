@@ -28,7 +28,7 @@
  *   - Total timeout cap: 55s (Worker CPU limit ~60s)
  */
 
-import puppeteer from '@cloudflare/puppeteer';
+import puppeteer, { type Browser, type HTTPRequest, type Page } from '@cloudflare/puppeteer';
 
 // ── Env bindings ───────────────────────────────────────────────────────────────
 
@@ -246,7 +246,7 @@ function jsonError(status: number, message: string): Response {
  * After reaching the bottom, waits for all <img> to be .complete (max 5s),
  * then scrolls back to the top so fullPage screenshot captures from y=0.
  */
-async function autoScroll(page: puppeteer.Page): Promise<void> {
+async function autoScroll(page: Page): Promise<void> {
   // 続133: lazy 画像を確実に出すための 3 段強化。
   //   (1) data-src / data-lazy-src / data-original を src に昇格し loading=eager 化
   //       (一部のサイトは IntersectionObserver でなく独自属性で遅延読込するため、
@@ -365,7 +365,7 @@ export default {
     }
 
     // ── Puppeteer capture ────────────────────────────────────────────────────
-    let browser: puppeteer.Browser | null = null;
+    let browser: Browser | null = null;
 
     // Race the whole puppeteer flow against a total deadline
     const capturePromise = (async (): Promise<Response> => {
@@ -381,7 +381,7 @@ export default {
       // cloud-metadata service and no access to the app's private network, so blast radius is
       // low. Full resolve-and-pin is impractical in a Worker.
       await page.setRequestInterception(true);
-      page.on('request', (req) => {
+      page.on('request', (req: HTTPRequest) => {
         try {
           const reqUrl = new URL(req.url());
           let h = reqUrl.hostname.toLowerCase();
@@ -437,8 +437,10 @@ export default {
         screenshotBytes instanceof Uint8Array
           ? screenshotBytes
           : new Uint8Array(screenshotBytes as ArrayBuffer);
+      const body = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(body).set(bytes);
 
-      return new Response(bytes, {
+      return new Response(body, {
         status: 200,
         headers: {
           'content-type': 'image/jpeg',
@@ -464,7 +466,7 @@ export default {
       return jsonError(500, `screenshot failed: ${message}`);
     } finally {
       if (browser !== null) {
-        await (browser as puppeteer.Browser).close().catch(() => {
+        await (browser as Browser).close().catch(() => {
           // best-effort close — if it fails the Worker instance will be recycled anyway
         });
       }
