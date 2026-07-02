@@ -252,6 +252,82 @@ describe('getHeatmapUnderlayWithR2Cache (tier selection + TTL/SWR)', () => {
     expect(counters.microlink).toBe(1) // lock 取れず → 再 capture しない
   })
 
+  it('degraded (microlink) capture stays r2-fresh within 1h', async () => {
+    const store: FakeR2Store = { objects: new Map() }
+    const counters = { microlink: 0 }
+    const t0 = Date.parse('2026-06-01T00:00:00.000Z')
+    await getHeatmapUnderlayWithR2Cache(INPUT, baseHooks(store, counters, { now: () => t0 }))
+    _resetScreenshotMemoryCache()
+
+    const t30m = t0 + 30 * 60 * 1000
+    const res = await getHeatmapUnderlayWithR2Cache(
+      INPUT,
+      baseHooks(store, counters, { now: () => t30m }),
+    )
+    expect(res.tier).toBe('r2-fresh')
+    expect(counters.microlink).toBe(1)
+  })
+
+  it('degraded (microlink) capture goes r2-stale after 1h (self-heal via SWR)', async () => {
+    const store: FakeR2Store = { objects: new Map() }
+    const counters = { microlink: 0 }
+    const t0 = Date.parse('2026-06-01T00:00:00.000Z')
+    // fake fetch は microlink 経路 → metadata.provider = 'microlink'
+    await getHeatmapUnderlayWithR2Cache(INPUT, baseHooks(store, counters, { now: () => t0 }))
+    _resetScreenshotMemoryCache()
+
+    // 2h 後: cloudflare capture なら 24h fresh だが、microlink 劣化は 1h で stale → SWR 再撮影
+    const t2h = t0 + 2 * 60 * 60 * 1000
+    const scheduled: Array<() => Promise<void>> = []
+    const res = await getHeatmapUnderlayWithR2Cache(
+      INPUT,
+      baseHooks(store, counters, {
+        now: () => t2h,
+        schedule: (task) => {
+          scheduled.push(task)
+        },
+      }),
+    )
+    expect(res.tier).toBe('r2-stale')
+    expect(scheduled).toHaveLength(1)
+    await scheduled[0]!()
+    expect(counters.microlink).toBe(2) // background 再撮影が走った
+  })
+
+  it('cloudflare (Worker) capture stays r2-fresh for 24h (2h age → r2-fresh, no revalidate)', async () => {
+    const store: FakeR2Store = { objects: new Map() }
+    const counters = { microlink: 0 }
+    const t0 = Date.parse('2026-06-01T00:00:00.000Z')
+    await getHeatmapUnderlayWithR2Cache(INPUT, baseHooks(store, counters, { now: () => t0 }))
+    _resetScreenshotMemoryCache()
+
+    // fake は microlink 経路なので、R2 metadata の provider を 'cloudflare' に書き換えて
+    // Worker capture 相当の状態を作る (24h fresh 側の分岐を直接検証)
+    const keys = buildR2Keys(INPUT)
+    const meta = store.objects.get(keys.metaKey)
+    expect(meta).toBeDefined()
+    const parsed = JSON.parse(
+      typeof meta!.body === 'string' ? meta!.body : new TextDecoder().decode(meta!.body),
+    ) as Record<string, unknown>
+    parsed.provider = 'cloudflare'
+    store.objects.set(keys.metaKey, { body: JSON.stringify(parsed), contentType: 'application/json' })
+
+    const t2h = t0 + 2 * 60 * 60 * 1000
+    const scheduled: Array<() => Promise<void>> = []
+    const res = await getHeatmapUnderlayWithR2Cache(
+      INPUT,
+      baseHooks(store, counters, {
+        now: () => t2h,
+        schedule: (task) => {
+          scheduled.push(task)
+        },
+      }),
+    )
+    expect(res.tier).toBe('r2-fresh')
+    expect(scheduled).toHaveLength(0)
+    expect(counters.microlink).toBe(1)
+  })
+
   it('R2 beyond staleTtl (> 7d) → synchronous re-capture (capture tier)', async () => {
     const store: FakeR2Store = { objects: new Map() }
     const counters = { microlink: 0 }

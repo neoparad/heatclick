@@ -71,6 +71,14 @@ const CAPTURE_VERSION = 'v11'
 /** TTL (capturedAt 比較) */
 const FRESH_TTL_MS = 24 * 60 * 60 * 1000 // 24h: これ以内なら即返す
 const STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000 // 7d: これ以内なら返しつつ background 再取得
+/**
+ * 劣化経路 (microlink fallback) capture の fresh 窓。
+ * Microlink は autoScroll/lazy 昇格をしないため「lazy 画像が空白」「上部のみ」になりやすい。
+ * これを 24h fresh で固定すると、Worker が復旧しても劣化画像を丸1日配り続ける
+ * (=「画像が出ない」が何度も再発して見える主因)。1h に短縮し、SWR 再撮影で
+ * Worker capture へ自動置換されるようにする (自己修復)。
+ */
+const DEGRADED_FRESH_TTL_MS = 60 * 60 * 1000 // 1h
 
 /** signed GET URL の寿命 (`<img>` 表示用、短命) */
 const SIGNED_GET_TTL_SEC = 300 // 5 min
@@ -178,7 +186,10 @@ export async function getHeatmapUnderlayWithR2Cache(
   const r2Hit = await readFromR2(input, r2, hooks.fetchImpl).catch(() => null)
   if (r2Hit) {
     const ageMs = now() - Date.parse(r2Hit.metadata.capturedAt)
-    if (Number.isFinite(ageMs) && ageMs <= FRESH_TTL_MS) {
+    // microlink (劣化 fallback) capture は fresh 窓を 1h に短縮 → SWR で自己修復
+    const freshTtlMs =
+      r2Hit.metadata.provider === 'cloudflare' ? FRESH_TTL_MS : DEGRADED_FRESH_TTL_MS
+    if (Number.isFinite(ageMs) && ageMs <= freshTtlMs) {
       setMemoryCachedUnderlay(cacheKey, r2Hit.capture)
       return { capture: { ...r2Hit.capture, cached: true }, tier: 'r2-fresh' }
     }
