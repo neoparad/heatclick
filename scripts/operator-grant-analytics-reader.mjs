@@ -1,16 +1,16 @@
 /**
- * Operator script (続130): analytics_reader の不足 grant + user-level メモリ防御。
+ * Operator script: keep analytics_reader least-privilege.
  *
- * 背景 (2026-06-12 query_log 実証):
- *   1. analytics_reader に clickinsight.image_visibility の SELECT grant が無く、
- *      /api/heatmap/elements が 497 → 502 で全滅 (画像ホバー/要素カード/構造タブ巻き添え)。
- *      ※ コード側は 続130 で「個別 degrade」に直したが、画像ホバー機能の解放には grant が必要。
- *   2. analytics_reader は readonly=1 のため per-query max_memory_usage が HTTP 層で拒否される。
- *      メモリ防御は user-level (ALTER USER ... SETTINGS) で行うのが正解 (ここで適用)。
+ * Dry run:
+ *   node scripts/operator-grant-analytics-reader.mjs
  *
- * 実行 (Owner のみ。GRANT/ALTER USER は権限変更 = Owner 実行が本プロジェクトのルール):
- *   node scripts/operator-grant-analytics-reader.mjs              # dry-run (現状表示のみ)
- *   node scripts/operator-grant-analytics-reader.mjs --execute    # GRANT + ALTER USER 適用
+ * Apply:
+ *   node scripts/operator-grant-analytics-reader.mjs --execute
+ *
+ * Policy:
+ *   - analytics_reader must not have database-wide SELECT.
+ *   - only tables read by app/lib analytics_reader paths are allowed.
+ *   - write-only tables stay outside this role.
  */
 
 import { readFileSync } from 'node:fs'
@@ -28,81 +28,127 @@ const client = createClient({
   request_timeout: 30_000,
 })
 
-/** analytics_reader が SELECT を持つべきテーブル (heatmap/AIチャットの参照面) */
+/**
+ * Tables read by production app/lib code through getClickHouseClient('analytics_reader').
+ *
+ * Keep this explicit rather than granting clickinsight.*. It intentionally excludes
+ * chat_conversations and llm_audit_ledger, which are writer-role tables.
+ */
 const REQUIRED_TABLES = [
-  'image_visibility', // 続126 画像ホバー (今回の欠落)
-  'element_visibility_v2',
-  'scroll_timeline',
-  'form_interactions',
-  'web_vitals',
-  'video_events',
+  'analysis_jobs',
   'behavior_signals',
+  'crawl_runs',
+  'daily_site_summaries',
+  'element_visibility',
+  'element_visibility_v2',
+  'events',
+  'events_daily_by_dim',
+  'events_hourly_by_dim',
+  'events_monthly_by_dim',
+  'form_interactions',
+  'gsc_data',
+  'image_visibility',
+  'page_content_sections',
+  'page_issues',
+  'proposal_tickets',
+  'scenario_match',
+  'section_behavior_summary',
+  'sessions',
+  'sites',
+  'video_events',
+  'web_vitals',
 ]
+
+const REQUIRED = new Set(REQUIRED_TABLES)
 
 async function rows(sql) {
   return (await client.query({ query: sql, format: 'JSONEachRow' })).json()
 }
 
-async function main() {
-  console.log(`mode: ${EXECUTE ? 'EXECUTE (GRANT + ALTER USER)' : 'DRY-RUN (現状表示のみ)'}\n`)
-
-  // 現状 grant の確認
-  const grants = await rows(
-    `SELECT access_type, table FROM system.grants WHERE user_name = 'analytics_reader' AND database = 'clickinsight'`,
-  )
-  const granted = new Set(grants.filter((g) => g.access_type === 'SELECT').map((g) => g.table))
-  // table=null は database 全体 grant
-  const hasDbWide = grants.some((g) => g.access_type === 'SELECT' && g.table === null)
-  console.log(`現状: SELECT grant ${hasDbWide ? '(database 全体)' : `対象 ${granted.size} テーブル`}`)
-
-  const missing = hasDbWide ? [] : REQUIRED_TABLES.filter((t) => !granted.has(t))
-  for (const t of REQUIRED_TABLES) {
-    const ok = hasDbWide || granted.has(t)
-    console.log(`  ${ok ? '✓' : '✗'} clickinsight.${t}${ok ? '' : ' ← GRANT 必要'}`)
-  }
-
-  // user-level メモリ設定の現状
-  const settings = await rows(
-    `SELECT setting_name, value FROM system.settings_profile_elements WHERE user_name = 'analytics_reader' AND setting_name = 'max_memory_usage'`,
-  )
-  const hasMemCap = settings.length > 0
-  console.log(`\nuser-level max_memory_usage: ${hasMemCap ? settings[0].value : '未設定 ← 適用推奨 (2GB)'}`)
-
+async function command(sql) {
   if (!EXECUTE) {
-    console.log('\n適用するには: node scripts/operator-grant-analytics-reader.mjs --execute')
-    await client.close()
+    console.log(`[dry-run] ${sql}`)
     return
   }
+  await client.command({ query: sql })
+  console.log(`[applied] ${sql}`)
+}
 
-  for (const t of missing) {
-    process.stdout.write(`GRANT SELECT ON clickinsight.${t} TO analytics_reader ...`)
-    try {
-      await client.command({ query: `GRANT SELECT ON clickinsight.${t} TO analytics_reader` })
-      console.log(' 完了')
-    } catch (e) {
-      console.log(` ✗ ${e.message?.split('\n')[0]?.slice(0, 120)}`)
-    }
+async function tableExists(table) {
+  const r = await rows(
+    `SELECT count() AS c
+     FROM system.tables
+     WHERE database = 'clickinsight' AND name = '${table}'`,
+  ).catch(() => [])
+  return Number(r[0]?.c ?? 0) > 0
+}
+
+async function main() {
+  console.log(`mode: ${EXECUTE ? 'EXECUTE' : 'DRY-RUN'}\n`)
+
+  const existingTables = []
+  const missingTables = []
+  for (const table of REQUIRED_TABLES) {
+    if (await tableExists(table)) existingTables.push(table)
+    else missingTables.push(table)
   }
 
-  if (!hasMemCap) {
-    process.stdout.write(`ALTER USER analytics_reader SETTINGS max_memory_usage = 2000000000 ...`)
-    try {
-      // 既存 user-level settings (readonly=1 等) を保持したまま追記する形:
-      // ClickHouse の ALTER USER ... SETTINGS は指定 setting を追加/更新する (他は維持)。
-      await client.command({
-        query: `ALTER USER analytics_reader SETTINGS max_memory_usage = 2000000000`,
-      })
-      console.log(' 完了 (heatmap/チャットの1クエリがサーバ全体を巻き込めなくなる)')
-    } catch (e) {
-      console.log(` ✗ ${e.message?.split('\n')[0]?.slice(0, 120)}`)
-    }
+  if (missingTables.length > 0) {
+    console.log(`missing tables skipped: ${missingTables.map((t) => `clickinsight.${t}`).join(', ')}`)
   }
 
-  console.log('\n✓ 完了。アプリ側の再デプロイは不要 (権限は即時反映)。ヒートマップをリロードして確認。')
+  const grants = await rows(
+    `SELECT access_type, database, table
+     FROM system.grants
+     WHERE user_name = 'analytics_reader'
+       AND access_type = 'SELECT'
+       AND database = 'clickinsight'
+     ORDER BY database, table`,
+  )
+
+  const hasDbWide = grants.some((g) => g.table == null)
+  const currentTables = new Set(grants.filter((g) => g.table != null).map((g) => String(g.table)))
+  const extraTables = [...currentTables].filter((t) => !REQUIRED.has(t))
+  const missingGrants = existingTables.filter((t) => !currentTables.has(t) || hasDbWide)
+
+  console.log(`database-wide SELECT: ${hasDbWide ? 'present (will revoke)' : 'absent'}`)
+  console.log(`current table grants: ${[...currentTables].sort().join(', ') || '(none)'}`)
+  console.log(`required table grants: ${existingTables.join(', ')}`)
+  console.log(`extra table grants: ${extraTables.join(', ') || '(none)'}`)
+  console.log(`missing explicit grants: ${missingGrants.join(', ') || '(none)'}`)
+
+  if (hasDbWide) {
+    await command(`REVOKE SELECT ON clickinsight.* FROM analytics_reader`)
+  }
+
+  for (const table of extraTables) {
+    await command(`REVOKE SELECT ON clickinsight.${table} FROM analytics_reader`)
+  }
+
+  for (const table of missingGrants) {
+    await command(`GRANT SELECT ON clickinsight.${table} TO analytics_reader`)
+  }
+
+  await command(`ALTER USER analytics_reader SETTINGS max_memory_usage = 2000000000`)
+
+  const finalGrants = await rows(
+    `SELECT access_type, database, table
+     FROM system.grants
+     WHERE user_name = 'analytics_reader'
+       AND access_type = 'SELECT'
+       AND database = 'clickinsight'
+     ORDER BY database, table`,
+  )
+  console.log('\nfinal SELECT grants:')
+  for (const g of finalGrants) {
+    console.log(`  ${g.database}.${g.table ?? '*'}`)
+  }
+
   await client.close()
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   console.error('FAILED:', e.message?.split('\n')[0])
+  await client.close().catch(() => {})
   process.exit(1)
 })
