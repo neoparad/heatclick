@@ -9,11 +9,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@cloudflare/puppeteer": "^0.0.9"
+    "@cloudflare/puppeteer": "^1.1.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260411.1",
+    "@cloudflare/workers-types": "^4.20260702.1",
     "typescript": "^5.4.0",
-    "wrangler": "^4.0.0"
+    "wrangler": "^4.107.0"
   }
 }
