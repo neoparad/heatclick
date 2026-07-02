@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 
 import { getClickHouseClient } from '@/lib/clickhouse'
+import { getCloudflareBRConfig, getScreenshotWorkerConfig } from '@/lib/heatmap/screenshot-provider'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -23,11 +24,30 @@ export async function GET() {
     clickhouse = 'unhealthy'
   }
 
+  // screenshot 経路の設定有無 (boolean のみ、secret は返さない)。
+  // Worker env 欠落 → 全 capture が microlink 劣化 (lazy 画像空白/上部のみ) に落ちるのに
+  // 気づけない事故が過去に起きたため、期待 provider をここで可視化する。
+  const workerConfigured = getScreenshotWorkerConfig() != null
+  const cloudflareBRConfigured = getCloudflareBRConfig() != null
+  const expectedScreenshotProvider = workerConfigured
+    ? 'worker'
+    : cloudflareBRConfigured
+      ? 'cloudflare-rest'
+      : 'microlink-fallback'
+
   const overall = clickhouse === 'healthy' ? 'healthy' : 'degraded'
   return NextResponse.json({
     status: overall === 'healthy' ? 'ok' : 'degraded',
     timestamp: new Date().toISOString(),
     service: process.env.SERVICE_NAME ?? 'api',
-    health: { clickhouse, overall },
+    health: {
+      clickhouse,
+      overall,
+      screenshot: {
+        workerConfigured,
+        cloudflareBRConfigured,
+        expectedProvider: expectedScreenshotProvider,
+      },
+    },
   })
 }
