@@ -15,7 +15,7 @@ export const dynamic = 'force-dynamic'
 export async function GET() {
   let clickhouse: 'healthy' | 'unhealthy' = 'unhealthy'
   try {
-    const ch = getClickHouseClient()
+    const ch = getClickHouseClient('analytics_reader')
     const rs = await ch.query({ query: 'SELECT 1', format: 'JSONEachRow' })
     await rs.json()
     clickhouse = 'healthy'
