@@ -186,10 +186,13 @@ export function HeatOverlay({
  */
 /** intensity [0,1] → warm rgba (low=yellow-green, high=red)。 */
 function readHeatColor(intensity: number): string {
-  const r = Math.round(50 + intensity * 165)
-  const g = Math.round(161 - intensity * 130)
-  const b = Math.round(80 - intensity * 70)
-  const alpha = 0.16 + intensity * 0.44
+  // 続137 (Owner報告③): intensity は logNormalize 済で高域が 0.6〜1.0 に密集し濃淡が潰れる。
+  //   gamma 1.6 で再展開してコントラストを回復し、alpha 幅も 0.16〜0.60 → 0.14〜0.86 に拡大する。
+  const e = Math.pow(Math.min(1, Math.max(0, intensity)), 1.6)
+  const r = Math.round(40 + e * 190)
+  const g = Math.round(170 - e * 150)
+  const b = Math.round(90 - e * 80)
+  const alpha = 0.14 + e * 0.72
   return `rgba(${r},${g},${b},${alpha.toFixed(2)})`
 }
 
@@ -284,7 +287,8 @@ function ScrollReachOverlay({
   if (maxBottom > 0) {
     for (const band of sorted) {
       const centerPct = (((band.top + band.height / 2) / maxBottom) * 100).toFixed(2)
-      const alpha = 0.08 + band.reach * 0.4
+      // 続137 (Owner報告③): scroll 到達帯の alpha を 0.08〜0.48 → 0.10〜0.72 に拡大し判別性UP。
+      const alpha = 0.1 + band.reach * 0.62
       stops.push(`rgba(47,134,224,${alpha.toFixed(2)}) ${centerPct}%`)
     }
   }
@@ -352,7 +356,8 @@ function ExitGradientOverlay({
     for (const row of sorted) {
       const centerPct = (((row.top + row.height / 2) / maxBottom) * 100).toFixed(2)
       const norm = maxDrop > 0 ? (row.dropoff ?? 0) / maxDrop : 0
-      const alpha = norm * 0.5
+      // 続137 (Owner報告③): 離脱の alpha を norm*0.5 → gamma+下限付きで 0.12〜0.78 に拡大。
+      const alpha = norm <= 0 ? 0 : 0.12 + Math.pow(norm, 0.85) * 0.66
       stops.push(`rgba(214,69,69,${alpha.toFixed(2)}) ${centerPct}%`)
     }
   }
