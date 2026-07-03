@@ -43,10 +43,10 @@ import type {
 const SOURCE_WIDTH = 1280
 const MOCKUP_CANVAS_Y_RANGE = 720
 
-/** cluster grid (capture CSS px)。小さいほど密、大きいほど粗。 */
-const CLUSTER_GRID = 48
-/** density 用 blob の最大個数 (DOM blob を重ねて連続的な heat field を作る)。 */
-const MAX_DENSITY_BLOBS = 60
+/** cluster grid (capture CSS px)。小さいほど密、大きいほど粗。続137: 48→32 で粒状感UP (Owner報告②)。 */
+const CLUSTER_GRID = 32
+/** density 用 blob の最大個数。続137: 60→110 で面を増やし「クリックが疎に見える」を改善 (Owner報告②)。 */
+const MAX_DENSITY_BLOBS = 110
 /** label / card 化する hotspot 上位数 (clutter を避けるため blob より少なく)。 */
 const MAX_HOTSPOTS = 6
 /** Phase 2: pageHeight*1.05 を超える y は outlier (provider バグ / 計測ノイズ) として捨てる。 */
@@ -178,7 +178,9 @@ function buildRealClickBlobs(clusters: RawPoint[], maxCount: number): HeatBlob[]
     return {
       id: `real-click-${i + 1}`,
       mode: 'click',
-      severity: ratio >= 0.5 ? 'strong' : 'normal',
+      // 続137 (Owner報告③): 閾値 0.5→0.68。logNormalize では count>=~7 が全て strong 紫になり
+      //   濃淡が潰れていた。真に集中した cluster のみ strong にして normal との差を出す。
+      severity: ratio >= 0.68 ? 'strong' : 'normal',
       x: Math.max(0, Math.round(p.x - diameter / 2)),
       y: Math.max(0, Math.round(p.y - diameter / 2)),
       width: diameter,

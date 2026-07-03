@@ -628,7 +628,7 @@ export function HeatmapCanvas({
 
           <div
             data-testid="hm-canvas-scroll"
-            className="hm-canvas relative flex-1 overflow-y-auto p-5"
+            className="hm-canvas relative flex-1 overflow-y-auto overflow-x-hidden p-5"
             style={{
               background: fullscreen
                 ? 'linear-gradient(180deg, #1a1c20 0%, #0f1114 100%)'

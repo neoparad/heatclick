@@ -248,6 +248,11 @@ function jsonError(status: number, message: string): Response {
  */
 async function autoScroll(page: Page): Promise<void> {
   // 続133: lazy 画像を確実に出すための 3 段強化。
+  // 続137 (Owner報告①「一部の画像が表示されない」): 旧実装は <img> の data-src 系のみ昇格し、
+  //   (a) <picture><source srcset> (b) [data-bg]/[data-background] の CSS 背景 lazy
+  //   (c) <noscript> 内の <img> 復元 を撮り逃していた。奇しくも Microlink fallback 側
+  //   (screenshot-provider.ts の CLOUDFLARE_LAZY_LOAD_SCRIPT) には既にこの3つがあり、
+  //   primary の Worker には無かった非対称を解消する (同スクリプトから移植)。
   //   (1) data-src / data-lazy-src / data-original を src に昇格し loading=eager 化
   //       (一部のサイトは IntersectionObserver でなく独自属性で遅延読込するため、
   //        スクロールだけでは src が swap されず空白のままになる)。
@@ -259,8 +264,34 @@ async function autoScroll(page: Page): Promise<void> {
         im.getAttribute('data-lazy-src') ||
         im.getAttribute('data-original');
       if (ds && im.src !== ds) im.src = ds;
-      const dss = im.getAttribute('data-srcset') || im.getAttribute('data-lazy-srcset');
-      if (dss) im.srcset = dss;
+    }
+    // <img> と <picture><source> 両方の data-srcset を昇格 (source 昇格後に sizes を
+    // 触って reflow を促し、ブラウザに新 srcset を再評価させる)。
+    for (const el of Array.from(document.querySelectorAll('img,source'))) {
+      const dss = el.getAttribute('data-srcset') || el.getAttribute('data-lazy-srcset');
+      if (dss) el.setAttribute('srcset', dss);
+    }
+    for (const im of Array.from(document.querySelectorAll('img'))) {
+      im.sizes = im.sizes;
+    }
+    // CSS 背景画像の lazy (data-bg / data-background) を実体化。
+    for (const el of Array.from(document.querySelectorAll('[data-bg],[data-background]'))) {
+      const bg = el.getAttribute('data-bg') || el.getAttribute('data-background');
+      if (bg) (el as HTMLElement).style.backgroundImage = `url(${bg})`;
+    }
+    // <noscript> 内に隠れた <img> (JS 検出前提の lazy パターン) を DOM に復元。
+    for (const ns of Array.from(document.querySelectorAll('noscript'))) {
+      try {
+        const html = ns.textContent || '';
+        if (/<img/i.test(html)) {
+          const tmp = document.createElement('div');
+          tmp.innerHTML = html;
+          const img = tmp.querySelector('img');
+          if (img && ns.parentNode) ns.parentNode.insertBefore(img, ns);
+        }
+      } catch {
+        // malformed noscript content — skip
+      }
     }
   });
 

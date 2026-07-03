@@ -66,7 +66,10 @@ const KEY_PREFIX = 'heatmap-screenshots'
 // P2 (⑤⑥ full-height): Worker の x-capture-capped / x-capture-full-height を capture+metadata に
 //   通すようになった。旧 v10 cache は capped 情報を持たないため (= capped ページの scroll/exit が
 //   画像高で頭打ちのまま) v11 に bump し、Worker 経由で metadata 付きに撮り直す。
-const CAPTURE_VERSION = 'v11'
+// 続137 (Owner報告①「一部の画像が表示されない」): Worker の lazy 昇格を <picture><source>・
+//   CSS背景 [data-bg]/[data-background]・<noscript> 復元まで拡張 (Microlink 側と対称化)。
+//   旧 v11 cache はこれらの画像が空白のまま撮られているため v12 に bump して撮り直す。
+const CAPTURE_VERSION = 'v12'
 
 /** TTL (capturedAt 比較) */
 const FRESH_TTL_MS = 24 * 60 * 60 * 1000 // 24h: これ以内なら即返す

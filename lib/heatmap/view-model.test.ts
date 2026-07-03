@@ -169,10 +169,10 @@ describe('buildHeatmapViewModel', () => {
       // emotionSummary は 0 distribution
       expect(vm.emotionSummary.hes).toBe(0)
       expect(vm.emotionSummary.eng).toBe(0)
-      // click blob は density field (cluster 数、MAX_DENSITY_BLOBS=60 上限)
+      // click blob は density field (cluster 数、続137 で MAX_DENSITY_BLOBS 60→110 に引上げ)
       const clickBlobs = vm.blobs.filter((b) => b.mode === 'click')
       expect(clickBlobs.length).toBeGreaterThanOrEqual(1)
-      expect(clickBlobs.length).toBeLessThanOrEqual(60)
+      expect(clickBlobs.length).toBeLessThanOrEqual(110)
       // label tag は MAX_HOTSPOTS=6 上限、blob より少ない
       expect(vm.tags.length).toBeLessThanOrEqual(6)
       expect(vm.tags.length).toBeLessThanOrEqual(clickBlobs.length)
