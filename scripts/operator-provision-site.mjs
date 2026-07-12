@@ -118,6 +118,7 @@ async function main() {
 <!-- UGOKI MAP Tracking -->
 <script>
   window.CLICKINSIGHT_SITE_ID = '${trackingId}';
+  window.CLICKINSIGHT_TENANT_ID = '${TENANT_ID}';
   window.CLICKINSIGHT_DEBUG = false;
 </script>
 <script src="${origin}/v2/tracking.js" async></script>
