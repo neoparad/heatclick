@@ -27,6 +27,7 @@
 import type { Metadata } from 'next'
 import { cookies, headers } from 'next/headers'
 
+import { getServerSession } from '@/lib/auth/server-session'
 import { PageMeta } from '@/components/layout/page-meta'
 import {
   InstallSettingsPane,
@@ -60,6 +61,15 @@ export default async function InstallPage({ searchParams }: InstallPageProps) {
   const activeSite =
     PHASE1_SITES.find((s) => s.siteId === searchParams.site_id) ?? DEFAULT_ACTIVE_SITE
 
+  // P0-2 fix (independent review 2026-07-11): tracking snippet に tenant_id を必ず含める。
+  // tracking.js は data-tenant-id / window.CLICKINSIGHT_TENANT_ID のいずれも無いと
+  // sendBeacon を無言で抑止する (public/v2/tracking.js:136)。middleware が本ページを
+  // 認証必須にしているため session は通常存在するが、防御的に空文字 fallback する
+  // (空文字なら tracking.js 側が同様に抑止し、少なくとも「データが来ない」より安全な
+  // 「明示的に抑止される」状態になる)。
+  const session = await getServerSession()
+  const tenantId = session?.tenant_id ?? ''
+
   // tracking script origin (env 経由、未設定時は host ヘッダから組立)
   const h = await headers()
   const host = h.get('host')
@@ -77,6 +87,7 @@ export default async function InstallPage({ searchParams }: InstallPageProps) {
       <InstallSettingsPane
         activeSiteId={activeSite.siteId}
         activeSiteName={activeSite.siteName}
+        tenantId={tenantId}
         trackingOrigin={trackingOrigin}
         initialSiteStats={initialSiteStats}
       />

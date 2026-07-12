@@ -53,6 +53,9 @@ interface InstallSettingsPaneProps {
   /** 現在の operator が選択中の site (Phase 1 = bihadashop.jp 固定)。 */
   activeSiteId: string
   activeSiteName: string
+  /** P0-2 fix: tracking snippet に必須 (public/v2/tracking.js の tenant_id 必須化、未指定時は
+   *  sendBeacon が無言で抑止される)。session (getServerSession) 由来、server から渡される。 */
+  tenantId: string
   /** tracking.js script の host (env から server 経由で渡される) */
   trackingOrigin: string
   /** Phase 1 5 sites の初期 status (server で /api/pages を叩いた結果) */
@@ -159,13 +162,14 @@ export const INSTALL_METHODS: InstallMethodDef[] = [
         </li>
         <li>
           <span className="mini-code">
-            {`<Script src="<origin>/v2/tracking.js" strategy="afterInteractive" />`}
+            {`<Script src="<origin>/v2/tracking.js" data-site-id="<site_id>" data-tenant-id="<tenant_id>" strategy="afterInteractive" />`}
           </span>{' '}
-          を追加
+          を追加 (site_id / tenant_id は上部 Step 1 のタグと同じ値)
         </li>
         <li>
-          tracking_id は環境変数{' '}
-          <span className="mini-code">NEXT_PUBLIC_UGOKIMAP_SITE_ID</span> 推奨
+          data-tenant-id が無いと計測は無言で停止します。site_id / tenant_id は環境変数
+          (例 <span className="mini-code">NEXT_PUBLIC_UGOKIMAP_SITE_ID</span> /{' '}
+          <span className="mini-code">NEXT_PUBLIC_UGOKIMAP_TENANT_ID</span>) 経由で注入しても構いません
         </li>
       </ol>
     ),
@@ -207,6 +211,7 @@ export const VERIFY_ROWS_TEMPLATE: VerifyRowDef[] = [
 export function InstallSettingsPane({
   activeSiteId,
   activeSiteName,
+  tenantId,
   trackingOrigin,
   initialSiteStats,
 }: InstallSettingsPaneProps) {
@@ -323,7 +328,11 @@ export function InstallSettingsPane({
 
         <div className="ug-st-grid">
           <div>
-            <StepOneSnippet siteId={activeSiteId} trackingOrigin={trackingOrigin} />
+            <StepOneSnippet
+              siteId={activeSiteId}
+              tenantId={tenantId}
+              trackingOrigin={trackingOrigin}
+            />
             <StepTwoInstallMethods />
             <StepThreeVerify activeStat={activeStat} />
           </div>
@@ -433,17 +442,28 @@ function StatusBanner({
   )
 }
 
-function StepOneSnippet({ siteId, trackingOrigin }: { siteId: string; trackingOrigin: string }) {
+function StepOneSnippet({
+  siteId,
+  tenantId,
+  trackingOrigin,
+}: {
+  siteId: string
+  tenantId: string
+  trackingOrigin: string
+}) {
   const [copied, setCopied] = useState(false)
+  // P0-2 fix (independent review 2026-07-11): tenant_id 欠落で tracking.js が全 event を
+  // 無言で抑止していた (public/v2/tracking.js:136)。window.CLICKINSIGHT_TENANT_ID を追加。
   const snippet = useMemo(
     () =>
       `<!-- UGOKI MAP Tracking -->\n` +
       `<script>\n` +
       `  window.CLICKINSIGHT_SITE_ID = '${siteId}';\n` +
+      `  window.CLICKINSIGHT_TENANT_ID = '${tenantId}';\n` +
       `  window.CLICKINSIGHT_DEBUG = false;\n` +
       `</script>\n` +
       `<script src="${trackingOrigin}/v2/tracking.js" async></script>`,
-    [siteId, trackingOrigin],
+    [siteId, tenantId, trackingOrigin],
   )
 
   const handleCopy = useCallback(async () => {
@@ -455,6 +475,11 @@ function StepOneSnippet({ siteId, trackingOrigin }: { siteId: string; trackingOr
       // ignore — user can select manually
     }
   }, [snippet])
+
+  // P0-2 fix: tenantId 欠落 (session 取得失敗等) で壊れたタグを無警告でコピーさせない。
+  // tracking.js は tenant_id 空だと sendBeacon を無言で抑止するため (:136)、
+  // コピー自体をブロックし再読込を促す。
+  const tenantMissing = tenantId === ''
 
   const handleCopyId = useCallback(async () => {
     try {
@@ -478,11 +503,27 @@ function StepOneSnippet({ siteId, trackingOrigin }: { siteId: string; trackingOr
           <Copy className="h-3 w-3" aria-hidden /> ID コピー
         </button>
       </div>
+      {tenantMissing ? (
+        <div className="ug-st-banner warn" role="status">
+          <div className="ic">
+            <AlertTriangle className="h-5 w-5" aria-hidden />
+          </div>
+          <div>
+            セッション情報の取得に失敗したため、タグを生成できません。ページを再読み込みしてから再度お試しください
+            (このまま設置すると計測が行われません)。
+          </div>
+        </div>
+      ) : null}
       <div style={{ position: 'relative' }}>
         <pre className="ug-st-code-block">
           <code>{snippet}</code>
         </pre>
-        <button type="button" className="ug-st-code-copy" onClick={handleCopy}>
+        <button
+          type="button"
+          className="ug-st-code-copy"
+          onClick={handleCopy}
+          disabled={tenantMissing}
+        >
           <Copy className="h-2.5 w-2.5" aria-hidden /> {copied ? 'コピー済' : 'コードコピー'}
         </button>
       </div>
