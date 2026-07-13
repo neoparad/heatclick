@@ -14,6 +14,8 @@ import { NextResponse, type NextRequest } from 'next/server'
 import { z } from 'zod'
 
 import { getServerSession } from '@/lib/auth/server-session'
+import { getClickHouseClient } from '@/lib/clickhouse'
+import { computePathSetStats, markPathSetStatsUnavailable } from '@/lib/paths/stats-query'
 import { canWriteScenario, normalizeRole } from '@/lib/scenarios/publish-rbac'
 import { CloudflareKvError } from '@/lib/scenarios/kv-storage'
 import {
@@ -92,7 +94,15 @@ export async function GET(
     if (!found) {
       return NextResponse.json({ error: 'not_found' }, { status: 404 })
     }
-    return NextResponse.json(found, {
+    let pathSet = found
+    try {
+      pathSet = await computePathSetStats(getClickHouseClient('analytics_reader'), found)
+    } catch {
+      // The definition is still useful, but callers must see that live stats were not computed.
+      console.error('[paths/[id] api] path stats client initialization failed')
+      pathSet = markPathSetStatsUnavailable(found, 'clickhouse_error')
+    }
+    return NextResponse.json(pathSet, {
       status: 200,
       headers: { 'Cache-Control': 'no-store' },
     })

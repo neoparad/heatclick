@@ -312,6 +312,10 @@ function withUnanalysedStats(pathSet: PathSet, reason: string, warnings: Readonl
   }
 }
 
+export function markPathSetStatsUnavailable(pathSet: PathSet, reason: string): PathSet {
+  return withUnanalysedStats(pathSet, reason, ['ClickHouse query failed'])
+}
+
 export async function computePathSetStats(
   client: ClickHouseClient,
   pathSet: PathSet,
@@ -367,6 +371,6 @@ export async function computePathSetStats(
       },
     }
   } catch {
-    return withUnanalysedStats(pathSet, 'clickhouse_error', ['ClickHouse query failed'])
+    return markPathSetStatsUnavailable(pathSet, 'clickhouse_error')
   }
 }
