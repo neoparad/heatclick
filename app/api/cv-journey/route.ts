@@ -21,6 +21,7 @@ import { getClickHouseClient } from '@/lib/clickhouse'
 import { DEFAULT_FUNNEL } from '@/lib/cv-journey/funnel-config'
 import { buildFunnelData } from '@/lib/cv-journey/query'
 import { buildDummyData } from '@/lib/cv-journey/fixtures'
+import { recordDummyFallback } from '@/lib/monitoring/dummy-fallback-counter'
 import type { CvJourneyError, CvJourneySuccess } from '@/lib/api/cv-journey'
 
 export const runtime = 'nodejs'
@@ -97,6 +98,7 @@ export async function GET(request: Request) {
     // ClickHouse 接続不可 / 列不在 / timeout → ダミーにフォールバック（heatmap と同思想）
     const msg = e instanceof Error ? e.message : 'unknown'
     console.error(`[cv-journey] query failed, falling back to dummy: ${msg}`)
+    await recordDummyFallback('cv-journey')
     return NextResponse.json<CvJourneySuccess>({
       success: true,
       data: buildDummyData(DEFAULT_FUNNEL),
