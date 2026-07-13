@@ -43,7 +43,7 @@ export type InsightSeverity = (typeof INSIGHT_SEVERITIES)[number]
 export const PATHSET_STATUSES = ['draft', 'monitoring', 'paused', 'archived'] as const
 export type PathSetStatus = (typeof PATHSET_STATUSES)[number]
 
-export const EVIDENCE_LEVELS = ['proven', 'observed', 'inferred', 'planned'] as const
+export const EVIDENCE_LEVELS = ['proven', 'observed', 'observed_approx', 'inferred', 'planned'] as const
 export type EvidenceLevel = (typeof EVIDENCE_LEVELS)[number]
 
 // ── 分析結果（ノード/エッジ/サマリ）──────────────────────────────────────────────

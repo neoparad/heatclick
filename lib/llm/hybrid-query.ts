@@ -2466,7 +2466,7 @@ export interface FunnelResult {
 }
 
 /** event type allowlist (SQL injection 防止: kind='event' の value をバインドで渡すが念のため) */
-const ALLOWED_EVENT_TYPES = new Set([
+export const ALLOWED_EVENT_TYPES: ReadonlySet<string> = new Set([
   'pageview',
   'click',
   'conversion',
