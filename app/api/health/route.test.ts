@@ -7,10 +7,12 @@
 
 jest.mock('@/lib/clickhouse')
 jest.mock('@/lib/monitoring/ingest-freshness')
+jest.mock('@/lib/monitoring/dummy-fallback-counter')
 jest.mock('@/lib/heatmap/screenshot-provider')
 
 import { getClickHouseClient } from '@/lib/clickhouse'
 import { getIngestFreshnessSummary } from '@/lib/monitoring/ingest-freshness'
+import { getRecentDummyFallbacks } from '@/lib/monitoring/dummy-fallback-counter'
 import { getCloudflareBRConfig, getScreenshotWorkerConfig } from '@/lib/heatmap/screenshot-provider'
 
 import { GET } from './route'
@@ -20,6 +22,9 @@ const mockGetClickHouseClient = getClickHouseClient as jest.MockedFunction<
 >
 const mockGetIngestFreshnessSummary = getIngestFreshnessSummary as jest.MockedFunction<
   typeof getIngestFreshnessSummary
+>
+const mockGetRecentDummyFallbacks = getRecentDummyFallbacks as jest.MockedFunction<
+  typeof getRecentDummyFallbacks
 >
 const mockGetScreenshotWorkerConfig = getScreenshotWorkerConfig as jest.MockedFunction<
   typeof getScreenshotWorkerConfig
@@ -37,13 +42,25 @@ function fakeChClient(pingImpl: () => Promise<unknown>) {
 }
 
 describe('GET /api/health', () => {
+  const originalForcedDummy = process.env.CV_JOURNEY_DUMMY_ONLY
+
   beforeEach(() => {
     jest.resetAllMocks()
+    delete process.env.CV_JOURNEY_DUMMY_ONLY
     mockGetScreenshotWorkerConfig.mockReturnValue({
       workerUrl: 'https://worker.example',
       workerToken: 'tok',
     })
     mockGetCloudflareBRConfig.mockReturnValue(null)
+    mockGetRecentDummyFallbacks.mockResolvedValue({ count: 0, checked: true, windowHours: 6 })
+  })
+
+  afterAll(() => {
+    if (originalForcedDummy === undefined) {
+      delete process.env.CV_JOURNEY_DUMMY_ONLY
+    } else {
+      process.env.CV_JOURNEY_DUMMY_ONLY = originalForcedDummy
+    }
   })
 
   it('ping失敗時はfreshnessクエリを呼ばずunhealthy/degradedを返す (fail-fast)', async () => {
@@ -162,5 +179,74 @@ describe('GET /api/health', () => {
     const body = await res.json()
 
     expect(body.health.screenshot.expectedProvider).toBe('microlink-fallback')
+  })
+
+  it('recent dummy fallbackがあればoverall degradedにする', async () => {
+    mockGetClickHouseClient.mockReturnValue(fakeChClient(() => Promise.resolve([])))
+    mockGetIngestFreshnessSummary.mockResolvedValue({
+      totalSites: 4,
+      activeSites: 4,
+      staleSites: 0,
+      neverActiveSites: 0,
+      thresholdHours: 6,
+      ok: true,
+    })
+    mockGetRecentDummyFallbacks.mockResolvedValue({ count: 2, checked: true, windowHours: 6 })
+
+    const response = await GET()
+    const body = await response.json()
+
+    expect(body.health.cvJourney).toEqual({
+      recentDummyFallbacks: 2,
+      checked: true,
+      windowHours: 6,
+      forcedDummyMode: false,
+      ok: false,
+    })
+    expect(body.health.overall).toBe('degraded')
+  })
+
+  it('forced dummy modeならfallback件数が0でもoverall degradedにする', async () => {
+    process.env.CV_JOURNEY_DUMMY_ONLY = '1'
+    mockGetClickHouseClient.mockReturnValue(fakeChClient(() => Promise.resolve([])))
+    mockGetIngestFreshnessSummary.mockResolvedValue({
+      totalSites: 4,
+      activeSites: 4,
+      staleSites: 0,
+      neverActiveSites: 0,
+      thresholdHours: 6,
+      ok: true,
+    })
+
+    const response = await GET()
+    const body = await response.json()
+
+    expect(body.health.cvJourney.forcedDummyMode).toBe(true)
+    expect(body.health.overall).toBe('degraded')
+  })
+
+  it('Redis未確認だけではoverall degradedにしない', async () => {
+    mockGetClickHouseClient.mockReturnValue(fakeChClient(() => Promise.resolve([])))
+    mockGetIngestFreshnessSummary.mockResolvedValue({
+      totalSites: 4,
+      activeSites: 4,
+      staleSites: 0,
+      neverActiveSites: 0,
+      thresholdHours: 6,
+      ok: true,
+    })
+    mockGetRecentDummyFallbacks.mockResolvedValue({ count: 0, checked: false, windowHours: 6 })
+
+    const response = await GET()
+    const body = await response.json()
+
+    expect(body.health.cvJourney).toEqual({
+      recentDummyFallbacks: null,
+      checked: false,
+      windowHours: 6,
+      forcedDummyMode: false,
+      ok: false,
+    })
+    expect(body.health.overall).toBe('healthy')
   })
 })

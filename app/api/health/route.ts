@@ -2,6 +2,10 @@ import { NextResponse } from 'next/server'
 
 import { getClickHouseClient } from '@/lib/clickhouse'
 import { getCloudflareBRConfig, getScreenshotWorkerConfig } from '@/lib/heatmap/screenshot-provider'
+import {
+  DEFAULT_DUMMY_FALLBACK_WINDOW_HOURS,
+  getRecentDummyFallbacks,
+} from '@/lib/monitoring/dummy-fallback-counter'
 import { getIngestFreshnessSummary } from '@/lib/monitoring/ingest-freshness'
 
 export const runtime = 'nodejs'
@@ -25,6 +29,14 @@ const INGEST_UNCHECKED: IngestHealthField = {
   staleSites: null,
   neverActiveSites: null,
   thresholdHours: null,
+}
+
+interface CvJourneyHealthField {
+  recentDummyFallbacks: number | null
+  checked: boolean
+  windowHours: number
+  forcedDummyMode: boolean
+  ok: boolean
 }
 
 /**
@@ -72,6 +84,27 @@ export async function GET() {
     }
   }
 
+  const forcedDummyMode = process.env.CV_JOURNEY_DUMMY_ONLY === '1'
+  let cvJourney: CvJourneyHealthField = {
+    recentDummyFallbacks: null,
+    checked: false,
+    windowHours: DEFAULT_DUMMY_FALLBACK_WINDOW_HOURS,
+    forcedDummyMode,
+    ok: false,
+  }
+  try {
+    const recent = await getRecentDummyFallbacks('cv-journey')
+    cvJourney = {
+      recentDummyFallbacks: recent.checked ? recent.count : null,
+      checked: recent.checked,
+      windowHours: recent.windowHours,
+      forcedDummyMode,
+      ok: recent.checked && recent.count === 0 && !forcedDummyMode,
+    }
+  } catch {
+    // Health remains available even if monitoring infrastructure misbehaves.
+  }
+
   // screenshot 経路の設定有無 (boolean のみ、secret は返さない)。
   // Worker env 欠落 → 全 capture が microlink 劣化 (lazy 画像空白/上部のみ) に落ちるのに
   // 気づけない事故が過去に起きたため、期待 provider をここで可視化する。
@@ -83,7 +116,11 @@ export async function GET() {
       ? 'cloudflare-rest'
       : 'microlink-fallback'
 
-  const overall = clickhouse === 'healthy' && ingest.ok ? 'healthy' : 'degraded'
+  const cvJourneyDegraded =
+    cvJourney.forcedDummyMode ||
+    (cvJourney.checked && (cvJourney.recentDummyFallbacks ?? 0) > 0)
+  const overall =
+    clickhouse === 'healthy' && ingest.ok && !cvJourneyDegraded ? 'healthy' : 'degraded'
   return NextResponse.json({
     status: overall === 'healthy' ? 'ok' : 'degraded',
     timestamp: new Date().toISOString(),
@@ -91,6 +128,7 @@ export async function GET() {
     health: {
       clickhouse,
       ingest,
+      cvJourney,
       overall,
       screenshot: {
         workerConfigured,
