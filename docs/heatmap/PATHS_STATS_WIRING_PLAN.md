@@ -14,18 +14,18 @@
 
 ## 1. 確定した設計判断 (Claudeが決定、実装前提)
 
-### 判断① URLマッチ意味論 = canonical完全一致 (cv-journeyのsubstringから変更)
-- cv-journey は `position(url, {path:String}) > 0` の**部分一致**。paths のノードは「そのページに到達したか」を厳密に判定すべきなので、heatmap と同じ **canonical完全一致**を使う:
-  - SQL: `${canonicalUrlSql('url')} = {sN_url:String}` (`lib/heatmap/canonical-url.ts:34`)
-  - JS: バインド前に `canonicalizeHeatmapUrl(node.url)` で `?`/`#` を除去 (`canonical-url.ts:28`)
-- **グロブ `/products/*` の扱い**: POC は `/products/*` を使うが schema上マッチ意味論は未定義。**Sprint 4 では glob を「prefix一致」として解釈**する: `url` が `/*` で終わるノードは `startsWith(canonical(url), prefix)` = SQL `startsWith(${canonicalUrlSql('url')}, {sN_prefix:String})`。`/*`無しは完全一致。この2形だけをサポートし、正規表現等は非対応 (Phase 1.5)。**この分岐も query_params 束縛必須** (prefix値を文字列連結しない)。
-- **pageviewノード**: `node.url` が `/` で始まる裸のパス。canonical完全一致は `event_type = 'pageview' AND ${canonicalUrlSql('url')} = {sN_url:String}`、末尾 `/*` glob は `event_type = 'pageview' AND startsWith(${canonicalUrlSql('url')}, {sN_prefix:String})`。JS側では `canonicalizeHeatmapUrl()` を適用してから束縛する。
-- **event種別ノード `event:<type>`**: `event_type = {sN_evt:String}`。`<type>` は `hybrid-query.ts` の `ALLOWED_EVENT_TYPES` と同じ有限集合で検証し、未許可は warning を付けてwindowFunnel条件・表示統計から除外する。
-- **conversion種別ノード `conversion:<type>`**: `event_type = 'conversion' AND conversion_type = {sN_cv:String}`。サイト固有の `<type>` はallowlist化せず、必ず `query_params` に束縛する。該当イベントが無ければ0件として扱い、数値を捏造しない。
+### 判断① URLマッチ意味論 = pathname完全一致 + glob prefix
+- paths DSL は裸パス (`/entry/x`) と絶対URLの両方を受け付ける。JS側の `toPathnameForMatch()` が origin/query/hash を除き、ルート以外の末尾スラッシュを除去する。SQL側は `path(url)` に同じ末尾スラッシュ除去を適用し、両側のpathname契約を一致させる。
+- **pageviewノード**: 完全一致は `ifNull(event_type, '') = 'pageview' AND <pathnameExpr> = {sN_path:String}`。末尾 `/*` glob は `startsWith(<pathnameExpr>, {sN_prefix:String})`。`<pathnameExpr>` はNULL-safeな `path(url)` の末尾スラッシュ正規化であり、全値は `query_params` に束縛する。
+- **グロブ `/products/*` の扱い**: glob はprefix一致のみをサポートする。JSは `/products/` をprefixとして束縛するため `/products-other` を誤一致させない。正規表現等はPhase 1.5まで非対応。
+- **event種別ノード `event:<type>`**: `ifNull(event_type, '') = {sN_evt:String}`。`<type>` は `hybrid-query.ts` の `ALLOWED_EVENT_TYPES` と同じ有限集合で検証し、未許可は warning を付けてwindowFunnel条件・表示統計から除外する。
+- **conversion種別ノード `conversion:<type>`**: `ifNull(conversion_type, '') = {sN_cv:String}`。実データではconversion種別は `click` 行に保持されるためevent_typeを固定しない。サイト固有の `<type>` はallowlist化せず、必ず `query_params` に束縛する。該当イベントが無ければ未分析として扱い、数値を捏造しない。
+- windowFunnelに渡す条件式は全てNULL-safeにする。Nullable条件が一つでも混ざると `reached=NULL` でセッション全体が脱落するためである。
 
 ### 判断② write-back方式 = compute-on-read (KVには書き戻さない、Sprint 4)
 - **理由**: (a) KV書き戻しは「いつ再計算するか」の cache invalidation 問題を生む (step編集時リセット、期間変更、日次更新…)。(b) compute-on-read なら常に最新の events を反映し、stale化しない。(c) paths対象は限定公開規模で対象セット数が小さいので、GET時の追加クエリ1本は許容。
 - **実装**: `app/api/paths/route.ts` (list) と `app/api/paths/[id]/route.ts` (detail) の GET で、KVから読んだ PathSet に対し `computePathSetStats()` を呼び、ノード/エッジ/summary/trigger.sessions/averageCvRate を埋めてから返す。KVの行自体は定義のみで不変。
+- **POC例外**: `isDummy:true` のPOC seedはcompute-on-readの対象外とし、既存のダミー数値とD-07バッジをそのまま返す。
 - **evidence_level**: レスポンス上で `'observed_approx'` に射影 (KVは`planned`のまま)。canvas が per-node バッジを付ける。
 - **Sprint 5 で write-back + 日次バッチに移行可能な設計にする**: `computePathSetStats(pathSet, {client, tenantId, ...}): Promise<PathSet>` を純粋な「定義→統計入りPathSet」関数として切り出し、compute-on-read でもバッチwrite-backでも同じ関数を使えるようにする (Sprint 5 で cron から updatePathSet に流すだけ)。
 - **キャッシュ**: compute-on-read のCH負荷を抑えるため、P0-α1/screenshot と同じ L1メモリ+Redis(短TTL 60-120秒) で pathSetId+period 別にキャッシュ。fail-open。list で N セット×funnelクエリが増えるため、list は「トリガーsessionsと各branchのCV率まで」の軽量サマリのみ計算し、詳細 (node別通過数・edge・滞在・perf) は detail GET でのみ完全計算する2段構成にする。

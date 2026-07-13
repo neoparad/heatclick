@@ -61,14 +61,19 @@ function basePathSet(overrides: Partial<PathSet> = {}): PathSet {
 }
 
 describe('computeBranchFunnel', () => {
-  it('binds canonical page, glob, event, and conversion steps without interpolating values', async () => {
+  it('binds NULL-safe pathname, glob, event, and conversion steps without interpolating values', async () => {
     const client = mockClient([[{ s1: 100, s2: 80, s3: 60, s4: 20 }]])
 
     const result = await computeBranchFunnel(client, {
       tenantId: 'tenant_a',
       siteId: 'site_a',
       periodDays: 30,
-      steps: ['/?campaign=summer#top', '/products/*', 'event:click', 'conversion:cart_add'],
+      steps: [
+        'https://bihadashop.jp/?campaign=summer#top',
+        'https://bihadashop.jp/products/*?ignored=1',
+        'event:click',
+        'conversion:cart_add',
+      ],
     })
 
     expect(result.reached).toEqual([100, 80, 60, 20])
@@ -76,10 +81,14 @@ describe('computeBranchFunnel', () => {
 
     const query = client.query as jest.Mock
     const call = query.mock.calls[0][0]
-    expect(call.query).toContain("replaceRegexpOne(url, '[?#].*$', '') = {s0_url:String}")
-    expect(call.query).toContain("startsWith(replaceRegexpOne(url, '[?#].*$', ''), {s1_prefix:String})")
-    expect(call.query).toContain('event_type = {s2_evt:String}')
-    expect(call.query).toContain("event_type = 'conversion' AND conversion_type = {s3_cv:String}")
+    expect(call.query).toContain(
+      "ifNull(event_type, '') = 'pageview' AND if(ifNull(path(url), '') = '/', '/', replaceRegexpOne(ifNull(path(url), ''), '/+$', '')) = {s0_path:String}",
+    )
+    expect(call.query).toContain(
+      "ifNull(event_type, '') = 'pageview' AND startsWith(if(ifNull(path(url), '') = '/', '/', replaceRegexpOne(ifNull(path(url), ''), '/+$', '')), {s1_prefix:String})",
+    )
+    expect(call.query).toContain("ifNull(event_type, '') = {s2_evt:String}")
+    expect(call.query).toContain("ifNull(conversion_type, '') = {s3_cv:String}")
     expect(call.query).toContain('tenant_id = {tenant_id:String}')
     expect(call.query).toContain('site_id = {site_id:String}')
     expect(call.query).toContain('is_agent = 0')
@@ -89,7 +98,7 @@ describe('computeBranchFunnel', () => {
       site_id: 'site_a',
       period_days: 30,
       window_seconds: 1800,
-      s0_url: '/',
+      s0_path: '/',
       s1_prefix: '/products/',
       s2_evt: 'click',
       s3_cv: 'cart_add',
@@ -111,7 +120,7 @@ describe('computeBranchFunnel', () => {
 
     const call = (client.query as jest.Mock).mock.calls[0][0]
     expect(call.query).not.toContain('cart_add')
-    expect(call.query).toContain("event_type = 'conversion' AND conversion_type = {s2_cv:String}")
+    expect(call.query).toContain("ifNull(conversion_type, '') = {s2_cv:String}")
     expect(call.query_params).toMatchObject({ s2_cv: 'cart_add' })
   })
 })
@@ -130,7 +139,9 @@ describe('fetchTriggerSessions', () => {
     expect(result).toEqual({ sessions: 7128, warnings: [] })
     const call = (client.query as jest.Mock).mock.calls[0][0]
     expect(call.query).toContain('uniqExact(session_id) AS sessions')
-    expect(call.query).toContain("event_type = 'pageview' AND replaceRegexpOne(url, '[?#].*$', '') = {s0_url:String}")
+    expect(call.query).toContain(
+      "ifNull(event_type, '') = 'pageview' AND if(ifNull(path(url), '') = '/', '/', replaceRegexpOne(ifNull(path(url), ''), '/+$', '')) = {s0_path:String}",
+    )
     expect(call.query).toContain('tenant_id = {tenant_id:String}')
     expect(call.query).toContain('site_id = {site_id:String}')
     expect(call.query).toContain('is_agent = 0')
@@ -138,7 +149,7 @@ describe('fetchTriggerSessions', () => {
       tenant_id: 'tenant_a',
       site_id: 'site_a',
       period_days: 14,
-      s0_url: '/landing',
+      s0_path: '/landing',
     })
   })
 })
@@ -151,12 +162,12 @@ describe('computePathSetStats', () => {
   })
 
   it('projects observed counts, drop rates, and CV rates without mutating the source definition', async () => {
-    const source = basePathSet()
+    const source = basePathSet({ isDummy: false, evidence_level: 'planned' })
     const client = mockClient([[{ sessions: 100 }], [{ s1: 100, s2: 50, s3: 10 }]])
 
     const result = await computePathSetStats(client, source)
 
-    expect(source.isDummy).toBe(true)
+    expect(source.isDummy).toBe(false)
     expect(source.trigger.sessions).toBe('—')
     expect(result.isDummy).toBe(false)
     expect(result.evidence_level).toBe('observed_approx')
@@ -179,7 +190,7 @@ describe('computePathSetStats', () => {
   it('returns an explicitly unanalysed projection for empty data instead of retaining dummy values', async () => {
     const client = mockClient([[{ sessions: 0 }]])
 
-    const result = await computePathSetStats(client, basePathSet())
+    const result = await computePathSetStats(client, basePathSet({ isDummy: false, evidence_level: 'planned' }))
 
     expect(result.isDummy).toBe(false)
     expect(result.evidence_level).toBe('planned')
@@ -195,7 +206,7 @@ describe('computePathSetStats', () => {
   it('returns an explicitly unanalysed projection when ClickHouse fails', async () => {
     const client = mockClient([new Error('ClickHouse unavailable')])
 
-    const result = await computePathSetStats(client, basePathSet())
+    const result = await computePathSetStats(client, basePathSet({ isDummy: false, evidence_level: 'planned' }))
 
     expect(result.isDummy).toBe(false)
     expect(result.evidence_level).toBe('planned')
@@ -206,5 +217,38 @@ describe('computePathSetStats', () => {
         warnings: ['ClickHouse query failed'],
       },
     })
+  })
+
+  it('returns an unanalysed projection when a real path set has no matching node events', async () => {
+    const client = mockClient([[{ sessions: 100 }], [{ s1: 100, s2: 0, s3: 0 }]])
+
+    const result = await computePathSetStats(
+      client,
+      basePathSet({ isDummy: false, evidence_level: 'planned' }),
+    )
+
+    expect(result.isDummy).toBe(false)
+    expect(result.evidence_level).toBe('planned')
+    expect(result.branches[0].nodes.every((node) => node.stats.length === 0)).toBe(true)
+    expect(result.evidence_data).toMatchObject({
+      pathStats: {
+        statsComputed: false,
+        reason: 'no_matching_steps',
+        warnings: ["No events matched path branch 'branch-a'"],
+      },
+    })
+  })
+
+  it('skips ClickHouse and preserves the existing dummy POC projection', async () => {
+    const source = basePathSet({
+      trigger: { title: 'Home', url: '/', periodDays: 30, sessions: '12,450' },
+      averageCvRate: '4.3%',
+    })
+    const client = mockClient([])
+
+    const result = await computePathSetStats(client, source)
+
+    expect(result).toBe(source)
+    expect(client.query).not.toHaveBeenCalled()
   })
 })

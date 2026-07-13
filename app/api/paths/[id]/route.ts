@@ -95,12 +95,14 @@ export async function GET(
       return NextResponse.json({ error: 'not_found' }, { status: 404 })
     }
     let pathSet = found
-    try {
-      pathSet = await computePathSetStats(getClickHouseClient('analytics_reader'), found)
-    } catch {
-      // The definition is still useful, but callers must see that live stats were not computed.
-      console.error('[paths/[id] api] path stats client initialization failed')
-      pathSet = markPathSetStatsUnavailable(found, 'clickhouse_error')
+    if (!found.isDummy) {
+      try {
+        pathSet = await computePathSetStats(getClickHouseClient('analytics_reader'), found)
+      } catch {
+        // The definition is still useful, but callers must see that live stats were not computed.
+        console.error('[paths/[id] api] path stats client initialization failed')
+        pathSet = markPathSetStatsUnavailable(found, 'clickhouse_error')
+      }
     }
     return NextResponse.json(pathSet, {
       status: 200,

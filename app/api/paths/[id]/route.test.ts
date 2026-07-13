@@ -107,6 +107,20 @@ describe('GET /api/paths/[id]', () => {
     expect(response.headers.get('Cache-Control')).toBe('no-store')
   })
 
+  it('returns a dummy POC definition without initializing ClickHouse', async () => {
+    const definition = pathSet({ isDummy: true, evidence_level: 'inferred' })
+    mockCreatePathSetRepository.mockReturnValue({
+      getPathSet: jest.fn().mockResolvedValue(definition),
+    } as ReturnType<typeof createPathSetRepository>)
+
+    const response = await GET(request(), { params: { id: PATHSET_ID } })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual(definition)
+    expect(mockGetClickHouseClient).not.toHaveBeenCalled()
+    expect(mockComputePathSetStats).not.toHaveBeenCalled()
+  })
+
   it('returns a visible unanalysed projection when ClickHouse client creation fails', async () => {
     const definition = pathSet()
     const unavailable = pathSet({
