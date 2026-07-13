@@ -1,6 +1,7 @@
 import type { ClickHouseClient } from '@clickhouse/client'
 
 import { ALLOWED_EVENT_TYPES } from '@/lib/llm/hybrid-query'
+import { pathnameMatchSql, toPathnameForMatch, toPathnameGlobPrefix } from './url-match'
 import {
   PATHS_UNANALYZED_VALUE,
   edgeBandForDropRate,
@@ -9,7 +10,6 @@ import {
   rollupBranchSeverity,
 } from './stats-format'
 import type { PathBranch, PathNode, PathSet } from './types'
-import { canonicalizeHeatmapUrl, canonicalUrlSql } from '@/lib/heatmap/canonical-url'
 
 const DEFAULT_WINDOW_SECONDS = 1_800
 
@@ -46,9 +46,11 @@ export interface ComputePathSetStatsOptions {
 interface BranchProjection {
   branch: PathBranch
   cvRate: number | null
+  isAnalysed: boolean
+  warning?: string
 }
 
-function stepParamKey(index: number, suffix: 'url' | 'prefix' | 'evt' | 'cv'): string {
+function stepParamKey(index: number, suffix: 'path' | 'prefix' | 'evt' | 'cv'): string {
   return `s${index}_${suffix}`
 }
 
@@ -67,7 +69,7 @@ function buildEventCondition(step: string, index: number): PathStepCondition {
 
   const key = stepParamKey(index, 'evt')
   return {
-    expression: `event_type = {${key}:String}`,
+    expression: `ifNull(event_type, '') = {${key}:String}`,
     params: { [key]: eventType },
   }
 }
@@ -80,29 +82,31 @@ function buildConversionCondition(step: string, index: number): PathStepConditio
 
   const key = stepParamKey(index, 'cv')
   return {
-    expression: `event_type = 'conversion' AND conversion_type = {${key}:String}`,
+    expression: `ifNull(conversion_type, '') = {${key}:String}`,
     params: { [key]: conversionType },
   }
 }
 
 function buildPageCondition(step: string, index: number): PathStepCondition {
-  const canonicalUrl = canonicalizeHeatmapUrl(step)
-  if (!canonicalUrl.startsWith('/') || (canonicalUrl.includes('*') && !canonicalUrl.endsWith('/*'))) {
-    return { expression: '', params: {}, warning: `Unsupported page step '${step}'` }
-  }
-
-  if (canonicalUrl.endsWith('/*')) {
+  const value = step.trim()
+  const prefix = toPathnameGlobPrefix(value)
+  if (prefix) {
     const key = stepParamKey(index, 'prefix')
     return {
-      expression: `event_type = 'pageview' AND startsWith(${canonicalUrlSql('url')}, {${key}:String})`,
-      params: { [key]: canonicalUrl.slice(0, -1) },
+      expression: `ifNull(event_type, '') = 'pageview' AND startsWith(${pathnameMatchSql('url')}, {${key}:String})`,
+      params: { [key]: prefix },
     }
   }
 
-  const key = stepParamKey(index, 'url')
+  const pathname = toPathnameForMatch(value)
+  if (!pathname || pathname.includes('*')) {
+    return { expression: '', params: {}, warning: `Unsupported page step '${step}'` }
+  }
+
+  const key = stepParamKey(index, 'path')
   return {
-    expression: `event_type = 'pageview' AND ${canonicalUrlSql('url')} = {${key}:String}`,
-    params: { [key]: canonicalUrl },
+    expression: `ifNull(event_type, '') = 'pageview' AND ${pathnameMatchSql('url')} = {${key}:String}`,
+    params: { [key]: pathname },
   }
 }
 
@@ -247,8 +251,29 @@ function projectNodeStats(
   return { ...node, stats }
 }
 
+function withUnanalysedBranch(branch: PathBranch): PathBranch {
+  return {
+    ...branch,
+    severity: 'ok',
+    nodes: branch.nodes.map((node) => ({ ...node, stats: [] })),
+    edges: branch.nodes.slice(1).map(() => ({ label: '' })),
+    summary: { ...branch.summary, cvRate: PATHS_UNANALYZED_VALUE, delta: '', deltaTone: 'pos' },
+  }
+}
+
 function projectBranch(branch: PathBranch, funnel: PathStatsStepResult, triggerSessions: number): BranchProjection {
   const nodeReached = funnel.reached.slice(1)
+  const hasUnanalysedNode = nodeReached.some((reached) => reached === null || reached === 0)
+  if (hasUnanalysedNode) {
+    const hasNoMatchingEvent = nodeReached.some((reached) => reached === 0)
+    return {
+      cvRate: null,
+      isAnalysed: false,
+      ...(hasNoMatchingEvent ? { warning: `No events matched path branch '${branch.id}'` } : {}),
+      branch: withUnanalysedBranch(branch),
+    }
+  }
+
   const nodes = branch.nodes.map((node, index) =>
     projectNodeStats(
       node,
@@ -271,11 +296,11 @@ function projectBranch(branch: PathBranch, funnel: PathStatsStepResult, triggerS
     const band = edgeBandForDropRate(drop)
     return { label: `通過 ${formatPathPercent(advanceRate)}`, ...(band ? { band } : {}) }
   })
-  const hasUnsupportedNode = nodeReached.some((reached) => reached === null)
-  const cvRate = hasUnsupportedNode ? null : ratio(nodeReached.at(-1) ?? null, triggerSessions)
+  const cvRate = ratio(nodeReached.at(-1) ?? null, triggerSessions)
 
   return {
     cvRate,
+    isAnalysed: true,
     branch: {
       ...branch,
       nodes,
@@ -312,11 +337,17 @@ function withUnanalysedStats(pathSet: PathSet, reason: string, warnings: Readonl
   }
 }
 
+export function markPathSetStatsUnavailable(pathSet: PathSet, reason: string): PathSet {
+  return withUnanalysedStats(pathSet, reason, ['ClickHouse query failed'])
+}
+
 export async function computePathSetStats(
   client: ClickHouseClient,
   pathSet: PathSet,
   options: ComputePathSetStatsOptions = {},
 ): Promise<PathSet> {
+  if (pathSet.isDummy) return pathSet
+
   try {
     const trigger = await fetchTriggerSessions(client, {
       tenantId: pathSet.tenant_id,
@@ -346,10 +377,17 @@ export async function computePathSetStats(
     const projections = pathSet.branches.map((branch, index) =>
       projectBranch(branch, funnels[index], trigger.sessions),
     )
+    const warnings = [
+      ...funnels.flatMap((funnel) => funnel.warnings),
+      ...projections.flatMap((projection) => (projection.warning ? [projection.warning] : [])),
+    ]
+    if (!projections.some((projection) => projection.isAnalysed)) {
+      return withUnanalysedStats(pathSet, 'no_matching_steps', warnings)
+    }
+
     const cvRates = projections.flatMap((projection) =>
       projection.cvRate === null ? [] : [projection.cvRate],
     )
-    const warnings = funnels.flatMap((funnel) => funnel.warnings)
 
     return {
       ...pathSet,
@@ -367,6 +405,6 @@ export async function computePathSetStats(
       },
     }
   } catch {
-    return withUnanalysedStats(pathSet, 'clickhouse_error', ['ClickHouse query failed'])
+    return markPathSetStatsUnavailable(pathSet, 'clickhouse_error')
   }
 }

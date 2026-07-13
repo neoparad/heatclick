@@ -77,6 +77,7 @@
 ### P0-ζ: cv-journey / paths のダミー混入確認 【私の指摘・未検証】
 - 両者ともCH失敗時に無言でダミー/フォールバック。本番で実データかダミーか未確認。
 - 作業: Codexデスクトップで本番の `meta.dataSource` 確認 + `CV_JOURNEY_DUMMY_ONLY` env確認 + paths統計結線のmerge状態確認。
+- TODO (paths完了後の別issue): cv-journey `DEFAULT_FUNNEL` の `add_to_cart`/`purchase` conversionは本番0件のため、`ifNull(conversion_type, '')` 単独照合、実値 `affiliate_*` の見直し、`path()` pathname正規化、windowFunnel条件のNULL-safe化を行う。
 - 工数: S(調査のみ、コード不要な可能性)。
 
 ### P0-η: 感情タブの扱い 【sol P0/監査整合】
