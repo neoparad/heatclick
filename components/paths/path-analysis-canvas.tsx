@@ -700,6 +700,8 @@ function evidenceBadge(level: EvidenceLevel): string {
       return 'PROVEN'
     case 'observed':
       return 'OBSERVED'
+    case 'observed_approx':
+      return 'OBSERVED APPROX.'
     case 'inferred':
       return 'INFERRED'
     case 'planned':

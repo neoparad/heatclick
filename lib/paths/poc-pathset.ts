@@ -6,7 +6,7 @@
  * 成立するよう、scenarios の POC_SCENARIOS と同じく list / detail に merge する。
  *
  * D-07: isDummy=true / evidence_level='inferred' (dummy 数値入り)。UI は INFERRED バッジを出し、
- * 断定数値を避ける。Sprint 4 で events MV 由来の observed_approx に置換予定。
+ * 断定数値を避ける。Sprint 4 で events 集計由来の observed_approx に置換予定。
  *
  * tenant/site: scenarios POC と同じ linkth_internal + CIP_EcwUTHEZdIOAUqum 固定。
  */
@@ -61,7 +61,7 @@ export const POC_PATHSETS: ReadonlyArray<PathSet> = [
             id: 'A2',
             step: 'A2',
             title: 'カート投入',
-            url: 'event:cart_add',
+            url: 'conversion:cart_add',
             band: 'warn',
             stats: [
               { k: '通過', v: '1,283' },
@@ -118,7 +118,7 @@ export const POC_PATHSETS: ReadonlyArray<PathSet> = [
             id: 'B3',
             step: 'B3',
             title: 'カート投入',
-            url: 'event:cart_add',
+            url: 'conversion:cart_add',
             band: 'warn',
             stats: [
               { k: '通過', v: '307' },
@@ -178,7 +178,7 @@ export const POC_PATHSETS: ReadonlyArray<PathSet> = [
             id: 'C3',
             step: 'C3',
             title: 'カート投入',
-            url: 'event:cart_add',
+            url: 'conversion:cart_add',
             band: 'warn',
             stats: [
               { k: '通過', v: '38' },
