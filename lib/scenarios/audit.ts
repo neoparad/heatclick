@@ -27,6 +27,11 @@ export type ScenarioAuditAction =
   | 'pathset.updated'
   | 'pathset.deleted'
   | 'pathset.access_denied'
+  // CV定義 (lib/conversions/repository.ts) — 同上 audit_events 共用。
+  | 'cvdef.created'
+  | 'cvdef.updated'
+  | 'cvdef.deleted'
+  | 'cvdef.access_denied'
 
 export interface ScenarioAuditEvent {
   action: ScenarioAuditAction

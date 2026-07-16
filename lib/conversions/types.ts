@@ -175,6 +175,7 @@ export const cvDefinitionSchema = z.object({
   value: cvValueSchema.default({ mode: 'none' }),
   created_at: z.string().min(1),
   updated_at: z.string().min(1),
+  created_by: z.string().min(1),
   /**
    * best-effort 楽観ロック。Cloudflare KV に CAS が無いため read 時 version 不一致→409 の
    * best-effort であり、書込競合窓は許容 (§2 設計判断)。
