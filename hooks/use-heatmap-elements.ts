@@ -16,6 +16,29 @@ import {
   type HeatmapElementsQuery,
 } from '@/lib/api/heatmap-elements'
 
+// ---------------------------------------------------------------------------
+// P0 計測 (spec: docs/heatmap/SONNET_PROMPT_P0_instrumentation_2026-07-19.md §4)
+// mark/measure は必ず try/catch で自壊させ、計測失敗がアプリの挙動に一切影響しないようにする
+// (spec §0 絶対条件1)。
+// ---------------------------------------------------------------------------
+function safeMark(name: string): void {
+  try {
+    if (typeof performance === 'undefined' || typeof performance.mark !== 'function') return
+    performance.mark(name)
+  } catch {
+    // instrumentation must never affect app behavior
+  }
+}
+
+function safeMeasure(name: string, startMark: string, endMark: string): void {
+  try {
+    if (typeof performance === 'undefined' || typeof performance.measure !== 'function') return
+    performance.measure(name, startMark, endMark)
+  } catch {
+    // instrumentation must never affect app behavior
+  }
+}
+
 export interface UseHeatmapElementsResult {
   elements: HeatmapElementsData | null
   loading: boolean
@@ -43,6 +66,7 @@ export function useHeatmapElements(query: {
     }
     const ctrl = new AbortController()
     setLoading(true)
+    safeMark('hm:elements:start')
     const apiQuery: HeatmapElementsQuery = {
       site_id: siteId,
       page_url: pageUrl,
@@ -56,7 +80,11 @@ export function useHeatmapElements(query: {
         if (!ctrl.signal.aborted) setElements(data)
       })
       .finally(() => {
-        if (!ctrl.signal.aborted) setLoading(false)
+        if (!ctrl.signal.aborted) {
+          setLoading(false)
+          safeMark('hm:elements:end')
+          safeMeasure('hm:elements', 'hm:elements:start', 'hm:elements:end')
+        }
       })
     return () => ctrl.abort()
   }, [siteId, pageUrl, start, end, deviceType, segment])

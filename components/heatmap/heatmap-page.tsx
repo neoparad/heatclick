@@ -59,6 +59,131 @@ type PeriodDays = 7 | 14 | 30
  */
 export type CanvasDevice = 'pc' | 'sp' | 'tab'
 
+// ---------------------------------------------------------------------------
+// P0 計測 (spec: docs/heatmap/SONNET_PROMPT_P0_instrumentation_2026-07-19.md §4)
+// mark/measure/console.table は必ず try/catch で自壊させ、計測失敗がアプリの挙動に
+// 一切影響しないようにする (spec §0 絶対条件1)。console.table のダンプ自体は
+// `?perf=1` の時のみ実行する (marks/measures は常時記録— spec §4.2)。
+// ---------------------------------------------------------------------------
+function safeMark(name: string): void {
+  try {
+    if (typeof performance === 'undefined' || typeof performance.mark !== 'function') return
+    performance.mark(name)
+  } catch {
+    // instrumentation must never affect app behavior
+  }
+}
+
+interface PerfMeasureRow {
+  name: string
+  startTimeMs: number
+  durationMs: number
+  detail?: unknown
+}
+
+function buildMeasureRows(): PerfMeasureRow[] {
+  try {
+    if (
+      typeof performance === 'undefined' ||
+      typeof performance.getEntriesByType !== 'function'
+    ) {
+      return []
+    }
+    return performance.getEntriesByType('measure').map((m) => ({
+      name: m.name,
+      startTimeMs: Math.round(m.startTime),
+      durationMs: Math.round(m.duration),
+      detail: (m as PerformanceMeasure).detail,
+    }))
+  } catch {
+    return []
+  }
+}
+
+interface PerfNavigationRow {
+  metric: string
+  valueMs: number
+}
+
+function buildNavigationTimingRows(): PerfNavigationRow[] {
+  try {
+    if (
+      typeof performance === 'undefined' ||
+      typeof performance.getEntriesByType !== 'function'
+    ) {
+      return []
+    }
+    const [nav] = performance.getEntriesByType('navigation') as PerformanceNavigationTiming[]
+    if (!nav) return []
+    return [
+      { metric: 'fetchStart', valueMs: Math.round(nav.fetchStart) },
+      { metric: 'requestStart', valueMs: Math.round(nav.requestStart) },
+      { metric: 'responseStart', valueMs: Math.round(nav.responseStart) },
+      { metric: 'responseEnd', valueMs: Math.round(nav.responseEnd) },
+      { metric: 'domContentLoadedEventEnd', valueMs: Math.round(nav.domContentLoadedEventEnd) },
+      { metric: 'loadEventEnd', valueMs: Math.round(nav.loadEventEnd) },
+      {
+        // SSR (App Router Server Component) は Server-Timing が出せないため、
+        // ここが実測の代理指標になる (spec §3.5)
+        metric: 'responseStart-requestStart (SSR実測)',
+        valueMs: Math.round(nav.responseStart - nav.requestStart),
+      },
+    ]
+  } catch {
+    return []
+  }
+}
+
+interface PerfServerTimingRow {
+  api: string
+  span: string
+  durMs: number
+  desc: string
+}
+
+function buildServerTimingRows(): PerfServerTimingRow[] {
+  const rows: PerfServerTimingRow[] = []
+  try {
+    if (
+      typeof performance === 'undefined' ||
+      typeof performance.getEntriesByType !== 'function'
+    ) {
+      return rows
+    }
+    const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[]
+    for (const r of resources) {
+      if (!r.name.includes('/api/heatmap')) continue
+      let api = r.name
+      try {
+        api = new URL(r.name).pathname
+      } catch {
+        // keep full URL as fallback label
+      }
+      for (const st of r.serverTiming ?? []) {
+        rows.push({ api, span: st.name, durMs: Math.round(st.duration), desc: st.description })
+      }
+    }
+    return rows
+  } catch {
+    return rows
+  }
+}
+
+function dumpPerfIfRequested(): void {
+  try {
+    if (typeof window === 'undefined') return
+    if (!window.location.search.includes('perf=1')) return
+    // eslint-disable-next-line no-console -- P0 計測: ?perf=1 ゲート内のみの意図的なダンプ (spec §4.2)
+    console.table(buildMeasureRows())
+    // eslint-disable-next-line no-console -- P0 計測: ?perf=1 ゲート内のみの意図的なダンプ (spec §4.2)
+    console.table(buildNavigationTimingRows())
+    // eslint-disable-next-line no-console -- P0 計測: ?perf=1 ゲート内のみの意図的なダンプ (spec §4.2)
+    console.table(buildServerTimingRows())
+  } catch {
+    // instrumentation must never affect app behavior
+  }
+}
+
 function deviceToEventFilter(d: CanvasDevice): 'desktop' | 'mobile' | 'tablet' {
   return d === 'pc' ? 'desktop' : d === 'sp' ? 'mobile' : 'tablet'
 }
@@ -74,6 +199,63 @@ function periodToRange(days: PeriodDays): { start: string; end: string } {
 }
 
 export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPageProps) {
+  // P0 計測 (spec §4.1): HeatmapPageClient の初回 useEffect で hm:mount を記録。
+  useEffect(() => {
+    safeMark('hm:mount')
+  }, [])
+
+  // P0 計測 (spec §4.1/§4.2): tiles 完了 (hm:tiles:end) と img decode 完了 (hm:img:decoded) の
+  // 両方が揃った時点で hm:visual-complete measure を 1 回だけ記録する。
+  // real-page-screenshot-underlay.tsx は heatmap-canvas.tsx (触ってはならないファイル) の
+  // 奥に描画されるため、そこへ直接コールバックを通す代わりに Performance API の
+  // 'mark' entry を観測することで疎結合に検知する。
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof PerformanceObserver === 'undefined') {
+      return undefined
+    }
+
+    let tilesEndTime: number | null = null
+    let imgDecodedTime: number | null = null
+    let fired = false
+
+    const maybeFireVisualComplete = () => {
+      if (fired || tilesEndTime === null || imgDecodedTime === null) return
+      fired = true
+      try {
+        const endTime = Math.max(tilesEndTime, imgDecodedTime)
+        performance.measure('hm:visual-complete', { start: 'hm:mount', end: endTime })
+      } catch {
+        // instrumentation must never affect app behavior
+      }
+      dumpPerfIfRequested()
+    }
+
+    let observer: PerformanceObserver | null = null
+    try {
+      observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          if (entry.name === 'hm:tiles:end' && tilesEndTime === null) {
+            tilesEndTime = entry.startTime
+          } else if (entry.name === 'hm:img:decoded' && imgDecodedTime === null) {
+            imgDecodedTime = entry.startTime
+          }
+        }
+        maybeFireVisualComplete()
+      })
+      observer.observe({ type: 'mark', buffered: true })
+    } catch {
+      // PerformanceObserver 未対応環境では黙って計測をスキップ (spec §0)
+    }
+
+    return () => {
+      try {
+        observer?.disconnect()
+      } catch {
+        // ignore
+      }
+    }
+  }, [])
+
   // activeLayer はデータ取得レイヤー (単一選択、ラジオ)。
   // 変更時に heatmapQuery が変わり useHeatmapTiles が再 fetch する。
   const [layer, setLayer] = useState<HeatmapLayer>('click')
