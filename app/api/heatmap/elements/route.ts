@@ -23,6 +23,7 @@ import { getServerSession } from '@/lib/auth/server-session'
 import { getClickHouseClient } from '@/lib/clickhouse'
 import { segmentFilterSql } from '@/lib/heatmap/segment-filter'
 import { canonicalizeHeatmapUrl, canonicalUrlSql } from '@/lib/heatmap/canonical-url'
+import { createRouteTimer, type RouteTimer } from '@/lib/perf/server-timing'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -92,7 +93,36 @@ interface SignalRow {
   y: number
 }
 
+// ── P0 計測 (docs/heatmap/SONNET_PROMPT_P0_instrumentation_2026-07-19.md §3) ──
+// 挙動変更ゼロ (絶対条件1): 以下 helper は計測専用でレスポンス body/status を変えない。
+
+/** CH query_log 突合用 log_comment。URL・tenant 値は含めない (絶対条件5)。 */
+function perfLogComment(route: string, span: string, reqId: string): { log_comment: string } {
+  try {
+    return { log_comment: JSON.stringify({ app: 'heatmap', route, span, req: reqId }) }
+  } catch {
+    return { log_comment: '' }
+  }
+}
+
+/** 既存の NextResponse.json 呼び出しに Server-Timing ヘッダ + 計測ログを足すだけの薄いラッパ。 */
+function jsonWithTiming(
+  t: RouteTimer,
+  body: unknown,
+  init: { status?: number; headers?: Record<string, string> } = {},
+): NextResponse {
+  // eslint-disable-next-line no-console
+  console.info(t.logLine())
+  return NextResponse.json(body, {
+    ...init,
+    headers: { ...(init.headers ?? {}), 'Server-Timing': t.headerValue() },
+  })
+}
+
 export async function GET(request: Request) {
+  // P0 計測: レスポンス内容・ステータスには影響しない (絶対条件1)。
+  const t = createRouteTimer('heatmap-elements')
+  const reqId = t.reqId()
   const url = new URL(request.url)
   const parsed = querySchema.safeParse({
     site_id: url.searchParams.get('site_id') ?? undefined,
@@ -103,7 +133,8 @@ export async function GET(request: Request) {
     segment: url.searchParams.get('segment') ?? undefined,
   })
   if (!parsed.success) {
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       {
         success: false,
         error: { code: 'BAD_REQUEST', message: parsed.error.issues[0]?.message ?? 'invalid request' },
@@ -116,15 +147,17 @@ export async function GET(request: Request) {
   params.page_url = canonicalizeHeatmapUrl(params.page_url)
 
   // tenant 検証 — REQ-SEC-126: getServerSession 経由で Layer 2 失効照合を通す
-  const session = await getServerSession()
+  const session = await t.span('auth', async () => getServerSession())
   if (!session) {
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       { success: false, error: { code: 'UNAUTHORIZED', message: 'tenant context missing' } },
       { status: 401 },
     )
   }
   if (!session.user.site_ids.includes(params.site_id)) {
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       { success: false, error: { code: 'TENANT_FORBIDDEN', message: 'site not in tenant' } },
       { status: 403 },
     )
@@ -145,8 +178,9 @@ export async function GET(request: Request) {
     const ch = getClickHouseClient('analytics_reader')
 
     // 1) 要素単位 click 集計 (上位 N)。x は 1280 正規化 / y は document 絶対 CSS px。
-    const elementsRs = await ch.query({
-      query: `
+    const elementRows = await t.span('ch-elements', async () => {
+      const elementsRs = await ch.query({
+        query: `
         SELECT
           element_selector AS selector,
           anyLast(element_text) AS text,
@@ -171,14 +205,17 @@ export async function GET(request: Request) {
         ORDER BY clicks DESC
         LIMIT ${TOP_ELEMENTS_LIMIT}
       `,
-      query_params: queryParams,
-      format: 'JSONEachRow',
+        query_params: queryParams,
+        format: 'JSONEachRow',
+        clickhouse_settings: perfLogComment('heatmap-elements', 'ch-elements', reqId),
+      })
+      return (await elementsRs.json()) as ElementRow[]
     })
-    const elementRows = (await elementsRs.json()) as ElementRow[]
 
     // 2) シグナル (rage_click / dead_click) selector 別上位
-    const signalsRs = await ch.query({
-      query: `
+    const signalRows = await t.span('ch-signals', async () => {
+      const signalsRs = await ch.query({
+        query: `
         SELECT
           event_type,
           element_selector AS selector,
@@ -201,10 +238,12 @@ export async function GET(request: Request) {
         ORDER BY count DESC
         LIMIT 100
       `,
-      query_params: queryParams,
-      format: 'JSONEachRow',
+        query_params: queryParams,
+        format: 'JSONEachRow',
+        clickhouse_settings: perfLogComment('heatmap-elements', 'ch-signals', reqId),
+      })
+      return (await signalsRs.json()) as SignalRow[]
     })
-    const signalRows = (await signalsRs.json()) as SignalRow[]
 
     const signals = (['rage_click', 'dead_click'] as const).map((et) => {
       const rows = signalRows.filter((r) => r.event_type === et)
@@ -223,8 +262,9 @@ export async function GET(request: Request) {
     })
 
     // 3) ページ全体セッション数 (続126 ★: 要素クリック率の分母)
-    const pageSessionsRs = await ch.query({
-      query: `
+    const pageSessions = await t.span('ch-sessions', async () => {
+      const pageSessionsRs = await ch.query({
+        query: `
         SELECT uniqExact(session_id) AS sessions
         FROM clickinsight.events
         WHERE tenant_id = {tenant_id:String}
@@ -236,12 +276,12 @@ export async function GET(request: Request) {
           ${deviceFilter}
           ${segmentFilter}
       `,
-      query_params: queryParams,
-      format: 'JSONEachRow',
+        query_params: queryParams,
+        format: 'JSONEachRow',
+        clickhouse_settings: perfLogComment('heatmap-elements', 'ch-sessions', reqId),
+      })
+      return Number(((await pageSessionsRs.json()) as Array<{ sessions: number }>)[0]?.sessions ?? 0)
     })
-    const pageSessions = Number(
-      ((await pageSessionsRs.json()) as Array<{ sessions: number }>)[0]?.sessions ?? 0,
-    )
 
     // 4) 画像視認率 (続126 ⑤): image_visibility 専用テーブル。
     //    座標は median (混在 viewport の外れ値に強い)。duration は median (累積計測のため
@@ -265,8 +305,9 @@ export async function GET(request: Request) {
     let imageRows: ImageRow[] = []
     let imagesError: string | null = null
     try {
-      const imagesRs = await ch.query({
-        query: `
+      imageRows = await t.span('ch-images', async () => {
+        const imagesRs = await ch.query({
+          query: `
           SELECT
             image_src AS src,
             anyLast(image_alt) AS alt,
@@ -289,10 +330,12 @@ export async function GET(request: Request) {
           ORDER BY sessions DESC
           LIMIT ${TOP_IMAGES_LIMIT}
         `,
-        query_params: queryParams,
-        format: 'JSONEachRow',
+          query_params: queryParams,
+          format: 'JSONEachRow',
+          clickhouse_settings: perfLogComment('heatmap-elements', 'ch-images', reqId),
+        })
+        return (await imagesRs.json()) as ImageRow[]
       })
-      imageRows = (await imagesRs.json()) as ImageRow[]
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message.split('\n')[0] : 'unknown'
       // 続135 (P0 可視化): 失敗を silent [] にせず分類コードで surface する。
@@ -314,8 +357,9 @@ export async function GET(request: Request) {
     }
     let issueRows: IssueRow[] = []
     try {
-      const issuesRs = await ch.query({
-        query: `
+      issueRows = await t.span('ch-issues', async () => {
+        const issuesRs = await ch.query({
+          query: `
           SELECT
             issue_category,
             issue_type,
@@ -330,16 +374,19 @@ export async function GET(request: Request) {
           ORDER BY severity DESC, n DESC
           LIMIT ${TOP_ISSUES_LIMIT}
         `,
-        query_params: queryParams,
-        format: 'JSONEachRow',
+          query_params: queryParams,
+          format: 'JSONEachRow',
+          clickhouse_settings: perfLogComment('heatmap-elements', 'ch-issues', reqId),
+        })
+        return (await issuesRs.json()) as IssueRow[]
       })
-      issueRows = (await issuesRs.json()) as IssueRow[]
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message.split('\n')[0] : 'unknown'
       console.error(`[heatmap/elements] page_issues degraded to []: ${msg}`)
     }
 
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       {
         success: true,
         data: {
@@ -389,7 +436,8 @@ export async function GET(request: Request) {
     const msg = e instanceof Error ? e.message : 'unknown'
     // ClickHouse error 詳細は client に漏らさない (credentials を含む経路を遮断)
     console.error(`[heatmap/elements] query failed: ${msg}`)
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       { success: false, error: { code: 'INTERNAL', message: 'elements query failed' } },
       { status: 502 },
     )

@@ -16,6 +16,7 @@ import dynamic from 'next/dynamic'
 
 import { getServerSession } from '@/lib/auth/server-session'
 import { fetchPagesCached, type PageOption } from '@/lib/pages/fetch-pages'
+import { coldStartInfo, region } from '@/lib/perf/server-timing'
 import { PageMeta } from '@/components/layout/page-meta'
 
 const HeatmapPageClient = dynamic(
@@ -34,6 +35,27 @@ interface HeatmapPageProps {
 
 /** 5 sites (続 39) の既定値 (bihadashop.jp)。 */
 const DEFAULT_SITE_ID = 'CIP_EcwUTHEZdIOAUqum'
+
+/**
+ * P0 計測 (docs/heatmap/SONNET_PROMPT_P0_instrumentation_2026-07-19.md §3.5)。
+ * Server Component はレスポンスヘッダを設定できないため Server-Timing は使わない。
+ * 代わりに fetchPages の所要時間を performance.now() で挟み、構造化 1 行 JSON を
+ * console.info で出す (Vercel function ログで見る)。`coldStartInfo()`/`region()` は
+ * Node/route-handler 専有の API を使わない (performance.now() と process.env のみ) ため
+ * lib/perf/server-timing.ts の実装をそのまま import して使う (route 側と同じモジュール
+ * スコープ判定ロジックを共有 — Next.js は page/route を別 function bundle にするため、
+ * このモジュールの `invoked` フラグはこの bundle 内で独立して機能する)。
+ * 計測が失敗してもレスポンス内容・ステータスは変えない (絶対条件1) — try/catch で
+ * ログ出力だけを握りつぶす。
+ */
+
+/**
+ * fetchPagesCached (lib/pages/fetch-pages.ts) は unstable_cache (5 分 revalidate) で
+ * ラップされているが、呼び出し側に cache hit/miss を返さない。このファイルだけを編集する
+ * スコープでは判別する術がないため、所要時間からの推定に留める
+ * (§3.5 「5分cacheにhitしたか判別可能なら」— 確定判定ではなくヒューリスティックである点に注意)。
+ */
+const CACHE_HIT_HEURISTIC_THRESHOLD_MS = 20
 
 /**
  * 続122: 旧実装は `${NEXT_PUBLIC_APP_URL}/api/pages` への **HTTP 自己 fetch** だった。
@@ -58,7 +80,31 @@ async function fetchPages(siteId: string): Promise<PageOption[]> {
 
 export default async function ProofHeatmapPage({ searchParams }: HeatmapPageProps) {
   const siteId = searchParams.site_id ?? DEFAULT_SITE_ID
+
+  // P0 計測: cold は「このモジュールロード後の最初の呼び出しか」で判定 (§3.5 参照)。
+  const { cold } = coldStartInfo()
+
+  const ssrPagesStart = performance.now()
   const pages = await fetchPages(siteId)
+  const ssrPagesDurMs = performance.now() - ssrPagesStart
+
+  try {
+    // eslint-disable-next-line no-console -- perf 計測専用ログ (§3.5)。console.log は禁止だが console.info は許容
+    console.info(
+      JSON.stringify({
+        perf: 'heatmap-ssr',
+        span: 'pages',
+        durMs: Math.round(ssrPagesDurMs * 100) / 100,
+        cold,
+        region: region(),
+        // ヒューリスティック判定 (正確な cache hit/miss はこのファイル単体からは不明。上の注記参照)
+        cacheHit: ssrPagesDurMs < CACHE_HIT_HEURISTIC_THRESHOLD_MS,
+      }),
+    )
+  } catch {
+    // 計測ログの失敗はレスポンスに一切影響させない (絶対条件1)
+  }
+
   const initialPageUrl = searchParams.page_url ?? pages[0]?.url ?? ''
 
   return (
