@@ -34,6 +34,29 @@ import {
   type HeatmapTileMeta,
 } from '@/lib/api/heatmap'
 
+// ---------------------------------------------------------------------------
+// P0 計測 (spec: docs/heatmap/SONNET_PROMPT_P0_instrumentation_2026-07-19.md §4)
+// mark/measure は必ず try/catch で自壊させ、計測失敗がアプリの挙動に一切影響しないようにする
+// (spec §0 絶対条件1)。
+// ---------------------------------------------------------------------------
+function safeMark(name: string, detail?: Record<string, unknown>): void {
+  try {
+    if (typeof performance === 'undefined' || typeof performance.mark !== 'function') return
+    performance.mark(name, detail ? { detail } : undefined)
+  } catch {
+    // instrumentation must never affect app behavior
+  }
+}
+
+function safeMeasure(name: string, startMark: string, endMark: string): void {
+  try {
+    if (typeof performance === 'undefined' || typeof performance.measure !== 'function') return
+    performance.measure(name, startMark, endMark)
+  } catch {
+    // instrumentation must never affect app behavior
+  }
+}
+
 export interface UseHeatmapTilesResult {
   tiles: HeatmapTile[]
   loading: boolean
@@ -85,6 +108,7 @@ export function useHeatmapTiles(query: HeatmapQuery): UseHeatmapTilesResult {
       abortRef.current = ctrl
       setLoading(true)
       setError(null)
+      safeMark('hm:tiles:start')
 
       let currentCursor = startCursor
       let batches = 0
@@ -154,7 +178,11 @@ export function useHeatmapTiles(query: HeatmapQuery): UseHeatmapTilesResult {
         setError(err instanceof Error ? err.message : 'tile fetch failed')
         setHasMore(false)
       } finally {
-        if (!ctrl.signal.aborted) setLoading(false)
+        if (!ctrl.signal.aborted) {
+          setLoading(false)
+          safeMark('hm:tiles:end', { batches })
+          safeMeasure('hm:tiles', 'hm:tiles:start', 'hm:tiles:end')
+        }
       }
     },
     // query は変更時に reset effect で fetchFrom(null) 経由で呼び直すため deps から除外

@@ -12,6 +12,29 @@
 
 import { useEffect, useState } from 'react'
 
+// ---------------------------------------------------------------------------
+// P0 計測 (spec: docs/heatmap/SONNET_PROMPT_P0_instrumentation_2026-07-19.md §4)
+// mark/measure は必ず try/catch で自壊させ、計測失敗がアプリの挙動に一切影響しないようにする
+// (spec §0 絶対条件1)。
+// ---------------------------------------------------------------------------
+function safeMark(name: string): void {
+  try {
+    if (typeof performance === 'undefined' || typeof performance.mark !== 'function') return
+    performance.mark(name)
+  } catch {
+    // instrumentation must never affect app behavior
+  }
+}
+
+function safeMeasure(name: string, startMark: string, endMark: string): void {
+  try {
+    if (typeof performance === 'undefined' || typeof performance.measure !== 'function') return
+    performance.measure(name, startMark, endMark)
+  } catch {
+    // instrumentation must never affect app behavior
+  }
+}
+
 export interface PageStatsData {
   page_views: number
   sessions: number
@@ -38,6 +61,7 @@ export function usePageStats(input: UsePageStatsInput): PageStatsState {
   useEffect(() => {
     const ctrl = new AbortController()
     setState({ kind: 'loading' })
+    safeMark('hm:stats:start')
 
     const params = new URLSearchParams({
       site_id: input.siteId,
@@ -84,6 +108,12 @@ export function usePageStats(input: UsePageStatsInput): PageStatsState {
           kind: 'error',
           message: err instanceof Error ? err.message : 'page stats fetch failed',
         })
+      })
+      .finally(() => {
+        if (!ctrl.signal.aborted) {
+          safeMark('hm:stats:end')
+          safeMeasure('hm:stats', 'hm:stats:start', 'hm:stats:end')
+        }
       })
 
     return () => ctrl.abort()

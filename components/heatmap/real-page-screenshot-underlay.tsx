@@ -16,11 +16,54 @@
 
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import * as Sentry from '@sentry/nextjs'
 
 import type { HeatmapUnderlayCapture } from '@/lib/heatmap/types'
 import { isImageUrlTrusted } from '@/lib/heatmap/image-url-validator'
+
+// ---------------------------------------------------------------------------
+// P0 計測 (spec: docs/heatmap/SONNET_PROMPT_P0_instrumentation_2026-07-19.md §4.3)
+// mark は必ず try/catch で自壊させ、計測失敗がアプリの挙動に一切影響しないようにする
+// (spec §0 絶対条件1)。
+// ---------------------------------------------------------------------------
+function safeMark(name: string, detail?: Record<string, unknown>): void {
+  try {
+    if (typeof performance === 'undefined' || typeof performance.mark !== 'function') return
+    performance.mark(name, detail ? { detail } : undefined)
+  } catch {
+    // instrumentation must never affect app behavior
+  }
+}
+
+/**
+ * Resource Timing から画像の転送量/所要時間を取得する。
+ * R2 は `Timing-Allow-Origin` を返さない可能性が高く、cross-origin 制限で
+ * transferSize 等が 0 に丸められる場合は「未計測」とみなし -1 を記録する
+ * (取得できないことをエラーにはしない — spec §4.3)。
+ */
+function getImageTransferMetrics(imageUrl: string): {
+  transferSize: number
+  durationMs: number
+} {
+  try {
+    if (
+      typeof performance === 'undefined' ||
+      typeof performance.getEntriesByName !== 'function'
+    ) {
+      return { transferSize: -1, durationMs: -1 }
+    }
+    const entries = performance.getEntriesByName(imageUrl) as PerformanceResourceTiming[]
+    const entry = entries[entries.length - 1]
+    if (!entry) return { transferSize: -1, durationMs: -1 }
+    const transferSize = entry.transferSize > 0 ? entry.transferSize : -1
+    const durationMs =
+      entry.responseEnd > 0 && entry.startTime >= 0 ? entry.responseEnd - entry.startTime : -1
+    return { transferSize, durationMs }
+  } catch {
+    return { transferSize: -1, durationMs: -1 }
+  }
+}
 
 interface RealPageScreenshotUnderlayProps {
   capture: HeatmapUnderlayCapture
@@ -31,6 +74,7 @@ export function RealPageScreenshotUnderlay({
   capture,
   onImageError,
 }: RealPageScreenshotUnderlayProps) {
+  const imgRef = useRef<HTMLImageElement>(null)
   // 診断: imageUrl の origin 分類 (pure function、副作用なし)
   const urlValidation = isImageUrlTrusted(capture.imageUrl)
 
@@ -76,6 +120,23 @@ export function RealPageScreenshotUnderlay({
     onImageError?.()
   }
 
+  // P0 計測 (spec §4.3): onLoad → hm:img:loaded、img.decode() 解決 → hm:img:decoded。
+  // decode() の失敗は onError 経路とは独立の非致命事象なので黙って握りつぶす (spec §0)。
+  const handleImageLoad = () => {
+    safeMark('hm:img:loaded')
+    const img = imgRef.current
+    if (!img) return
+    img
+      .decode()
+      .then(() => {
+        const { transferSize, durationMs } = getImageTransferMetrics(capture.imageUrl)
+        safeMark('hm:img:decoded', { transferSize, durationMs })
+      })
+      .catch(() => {
+        // decode 失敗は計測対象外。挙動には影響させない (spec §0)
+      })
+  }
+
   return (
     <div
       className="real-page-underlay block w-full"
@@ -88,6 +149,7 @@ export function RealPageScreenshotUnderlay({
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
+        ref={imgRef}
         src={capture.imageUrl}
         alt=""
         width={capture.naturalWidth}
@@ -107,6 +169,7 @@ export function RealPageScreenshotUnderlay({
         fetchPriority="high"
         referrerPolicy="no-referrer"
         onError={handleImageError}
+        onLoad={handleImageLoad}
         data-testid="real-page-screenshot-img"
       />
     </div>
