@@ -36,6 +36,7 @@ import {
   ScreenshotProviderError,
   validateExternalUrl,
 } from '@/lib/heatmap/screenshot-provider'
+import { createRouteTimer, type RouteTimer } from '@/lib/perf/server-timing'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -63,6 +64,8 @@ async function tenantTracksUrl(input: {
   tenantId: string
   siteId: string
   pageUrl: string
+  /** P0 計測: CH query_log 突合用 (route/reqId が揃った時のみ log_comment を付与) */
+  perfReqId?: string
 }): Promise<boolean> {
   const ch = getClickHouseClient('analytics_reader')
   const rs = await ch.query({
@@ -81,12 +84,44 @@ async function tenantTracksUrl(input: {
       page_url: input.pageUrl,
     },
     format: 'JSONEachRow',
+    ...(input.perfReqId
+      ? { clickhouse_settings: perfLogComment('heatmap-screenshot', 'own-ch', input.perfReqId) }
+      : {}),
   })
   const rows = (await rs.json()) as Array<{ hit: number }>
   return rows.length > 0
 }
 
+// ── P0 計測 (docs/heatmap/SONNET_PROMPT_P0_instrumentation_2026-07-19.md §3) ──
+// 挙動変更ゼロ (絶対条件1): 以下 helper は計測専用でレスポンス body/status を変えない。
+
+/** CH query_log 突合用 log_comment。URL・tenant 値は含めない (絶対条件5)。 */
+function perfLogComment(route: string, span: string, reqId: string): { log_comment: string } {
+  try {
+    return { log_comment: JSON.stringify({ app: 'heatmap', route, span, req: reqId }) }
+  } catch {
+    return { log_comment: '' }
+  }
+}
+
+/** 既存の NextResponse.json 呼び出しに Server-Timing ヘッダ + 計測ログを足すだけの薄いラッパ。 */
+function jsonWithTiming(
+  t: RouteTimer,
+  body: unknown,
+  init: { status?: number; headers?: Record<string, string> } = {},
+): NextResponse {
+  // eslint-disable-next-line no-console
+  console.info(t.logLine())
+  return NextResponse.json(body, {
+    ...init,
+    headers: { ...(init.headers ?? {}), 'Server-Timing': t.headerValue() },
+  })
+}
+
 export async function GET(request: Request) {
+  // P0 計測: レスポンス内容・ステータスには影響しない (絶対条件1)。
+  const t = createRouteTimer('heatmap-screenshot')
+  const reqId = t.reqId()
   const url = new URL(request.url)
   const parsed = querySchema.safeParse({
     site_id: url.searchParams.get('site_id') ?? undefined,
@@ -94,7 +129,8 @@ export async function GET(request: Request) {
     device: url.searchParams.get('device') ?? undefined,
   })
   if (!parsed.success) {
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       {
         success: false,
         error: {
@@ -108,17 +144,19 @@ export async function GET(request: Request) {
   const params = parsed.data
 
   // tenant 検証 — REQ-SEC-126 (§13.7): getServerSession 経由で Layer 2 失効照合を通す
-  const session = await getServerSession()
+  const session = await t.span('auth', async () => getServerSession())
   const tenantId = session?.tenant_id ?? null
   const siteIds = session ? session.user.site_ids.join(',') : null
   if (!tenantId) {
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       { success: false, error: { code: 'UNAUTHORIZED', message: 'tenant context missing' } },
       { status: 401 },
     )
   }
   if (!tenantHasSite(siteIds, params.site_id)) {
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       { success: false, error: { code: 'TENANT_FORBIDDEN', message: 'site not in tenant' } },
       { status: 403 },
     )
@@ -134,7 +172,8 @@ export async function GET(request: Request) {
     canonicalUrl = canonicalizeHeatmapUrl(params.page_url)
   } catch (err) {
     if (err instanceof ScreenshotProviderError) {
-      return NextResponse.json(
+      return jsonWithTiming(
+        t,
         { success: false, error: { code: err.code, message: err.message } },
         { status: err.code === 'BLOCKED_URL' ? 403 : 400 },
       )
@@ -144,13 +183,17 @@ export async function GET(request: Request) {
 
   // Tenant-owned URL check: 自分の tracking が無い URL の screenshot は撮らせない
   try {
-    const owns = await tenantTracksUrl({
-      tenantId,
-      siteId: params.site_id,
-      pageUrl: canonicalUrl,
-    })
+    const owns = await t.span('own-ch', async () =>
+      tenantTracksUrl({
+        tenantId,
+        siteId: params.site_id,
+        pageUrl: canonicalUrl,
+        perfReqId: reqId,
+      }),
+    )
     if (!owns) {
-      return NextResponse.json(
+      return jsonWithTiming(
+        t,
         {
           success: false,
           error: {
@@ -165,7 +208,8 @@ export async function GET(request: Request) {
     // CH 不可達は **拒否** ではなく **不確実だが SSRF guard 通過したのでフェイル open しない**。
     // 確実にユーザー操作を止めるため 503 を返し、Frontend は fallback (Mock underlay) を表示する。
     console.error('[heatmap/screenshot] tenant ownership check failed:', err)
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       {
         success: false,
         error: { code: 'OWNERSHIP_CHECK_UNAVAILABLE', message: 'analytics lookup failed' },
@@ -176,13 +220,17 @@ export async function GET(request: Request) {
 
   // Provider 呼び出し (L1 in-memory → R2 L2 → capture、TTL/SWR/dedupe は cache 層が担う)
   try {
-    const { capture } = await getHeatmapUnderlayWithR2Cache({
-      tenantId,
-      siteId: params.site_id,
-      pageUrl: canonicalUrl,
-      device: params.device,
-    })
-    return NextResponse.json(
+    const { capture, tier } = await t.span('cache', async () =>
+      getHeatmapUnderlayWithR2Cache({
+        tenantId,
+        siteId: params.site_id,
+        pageUrl: canonicalUrl,
+        device: params.device,
+      }),
+    )
+    t.mark('tier', tier)
+    return jsonWithTiming(
+      t,
       { success: true, data: capture },
       {
         // capture.imageUrl は 5min の署名URL。warm 再ナビで function + ClickHouse を
@@ -203,13 +251,15 @@ export async function GET(request: Request) {
               : err.code === 'INVALID_URL'
                 ? 400
                 : 502
-      return NextResponse.json(
+      return jsonWithTiming(
+        t,
         { success: false, error: { code: err.code, message: err.message } },
         { status },
       )
     }
     console.error('[heatmap/screenshot] unknown error:', err)
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       { success: false, error: { code: 'INTERNAL', message: 'screenshot pipeline failed' } },
       { status: 502 },
     )

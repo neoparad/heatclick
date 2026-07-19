@@ -27,6 +27,7 @@ import { getClickHouseClient } from '@/lib/clickhouse'
 import type { HeatmapSegment } from '@/lib/api/heatmap'
 import { segmentFilterSql } from '@/lib/heatmap/segment-filter'
 import { canonicalizeHeatmapUrl, canonicalUrlSql } from '@/lib/heatmap/canonical-url'
+import { createRouteTimer, type RouteTimer } from '@/lib/perf/server-timing'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -127,7 +128,38 @@ function isDummyOnly(): boolean {
   return process.env.HEATMAP_DUMMY_ONLY === '1'
 }
 
+// ── P0 計測 (docs/heatmap/SONNET_PROMPT_P0_instrumentation_2026-07-19.md §3) ──
+// 挙動変更ゼロ (絶対条件1): 以下 3 helper は計測専用で、レスポンス body/status を
+// 一切変えない。t.headerValue()/t.logLine() は server-timing.ts 側で自壊しない
+// ことが保証されているため、ここでは追加の try/catch を重ねていない。
+
+/** CH query_log 突合用 log_comment。URL・tenant 値は含めない (絶対条件5)。 */
+function perfLogComment(route: string, span: string, reqId: string): { log_comment: string } {
+  try {
+    return { log_comment: JSON.stringify({ app: 'heatmap', route, span, req: reqId }) }
+  } catch {
+    return { log_comment: '' }
+  }
+}
+
+/** 既存の NextResponse.json 呼び出しに Server-Timing ヘッダ + 計測ログを足すだけの薄いラッパ。 */
+function jsonWithTiming(
+  t: RouteTimer,
+  body: unknown,
+  init: { status?: number; headers?: Record<string, string> } = {},
+): NextResponse {
+  // eslint-disable-next-line no-console
+  console.info(t.logLine())
+  return NextResponse.json(body, {
+    ...init,
+    headers: { ...(init.headers ?? {}), 'Server-Timing': t.headerValue() },
+  })
+}
+
 export async function GET(request: Request) {
+  // P0 計測: レスポンス内容・ステータスには影響しない (絶対条件1)。
+  const t = createRouteTimer('heatmap')
+  const reqId = t.reqId()
   const url = new URL(request.url)
   const parsed = querySchema.safeParse({
     site_id: url.searchParams.get('site_id') ?? undefined,
@@ -142,7 +174,8 @@ export async function GET(request: Request) {
   })
 
   if (!parsed.success) {
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       {
         success: false,
         error: {
@@ -161,17 +194,19 @@ export async function GET(request: Request) {
 
   // tenant 検証 — REQ-SEC-126 (§13.7): header 直読みをやめ getServerSession 経由で
   // Layer 2 失効照合 (session/membership version + tenant.status) を通す。失効済みは null。
-  const session = await getServerSession()
+  const session = await t.span('auth', async () => getServerSession())
   const tenantId = session?.tenant_id ?? null
   const siteIds = session ? session.user.site_ids.join(',') : null
   if (!tenantId) {
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       { success: false, error: { code: 'UNAUTHORIZED', message: 'tenant context missing' } },
       { status: 401 },
     )
   }
   if (!tenantHasSite(siteIds, params.site_id)) {
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       { success: false, error: { code: 'TENANT_FORBIDDEN', message: 'site not in tenant' } },
       { status: 403 },
     )
@@ -184,19 +219,22 @@ export async function GET(request: Request) {
   if (params.cursor) {
     const cur = decodeCursor(params.cursor)
     if (!cur) {
-      return NextResponse.json(
+      return jsonWithTiming(
+        t,
         { success: false, error: { code: 'CURSOR_INVALID', message: 'cursor decode failed' } },
         { status: 400 },
       )
     }
     if (!constantTimeEqual(cur.query_hash, queryHash)) {
-      return NextResponse.json(
+      return jsonWithTiming(
+        t,
         { success: false, error: { code: 'CURSOR_INVALID', message: 'query condition changed' } },
         { status: 400 },
       )
     }
     if (cur.exp < Date.now() / 1000) {
-      return NextResponse.json(
+      return jsonWithTiming(
+        t,
         { success: false, error: { code: 'CURSOR_INVALID', message: 'cursor expired' } },
         { status: 400 },
       )
@@ -216,24 +254,32 @@ export async function GET(request: Request) {
   //    fall-through (dummy fallback 含む契約は不変)。cursor 継続リクエストも従来経路のまま。
   if (isPxLayer && yStart === 0 && !isDummyOnly()) {
     try {
-      const allPoints = await fetchRealHeatmapPoints({
-        tenantId,
-        siteId: params.site_id,
-        pageUrl: params.page_url,
-        heatmapType: params.heatmap_type,
-        deviceType: params.device_type,
-        segment: params.segment,
-        yStart: 0,
-        yEnd: PAGE_HEIGHT_ESTIMATE,
-        startDate: params.start_date,
-        endDate: params.end_date,
-        allBands: true,
-        tileSize: params.tile_size,
-      })
-      return NextResponse.json({
+      const allPoints = await t.span('ch', async () =>
+        fetchRealHeatmapPoints({
+          tenantId,
+          siteId: params.site_id,
+          pageUrl: params.page_url,
+          heatmapType: params.heatmap_type,
+          deviceType: params.device_type,
+          segment: params.segment,
+          yStart: 0,
+          yEnd: PAGE_HEIGHT_ESTIMATE,
+          startDate: params.start_date,
+          endDate: params.end_date,
+          allBands: true,
+          tileSize: params.tile_size,
+          perfRoute: 'heatmap',
+          perfSpan: 'ch',
+          perfReqId: reqId,
+        }),
+      )
+      const tiles = partitionIntoTiles(allPoints, params.tile_size)
+      t.mark('bands', String(tiles.length))
+      t.mark('points', String(allPoints.length))
+      return jsonWithTiming(t, {
         success: true,
         data: {
-          tiles: partitionIntoTiles(allPoints, params.tile_size),
+          tiles,
           next_cursor: null,
         },
         meta: {
@@ -270,18 +316,23 @@ export async function GET(request: Request) {
     dataSource = 'dummy_lcg'
   } else {
     try {
-      points = await fetchRealHeatmapPoints({
-        tenantId,
-        siteId: params.site_id,
-        pageUrl: params.page_url,
-        heatmapType: params.heatmap_type,
-        deviceType: params.device_type,
-        segment: params.segment,
-        yStart,
-        yEnd: tileEnd,
-        startDate: params.start_date,
-        endDate: params.end_date,
-      })
+      points = await t.span('ch-fallback', async () =>
+        fetchRealHeatmapPoints({
+          tenantId,
+          siteId: params.site_id,
+          pageUrl: params.page_url,
+          heatmapType: params.heatmap_type,
+          deviceType: params.device_type,
+          segment: params.segment,
+          yStart,
+          yEnd: tileEnd,
+          startDate: params.start_date,
+          endDate: params.end_date,
+          perfRoute: 'heatmap',
+          perfSpan: 'ch-fallback',
+          perfReqId: reqId,
+        }),
+      )
       dataSource = 'clickhouse_events'
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown'
@@ -308,7 +359,7 @@ export async function GET(request: Request) {
         exp: Math.floor(Date.now() / 1000) + 600,
       })
 
-  return NextResponse.json({
+  return jsonWithTiming(t, {
     success: true,
     data: {
       tiles: [tile],
@@ -390,6 +441,10 @@ async function fetchRealHeatmapPoints(input: {
   allBands?: boolean
   /** allBands 時の band 幅 (LIMIT BY の band 式に使用) */
   tileSize?: number
+  /** P0 計測: CH query_log 突合用 log_comment (route/span/reqId が揃った時のみ付与) */
+  perfRoute?: string
+  perfSpan?: string
+  perfReqId?: string
 }): Promise<Array<{ x: number; y: number; count: number; sessions: number }>> {
   const client = getClickHouseClient('analytics_reader')
 
@@ -594,6 +649,9 @@ async function fetchRealHeatmapPoints(input: {
     query: sql,
     query_params: queryParams,
     format: 'JSONEachRow',
+    ...(input.perfRoute && input.perfSpan && input.perfReqId
+      ? { clickhouse_settings: perfLogComment(input.perfRoute, input.perfSpan, input.perfReqId) }
+      : {}),
   })
   const rows = (await rs.json()) as Array<{
     x: number

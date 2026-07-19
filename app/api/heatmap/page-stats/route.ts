@@ -30,6 +30,7 @@ import { z } from 'zod'
 
 import { getClickHouseClient } from '@/lib/clickhouse'
 import { canonicalizeHeatmapUrl, canonicalUrlSql } from '@/lib/heatmap/canonical-url'
+import { createRouteTimer, type RouteTimer } from '@/lib/perf/server-timing'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -62,7 +63,36 @@ function tenantHasSite(headerSiteIds: string | null, siteId: string): boolean {
   return headerSiteIds.split(',').map((s) => s.trim()).includes(siteId)
 }
 
+// ── P0 計測 (docs/heatmap/SONNET_PROMPT_P0_instrumentation_2026-07-19.md §3) ──
+// 挙動変更ゼロ (絶対条件1): 以下 helper は計測専用でレスポンス body/status を変えない。
+
+/** CH query_log 突合用 log_comment。URL・tenant 値は含めない (絶対条件5)。 */
+function perfLogComment(route: string, span: string, reqId: string): { log_comment: string } {
+  try {
+    return { log_comment: JSON.stringify({ app: 'heatmap', route, span, req: reqId }) }
+  } catch {
+    return { log_comment: '' }
+  }
+}
+
+/** 既存の NextResponse.json 呼び出しに Server-Timing ヘッダ + 計測ログを足すだけの薄いラッパ。 */
+function jsonWithTiming(
+  t: RouteTimer,
+  body: unknown,
+  init: { status?: number; headers?: Record<string, string> } = {},
+): NextResponse {
+  // eslint-disable-next-line no-console
+  console.info(t.logLine())
+  return NextResponse.json(body, {
+    ...init,
+    headers: { ...(init.headers ?? {}), 'Server-Timing': t.headerValue() },
+  })
+}
+
 export async function GET(request: Request) {
+  // P0 計測: レスポンス内容・ステータスには影響しない (絶対条件1)。
+  const t = createRouteTimer('heatmap-page-stats')
+  const reqId = t.reqId()
   const url = new URL(request.url)
   const parsed = querySchema.safeParse({
     site_id: url.searchParams.get('site_id') ?? undefined,
@@ -73,7 +103,8 @@ export async function GET(request: Request) {
   })
 
   if (!parsed.success) {
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       {
         success: false,
         error: {
@@ -89,17 +120,19 @@ export async function GET(request: Request) {
   params.page_url = canonicalizeHeatmapUrl(params.page_url)
 
   // tenant 検証 — REQ-SEC-126 (§13.7): getServerSession 経由で Layer 2 失効照合を通す
-  const session = await getServerSession()
+  const session = await t.span('auth', async () => getServerSession())
   const tenantId = session?.tenant_id ?? null
   const siteIds = session ? session.user.site_ids.join(',') : null
   if (!tenantId) {
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       { success: false, error: { code: 'UNAUTHORIZED', message: 'tenant context missing' } },
       { status: 401 },
     )
   }
   if (!tenantHasSite(siteIds, params.site_id)) {
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       { success: false, error: { code: 'TENANT_FORBIDDEN', message: 'site not in tenant' } },
       { status: 403 },
     )
@@ -149,12 +182,15 @@ export async function GET(request: Request) {
       queryParams.device_type = params.device_type
     }
 
-    const rs = await ch.query({
-      query: sql,
-      query_params: queryParams,
-      format: 'JSONEachRow',
+    const rows = await t.span('ch', async () => {
+      const rs = await ch.query({
+        query: sql,
+        query_params: queryParams,
+        format: 'JSONEachRow',
+        clickhouse_settings: perfLogComment('heatmap-page-stats', 'ch', reqId),
+      })
+      return (await rs.json()) as PageStatsRow[]
     })
-    const rows = (await rs.json()) as PageStatsRow[]
     const row = rows[0] ?? { page_views: 0, sessions: 0, clicks: 0, scroll_sessions_over_50pct: null }
 
     const ctr = row.page_views > 0 ? row.clicks / row.page_views : null
@@ -171,7 +207,7 @@ export async function GET(request: Request) {
       evidence_level: 'observed_exact',
     }
 
-    return NextResponse.json({ success: true, data: body, meta: { query_hash: queryHash } })
+    return jsonWithTiming(t, { success: true, data: body, meta: { query_hash: queryHash } })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'unknown error'
     // events table に `scroll_y_pct` 列が無いケース等 (Infra 続 82 deploy 前) — 縮退 query で再試行
@@ -193,18 +229,21 @@ export async function GET(request: Request) {
             AND timestamp >= toDateTime({start:String})
             AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
         `
-        const rs = await ch.query({
-          query: fallbackSql,
-          query_params: {
-            tenant_id: tenantId,
-            site_id: params.site_id,
-            page_url: params.page_url,
-            start: params.start_date,
-            end: params.end_date,
-          },
-          format: 'JSONEachRow',
+        const rows = await t.span('ch-fallback', async () => {
+          const rs = await ch.query({
+            query: fallbackSql,
+            query_params: {
+              tenant_id: tenantId,
+              site_id: params.site_id,
+              page_url: params.page_url,
+              start: params.start_date,
+              end: params.end_date,
+            },
+            format: 'JSONEachRow',
+            clickhouse_settings: perfLogComment('heatmap-page-stats', 'ch-fallback', reqId),
+          })
+          return (await rs.json()) as Array<Omit<PageStatsRow, 'scroll_sessions_over_50pct'>>
         })
-        const rows = (await rs.json()) as Array<Omit<PageStatsRow, 'scroll_sessions_over_50pct'>>
         const row = rows[0] ?? { page_views: 0, sessions: 0, clicks: 0 }
         const ctr = row.page_views > 0 ? row.clicks / row.page_views : null
         const body: PageStatsResponse = {
@@ -214,7 +253,7 @@ export async function GET(request: Request) {
           scroll_path_rate: null,
           evidence_level: 'observed_approx',
         }
-        return NextResponse.json({
+        return jsonWithTiming(t, {
           success: true,
           data: body,
           meta: { query_hash: queryHash, fallback: 'scroll_columns_missing' },
@@ -222,14 +261,16 @@ export async function GET(request: Request) {
       } catch (fallbackError) {
         const fmsg = fallbackError instanceof Error ? fallbackError.message : 'unknown'
         console.error(`[page-stats] fallback also failed query_hash=${queryHash}: ${fmsg}`)
-        return NextResponse.json(
+        return jsonWithTiming(
+          t,
           { success: false, error: { code: 'INTERNAL', message: 'page stats query failed' } },
           { status: 500 },
         )
       }
     }
     console.error(`[page-stats] query failed query_hash=${queryHash}: ${message}`)
-    return NextResponse.json(
+    return jsonWithTiming(
+      t,
       { success: false, error: { code: 'INTERNAL', message: 'page stats query failed' } },
       { status: 500 },
     )
