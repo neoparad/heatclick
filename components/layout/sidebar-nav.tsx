@@ -32,6 +32,7 @@ import Link from 'next/link'
 import {
   Activity,
   Bot,
+  Camera,
   CheckCircle2,
   ChevronRight,
   FileText,
@@ -161,6 +162,15 @@ const ACCOUNT_NAV: ReadonlyArray<NavItem> = [
     href: '/install',
     label: '設定 / タグ設置',
     icon: <Settings className="h-4 w-4" aria-hidden />,
+  },
+  {
+    // docs/heatmap/CAPTURE_STRATEGY_DECISION_2026-08-08.md §5。owner/admin 以外は
+    // page.tsx 側で /heatmap へ redirect されるため、ここではロール分岐しない
+    // (このファイルに role フィルタ機構が無いため新規追加はしない — 現状は全員に表示)。
+    navKey: 'heatmap-backfill',
+    href: '/operator/heatmap-backfill',
+    label: 'スクショ事前生成',
+    icon: <Camera className="h-4 w-4" aria-hidden />,
   },
   {
     navKey: 'logout',
