@@ -1131,9 +1131,16 @@
 
   .ug-st-site-row {
     display: flex; align-items: center; gap: 10px;
-    padding: 10px 0; border-bottom: 1px dashed var(--ug-border-2);
+    padding: 10px 8px; margin: 0 -8px;
+    border-bottom: 1px dashed var(--ug-border-2);
+    border-radius: var(--ug-r-sm); transition: background .12s;
   }
   .ug-st-site-row:last-child { border-bottom: 0; }
+  .ug-st-site-row:hover { background: var(--ug-bg-subtle); }
+  .ug-st-site-row .switch-hint {
+    flex-shrink: 0; opacity: .45; transition: opacity .12s; color: var(--ug-text-3);
+  }
+  .ug-st-site-row:hover .switch-hint { opacity: 1; color: var(--ug-brand-1); }
   .ug-st-site-row .dot {
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--ug-green); flex-shrink: 0;
