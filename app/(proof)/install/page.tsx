@@ -40,7 +40,7 @@ export const metadata: Metadata = {
 }
 
 /**
- * Phase 1 dogfood 5 sites (続 39 / `lib/auth/dogfood-users.ts` と整合)。
+ * Phase 1 dogfood sites (続 39 / `lib/auth/dogfood-users.ts` の LINKTH_INTERNAL_SITE_IDS と整合)。
  * Sprint 3 W2-B で sites table (Infra 続 56 配備済 `clickinsight.sites`) から動的取得に切替予定。
  */
 const PHASE1_SITES: ReadonlyArray<{ siteId: string; siteName: string }> = [
@@ -49,6 +49,9 @@ const PHASE1_SITES: ReadonlyArray<{ siteId: string; siteName: string }> = [
   { siteId: 'CIP_6r2WofQDSKrOwxmM', siteName: 'site-3 (linkth internal)' },
   { siteId: 'CIP_8eN7xgfBtDAnzE26', siteName: 'site-4 (linkth internal)' },
   { siteId: 'CIP_QWaPiks5krukJ6NM', siteName: 'site-5 (linkth internal)' },
+  // 続127 provision。dogfood-users.ts の LINKTH_INTERNAL_SITE_IDS には登録済みだったが
+  // このリストへの追加が漏れていたため、URL 指定 (?site_id=) でも既定サイトに fallback していた。
+  { siteId: 'CIP_E3xzSWfXcXx6GaTL', siteName: 'link-th.co.jp (コーポレート)' },
 ]
 
 const DEFAULT_ACTIVE_SITE = PHASE1_SITES[0]
