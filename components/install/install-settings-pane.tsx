@@ -9,21 +9,24 @@
  *   - 5 tabs (タグ設置 active、他 4 つは Sprint 3 W2 で本接続 = disabled)
  *   - 2 column:
  *     Left  : Step 1 snippet + Step 2 install methods accordion + Step 3 verification
- *     Right : 計測サマリー (tracking_id + 7d page 件数等) + Phase 1 5 sites status
+ *     Right : 計測サマリー (tracking_id + 7d page 件数等) + Phase 1 sites status
  *
  * Sprint 3 W2-A (続 75 範囲):
  *   - tracking script は実 tracking_id (server props 経由で渡される) で生成
  *   - 動作確認 button → /api/pages?site_id=<id> を fetch して 1 件以上返ればイベント流入 OK と判定
  *   - 各 site の status (last_event 推定 / 7d events) は `initialSiteStats` (server で /api/pages 経由で取得) を表示
+ *   - site status row は `/install?site_id=` への Link (続128: サイト切替が無かったため追加)
  *
  * Sprint 3 W2 (続 76+ 想定):
  *   - 個人情報マスク / CV・目標設定 / アラート tab の本接続 (Infra schema 待ち)
- *   - tracking_id 切替 (現在は固定 5 sites、site picker drawer 配備後に dynamic 化)
+ *   - Phase 1 site 一覧は `app/(proof)/install/page.tsx` の `PHASE1_SITES` 固定配列のまま
+ *     (Sprint 3 W2-B で `clickinsight.sites` からの動的取得に切替予定)
  */
 
 'use client'
 
 import { useCallback, useMemo, useState } from 'react'
+import Link from 'next/link'
 import {
   AlertTriangle,
   Boxes,
@@ -697,12 +700,17 @@ function SitesStatusCard({
 }) {
   return (
     <div className="ug-st-side-panel">
-      <h4>Phase 1 5 sites tracking 状況</h4>
+      <h4>Phase 1 {siteStats.length} sites tracking 状況</h4>
       <div>
         {siteStats.map((s) => {
           const dotClass = s.errorMessage ? 'crit' : s.hasEvents ? '' : 'warn'
           return (
-            <div className="ug-st-site-row" key={s.siteId}>
+            <Link
+              href={`/install?site_id=${encodeURIComponent(s.siteId)}`}
+              className="ug-st-site-row"
+              style={{ textDecoration: 'none', color: 'inherit', cursor: 'pointer' }}
+              key={s.siteId}
+            >
               <span className={`dot ${dotClass}`} />
               <div className="meta">
                 <div className="name">
@@ -732,7 +740,7 @@ function SitesStatusCard({
                   </>
                 )}
               </div>
-            </div>
+            </Link>
           )
         })}
       </div>
