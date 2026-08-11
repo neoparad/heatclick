@@ -740,6 +740,9 @@ function SitesStatusCard({
                   </>
                 )}
               </div>
+              {s.siteId === activeSiteId ? null : (
+                <ChevronRight className="switch-hint h-3.5 w-3.5" aria-hidden />
+              )}
             </Link>
           )
         })}
