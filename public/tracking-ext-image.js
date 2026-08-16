@@ -1,7 +1,12 @@
 /**
  * ClickInsight Pro - Image Visibility Tracking Extension
  * Tracks: image_visibility (duration, max visible ratio per image)
- */
+ *
+ * SaaS B-1 (decisions.md L275 続 14): events are queued through core tracking.js,
+ * which enforces data-tenant-id at start-up (sendBeacon abort + console.error on absence).
+ * This extension itself does not parse data-tenant-id; consumers must wire it on the
+ * <script src="tracking.js"> tag (or via ?tenant_id= query) — see tracking.js header.
+  */
 (function() {
   'use strict';
   const CI = window.ClickInsight;
@@ -16,9 +21,21 @@
 
       this.observer = new IntersectionObserver((entries) => {
         const now = Date.now();
+        const scrollY = window.scrollY || window.pageYOffset;
         for (const entry of entries) {
           const data = this.tracked.get(entry.target);
           if (!data) continue;
+          if (!data.geometrySet) {
+            // Geometry comes from the observer's own boundingClientRect, computed as
+            // part of IntersectionObserver's async intersection-checking pass rather
+            // than a synchronous forced-layout call (perf/②a: PSI-confirmed 55ms
+            // forced reflow from an explicit img.getBoundingClientRect() scan).
+            const rect = entry.boundingClientRect;
+            data.y = Math.round(rect.top + scrollY);
+            data.width = entry.target.naturalWidth || Math.round(rect.width);
+            data.height = entry.target.naturalHeight || Math.round(rect.height);
+            data.geometrySet = true;
+          }
           if (entry.isIntersecting) {
             data.startTime = now;
             data.maxRatio = Math.max(data.maxRatio, entry.intersectionRatio);
@@ -42,14 +59,12 @@
         if (img.naturalWidth > 0 && img.naturalWidth < 30 && img.naturalHeight < 30) continue;
         if (img.src && (img.src.startsWith('data:') || img.src.endsWith('.svg'))) continue;
 
-        const rect = img.getBoundingClientRect();
-        const scrollY = window.scrollY || window.pageYOffset;
-
+        // No getBoundingClientRect() here: y/width/height are filled in later from
+        // the IntersectionObserver callback's entry.boundingClientRect (see init()),
+        // so this scan never forces a synchronous layout.
         this.tracked.set(img, {
           src: img.src || '', alt: img.alt || '', path: CI.utils.getElementPath(img),
-          y: Math.round(rect.top + scrollY),
-          width: img.naturalWidth || Math.round(rect.width),
-          height: img.naturalHeight || Math.round(rect.height),
+          y: 0, width: 0, height: 0, geometrySet: false,
           startTime: 0, totalVisible: 0, maxRatio: 0,
         });
         this.observer.observe(img);
