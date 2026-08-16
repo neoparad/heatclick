@@ -236,40 +236,11 @@ function isBlockedHostname(host: string): boolean {
   return false
 }
 
-/** scheme → default port (省略時に剥がす対象) */
-const DEFAULT_PORT_FOR_SCHEME: Record<string, string> = {
-  'http:': '80',
-  'https:': '443',
-}
-
-/**
- * page_url の正準化 (canonicalization)。
- *
- * 設計 (続 perf R2 cache):
- *   - **cache key と ClickHouse ownership lookup の両方で同一文字列を使う**ことが CRITICAL。
- *     ここで返す文字列を route が両方に渡すことで、cache hit と ownership 判定が乖離しない。
- *   - **過剰正規化しない**:
- *       - scheme / host を lowercase (大文字小文字はサーバが区別しないため安全)
- *       - default port (http=80 / https=443) を剥がす
- *       - fragment (#...) を剥がす (サーバに送られない部分なので別ページではない)
- *   - **触らない** (= 別ページの可能性があるため):
- *       - query param の有無・順序 (?a=1&b=2 ≠ ?b=2&a=1 を別物として扱う)
- *       - trailing slash (/foo ≠ /foo/ を別物として扱う)
- *       - path の大文字小文字
- *
- * 入力は `validateExternalUrl` を通過済 URL を前提とする (本関数は SSRF 判定しない)。
- */
-export function canonicalizePageUrl(rawUrl: string): string {
-  const u = new URL(rawUrl)
-  u.protocol = u.protocol.toLowerCase()
-  u.hostname = u.hostname.toLowerCase()
-  if (u.port && DEFAULT_PORT_FOR_SCHEME[u.protocol] === u.port) {
-    u.port = ''
-  }
-  u.hash = ''
-  // URL.toString() は query 順序・trailing slash・path case を保持する (= 過剰正規化しない)
-  return u.toString()
-}
+// 続135: URL 正準化は lib/heatmap/canonical-url.ts (canonicalizeHeatmapUrl) に一元化した。
+//   旧 canonicalizePageUrl は query を保持し host を小文字化していたため、tile/elements/
+//   page-stats の canonical (query/fragment 除去・単純切り) と乖離し、screenshot ownership と
+//   行動データの URL グルーピングがズレて ② overlay 欠落 / cache 断片化を生んでいた。
+//   canonical の二重定義を避けるため本関数は削除 (HEATMAP_QUALITY_PLAN P1)。再導入しないこと。
 
 /**
  * cache key: tenant / site / url / device / width / 設定 hash。
