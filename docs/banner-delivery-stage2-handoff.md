@@ -58,7 +58,7 @@ The response will contain the new scenario `id` (UUID). Note it down.
 curl "https://ugokimap.com/api/scenarios/runtime?tenant_id=linkth_internal&site_id=CIP_EcwUTHEZdIOAUqum"
 ```
 
-Expected: `{"error":"no_scenarios"}` with HTTP 404 — because the scenario is still `draft` and is not included in the public payload.
+Expected: HTTP 200 with `{"generated_at":"...","tenant_id":"linkth_internal","site_id":"CIP_EcwUTHEZdIOAUqum","scenarios":[]}` — the scenario is still `draft` so it's excluded from `scenarios`, but the endpoint no longer 404s for this case (issue① fix, 2026-08: a `draft`/not-yet-active scenario is not an error, it's a normal empty state, and the old 404 produced console noise on every customer pageview with zero active scenarios).
 
 ### 2d. Activate delivery (change status to `live`)
 

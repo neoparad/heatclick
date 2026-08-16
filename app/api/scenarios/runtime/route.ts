@@ -11,8 +11,12 @@
  *   - Reads in-memory hard-code (lib/scenarios/poc-scenario.ts)
  *   - public endpoint (no JWT) because tracking.js v2 already runs on customer pages
  *     and the runtime payload contains no PII — only condition AST + variant HTML.
- *   - tenant_id + site_id must match a configured site_id (validated against poc data).
- *     Cross-tenant probing returns 404, not 403, to avoid info leak about tenant existence.
+ *   - tenant_id + site_id are NOT required to match a pre-registered site_id record: any
+ *     syntactically valid pair (see QuerySchema) that simply has zero active scenarios is a
+ *     normal, expected state for real customer traffic (most pageviews have no live scenario
+ *     running). That case returns HTTP 200 with an empty `scenarios: []` payload — not 404 —
+ *     so it does not show up as console/network error noise on every customer pageview.
+ *     Malformed query params (missing/invalid tenant_id or site_id) still return 400.
  *
  * REQ-SEC-006 (don't public-cache executable config + kill-switch):
  *   - This payload contains EXECUTABLE config (inline HTML the runtime injects). It is served
@@ -20,7 +24,7 @@
  *     for minutes and an emergency kill takes effect on the very next request (no TTL wait).
  *   - A kill-switch (lib/scenarios/kill-switch.ts) is consulted on every serve, independent
  *     of any cache: global / per-tenant / per-scenario disable flags drop scenarios at serve
- *     time. If everything is killed, we serve nothing (404).
+ *     time. If everything is killed, we serve the empty-scenarios 200 payload (see above).
  *   - `preview` status is NOT exposed in this public payload — preview is for authoring/QA,
  *     not for delivery to every anonymous visitor. Only `live` (+ measure-path) reaches here.
  *
@@ -99,12 +103,14 @@ export async function GET(request: Request): Promise<NextResponse> {
 
   const { tenant_id, site_id } = parsed.data
 
-  // REQ-SEC-006: global kill-switch — serve nothing if scenario delivery is globally disabled.
+  // REQ-SEC-006: global kill-switch — serve the empty-scenarios 200 payload if scenario
+  // delivery is globally disabled. Not a 404: this is a routine "nothing to deliver right
+  // now" outcome for otherwise-valid requests, not an error.
   if (isScenarioDeliveryGloballyDisabled()) {
-    return NextResponse.json(
-      { error: 'no_scenarios' },
-      { status: 404, headers: { 'Cache-Control': 'no-store', ...CORS_HEADERS } },
-    )
+    return NextResponse.json(emptyRuntimePayload(tenant_id, site_id), {
+      status: 200,
+      headers: { 'Cache-Control': 'no-store', ...CORS_HEADERS },
+    })
   }
 
   // Stage 5 (続 M-12): KV-first merge with POC fallback
@@ -135,11 +141,13 @@ export async function GET(request: Request): Promise<NextResponse> {
   const scenarios = killFiltered.filter((s) => isScenarioInSchedule(s.schedule, nowMs))
 
   if (scenarios.length === 0) {
-    // 404 (not 403) to avoid leaking tenant existence.
-    return NextResponse.json(
-      { error: 'no_scenarios' },
-      { status: 404, headers: { 'Cache-Control': 'no-store', ...CORS_HEADERS } },
-    )
+    // Valid tenant_id/site_id with zero active scenarios is the common case for real
+    // customer traffic (most pageviews have no live scenario running) — 200 + empty
+    // scenarios payload, not 404, so it doesn't show up as console/network error noise.
+    return NextResponse.json(emptyRuntimePayload(tenant_id, site_id), {
+      status: 200,
+      headers: { 'Cache-Control': 'no-store', ...CORS_HEADERS },
+    })
   }
 
   const runtimeScenarios: ScenarioRuntime[] = await Promise.all(
@@ -176,6 +184,22 @@ export async function GET(request: Request): Promise<NextResponse> {
       ...CORS_HEADERS,
     },
   })
+}
+
+/**
+ * 続 M-N (2026-08-16, issue①): Empty-scenarios success payload, reused by every
+ * "valid tenant/site, nothing to deliver right now" branch (global kill-switch, zero
+ * scenarios after schedule/kill filtering). Shape matches the non-empty success payload
+ * below (ScenarioRuntimePayloadSchema) — just with `scenarios: []` — so this is genuinely
+ * the existing "no active scenario" success shape, not a new one.
+ */
+function emptyRuntimePayload(tenant_id: string, site_id: string): ScenarioRuntimePayload {
+  return {
+    generated_at: new Date().toISOString(),
+    tenant_id,
+    site_id,
+    scenarios: [],
+  }
 }
 
 /**

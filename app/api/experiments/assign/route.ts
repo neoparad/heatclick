@@ -11,7 +11,11 @@
  *      lib/experiments/assignment.ts SECURITY ブロック参照)。
  *   - no-store (REQ-SEC-006 同方針: per-visitor 応答を CDN 共有キャッシュさせない)。
  *   - 返却は PII なし (実験 id / url_pattern / arm のみ、customer サイトで匿名 visitor に配る前提)。
- *     cross-tenant probe は 404 で tenant 存在を隠す (scenarios/runtime と同方針)。
+ *     cross-tenant probe は 404 で tenant 存在を隠す。
+ *     (2026-08 補足: scenarios/runtime は同種の「未登録/実験なし」ケースを 404→200+空配列 に変更した
+ *      — 全顧客ページビューで発生する console 404 ノイズが理由で、対象は「有効な tenant/site だが
+ *      対象データが無い」ケースのみ。本 route の cross-tenant probe 隠蔽とは別の話で、本 route 自体は
+ *      変更していない。)
  *   - middleware で api-public 登録 (JWT 免除)。
  *   - tenant_id は repo.list の WHERE に渡され全クエリ tenant scoped (§3.8.1)。
  */
