@@ -38,7 +38,7 @@ export async function GET(request: NextRequest) {
       site_id: siteId,
       platform: platform,
       install_code: installCode,
-      tracking_url: `${process.env.NEXT_PUBLIC_APP_URL}/tracking.js`,
+      tracking_url: `${process.env.NEXT_PUBLIC_APP_URL}/v2/tracking.js`,
       api_url: `${process.env.NEXT_PUBLIC_APP_URL}/api/events`
     })
 
@@ -62,7 +62,7 @@ function clickinsight_pro_tracking() {
         window.CLICKINSIGHT_SITE_ID = '${siteId}';
         window.CLICKINSIGHT_DEBUG = false;
     </script>
-    <script src="${process.env.NEXT_PUBLIC_APP_URL}/tracking.js" data-site-id="${siteId}" async></script>
+    <script src="${process.env.NEXT_PUBLIC_APP_URL}/v2/tracking.js" data-site-id="${siteId}" async></script>
     <?php
 }
 
@@ -103,7 +103,7 @@ function generateHTMLCode(siteId: string): string {
         window.CLICKINSIGHT_SITE_ID = '${siteId}';
         window.CLICKINSIGHT_DEBUG = false;
     </script>
-    <script src="${process.env.NEXT_PUBLIC_APP_URL}/tracking.js" data-site-id="${siteId}" async></script>
+    <script src="${process.env.NEXT_PUBLIC_APP_URL}/v2/tracking.js" data-site-id="${siteId}" async></script>
 </head>
 <body>
     <!-- Your website content -->
