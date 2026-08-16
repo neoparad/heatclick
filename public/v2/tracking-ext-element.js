@@ -33,6 +33,13 @@
             var entry = entries[i];
             var data = elementVisibility.tracked.get(entry.target);
             if (!data) continue;
+            if (data.y === null) {
+              // entry.boundingClientRect comes from the IntersectionObserver's own
+              // async geometry pass, unlike el.getBoundingClientRect() called eagerly
+              // at scan time — reading it here avoids forcing a synchronous reflow.
+              var scrollY = window.scrollY || window.pageYOffset;
+              data.y = Math.round(entry.boundingClientRect.top + scrollY);
+            }
             if (entry.isIntersecting) {
               data.startTime = now;
               data.maxRatio = Math.max(data.maxRatio, entry.intersectionRatio);
@@ -97,13 +104,15 @@
 
         for (var el of all) {
           if (this.tracked.has(el)) continue;
-          var rect = el.getBoundingClientRect();
-          var scrollY = window.scrollY || window.pageYOffset;
+          // y is resolved lazily from entry.boundingClientRect in the observer
+          // callback (see init) instead of calling el.getBoundingClientRect()
+          // here, which would force a synchronous layout on every new element
+          // found in this scan loop.
           this.tracked.set(el, {
             selector: el.getAttribute('data-track-visibility') || (CI.utils.getCssSelector ? CI.utils.getCssSelector(el) : CI.utils.getElementPath(el)),
             tag: el.tagName.toLowerCase(),
             text: (el.textContent || '').trim().substring(0, 100),
-            y: Math.round(rect.top + scrollY),
+            y: null,
             startTime: 0, totalVisible: 0, maxRatio: 0, clicked: false,
           });
           this.observer.observe(el);
@@ -127,25 +136,43 @@
           elements = document.querySelectorAll(defaultSelectors);
         }
 
+        // Batch the geometry reads instead of interleaving them with the
+        // trackedV2.set()/observerV2.observe() writes below: collect the
+        // not-yet-tracked candidates first (no reads), then read every
+        // candidate's getBoundingClientRect() back-to-back in one tight loop
+        // (no writes/mutations between reads), then apply the size filter and
+        // do all the writes. This avoids forcing a separate synchronous
+        // layout pass per element in this scan loop.
+        var candidates = [];
         for (var i = 0; i < elements.length; i++) {
           var el = elements[i];
           if (this.trackedV2.has(el)) continue;
+          candidates.push(el);
+        }
+
+        var rects = [];
+        for (var j = 0; j < candidates.length; j++) {
+          rects.push(candidates[j].getBoundingClientRect());
+        }
+
+        for (var k = 0; k < candidates.length; k++) {
+          var rect = rects[k];
           // Skip tiny or hidden elements
-          var rect = el.getBoundingClientRect();
           if (rect.width < 10 || rect.height < 10) continue;
 
-          var selector = CI.utils.getCssSelector ? CI.utils.getCssSelector(el) : CI.utils.getElementPath(el);
-          this.trackedV2.set(el, {
+          var candidate = candidates[k];
+          var selector = CI.utils.getCssSelector ? CI.utils.getCssSelector(candidate) : CI.utils.getElementPath(candidate);
+          this.trackedV2.set(candidate, {
             selector: selector,
-            tag: el.tagName.toLowerCase(),
-            text: (el.textContent || '').trim().substring(0, 100),
+            tag: candidate.tagName.toLowerCase(),
+            text: (candidate.textContent || '').trim().substring(0, 100),
             visibleStartMs: 0,
             visibleEndMs: 0,
             lastSeenMs: 0,
             totalVisible: 0,
             maxRatio: 0,
           });
-          this.observerV2.observe(el);
+          this.observerV2.observe(candidate);
         }
       },
 
@@ -160,7 +187,7 @@
           if (total < 100) continue;
           CI.track({
             event_type: 'element_visibility', element_selector: data.selector, element_tag: data.tag,
-            element_text: data.text, element_y: data.y,
+            element_text: data.text, element_y: data.y === null ? 0 : data.y,
             visible_duration_ms: Math.round(total), max_visible_ratio: Math.round(data.maxRatio * 100) / 100,
             element_clicked: data.clicked ? 1 : 0,
           });

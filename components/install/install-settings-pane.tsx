@@ -187,6 +187,14 @@ export interface VerifyRowDef {
   detail: React.ReactNode
 }
 
+// Issue ③ (2026-08): link-th.co.jp 本番で実際に発生した設置ミスの再発防止用定数。
+// tracking.js の script タグは trackingOrigin (SaaS 側ホスト) から読み込まれるが、
+// 実際のイベント計測ビーコン (sendBeacon/fetch) は別オリジンの Cloudflare Worker である
+// この URL に直接送信される (public/v2/tracking.js:124 apiEndpoint 既定値)。
+// 顧客が <script src> のホストだけを CSP script-src に許可し、この Worker origin を
+// connect-src に追加し忘れる、というのが実際に起きた事故パターン。
+const EVENT_INGEST_ORIGIN = 'https://ugokimap-event-ingest.linkth.workers.dev'
+
 export const VERIFY_ROWS_TEMPLATE: VerifyRowDef[] = [
   {
     state: 'ok',
@@ -207,7 +215,10 @@ export const VERIFY_ROWS_TEMPLATE: VerifyRowDef[] = [
     state: 'warn',
     title: 'CSP (Content Security Policy)',
     detail:
-      'タグ送信先 ugokimap-event-ingest.linkth.workers.dev を CSP に追加することを推奨 (W2 で機能タブ配備)',
+      'script-src には tracking.js を読み込んでいるホストを、connect-src には同ホストに加えて ' +
+      `${EVENT_INGEST_ORIGIN} (実際のイベント送信先 Worker) を追加してください。` +
+      'script タグの src だけを見て connect-src への追加を忘れると、タグは読み込まれるのに ' +
+      '計測イベントだけ CSP でブロックされます (link-th.co.jp で実際に発生した設置ミス)。',
   },
 ]
 
@@ -337,7 +348,7 @@ export function InstallSettingsPane({
               trackingOrigin={trackingOrigin}
             />
             <StepTwoInstallMethods />
-            <StepThreeVerify activeStat={activeStat} />
+            <StepThreeVerify activeStat={activeStat} trackingOrigin={trackingOrigin} />
           </div>
           <div>
             <TrackingSummaryCard activeStat={activeStat} />
@@ -580,7 +591,13 @@ function StepTwoInstallMethods() {
   )
 }
 
-function StepThreeVerify({ activeStat }: { activeStat: SiteStatus | null }) {
+function StepThreeVerify({
+  activeStat,
+  trackingOrigin,
+}: {
+  activeStat: SiteStatus | null
+  trackingOrigin: string
+}) {
   const hasEvents = activeStat?.hasEvents === true
   // Template に動的 active site 情報を merge
   const rows: VerifyRowDef[] = [
@@ -614,8 +631,17 @@ function StepThreeVerify({ activeStat }: { activeStat: SiteStatus | null }) {
       title: 'CSP (Content Security Policy)',
       detail: (
         <>
-          タグ送信先 <span className="mono">ugokimap-event-ingest.linkth.workers.dev</span> を
-          CSP に追加することを推奨 (W2 で機能タブ配備)
+          script タグの読み込み元と、実際のイベント送信先は別ホストです。両方を CSP に追加してください:{' '}
+          <span className="mono">script-src {trackingOrigin}</span>
+          {' / '}
+          <span className="mono">
+            connect-src {trackingOrigin} {EVENT_INGEST_ORIGIN}
+          </span>
+          。タグの src は {trackingOrigin} を指していますが、sendBeacon / fetch で送信される計測
+          イベントは別オリジンの Cloudflare Worker ({EVENT_INGEST_ORIGIN}) へ直接届きます。
+          connect-src にこの Worker のオリジンを追加し忘れると、タグ自体は正常に読み込まれるのに
+          送信だけ CSP にブロックされ、計測が止まっていることに気づきにくくなります
+          (link-th.co.jp の本番環境で実際に発生した設置ミスです)。
         </>
       ),
     },
