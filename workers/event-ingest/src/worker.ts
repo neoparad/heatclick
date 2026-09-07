@@ -18,11 +18,19 @@
  *   - MEDIUM 修正 同時統合: M-1 pickColumns tenant_id INSERT-境界 assert / M-3 parseClickHouseUrl URL parser
  */
 
+import {
+  buildVisitorIdSetCookie,
+  pickPayloadVisitorId,
+  resolveCanonicalVisitorId,
+} from './visitor-cookie.ts';
+
 export interface Env {
   // ClickHouse access
   CLICKHOUSE_URL: string;        // e.g., http://user:pass@host:port (secret 経由)
   CLICKHOUSE_DB: string;          // 'clickinsight'
-  ALLOWED_ORIGINS: string;        // '*' or comma-separated
+  // ALLOWED_ORIGINS は撤去 (docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md §3-2):
+  //   旧実装は '*' 以外を設定しても allowlist を検証せず任意 Origin をエコーしており
+  //   「制限している風で制限していない」状態だった。公開 ingest endpoint として '*' 固定。
   BATCH_SIZE: string;             // unused in current impl, reserved
   FLUSH_INTERVAL_MS: string;      // unused in current impl, reserved
 
@@ -769,11 +777,24 @@ function detectAgentFromUA(ua: string): { is_agent: number; agent_type: string }
 
 // ── CORS helpers ────────────────────────────────────────────────────
 
-function corsHeaders(origin: string | null, env: Env): Record<string, string> {
-  const allowed = env.ALLOWED_ORIGINS;
-  const respOrigin = allowed === '*' ? '*' : (origin || '*');
+/**
+ * 公開 ingest endpoint の CORS。ACAO は '*' 固定。
+ *
+ * 不変条件 (docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md §3-2 / §4 S-1):
+ *   - この endpoint に `Access-Control-Allow-Credentials: true` を **追加してはならない**
+ *     ('*' との併用はブラウザが拒否し、かつ任意オリジンへの credentialed CORS になる)。
+ *     必要になったら Origin の完全一致 allowlist (endsWith/includes 禁止、`Origin: null`
+ *     拒否、`Vary: Origin` 付与) を先に実装すること。
+ *   - CORS は ingestion を守らない (text/plain sendBeacon は preflight を経ない)。
+ *     受入制御は site_id→tenant registry 照合 (resolveTenant) が担い、cross-site からの
+ *     Cookie 付き偽造は `__ugk_vid` の SameSite=Lax が防ぐ (visitor-cookie.ts 参照)。
+ *   - 旧 `ALLOWED_ORIGINS` の非 '*' 分岐は allowlist を検証せず Origin をエコーしていた
+ *     ため撤去 (v1 の「厳格 allowlist 化」案は未登録オリジンの application/json 経路の
+ *     preflight を壊すことが判明し不採用)。
+ */
+function corsHeaders(): Record<string, string> {
   return {
-    'Access-Control-Allow-Origin': respOrigin,
+    'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'POST, OPTIONS, GET',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Max-Age': '86400',
@@ -785,8 +806,7 @@ function corsHeaders(origin: string | null, env: Env): Record<string, string> {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    const origin = request.headers.get('Origin');
-    const cors = corsHeaders(origin, env);
+    const cors = corsHeaders();
 
     if (url.pathname === '/health' || url.pathname === '/') {
       return new Response(JSON.stringify({ status: 'ok', worker: 'ugokimap-event-ingest' }), {
@@ -902,6 +922,21 @@ export default {
       }
     }
 
+    // 第一者 visitor_id (docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md §3-1):
+    //   Cookie 値 > payload 値 > mint の順で正準化 (各ソースとも形式検証パス時のみ採用)。
+    //   accepted event が 1 件以上ある応答 **のみ** Set-Cookie を返す (この分岐に限定)。
+    //   400/401/413 や全件 drop の 200 では発行しない — 失敗確定のリクエストを送るだけで
+    //   Cookie 設定を誘発できてしまうため。
+    //   注意: request.headers.get('Cookie') の生値はログ・audit・CH のいずれにも書かない
+    //   (パスプロキシ経由では顧客サイトの全 Cookie が届く)。
+    const { vid } = resolveCanonicalVisitorId({
+      cookieHeader: request.headers.get('Cookie'),
+      payloadVisitorId: pickPayloadVisitorId(acceptedEvents),
+    });
+    for (const e of acceptedEvents) {
+      e.visitor_id = vid;
+    }
+
     ctx.waitUntil(flushToClickHouse(env, acceptedEvents));
 
     return new Response(
@@ -910,7 +945,16 @@ export default {
         received: acceptedEvents.length,
         dropped: dropContexts.length,
       }),
-      { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } },
+      {
+        status: 200,
+        headers: {
+          ...cors,
+          'Content-Type': 'application/json',
+          'Set-Cookie': buildVisitorIdSetCookie(vid),
+          // Set-Cookie 付き応答が中間層でキャッシュされると訪問者間で vid が混線する
+          'Cache-Control': 'no-store',
+        },
+      },
     );
   },
 };

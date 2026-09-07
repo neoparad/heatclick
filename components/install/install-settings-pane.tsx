@@ -642,6 +642,10 @@ function StepThreeVerify({
           connect-src にこの Worker のオリジンを追加し忘れると、タグ自体は正常に読み込まれるのに
           送信だけ CSP にブロックされ、計測が止まっていることに気づきにくくなります
           (link-th.co.jp の本番環境で実際に発生した設置ミスです)。
+          なお、第一者化 (自サイトの <span className="mono">/ugoki/track</span> を Worker へ
+          リバースプロキシし、タグに <span className="mono">window.CLICKINSIGHT_API_URL = &apos;/ugoki/track&apos;</span>{' '}
+          を追加する構成。Safari の7日制限を回避して訪問者識別を最長400日保持します) を行った場合は、
+          送信先が自オリジンになるため connect-src に Worker のオリジンは不要です。
         </>
       ),
     },

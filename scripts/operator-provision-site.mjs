@@ -131,6 +131,16 @@ async function main() {
         data-runtime-url="${origin}/api/scenarios/runtime"
         defer></script>
 
+■ ③ (任意・推奨) 第一者化 — Safari ITP の7日制限を回避して訪問者識別を最長400日保持:
+   docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md 参照。前提: サイトが HTTPS 配信。
+   1. 顧客サイト側で /ugoki/track を ingest Worker へリバースプロキシ
+      (Vercel の例: vercel.json の rewrites に
+       { "source": "/ugoki/track", "destination": "https://ugokimap-event-ingest.linkth.workers.dev/api/track" }
+       ※ next.config.js の rewrites は Set-Cookie を落とす報告があるため使わない)
+   2. ①のタグの <script> 内に 1 行追加:
+        window.CLICKINSIGHT_API_URL = '/ugoki/track';
+   3. CSP を使っている場合、connect-src は自オリジンで足りる (Worker の origin は不要になる)
+
 ■ 残作業:
   1. lib/auth/dogfood-users.ts / seed-auth-registry.mjs の SITE_IDS に追加 (コード整合)
   2. 管理画面に出すには再ログインが必要 (JWT の site_ids 再発行)
