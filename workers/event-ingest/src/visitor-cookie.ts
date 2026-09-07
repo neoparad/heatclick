@@ -21,6 +21,13 @@
  *     共存し、同名置換 (昇格) が成立しない
  *   - HttpOnly は付けない (scenario-runtime.js が document.cookie から読む)
  *   - SameSite=Lax を None に緩めない (cross-site からの Cookie 付き偽造の唯一の防御)
+ *   - **Cookie 由来 vid の採用と Set-Cookie 発行は「第一者束縛」が成立した場合のみ**
+ *     (v4、Codex round2 HIGH): Lax は same-site (兄弟サブドメイン) からの送信を防がない。
+ *     攻撃者が顧客の兄弟サブドメインから顧客プロキシへ「攻撃者自身の site_id/tenant_id」を
+ *     送ると、被害者の Cookie が同乗し、Worker が被害者 vid を攻撃者テナントの行に書く。
+ *     対策 = isFirstPartyBound: (1) Sec-Fetch-Site: same-origin (ブラウザ付与、ページ JS から
+ *     偽装不可、same-site を除外) かつ (2) プロキシが転送した元ホスト == payload の site が
+ *     登録しているホスト、かつ (3) accepted events が単一 site_id。
  */
 
 export const VISITOR_ID_COOKIE = '__ugk_vid';
@@ -126,4 +133,88 @@ export function pickPayloadVisitorId(events: ReadonlyArray<Record<string, unknow
     if (isValidVisitorId(e.visitor_id)) return e.visitor_id;
   }
   return null;
+}
+
+// ── 第一者束縛 (v4、Codex round2 HIGH 対応) ─────────────────────────
+
+/**
+ * ホスト名の正準化: 小文字化・ポート除去・末尾ドット除去・IDN は punycode 化。
+ * 不正な値は null。`URL` を経由することで検証も兼ねる。
+ */
+export function normalizeHost(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  if (s.length === 0 || s.length > 253) return null;
+  let hostname: string;
+  try {
+    hostname = new URL('https://' + s).hostname;
+  } catch {
+    return null;
+  }
+  const h = hostname.toLowerCase().replace(/\.$/, '');
+  if (!/^[a-z0-9.-]+$/.test(h)) return null;
+  return h;
+}
+
+/** sites.url (例 "https://customer.com/") から登録ホストを得る。 */
+export function hostFromUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return null;
+  try {
+    return normalizeHost(new URL(raw).hostname);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * プロキシが転送した元ホスト。`X-Forwarded-Host` は多段プロキシで "a, b" になりうるため
+ * 先頭 (最初にリクエストを受けたホスト) を採用する。
+ */
+export function firstForwardedHost(header: string | null | undefined): string | null {
+  if (!header) return null;
+  const first = header.split(',')[0];
+  return normalizeHost(first);
+}
+
+/** accepted events の site_id が単一ならそれを返す。混在・欠落は null (束縛しない)。 */
+export function pickSingleSiteId(events: ReadonlyArray<Record<string, unknown>>): string | null {
+  let siteId: string | null = null;
+  for (const e of events) {
+    if (typeof e.site_id !== 'string' || e.site_id.length === 0) return null;
+    if (siteId === null) siteId = e.site_id;
+    else if (siteId !== e.site_id) return null;
+  }
+  return siteId;
+}
+
+export interface FirstPartyBindingInput {
+  /** ブラウザ付与の Fetch Metadata。ページ JS からは偽装不可。プロキシが転送する必要あり。 */
+  secFetchSite: string | null | undefined;
+  /** プロキシが転送した元ホスト (X-Forwarded-Host)。 */
+  forwardedHost: string | null | undefined;
+  /** payload の site_id が sites テーブルに登録しているホスト (hostFromUrl)。null = 不明。 */
+  registeredHost: string | null;
+}
+
+/**
+ * Cookie 由来 vid を採用し Set-Cookie を返してよいか。
+ *
+ * 全条件を満たす場合のみ true:
+ *   1. Sec-Fetch-Site === 'same-origin' — 送信元ページとリクエスト先が同一オリジン。
+ *      兄弟サブドメイン (same-site) や cross-site は除外。ヘッダ欠落 (旧ブラウザ / プロキシが
+ *      転送しない) も除外 = fail closed
+ *   2. 転送元ホストと登録ホストが正準化後に完全一致
+ *   3. 登録ホストが解決できている
+ *
+ * false の場合、呼び元は payload の visitor_id をそのまま流し、Set-Cookie を返さない
+ * (被害者 Cookie の上書き = 固定化も起きない)。同一オリジンの任意スクリプトは
+ * document.cookie を直接読めるため、同一オリジンが原理的な信頼境界であり、
+ * この判定はその境界に一致させたもの。
+ */
+export function isFirstPartyBound(input: FirstPartyBindingInput): boolean {
+  if (input.secFetchSite !== 'same-origin') return false;
+  if (input.registeredHost === null) return false;
+  const forwarded = firstForwardedHost(input.forwardedHost);
+  if (forwarded === null) return false;
+  return forwarded === input.registeredHost;
 }

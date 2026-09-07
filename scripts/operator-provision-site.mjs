@@ -136,7 +136,9 @@ async function main() {
    1. 顧客サイト側で /ugoki/track を ingest Worker へリバースプロキシ
       (Vercel の例: vercel.json の rewrites に
        { "source": "/ugoki/track", "destination": "https://ugokimap-event-ingest.linkth.workers.dev/api/track" }
-       ※ next.config.js の rewrites は Set-Cookie を落とす報告があるため使わない)
+       ※ next.config.js の rewrites は Set-Cookie を落とす報告があるため使わない
+       ※ プロキシは Sec-Fetch-Site と X-Forwarded-Host を Worker へ転送すること。
+          転送されないと Worker は Set-Cookie を返さず、従来どおり7日制限のままになる)
    2. ①のタグの <script> 内に 1 行追加:
         window.CLICKINSIGHT_API_URL = '/ugoki/track';
    3. CSP を使っている場合、connect-src は自オリジンで足りる (Worker の origin は不要になる)

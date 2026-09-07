@@ -20,7 +20,10 @@
 
 import {
   buildVisitorIdSetCookie,
+  hostFromUrl,
+  isFirstPartyBound,
   pickPayloadVisitorId,
+  pickSingleSiteId,
   resolveCanonicalVisitorId,
 } from './visitor-cookie.ts';
 
@@ -275,6 +278,43 @@ function cacheStore(site_id: string, tenant_id: string | null): void {
   });
 }
 
+/**
+ * v4 (第一者束縛): site_id → sites.url のホスト。tenant lookup と同じ SELECT で取得し、
+ * 同 TTL でキャッシュ。null = 登録行に url が無い/不正 (束縛不可として扱う)。
+ */
+interface HostCacheEntry {
+  host: string | null;
+  expires_at: number;
+}
+const SITE_HOST_CACHE = new Map<string, HostCacheEntry>();
+
+function hostCacheLookup(site_id: string): { hit: false } | { hit: true; host: string | null } {
+  const entry = SITE_HOST_CACHE.get(site_id);
+  if (!entry) return { hit: false };
+  if (Date.now() > entry.expires_at) {
+    SITE_HOST_CACHE.delete(site_id);
+    return { hit: false };
+  }
+  return { hit: true, host: entry.host };
+}
+
+function hostCacheStore(site_id: string, host: string | null): void {
+  SITE_HOST_CACHE.set(site_id, { host, expires_at: Date.now() + SITE_CACHE_TTL_MS });
+}
+
+/**
+ * payload の site が登録しているホスト。tenant lookup (lookupTenantBySiteId) が
+ * 同時に host cache を温めるため、通常はキャッシュヒット。JWT 経路等で未取得なら
+ * ここで lookup を走らせる (結果は両キャッシュに入る)。
+ */
+async function getRegisteredSiteHost(env: Env, site_id: string): Promise<string | null> {
+  const cached = hostCacheLookup(site_id);
+  if (cached.hit) return cached.host;
+  await lookupTenantBySiteId(env, site_id);
+  const after = hostCacheLookup(site_id);
+  return after.hit ? after.host : null;
+}
+
 // ── M-3 + H-2: ClickHouse URL / credential parsing ──────────────────
 
 /**
@@ -326,7 +366,7 @@ async function lookupTenantBySiteId(env: Env, site_id: string): Promise<string |
   // resolveTenant 経路 (b) が常時 reject、Sprint 4 W1 Worker redeploy 後に全 ingest が drop していた。
   const queryUrl = `${baseUrl}/?database=${encodeURIComponent(env.CLICKHOUSE_DB)}`
     + `&query=${encodeURIComponent(
-        "SELECT tenant_id FROM sites WHERE tracking_id = {site_id:String} LIMIT 1 FORMAT JSONEachRow"
+        "SELECT tenant_id, url FROM sites WHERE tracking_id = {site_id:String} LIMIT 1 FORMAT JSONEachRow"
       )}`
     + `&param_site_id=${encodeURIComponent(site_id)}`;
 
@@ -349,7 +389,7 @@ async function lookupTenantBySiteId(env: Env, site_id: string): Promise<string |
       cacheStore(site_id, null);
       return null;
     }
-    const row = JSON.parse(firstLine) as { tenant_id?: unknown };
+    const row = JSON.parse(firstLine) as { tenant_id?: unknown; url?: unknown };
     if (typeof row.tenant_id !== 'string' || row.tenant_id.length === 0) {
       cacheStore(site_id, null);
       return null;
@@ -362,6 +402,8 @@ async function lookupTenantBySiteId(env: Env, site_id: string): Promise<string |
       return null;
     }
     cacheStore(site_id, canonical);
+    // v4: 第一者束縛用の登録ホストも同時にキャッシュ (url 不正/欠落は null = 束縛不可)
+    hostCacheStore(site_id, hostFromUrl(row.url));
     return canonical;
   } catch (e) {
     console.error(`sites lookup error for site_id=${site_id}:`, e);
@@ -583,7 +625,7 @@ async function emitAuditEventsBatch(
 
   // Reviewer R7-3 + Director 続 34 §5.4: resp.ok 検証で silent fail 撲滅
   // (旧コード = fetch 後 resp 内容を見ず success と判断、5xx でも console.error 出ず)
-  // 新コード = (1) network error catch (旧来通り) + (2) HTTP status 検証 + (3) Sentry breadcrumb
+  // 新コード = (1) network error catch (旧来通り) + (2) HTTP status 検証 + (3) 構造化ログ
   try {
     const resp = await fetch(insertUrl, {
       method: 'POST',
@@ -598,7 +640,7 @@ async function emitAuditEventsBatch(
       // ただし response body 全体 log は CH server side で error context を含む可能性 → 256 文字制限
       const respText = await resp.text().catch(() => '');
       const truncated = respText.slice(0, 256);
-      // Cloudflare Workers の Sentry SDK は console.error を breadcrumb に変換 (auto-instrumented)
+      // この Worker は Sentry SDK を使用せず、console.error を Cloudflare のログへ出力する
       // 構造化 message で grep / dashboard で集計可能に
       console.error(
         `[audit_events INSERT non-ok] status=${resp.status} statusText=${resp.statusText} ` +
@@ -922,22 +964,50 @@ export default {
       }
     }
 
-    // 第一者 visitor_id (docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md §3-1):
-    //   Cookie 値 > payload 値 > mint の順で正準化 (各ソースとも形式検証パス時のみ採用)。
-    //   accepted event が 1 件以上ある応答 **のみ** Set-Cookie を返す (この分岐に限定)。
-    //   400/401/413 や全件 drop の 200 では発行しない — 失敗確定のリクエストを送るだけで
-    //   Cookie 設定を誘発できてしまうため。
+    // 第一者 visitor_id (docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md v4 §3-1):
+    //   Cookie 由来 vid の採用と Set-Cookie 発行は **第一者束縛が成立した場合のみ**
+    //   (Codex round2 HIGH: 未束縛だと兄弟サブドメイン等から別テナントの site_id を
+    //   顧客プロキシへ送るだけで、同乗した被害者 Cookie の vid が別テナントの行に書かれる):
+    //     (1) Sec-Fetch-Site: same-origin  (2) X-Forwarded-Host 先頭 == sites.url のホスト
+    //     (3) accepted events が単一 site_id
+    //   束縛時: Cookie 値 > payload 値 > mint で正準化 (各ソース検証パス時のみ)、全 accepted
+    //   events を上書き、Set-Cookie + Cache-Control: no-store を付与。
+    //   非束縛時 (workers.dev 直叩き・別テナント site_id・same-site 等): イベントは payload の
+    //   visitor_id のまま (従来挙動)、Set-Cookie も返さない (被害者 Cookie の上書き=固定化を防ぐ)。
+    //   accepted 0 件 (400/401/413/全件 drop) の応答ではこの分岐に到達しない。
     //   注意: request.headers.get('Cookie') の生値はログ・audit・CH のいずれにも書かない
     //   (パスプロキシ経由では顧客サイトの全 Cookie が届く)。
-    const { vid } = resolveCanonicalVisitorId({
-      cookieHeader: request.headers.get('Cookie'),
-      payloadVisitorId: pickPayloadVisitorId(acceptedEvents),
+    const boundSiteId = pickSingleSiteId(acceptedEvents);
+    const registeredHost = boundSiteId !== null ? await getRegisteredSiteHost(env, boundSiteId) : null;
+    const bound = isFirstPartyBound({
+      secFetchSite: request.headers.get('Sec-Fetch-Site'),
+      forwardedHost: request.headers.get('X-Forwarded-Host'),
+      registeredHost,
     });
-    for (const e of acceptedEvents) {
-      e.visitor_id = vid;
+
+    let setCookie: string | null = null;
+    if (bound) {
+      const { vid, source } = resolveCanonicalVisitorId({
+        cookieHeader: request.headers.get('Cookie'),
+        payloadVisitorId: pickPayloadVisitorId(acceptedEvents),
+      });
+      for (const e of acceptedEvents) {
+        e.visitor_id = vid;
+        // サーバーが新規発行した id は定義上「初見」。payload の is_first_visit (client 判定) が
+        // false のままだと新規 id が再訪扱いになるため補正する (Codex round2 指摘)。
+        if (source === 'mint') e.is_first_visit = true;
+      }
+      setCookie = buildVisitorIdSetCookie(vid);
     }
 
     ctx.waitUntil(flushToClickHouse(env, acceptedEvents));
+
+    const responseHeaders: Record<string, string> = { ...cors, 'Content-Type': 'application/json' };
+    if (setCookie !== null) {
+      responseHeaders['Set-Cookie'] = setCookie;
+      // Set-Cookie 付き応答が中間層でキャッシュされると訪問者間で vid が混線する
+      responseHeaders['Cache-Control'] = 'no-store';
+    }
 
     return new Response(
       JSON.stringify({
@@ -945,16 +1015,7 @@ export default {
         received: acceptedEvents.length,
         dropped: dropContexts.length,
       }),
-      {
-        status: 200,
-        headers: {
-          ...cors,
-          'Content-Type': 'application/json',
-          'Set-Cookie': buildVisitorIdSetCookie(vid),
-          // Set-Cookie 付き応答が中間層でキャッシュされると訪問者間で vid が混線する
-          'Cache-Control': 'no-store',
-        },
-      },
+      { status: 200, headers: responseHeaders },
     );
   },
 };
@@ -1050,6 +1111,8 @@ export const __TEST_ONLY__ = {
   cacheLookup,
   cacheStore,
   SITE_TENANT_CACHE,
+  SITE_HOST_CACHE,
+  getRegisteredSiteHost,
   EVENTS_COLUMNS,
   BEHAVIOR_COLUMNS,
   IMAGE_VISIBILITY_COLUMNS,

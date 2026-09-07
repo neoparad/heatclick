@@ -1,13 +1,17 @@
-# 設計書 v3: visitor_id の第一者 Set-Cookie 化 (ITP 7日制限対応)
+# 設計書 v4: visitor_id の第一者 Set-Cookie 化 (ITP 7日制限対応)
 
 > 2026-08-16 / 起票: link-th.co.jp 導入先からの第4報 (2026-08-16)
 > 分類: **T1 (Critical)** — Cookie / CORS / tenant isolation に触れるため Claude + Codex dual review 必須
-> ステータス: **v3 ドラフト — Codex T1 レビュー (REJECT→反映済み) を通過待ち**。
+> ステータス: **v4 — 実装済み (PR #29)、Codex T1 実装レビュー 2回目 (REJECT・HIGH 1件) を反映。3回目待ち**。
 > v1→v2: 2並列敵対的レビュー (red-team / browser挙動fact-check、計15 findings) を反映
 > (§2-B パターンB不採用、§3-2 credentialed CORS 撤回、§6 検証項目の書換)。
 > v2→v3: **Codex dual review (1回目、REJECT・findings 7件) を反映**
 > (§3-1 payload 値の検証追加・Set-Cookie 発行条件の確定、§1 D-3 の範囲訂正、
 > §4 S-4 の「XSS必須」誤りを訂正、§3-4 Sentry 記載の誤りを訂正、HTTPS 前提条件を追加)。
+> v3→v4: **Codex 実装レビュー (2回目、REJECT・HIGH 1件) を反映 — 第一者束縛の追加**
+> (§3-1 step 3: Cookie 由来 vid の採用と Set-Cookie 発行を「Sec-Fetch-Site: same-origin ×
+> 転送元ホスト == サイト登録ホスト × 単一 site_id」に束縛。未束縛時は payload 値のまま・
+> Set-Cookie なし。§2 プロキシ要件、§4 S-9、§6 検証、§7 残存リスクを追加)。
 > 詳細は末尾の変更理由表を参照
 
 ---
@@ -109,6 +113,15 @@ Cookie の SameSite 属性では原理的に防げない。本設計はこの既
 - **完全に同一オリジンのため、CORS・CNAME/IP クローキング判定・DNS 要件がすべて消える。**
   fetch のデフォルト credentials (same-origin) で Cookie が送られるため、
   クライアント側の credentials 対応も不要
+- **プロキシの要件 (v4、第一者束縛のため必須)**: プロキシは以下 2 ヘッダを Worker へ転送すること。
+  転送されない場合、Worker は束縛不成立として **Set-Cookie を返さず、従来挙動 (JS Cookie の
+  ままで7日制限) に安全側で倒れる** (壊れはしないが第一者化の効果が出ない)。
+  - `Sec-Fetch-Site` (ブラウザ付与の Fetch Metadata。ページ JS からは偽装不可)
+  - `X-Forwarded-Host` (元リクエストの Host。多段なら先頭値を採用)
+  Vercel の platform rewrite がこれらを既定で転送するかは **§5 手順0 のスパイクで確認**する
+  (Vercel は `x-forwarded-host` を付与する挙動が知られているが、外部宛 rewrite での
+  `Sec-Fetch-Site` 転送は要実測)。nginx は `proxy_pass` が既定で転送する
+  (`proxy_set_header X-Forwarded-Host $host;` を明示推奨)。
 
 ⚠ **Vercel 顧客への注意 (fact-check 指摘)**: `vercel.json` (platform rewrite) を使うこと。
 `next.config.js` の rewrites には **Set-Cookie がドロップされる既知報告** (next.js #29488,
@@ -166,20 +179,41 @@ POST `/api/track` ハンドラに追加:
    これは Cookie 属性注入 (payload 値に `;` や制御文字を仕込んで Set-Cookie を汚染) や
    任意 ID の固定化に直結する欠陥だった。両方を同一 regex で検証し、不合格ならその
    ソースは「値なし」として扱う
-3. **vid 正準化 (優先順、検証パス済みの値のみが対象)**:
+3. **第一者束縛の判定 (v4、Codex 実装レビュー [HIGH] 対応) — 以下すべてを満たす場合のみ
+   Cookie 由来 vid を採用し Set-Cookie を返す**:
+   1. `Sec-Fetch-Site: same-origin` — 送信元ページとリクエスト先 (顧客プロキシ) が同一オリジン。
+      兄弟サブドメイン (`same-site`) や `cross-site`、ヘッダ欠落は不成立 (fail closed)
+   2. `X-Forwarded-Host` の先頭値 (正準化: 小文字・ポート/末尾ドット除去・IDN punycode)
+      == payload の site_id が `sites.url` に登録しているホスト (同じ正準化)
+   3. acceptedEvents の site_id が単一
+   **背景 (Codex が実 handler で再現)**: 束縛が無いと、顧客の HTTPS 兄弟サブドメインから
+   顧客プロキシ (`customer.com/ugoki/track`) へ「攻撃者自身の正規 site_id/tenant_id」を送るだけで、
+   same-site のため Lax でも被害者の `__ugk_vid` が同乗し、Worker が被害者 vid を
+   攻撃者テナントの行に書いていた (テナント間の識別子流出)。resolveTenant は payload の
+   site/tenant 対応しか見ておらず「Cookie を運んできたホスト」を検証していなかった。
+   同一オリジンの任意スクリプトは document.cookie を直接読めるため、同一オリジンが
+   原理的な信頼境界であり、本判定はその境界に一致させたもの。
+   **束縛不成立時**: イベントの `visitor_id` は payload の値のまま (従来挙動、上書きしない)、
+   Set-Cookie も返さない (返すと被害者 Cookie を攻撃者値で上書き = 固定化できてしまう)。
+   登録ホストの取得: `lookupTenantBySiteId` の SELECT を `tenant_id, url` に拡張し、
+   同 TTL でホストをキャッシュ (`SITE_HOST_CACHE`)。url 欠落/不正は「不明」= 束縛不可
+4. **vid 正準化 (束縛時のみ。優先順、検証パス済みの値のみが対象)**:
    1. Cookie の `__ugk_vid` (単一・形式検証パス時)
    2. payload 内の `visitor_id` (形式検証パス時 — 既存 JS 発行値の移行時連続性担保)
-   3. どちらも無い/両方とも検証不合格なら新規 UUID v4 を mint
-4. **イベントへの反映**: acceptedEvents (tenant 解決済み・site_id/event_type 妥当) の
+   3. どちらも無い/両方とも検証不合格なら新規 UUID v4 を mint。
+      この場合 `is_first_visit` を true に補正する (サーバー新規発行 = 初見。client 判定の
+      false が残ると新規 id が再訪扱いになる — Codex 指摘)
+5. **イベントへの反映 (束縛時のみ)**: acceptedEvents (tenant 解決済み・site_id/event_type 妥当) の
    各イベントの `visitor_id` を正準値で上書き
-5. **Set-Cookie 発行 — accepted イベントが1件以上ある応答のみ (Codex [MEDIUM] 指摘、v2 の未規定を確定)**:
-   `acceptedEvents.length > 0` の 200 応答にのみ
+6. **Set-Cookie 発行 — 束縛成立かつ accepted イベントが1件以上ある応答のみ**:
    `__ugk_vid=<vid>; Max-Age=34560000; Path=/; Secure; SameSite=Lax` (Domain なし) を付与する。
-   400/401/413 や「全イベント drop で 0 件受理」の 200 応答では Set-Cookie を発行しない
+   400/401/413 や「全イベント drop で 0 件受理」の 200 応答では発行しない
    (無条件発行だと、失敗確定のリクエストを送りつけるだけで Cookie 設定を誘発できてしまうため)。
    あわせて **`Cache-Control: no-store`** を必須付与 (fact-check 指摘: Set-Cookie 付き応答が
-   中間層でキャッシュされると訪問者間で vid が混線するため)
-6. **Cookie ヘッダの生値を Worker コード内で一切ログしない** (§4 S-3)
+   中間層でキャッシュされると訪問者間で vid が混線するため)。
+   **結果として workers.dev 直叩き (プロキシ無し = X-Forwarded-Host 無し) には Set-Cookie が
+   一切返らない** — v3 S-8 の「第三者コンテキストへの Set-Cookie は無害か」という論点自体が消える
+7. **Cookie ヘッダの生値を Worker コード内で一切ログしない** (§4 S-3)
 
 ### 3-2. CORS — v1 から方針変更: credentialed 化を撤回
 
@@ -217,11 +251,11 @@ sendBeacon 失敗時フォールバック — の preflight が失敗しイベ�
 
 ⚠ **v2 の記載を訂正 (Codex [MEDIUM] 指摘)**: v2 は「Sentry の自動計装が request header を
 capture しうる」としていたが、`workers/event-ingest/` に Sentry SDK の import/初期化は
-**存在しない** (grep で確認: `worker.ts:593` のコメントが「Sentry breadcrumb」と書いているが
-これは `console.error` 呼び出しに添えた説明コメントであり、実際に Sentry SDK が
-組み込まれている根拠ではない。`package.json` の `@sentry/nextjs` は別デプロイ物である
+**存在しない** (grep で確認。「Sentry breadcrumb」と記載していた説明コメントも
+PR #29 レビューで実態に合わせて構造化ログの説明へ訂正済み。
+`package.json` の `@sentry/nextjs` は別デプロイ物である
 Next.js アプリ側の依存であり、この Cloudflare Worker には無関係)。
-Sentry 関連の対応は不要。ただし `console.error` 経由のログ (`worker.ts:576-603` の
+Sentry 関連の対応は不要。ただし `console.error` 経由のログ (`worker.ts:583-610` の
 audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていない**ことは実装時に
 コードレビューで確認する (現状のコードは含めていないことを確認済み。今後の変更でも
 この不変条件を維持する)。
@@ -256,7 +290,8 @@ audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていな�
 | S-5 | tenant isolation | vid は認証ではなく識別子。tenant 解決は既存の site_id→tenant lookup のまま不変。host-only 化により v1 パターンBの cross-tenant 共有リスクは消滅 |
 | S-6 | プライバシー | vid はランダム UUID で PII なし。400日識別子になるため顧客向け規約テンプレの Cookie 記載を更新 (別チケット)。既存 opt-out (`clickinsight_optout`) は tracking.js が送信自体を止めるため引き続き機能 |
 | S-7 | SameSite=Lax の不変条件 | D-3 参照。None への変更禁止を明文化 + §6 に検証を追加 |
-| S-8 | 既存デプロイとの互換 (Codex [MEDIUM] 指摘で断定を緩和) | Set-Cookie は第三者コンテキスト (現行 workers.dev 直叩き) では多くのブラウザが保存を拒否する見込みだが、**ブラウザ別の挙動差・今後の第三者 Cookie 仕様変更を検証せず「無害」と断定しない**。§6 にブラウザ別の実機確認を追加し、保存されるブラウザが見つかった場合の扱い (そのブラウザでは workers.dev スコープの別 Cookie になるだけで第一者化後の host-only Cookie とは競合しないことの確認) も検証項目に含める。CORS を触らないため (§3-2 撤回) 既存顧客の全経路自体は不変 |
+| S-8 | 既存デプロイとの互換 (v4 で論点解消) | v4 の第一者束縛により、プロキシを経由しない workers.dev 直叩き (X-Forwarded-Host 無し) には **Set-Cookie が一切返らず、イベントの visitor_id も上書きしない** = 既存顧客の挙動は完全に不変。v3 で懸念した「第三者コンテキストへの Set-Cookie をブラウザがどう扱うか」は発生しない。CORS も触らない (§3-2) |
+| S-9 | **Cookie 由来 vid のテナント間流出 (Codex 実装レビュー [HIGH]、v4 で対応)** | Lax は same-site (兄弟サブドメイン) からの送信を防がず、resolveTenant は payload の site/tenant 対応しか見ないため、攻撃者が「自分の正規 site_id」を顧客プロキシへ送ると被害者 vid が攻撃者テナントに書かれた (Codex が実 handler で再現)。対策 = §3-1 step 3 の束縛 (Sec-Fetch-Site: same-origin × 転送元ホスト == 登録ホスト × 単一 site_id)。**運用上の前提**: `sites.url` のホストはテナント間で一意であること。現在は operator 発行のみで担保。セルフサーブ化時はドメイン所有確認 (DNS TXT 等) を必須にする (§7) |
 
 ## 5. ロールアウト計画
 
@@ -300,9 +335,18 @@ audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていな�
 - [ ] Worker 単体テスト: `acceptedEvents.length === 0` になる各ケース (400/401/413、
   全件 tenant 解決失敗による 200+0件) で **Set-Cookie ヘッダが付与されない**こと
   (Codex [MEDIUM] 指摘反映)
-- [ ] **ブラウザ別確認 (Codex [MEDIUM] 指摘、S-8)**: workers.dev 直叩き (第一者化前の
-  既存構成) で Set-Cookie 応答時、Chrome / Safari / Firefox 各最新版で第三者 Cookie が
-  実際に保存されないことを実機確認する
+- [ ] ~~ブラウザ別確認 (S-8)~~ → v4 で不要化 (workers.dev 直叩きには Set-Cookie が返らない)。
+  代わりに: workers.dev 直叩きの応答に Set-Cookie が無いことを handler テストで固定 (実装済み)
+- [ ] **束縛テスト (v4、Codex [HIGH])** — handler 単体テスト (実装済み・pass):
+  兄弟サブドメイン (`Sec-Fetch-Site: same-site`) からの攻撃者 site_id 送信で被害者 vid が
+  攻撃者テナント行に入らない / 同一オリジンでも登録ホスト不一致なら不採用 / X-Forwarded-Host
+  欠落・偽装・Sec-Fetch-Site 欠落は不採用 / 単一 site_id 以外は不採用 / ホスト正準化
+  (大文字・ポート・末尾ドット・多段リスト)
+- [ ] **手順0 スパイクに追加**: Vercel の platform rewrite が `Sec-Fetch-Site` と
+  `X-Forwarded-Host` を Worker まで転送すること (転送されなければ束縛が成立せず、第一者化の
+  効果が出ない。その場合は手順書で明示的なヘッダ転送設定が可能なプロキシに限定する)
+- [ ] dogfood (link-th.co.jp) で実ブラウザから送信し、Worker 側で束縛成立 → Set-Cookie 付与を確認
+  (`wrangler tail` で応答ヘッダを観測。Cookie ヘッダの値は出力しないこと)
 
 ## 7. スコープ外 (明示)
 
@@ -311,6 +355,14 @@ audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていな�
   認証も Origin 検証も無い公開 POST であり、これは本設計以前から存在する ingest
   パイプライン自体の性質。本設計は payload 由来 visitor_id の検証を追加する (§3-1) が、
   それ以外のペイロード偽造対策は別チケットで扱う
+- **同一オリジン上のスクリプトによる vid 取得 (v4 で残存として明記)**: HttpOnly を付けない
+  設計 (D-1) のため、顧客ページ上の任意の同一オリジンスクリプト (顧客が導入した第三者タグを含む)
+  は `document.cookie` から `__ugk_vid` を読める。第一者束縛はこの境界 (同一オリジン) に
+  一致させたものであり、この内側は本設計では守れない (守るには HttpOnly + scenario-runtime の
+  サーバー側 vid 供給への再設計が必要。将来課題)
+- **`sites.url` ホストのテナント間一意性 / ドメイン所有確認 (S-9)**: 第一者束縛は「登録ホストが
+  そのテナントのものである」ことを前提にする。operator 発行の現状では運用で担保。
+  セルフサーブ化の際は DNS TXT 等によるドメイン所有確認と、同一ホストの重複登録拒否を必須にする
 - `ci_user_id` (730日指定の第2識別子): 同じ ITP 制限を受けるが用途が限定的なため触らない
 - GA4 `_ga` Cookie: JS 発行のため救えない (サーバーサイド GTM の領域、linkth-web 側の別件)
 - HMAC 署名付き vid (S-4 の hardening): 第一者化が安定したら別チケットで検討
@@ -328,7 +380,7 @@ audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていな�
 | 1 | 設計書 v2 の Codex dual review (T1) 1回目 | Owner が desktop で実施 | **完了 (REJECT・findings 7件 → v3 で反映)** |
 | 2 | 設計書 v3 の Codex dual review (T1) 2回目 | **Owner が desktop で実施** | 未実施 (Owner 判断で実装を先行。実装差分込みで実施可) |
 | 3 | §5 手順0 Vercel スパイク | 結果を本書に追記。不成立なら設計再検討 | 未着手 (linkth-web 側作業。Worker 実装後は実 Worker を宛先にして実施可) |
-| 4 | §3-1 Worker Set-Cookie + vid 正準化 (payload 検証含む) + §3-2 echo 分岐削除 (単体テスト付き) | Claude 実装 + Codex review | **実装完了 (2026-09-07、未デプロイ)**: `workers/event-ingest/src/visitor-cookie.ts` (純関数) + `worker.ts` 組込。テスト 24 件 (純関数 15 + handler 9: Set-Cookie 発行条件・属性注入拒否・重複 Cookie・Cookie ヘッダ非漏洩・CORS 不変条件) を実 TS を直接 import して検証、全 pass |
+| 4 | §3-1 Worker Set-Cookie + vid 正準化 (payload 検証含む) + 第一者束縛 (v4) + §3-2 echo 分岐削除 (単体テスト付き) | Claude 実装 + Codex review | **実装完了 (PR #29、未デプロイ)**: `visitor-cookie.ts` (純関数) + `worker.ts` 組込。Codex 実装レビュー 1回目 = REJECT (HIGH: テナント間流出) → v4 で束縛を追加。テスト: 純関数 21 + handler 17 (攻撃再現→遮断・未束縛時の不変・Set-Cookie 発行条件・属性注入拒否・重複 Cookie・Cookie ヘッダ非漏洩・CORS 不変条件) を実 TS を直接 import して検証、全 pass。**Codex 実装レビュー 2回目 待ち** |
 | 5 | §3-4 CF ログ確認 (確認コマンド/合格条件/停止条件は本書記載済み) | **Owner 確認項目あり** | 未着手 |
 | 6 | Worker デプロイ | **Owner 確認ゲート** (wrangler deploy は Owner SSH 経由) | 未着手 |
 | 7 | link-th.co.jp 側設定 (rewrite + スニペット) | linkth-web 側セッションと連携 | 未着手 |
@@ -368,3 +420,13 @@ audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていな�
 | [MEDIUM] Set-Cookie 発行対象の応答分岐が未定義 | §3-1: acceptedEvents.length>0 の応答のみに限定と確定 |
 | [MEDIUM] Sentry 記載が実コードと不一致 (Worker に Sentry SDK 無し) | §3-4 を訂正: Sentry 対応は不要と明記。Cloudflare ログ確認を確認コマンド・合格条件・停止条件付きで具体化 |
 | (直接修正) §3-4 / §7 の行番号引用ズレ | Codex が直接修正済み (`worker.ts:576-603`、`tracking.js:364-380`) |
+
+## 付録3: v3 → v4 の変更理由 (Codex 実装レビュー 1回目 = PR #29 head 10bbdae、REJECT)
+
+| Finding (severity) | 対応 |
+|---|---|
+| [HIGH] Cookie 由来の被害者 vid を別テナントのイベントへ書き込める (same-site 兄弟サブドメインから攻撃者 site_id を顧客プロキシへ送信。Codex が実 handler で再現) | §3-1 step 3 第一者束縛を新設 (Sec-Fetch-Site: same-origin × X-Forwarded-Host == sites.url ホスト × 単一 site_id)。未束縛時はイベント不変・Set-Cookie なし。handler テストで攻撃を再現→遮断を固定。§2 プロキシ要件、§4 S-9、§7 残存リスク (同一オリジンスクリプト / ホスト一意性) を追加 |
+| 7件の fix 確認 | 1・2・3・5・6・7 CONFIRMED、4 PARTIALLY (実機検証未了) — v4 で S-8 の論点自体を解消 (直叩きには Set-Cookie を返さない) |
+| `is_first_visit` の整合 (mint 時に client 判定 false が残る) | §3-1 step 4: mint 時は true に補正 |
+| (直接修正) worker.ts の「Sentry 自動計装」誤コメント / 設置画面の HTTPS 前提 / 設計書の参照行 | Codex の直接修正を取り込み (PR #29 に含める) |
+| 未実施のまま: プロキシ・ブラウザ・Cloudflare ログの実機確認 | §5 手順0 (スパイクにヘッダ転送確認を追加)、§3-4、§6 に集約。デプロイ前ゲート |

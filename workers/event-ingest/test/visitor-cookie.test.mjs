@@ -21,9 +21,14 @@ import {
   VISITOR_ID_MAX_AGE_SEC,
   VISITOR_ID_RE,
   buildVisitorIdSetCookie,
+  firstForwardedHost,
+  hostFromUrl,
+  isFirstPartyBound,
   isValidVisitorId,
+  normalizeHost,
   parseVisitorIdCookie,
   pickPayloadVisitorId,
+  pickSingleSiteId,
   resolveCanonicalVisitorId,
 } from '../src/visitor-cookie.ts';
 
@@ -161,4 +166,64 @@ test('pickPayloadVisitorId: first valid visitor_id among events; skips invalid/m
   assert.equal(pickPayloadVisitorId([{ event_type: 'pageview' }]), null);
   assert.equal(pickPayloadVisitorId([{ visitor_id: 'bad' }, { visitor_id: OK_VID }]), OK_VID);
   assert.equal(pickPayloadVisitorId([{ visitor_id: 'x; Domain=evil.com' }]), null);
+});
+
+// ── 第一者束縛 (v4、Codex round2 HIGH 対応) ─────────────────────────
+
+test('normalizeHost: lowercases, strips port and trailing dot, rejects garbage, punycodes IDN', () => {
+  assert.equal(normalizeHost('Customer.Example'), 'customer.example');
+  assert.equal(normalizeHost('customer.example:443'), 'customer.example');
+  assert.equal(normalizeHost('customer.example.'), 'customer.example');
+  assert.equal(normalizeHost('  customer.example  '), 'customer.example');
+  assert.equal(normalizeHost('日本.example'), 'xn--wgv71a.example');
+  assert.equal(normalizeHost(''), null);
+  assert.equal(normalizeHost(null), null);
+  assert.equal(normalizeHost(42), null);
+  assert.equal(normalizeHost('a'.repeat(254)), null, 'over 253 chars');
+  assert.equal(normalizeHost('bad host'), null);
+});
+
+test('hostFromUrl: extracts and normalizes the host of sites.url', () => {
+  assert.equal(hostFromUrl('https://Customer.Example/path?x=1'), 'customer.example');
+  assert.equal(hostFromUrl('https://customer.example:8443/'), 'customer.example');
+  assert.equal(hostFromUrl('not a url'), null);
+  assert.equal(hostFromUrl(''), null);
+  assert.equal(hostFromUrl(undefined), null);
+});
+
+test('firstForwardedHost: takes the first hop of a comma list; null on absent/garbage', () => {
+  assert.equal(firstForwardedHost('customer.example'), 'customer.example');
+  assert.equal(firstForwardedHost('customer.example, proxy.internal'), 'customer.example');
+  assert.equal(firstForwardedHost('CUSTOMER.example:443'), 'customer.example');
+  assert.equal(firstForwardedHost(null), null);
+  assert.equal(firstForwardedHost(''), null);
+  assert.equal(firstForwardedHost(', customer.example'), null, 'empty first hop is not silently skipped');
+});
+
+test('pickSingleSiteId: single site_id across all events; null when mixed or missing', () => {
+  assert.equal(pickSingleSiteId([]), null);
+  assert.equal(pickSingleSiteId([{ site_id: 'A' }, { site_id: 'A' }]), 'A');
+  assert.equal(pickSingleSiteId([{ site_id: 'A' }, { site_id: 'B' }]), null);
+  assert.equal(pickSingleSiteId([{ site_id: 'A' }, {}]), null);
+  assert.equal(pickSingleSiteId([{ site_id: '' }]), null);
+});
+
+test('isFirstPartyBound: true only for same-origin + forwarded host == registered host', () => {
+  const ok = { secFetchSite: 'same-origin', forwardedHost: 'customer.example', registeredHost: 'customer.example' };
+  assert.equal(isFirstPartyBound(ok), true);
+  assert.equal(isFirstPartyBound({ ...ok, forwardedHost: 'CUSTOMER.example:443' }), true, 'normalized compare');
+  assert.equal(isFirstPartyBound({ ...ok, forwardedHost: 'customer.example, edge.internal' }), true, 'first hop');
+});
+
+test('isFirstPartyBound: false for same-site (sibling subdomain), cross-site, missing or wrong metadata', () => {
+  const base = { secFetchSite: 'same-origin', forwardedHost: 'customer.example', registeredHost: 'customer.example' };
+  assert.equal(isFirstPartyBound({ ...base, secFetchSite: 'same-site' }), false, 'sibling subdomain (Codex round2 HIGH)');
+  assert.equal(isFirstPartyBound({ ...base, secFetchSite: 'cross-site' }), false);
+  assert.equal(isFirstPartyBound({ ...base, secFetchSite: 'none' }), false);
+  assert.equal(isFirstPartyBound({ ...base, secFetchSite: null }), false, 'fail closed when header absent');
+  assert.equal(isFirstPartyBound({ ...base, secFetchSite: 'Same-Origin' }), false, 'exact token match only');
+  assert.equal(isFirstPartyBound({ ...base, forwardedHost: null }), false, 'legacy direct call: no proxy host');
+  assert.equal(isFirstPartyBound({ ...base, forwardedHost: 'evil.example' }), false);
+  assert.equal(isFirstPartyBound({ ...base, forwardedHost: 'sub.customer.example' }), false, 'exact host, not same-site');
+  assert.equal(isFirstPartyBound({ ...base, registeredHost: null }), false, 'unknown registered host');
 });
