@@ -14,7 +14,8 @@ compatibility_date = "2024-12-01"
 # Overridden by secrets in production
 # Dev: localhost via SSH tunnel (ssh -L 8123:127.0.0.1:8123)
 CLICKHOUSE_DB = "clickinsight"
-ALLOWED_ORIGINS = "*"
+# ALLOWED_ORIGINS は撤去 (2026-09, docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md §3-2)。
+# 公開 ingest endpoint として ACAO は '*' 固定 (worker.ts corsHeaders の不変条件コメント参照)。
 BATCH_SIZE = "50"
 FLUSH_INTERVAL_MS = "5000"
 
