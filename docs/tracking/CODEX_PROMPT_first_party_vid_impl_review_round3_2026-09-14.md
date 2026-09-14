@@ -1,74 +1,78 @@
-# Codex Desktop 用プロンプト (実装レビュー 3回目): 第一者 Set-Cookie 化 — PR #29 の JWT 経路 HIGH 対応確認
+# Codex Desktop 用プロンプト (実装レビュー 3回目・自己完結型): 第一者 Set-Cookie 化 — PR #29
 
 > 対象リポジトリ: `C:\Users\M2603\ugokimap-saas`、ブランチ `feat/first-party-visitor-cookie` (PR #29)
-> 前回 (実装レビュー 2回目): 前々回 HIGH (same-site) = CONFIRMED FIXED。新規 REJECT —
-> [HIGH] JWT テナントと Cookie を認可する site が結び付いていない / [MEDIUM] プロキシ信頼境界 /
-> [MEDIUM] 同一ホスト複数テナント。本 head で対応した。**主目的は HIGH の再現→遮断の確認**。
+> **今回から方式変更: 見つけた問題は報告するだけでなく、あなた自身が修正・テスト・コミットまで
+> 完了させる。Owner の判断が必要なものだけを報告に残す。** 往復を減らすため。
 
 ---PROMPT---
 
-前回 (実装レビュー 2回目) の T1 レビューで REJECT・[HIGH] 1件 + [MEDIUM] 2件を出しました。
-本 head で対応済みです。設計書 v5 (`docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md` §3-1 step 3-4/3-5、
-§4 S-10、§7、付録4) に対応内容があります。
+あなたは T1 (Critical) セキュリティレビュアー兼実装者です。これまで 2 回のレビュー (REJECT×2) で
+指摘 → Claude が修正 → 再レビュー、という往復をしてきましたが、**今回からあなたが修正まで
+完結させます**。
 
-## 対応内容 (要約)
+## 前提
 
-`isFirstPartyBound` (`workers/event-ingest/src/visitor-cookie.ts`) に条件を 2 つ追加:
+- 設計書: `docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md` (v5、§3-1 step 3 が束縛条件 1-5、
+  §4 S-9/S-10、§7 が Owner 判断事項、付録 3/4 が過去 2 回の対応表)
+- 主要コード: `workers/event-ingest/src/visitor-cookie.ts` (純関数)、`workers/event-ingest/src/worker.ts`
+  (handler、`getRegisteredSiteBinding`、`countTenantsRegisteredForHost`)、
+  `scripts/operator-provision-site.mjs`
+- テスト: `cd workers/event-ingest && node --test test/*.test.mjs` (Node 22.6+、実 TS を直接 import。
+  現状 79/79 pass)。型: `../../node_modules/.bin/tsc -p tsconfig.json --noEmit` (worker dir で、
+  `npm ci` 済み)。バンドル: `npx wrangler deploy --dry-run --outdir .wrangler/dry`
+- 前回 (2回目) の指摘と今回の対応: 付録4 参照。要点 — [HIGH] JWT 経路のテナント境界 → 束縛条件 (4)
+  サイト登録テナント == accepted テナント を追加、[MEDIUM] 同一ホスト複数テナント → 条件 (5)
+  実行時照会 + 登録スクリプトで拒否、[MEDIUM] プロキシ信頼境界 → §6 負のテスト・§2 要件化
 
-4. **サイト登録テナント == accepted events のテナント** — `getRegisteredSiteBinding` (`worker.ts`) が
-   `sites.url` のホストに加えて登録 `tenant_id` を返し、resolveTenant が注入した `tenant_id`
-   (JWT 経路なら JWT の tenant) と一致する場合のみ束縛。JWT 経路 (site lookup を経ない) では
-   host cache が冷えているため、ここで lookup を走らせる
-5. **同一ホストを別テナントが登録していない** — 1-4 を満たしたリクエストでのみ
-   `SELECT uniqExact(tenant_id) FROM sites WHERE lower(domain(url)) = {host}` を照会
-   (`countTenantsRegisteredForHost`、ホスト単位で同 TTL キャッシュ、失敗時は +Infinity = fail closed)。
-   登録スクリプト `scripts/operator-provision-site.mjs` でも同一ホストの別テナント登録を拒否
+## あなたがやること (この順で、1 回のセッションで完結させる)
 
-`resolveTenant` 自体 (JWT 経路が site 所有を照合しない既存挙動) は **変更していません** —
-認可仕様の変更は Owner 判断として設計書 §7 に別チケット化しました。
+### 1. 前回指摘の fix 確認 (再現手順を自分で叩く)
 
-## 依頼
+- [HIGH] `attacker_tenant` の有効 JWT + `victim_site` + `X-Forwarded-Host: victim.example` +
+  `Sec-Fetch-Site: same-origin` + 被害者 Cookie → INSERT 行の `visitor_id` が payload 値のままで
+  Set-Cookie が無いこと。正規経路 (被害者テナント JWT + 被害者 site) は束縛成立すること
+- [MEDIUM] `shared.example` を 2 テナントが登録 → 両方とも束縛しない。照会が CH 5xx なら fail closed。
+  照会は他条件を満たしたリクエストでのみ発行される
 
-### 主目的: 前回 HIGH の fix 確認
+### 2. 新たな穴を探し、**見つけたら自分で直す**
 
-前回あなたが再現した経路を **同じ方法で再実行**してください:
-`attacker_tenant` の有効 JWT (Bearer) + `victim_site` + `X-Forwarded-Host: victim.example` +
-`Sec-Fetch-Site: same-origin` + 被害者 Cookie。期待: INSERT 行は `tenant=attacker_tenant /
-site=victim_site` のまま (既存挙動) だが `visitor_id` は payload 値で、Set-Cookie なし。
-`test/handler-set-cookie.test.mjs` の "ATTACK (round3 HIGH)" がこの再現ですが、テストに頼らず叩いてください。
-あわせて正規経路 (被害者テナント JWT + 被害者 site) で束縛が成立することも確認してください。
+観点 (これに限らない):
+- JWT 経路と tracking_js 経路が 1 リクエストに混在して条件 (4) をすり抜ける組合せ
+- `lower(domain(url))` (ClickHouse 側) と `hostFromUrl` (Worker 側) の正準化のずれ
+  (IDN / 末尾ドット / ポート / 大文字 / スキーム無し url) で片方だけ一致する経路
+- `SITE_HOST_CACHE` と `HOST_TENANTS_CACHE` の独立 TTL による、登録変更直後 5 分間の古い判定
+- プロキシが `X-Forwarded-Host` を「追記」する構成で先頭採用が破れる経路 (Worker 側で緩和できるなら)
+- テストが捕捉していない経路
 
-### MEDIUM 2件の fix 確認
+**修正の基準**: 修正が局所的で、設計書 §1-§4 の設計判断を変えないものは、あなたが直す。
+直したら **必ず** (a) 回帰テストを追加 (既存ファイルの流儀に合わせる)、(b) 全テスト pass、
+(c) tsc clean、(d) wrangler dry-run 成功、(e) 設計書の該当箇所と付録に「付録5: 3回目 (Codex 自己修正)」
+として何をなぜ直したかを追記。
 
-- 同一ホスト 2 テナント: `shared.example` を `t_shared_a` / `t_shared_b` が登録した構成で、
-  両テナントとも束縛しないこと。照会失敗 (CH 5xx) で fail closed になること。
-  照会が「他条件を満たしたリクエストでのみ」発行され、未束縛リクエストに追加クエリを課さないこと
-- プロキシ要件: 設計書 §6 の負のテスト定義と §2 の要件 (nginx `proxy_set_header X-Forwarded-Host $host;` 必須、
-  Vercel は XFH == Host) が、あなたの指摘を満たす粒度か
+### 3. Owner 判断が必要なものだけ報告に残す
 
-### 新たに破る経路を探す (攻撃者視点)
+以下に該当するものは **直さずに** findings として報告 (severity 付き、実コードの裏付け付き):
+- 設計判断の変更 (例: `resolveTenant` の JWT 経路に site 所有照合を追加するか — §7 に既出、
+  これは Owner 判断なので触らない)
+- 認可・認証の仕様変更、secrets、デプロイ、顧客側 (プロキシ設定) の作業を要するもの
+- 修正すると既存顧客の挙動が変わるもの
+- 修正方法が複数あり、どれを取るかがトレードオフになるもの (選択肢と推奨を書く)
 
-- 条件 4 の一致に使う `eventTenant` は `pickSingleTenantId(acceptedEvents)` = resolveTenant が
-  注入した値。JWT 経路と tracking_js 経路が **1 リクエストに混在**することはあるか
-  (JWT があれば全イベントが JWT 経路になるはず — コードで確認)。混在で条件 4 をすり抜ける組合せは
-- `countTenantsRegisteredForHost` の `lower(domain(url))` と Worker 側の `hostFromUrl` の正準化が
-  **ずれる**入力 (IDN / 末尾ドット / ポート / 大文字 / `url` にスキーム無し) で、片方は一致・片方は
-  不一致になり、束縛が成立してしまう or 誤検知する経路
-- キャッシュの整合: `SITE_HOST_CACHE` (site→host,tenant) と `HOST_TENANTS_CACHE` (host→count) は
-  独立 TTL。登録変更 (テナント追加・URL 変更) 直後の 5 分間に古い判定で束縛が成立する窓の評価
-- `.wrangler/` を `.gitignore` に追加した。他に生成物の混入がないか
+### 4. コミット
 
-### 2段構え (前回同様)
+- 修正したファイルを **名指しで** `git add` (`git add -A` / `.` 禁止 — 並行セッションの差分が
+  作業ツリーにある: `app/api/cv-journey/*`, `lib/cv-journey/*`, `app/api/auth/magic-link/*`,
+  `components/heatmap/*` は触らない・stage しない)
+- `git commit` (message は日本語、`fix(event-ingest): ...` 形式、末尾に
+  `Co-Authored-By: Codex <noreply@openai.com>`)。**push / merge / deploy はしない** (Owner ゲート)
+- 生成物 (`.wrangler/` は .gitignore 済み) を stage しないこと
 
-- 明白な問題は直接修正して一覧化。設計判断への異議・セキュリティ上の欠陥は findings
-  (severity 付き) で報告し、あなたの一存でコードを変えない
+## 出力形式 (短く)
 
-## 出力形式
+1. 前回指摘の fix 確認結果 (各 1 行: CONFIRMED / STILL BROKEN + 根拠)
+2. 自分で直したもの一覧 (何を・なぜ・どのテストで固定したか・commit hash)
+3. Owner 判断が必要な findings (無ければ「なし」)
+4. 検証結果 (tests N/N、tsc、dry-run)
+5. 総合判定: **APPROVE** (Owner 判断事項以外は解消) / REJECT (自分で直せない CRITICAL/HIGH が残る場合のみ) + 理由 3 行以内
 
-1. 前回 HIGH の fix 確認 (CONFIRMED FIXED / STILL BROKEN / PARTIALLY + 再現手順と結果)
-2. MEDIUM 2件の fix 確認
-3. 新たに破る経路 (あれば severity 付き。無ければ観点ごとに「見つからず」と明記)
-4. 直接修正した箇所
-5. 総合判定: APPROVE / APPROVE-WITH-CHANGES / REJECT + 判定理由 (3行以内)
-
-理論上の可能性のみで実コード・実挙動の裏付けがない指摘には、その旨を明記してください。
+理論上の可能性のみで実コード・実挙動の裏付けがないものは書かないでください。
