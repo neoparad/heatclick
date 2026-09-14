@@ -63,3 +63,6 @@ _tmp_*
 test.jpg
 _tmp_audit/
 workers/screenshot/package-lock.json
+
+# Cloudflare Workers local build/dry-run output (wrangler)
+.wrangler/

@@ -1,8 +1,8 @@
-# 設計書 v4: visitor_id の第一者 Set-Cookie 化 (ITP 7日制限対応)
+# 設計書 v5: visitor_id の第一者 Set-Cookie 化 (ITP 7日制限対応)
 
 > 2026-08-16 / 起票: link-th.co.jp 導入先からの第4報 (2026-08-16)
 > 分類: **T1 (Critical)** — Cookie / CORS / tenant isolation に触れるため Claude + Codex dual review 必須
-> ステータス: **v4 — 実装済み (PR #29)、Codex T1 実装レビュー 2回目 (REJECT・HIGH 1件) を反映。3回目待ち**。
+> ステータス: **v5 — 実装済み (PR #29)、Codex T1 実装レビュー 3回目 (REJECT・HIGH 1件 + MEDIUM 2件) を反映。4回目待ち**。
 > v1→v2: 2並列敵対的レビュー (red-team / browser挙動fact-check、計15 findings) を反映
 > (§2-B パターンB不採用、§3-2 credentialed CORS 撤回、§6 検証項目の書換)。
 > v2→v3: **Codex dual review (1回目、REJECT・findings 7件) を反映**
@@ -12,6 +12,10 @@
 > (§3-1 step 3: Cookie 由来 vid の採用と Set-Cookie 発行を「Sec-Fetch-Site: same-origin ×
 > 転送元ホスト == サイト登録ホスト × 単一 site_id」に束縛。未束縛時は payload 値のまま・
 > Set-Cookie なし。§2 プロキシ要件、§4 S-9、§6 検証、§7 残存リスクを追加)。
+> v4→v5: **Codex 実装レビュー (3回目、REJECT・HIGH 1件) を反映 — 束縛条件にテナント一致とホスト一意性を追加**
+> (§3-1 step 3 に (4) サイト登録テナント == accepted テナント (JWT 経路対策)、(5) 同一ホストを
+> 別テナントが登録していない (実行時照会) を追加。§4 S-10、§6 負のテスト、§7 に JWT 経路の
+> 既存ギャップを Owner 判断事項として記録)。
 > 詳細は末尾の変更理由表を参照
 
 ---
@@ -186,6 +190,18 @@ POST `/api/track` ハンドラに追加:
    2. `X-Forwarded-Host` の先頭値 (正準化: 小文字・ポート/末尾ドット除去・IDN punycode)
       == payload の site_id が `sites.url` に登録しているホスト (同じ正準化)
    3. acceptedEvents の site_id が単一
+   4. **(v5) サイト登録テナント == acceptedEvents のテナント** — `resolveTenant` の JWT 経路は
+      「site_id がその JWT テナントのものか」を照合せず、JWT の tenant_id をそのまま採用する
+      (`worker.ts` resolveTenantWithDedupe の Bearer 分岐)。そのため v4 までは、攻撃者テナントの
+      有効 JWT + 被害者 site_id + 被害者オリジンからの送信 (同一オリジン・登録ホスト一致) で
+      1-3 を通過し、被害者 vid が攻撃者テナントの行に書かれた (Codex が実 handler で再現)。
+      束縛判定は sites.url のホストに加えて **登録テナント** も取得し、accepted に注入された
+      tenant_id と一致する場合のみ採用する
+   5. **(v5) 同一ホストを別テナントが登録していない** — Cookie は host 単位のため、同じホストを
+      複数テナントが登録していると、別リクエスト間で同じ vid が別テナントへ渡る。1-4 を満たした
+      リクエストでのみ `SELECT uniqExact(tenant_id) FROM sites WHERE lower(domain(url)) = {host}`
+      を照会 (ホスト単位・同 TTL キャッシュ、失敗時は fail closed) し、1 でなければ束縛しない。
+      登録時 (`operator-provision-site.mjs`) にも同一ホストの別テナント登録を拒否する
    **背景 (Codex が実 handler で再現)**: 束縛が無いと、顧客の HTTPS 兄弟サブドメインから
    顧客プロキシ (`customer.com/ugoki/track`) へ「攻撃者自身の正規 site_id/tenant_id」を送るだけで、
    same-site のため Lax でも被害者の `__ugk_vid` が同乗し、Worker が被害者 vid を
@@ -291,7 +307,8 @@ audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていな�
 | S-6 | プライバシー | vid はランダム UUID で PII なし。400日識別子になるため顧客向け規約テンプレの Cookie 記載を更新 (別チケット)。既存 opt-out (`clickinsight_optout`) は tracking.js が送信自体を止めるため引き続き機能 |
 | S-7 | SameSite=Lax の不変条件 | D-3 参照。None への変更禁止を明文化 + §6 に検証を追加 |
 | S-8 | 既存デプロイとの互換 (v4 で論点解消) | v4 の第一者束縛により、プロキシを経由しない workers.dev 直叩き (X-Forwarded-Host 無し) には **Set-Cookie が一切返らず、イベントの visitor_id も上書きしない** = 既存顧客の挙動は完全に不変。v3 で懸念した「第三者コンテキストへの Set-Cookie をブラウザがどう扱うか」は発生しない。CORS も触らない (§3-2) |
-| S-9 | **Cookie 由来 vid のテナント間流出 (Codex 実装レビュー [HIGH]、v4 で対応)** | Lax は same-site (兄弟サブドメイン) からの送信を防がず、resolveTenant は payload の site/tenant 対応しか見ないため、攻撃者が「自分の正規 site_id」を顧客プロキシへ送ると被害者 vid が攻撃者テナントに書かれた (Codex が実 handler で再現)。対策 = §3-1 step 3 の束縛 (Sec-Fetch-Site: same-origin × 転送元ホスト == 登録ホスト × 単一 site_id)。**運用上の前提**: `sites.url` のホストはテナント間で一意であること。現在は operator 発行のみで担保。セルフサーブ化時はドメイン所有確認 (DNS TXT 等) を必須にする (§7) |
+| S-9 | **Cookie 由来 vid のテナント間流出 (Codex 実装レビュー [HIGH]、v4 で対応)** | Lax は same-site (兄弟サブドメイン) からの送信を防がず、resolveTenant は payload の site/tenant 対応しか見ないため、攻撃者が「自分の正規 site_id」を顧客プロキシへ送ると被害者 vid が攻撃者テナントに書かれた (Codex が実 handler で再現)。対策 = §3-1 step 3 の束縛 (Sec-Fetch-Site: same-origin × 転送元ホスト == 登録ホスト × 単一 site_id)。**運用上の前提**: `sites.url` のホストはテナント間で一意であること。現在は operator 発行のみで担保。セルフサーブ化時はドメイン所有確認 (DNS TXT 等) を必須にする (§7)。**v5**: 実行時にも同一ホストの登録テナント数を照会し 1 以外は束縛しない (§3-1 step 3-5)、登録スクリプトでも拒否 |
+| S-10 | **JWT 経路でのテナント境界 (Codex 実装レビュー 3回目 [HIGH]、v5 で対応)** | JWT 経路は site 所有を照合しないため、攻撃者テナント JWT + 被害者 site_id + 被害者オリジンからの送信で v4 の束縛 (1-3) を通過し、被害者 vid が攻撃者テナントに書かれた。対策 = §3-1 step 3-4 (登録テナント == accepted テナント)。この悪用には被害者オリジンからの送信 (同一オリジン権限) が必要で round2 の same-site 経路は復活しないが、コード上のテナント境界として閉じる。**JWT 経路が site 所有を照合しないこと自体は本設計以前からの既存ギャップ** (Cookie とは無関係に、JWT テナントが他テナントの site_id を自テナント配下のイベントとして投入できる) — 本設計では resolveTenant の挙動を変えず (認可仕様の変更は Owner 判断)、§7 に別チケットとして記録 |
 
 ## 5. ロールアウト計画
 
@@ -347,6 +364,19 @@ audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていな�
   効果が出ない。その場合は手順書で明示的なヘッダ転送設定が可能なプロキシに限定する)
 - [ ] dogfood (link-th.co.jp) で実ブラウザから送信し、Worker 側で束縛成立 → Set-Cookie 付与を確認
   (`wrangler tail` で応答ヘッダを観測。Cookie ヘッダの値は出力しないこと)
+- [ ] **JWT 経路の束縛テスト (v5、Codex [HIGH])** — handler 単体テスト (実装済み・pass):
+  攻撃者テナント JWT + 被害者 site_id + 被害者オリジンで被害者 vid が攻撃者テナント行に入らない /
+  被害者テナント JWT + 被害者 site_id は束縛成立 (host cache が冷えた状態からの lookup を含む)
+- [ ] **ホスト一意性 (v5、Codex [MEDIUM])** — handler 単体テスト (実装済み・pass): 同一ホストを
+  2 テナントが登録した構成では両方とも束縛しない / 照会失敗は fail closed / 照会は他条件を
+  満たしたリクエストでのみ発行。**デプロイ前に本番 sites で重複ホストが 0 件であることを確認**:
+  `SELECT lower(domain(url)) AS h, uniqExact(tenant_id) AS t FROM sites GROUP BY h HAVING t > 1`
+- [ ] **プロキシの負のテスト (v5、Codex [MEDIUM])** — dogfood で実測: (a) クライアントが偽の
+  `X-Forwarded-Host: evil.example` を付けて顧客プロキシへ送っても Worker に届く値が元 Host で
+  **上書き**されていること (追記で `evil.example, customer.com` になる構成は不可 — 先頭採用のため
+  束縛が破れる)、(b) クライアントが `Sec-Fetch-Site` を送ってもブラウザ/プロキシが書き換えない
+  こと。nginx は `proxy_set_header X-Forwarded-Host $host;` を **必須設定**として手順書に明記
+  (Vercel は X-Forwarded-Host == Host。要実測)
 
 ## 7. スコープ外 (明示)
 
@@ -363,6 +393,15 @@ audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていな�
 - **`sites.url` ホストのテナント間一意性 / ドメイン所有確認 (S-9)**: 第一者束縛は「登録ホストが
   そのテナントのものである」ことを前提にする。operator 発行の現状では運用で担保。
   セルフサーブ化の際は DNS TXT 等によるドメイン所有確認と、同一ホストの重複登録拒否を必須にする
+  (v5: 登録スクリプトでの拒否 + Worker 実行時の照会は実装済み。DB 制約は ClickHouse の性質上
+  置けないため、上記の運用+実行時ガードで担保)
+- **JWT 経路が site_id の所有を照合しない (既存ギャップ、Owner 判断事項)**: `resolveTenant` の
+  Bearer 分岐は JWT の tenant_id を採用するだけで、イベントの site_id がそのテナントに属するかを
+  照合しない (Cookie とは無関係に本設計以前から存在)。JWT テナントは他テナントの site_id を
+  自テナント配下のイベントとして投入できる (他テナントのデータには影響しないが、site_id を
+  跨いだ集計の信頼性に関わる)。本設計では Cookie 束縛側で閉じるに留め、resolveTenant の認可仕様
+  (JWT 経路でも site 所有を必須にするか、JWT はサーバー間投入用として site 制約を意図的に
+  緩めているのか) は Owner 判断の別チケットとする
 - `ci_user_id` (730日指定の第2識別子): 同じ ITP 制限を受けるが用途が限定的なため触らない
 - GA4 `_ga` Cookie: JS 発行のため救えない (サーバーサイド GTM の領域、linkth-web 側の別件)
 - HMAC 署名付き vid (S-4 の hardening): 第一者化が安定したら別チケットで検討
@@ -380,7 +419,7 @@ audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていな�
 | 1 | 設計書 v2 の Codex dual review (T1) 1回目 | Owner が desktop で実施 | **完了 (REJECT・findings 7件 → v3 で反映)** |
 | 2 | 設計書 v3 の Codex dual review (T1) 2回目 | **Owner が desktop で実施** | 未実施 (Owner 判断で実装を先行。実装差分込みで実施可) |
 | 3 | §5 手順0 Vercel スパイク | 結果を本書に追記。不成立なら設計再検討 | 未着手 (linkth-web 側作業。Worker 実装後は実 Worker を宛先にして実施可) |
-| 4 | §3-1 Worker Set-Cookie + vid 正準化 (payload 検証含む) + 第一者束縛 (v4) + §3-2 echo 分岐削除 (単体テスト付き) | Claude 実装 + Codex review | **実装完了 (PR #29、未デプロイ)**: `visitor-cookie.ts` (純関数) + `worker.ts` 組込。Codex 実装レビュー 1回目 = REJECT (HIGH: テナント間流出) → v4 で束縛を追加。テスト: 純関数 21 + handler 17 (攻撃再現→遮断・未束縛時の不変・Set-Cookie 発行条件・属性注入拒否・重複 Cookie・Cookie ヘッダ非漏洩・CORS 不変条件) を実 TS を直接 import して検証、全 pass。**Codex 実装レビュー 2回目 待ち** |
+| 4 | §3-1 Worker Set-Cookie + vid 正準化 (payload 検証含む) + 第一者束縛 (v4) + §3-2 echo 分岐削除 (単体テスト付き) | Claude 実装 + Codex review | **実装完了 (PR #29、未デプロイ)**: `visitor-cookie.ts` (純関数) + `worker.ts` 組込。Codex 実装レビュー 1回目 = REJECT (HIGH: テナント間流出) → v4 で束縛を追加。テスト: 純関数 21 + handler 17 (攻撃再現→遮断・未束縛時の不変・Set-Cookie 発行条件・属性注入拒否・重複 Cookie・Cookie ヘッダ非漏洩・CORS 不変条件) を実 TS を直接 import して検証、全 pass。Codex 実装レビュー 2回目 = REJECT (HIGH: JWT 経路のテナント境界、MEDIUM: ホスト一意性 / プロキシ要件) → v5 で束縛条件 (4)(5) を追加、テスト追加 (JWT 攻撃再現→遮断・共有ホスト・照会失敗 fail closed・追加クエリの発行条件)。**Codex 実装レビュー 3回目 待ち** |
 | 5 | §3-4 CF ログ確認 (確認コマンド/合格条件/停止条件は本書記載済み) | **Owner 確認項目あり** | 未着手 |
 | 6 | Worker デプロイ | **Owner 確認ゲート** (wrangler deploy は Owner SSH 経由) | 未着手 |
 | 7 | link-th.co.jp 側設定 (rewrite + スニペット) | linkth-web 側セッションと連携 | 未着手 |
@@ -430,3 +469,15 @@ audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていな�
 | `is_first_visit` の整合 (mint 時に client 判定 false が残る) | §3-1 step 4: mint 時は true に補正 |
 | (直接修正) worker.ts の「Sentry 自動計装」誤コメント / 設置画面の HTTPS 前提 / 設計書の参照行 | Codex の直接修正を取り込み (PR #29 に含める) |
 | 未実施のまま: プロキシ・ブラウザ・Cloudflare ログの実機確認 | §5 手順0 (スパイクにヘッダ転送確認を追加)、§3-4、§6 に集約。デプロイ前ゲート |
+
+## 付録4: v4 → v5 の変更理由 (Codex 実装レビュー 2回目、REJECT)
+
+| Finding (severity) | 対応 |
+|---|---|
+| 前回 HIGH (same-site 兄弟サブドメイン) | **CONFIRMED FIXED** (Codex が同一手順で再送し遮断を確認) |
+| [HIGH] JWT テナントと Cookie を認可する site が結び付いていない (攻撃者 JWT + 被害者 site_id + 被害者オリジン → 被害者 vid が攻撃者テナントへ。Codex が実 handler で再現) | §3-1 step 3-4: サイト登録テナント == accepted テナントを束縛条件に追加 (`getRegisteredSiteBinding` が host に加えて tenant を返す)。handler テストで攻撃を再現→遮断、JWT 正規経路 (cold cache) の成立も固定。§4 S-10。JWT 経路が site 所有を照合しない既存ギャップは §7 に Owner 判断事項として記録 |
+| [MEDIUM] プロキシ信頼境界が運用要件として不十分 (XFH の追記構成・Sec-Fetch-Site 書換) | §6 に負のテスト (偽 XFH が上書きされること / Sec-Fetch-Site 不変) を追加、nginx の `proxy_set_header X-Forwarded-Host $host;` を必須化。Vercel は XFH == Host (要実測) |
+| [MEDIUM] 同一ホストを複数テナントが登録した場合の隔離が未保証 | §3-1 step 3-5: 実行時に `uniqExact(tenant_id)` を照会 (他条件成立時のみ、ホスト単位キャッシュ、失敗は fail closed)。登録スクリプトでも拒否。§6 にデプロイ前の重複ホスト確認クエリ |
+| 誤検知 (www/apex 混在、$proxy_host 送出) | 既知の制約として §2 プロキシ要件に集約 (束縛不成立 = 従来挙動、壊れない) |
+| (直接修正) visitor-cookie.ts の設計書参照 v3→v4 | 取り込み |
+| `.wrangler/` 未追跡 | `.gitignore` に追加 |

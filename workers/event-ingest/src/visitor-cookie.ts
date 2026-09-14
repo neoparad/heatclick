@@ -1,7 +1,7 @@
 /**
  * visitor_id (`__ugk_vid`) の第一者 Set-Cookie 化 — 純関数モジュール
  *
- * 設計書: docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md (v3) §3-1
+ * 設計書: docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md (v4) §3-1
  *
  * 背景: `__ugk_vid` は tracking.js が document.cookie で発行しており、Safari ITP により
  * 実質7日で失効する。顧客サイトのパスプロキシ (同一オリジン) 経由で Worker が同名・
@@ -187,6 +187,17 @@ export function pickSingleSiteId(events: ReadonlyArray<Record<string, unknown>>)
   return siteId;
 }
 
+/** accepted events の tenant_id (resolveTenant が注入済み) が単一ならそれを返す。 */
+export function pickSingleTenantId(events: ReadonlyArray<Record<string, unknown>>): string | null {
+  let tenantId: string | null = null;
+  for (const e of events) {
+    if (typeof e.tenant_id !== 'string' || e.tenant_id.length === 0) return null;
+    if (tenantId === null) tenantId = e.tenant_id;
+    else if (tenantId !== e.tenant_id) return null;
+  }
+  return tenantId;
+}
+
 export interface FirstPartyBindingInput {
   /** ブラウザ付与の Fetch Metadata。ページ JS からは偽装不可。プロキシが転送する必要あり。 */
   secFetchSite: string | null | undefined;
@@ -194,6 +205,12 @@ export interface FirstPartyBindingInput {
   forwardedHost: string | null | undefined;
   /** payload の site_id が sites テーブルに登録しているホスト (hostFromUrl)。null = 不明。 */
   registeredHost: string | null;
+  /** payload の site_id が sites テーブルに登録している tenant_id。null = 不明。 */
+  registeredTenant: string | null;
+  /** accepted events に resolveTenant が注入した tenant_id (JWT 経路なら JWT の tenant)。 */
+  eventTenant: string | null;
+  /** 同一ホストを別テナントも登録している (Cookie は host 単位なので vid が共有されてしまう)。 */
+  hostSharedByOtherTenant: boolean;
 }
 
 /**
@@ -205,6 +222,12 @@ export interface FirstPartyBindingInput {
  *      転送しない) も除外 = fail closed
  *   2. 転送元ホストと登録ホストが正準化後に完全一致
  *   3. 登録ホストが解決できている
+ *   4. サイト登録テナント == accepted events のテナント (v5、Codex round3 HIGH):
+ *      resolveTenant の JWT 経路は「site_id がその JWT テナントのものか」を照合しないため、
+ *      攻撃者テナントの JWT + 被害者 site_id + 被害者オリジンからの送信で 1-3 を通過し、
+ *      被害者 vid が攻撃者テナントの行に書かれていた。ここでテナント境界を閉じる
+ *   5. 同一ホストを別テナントが登録していない (Cookie は host 単位。共有されると
+ *      リクエスト間で別テナントに同じ vid が渡る)
  *
  * false の場合、呼び元は payload の visitor_id をそのまま流し、Set-Cookie を返さない
  * (被害者 Cookie の上書き = 固定化も起きない)。同一オリジンの任意スクリプトは
@@ -214,6 +237,9 @@ export interface FirstPartyBindingInput {
 export function isFirstPartyBound(input: FirstPartyBindingInput): boolean {
   if (input.secFetchSite !== 'same-origin') return false;
   if (input.registeredHost === null) return false;
+  if (input.registeredTenant === null || input.eventTenant === null) return false;
+  if (input.registeredTenant !== input.eventTenant) return false;
+  if (input.hostSharedByOtherTenant) return false;
   const forwarded = firstForwardedHost(input.forwardedHost);
   if (forwarded === null) return false;
   return forwarded === input.registeredHost;

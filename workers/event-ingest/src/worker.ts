@@ -24,6 +24,7 @@ import {
   isFirstPartyBound,
   pickPayloadVisitorId,
   pickSingleSiteId,
+  pickSingleTenantId,
   resolveCanonicalVisitorId,
 } from './visitor-cookie.ts';
 
@@ -282,37 +283,82 @@ function cacheStore(site_id: string, tenant_id: string | null): void {
  * v4 (第一者束縛): site_id → sites.url のホスト。tenant lookup と同じ SELECT で取得し、
  * 同 TTL でキャッシュ。null = 登録行に url が無い/不正 (束縛不可として扱う)。
  */
-interface HostCacheEntry {
+/** 第一者束縛に使うサイト登録情報 (sites.url のホスト + 登録テナント)。 */
+interface SiteBinding {
   host: string | null;
+  tenant_id: string | null;
+}
+interface SiteBindingCacheEntry extends SiteBinding {
   expires_at: number;
 }
-const SITE_HOST_CACHE = new Map<string, HostCacheEntry>();
+const SITE_HOST_CACHE = new Map<string, SiteBindingCacheEntry>();
 
-function hostCacheLookup(site_id: string): { hit: false } | { hit: true; host: string | null } {
+function hostCacheLookup(site_id: string): { hit: false } | { hit: true; binding: SiteBinding } {
   const entry = SITE_HOST_CACHE.get(site_id);
   if (!entry) return { hit: false };
   if (Date.now() > entry.expires_at) {
     SITE_HOST_CACHE.delete(site_id);
     return { hit: false };
   }
-  return { hit: true, host: entry.host };
+  return { hit: true, binding: { host: entry.host, tenant_id: entry.tenant_id } };
 }
 
-function hostCacheStore(site_id: string, host: string | null): void {
-  SITE_HOST_CACHE.set(site_id, { host, expires_at: Date.now() + SITE_CACHE_TTL_MS });
+function hostCacheStore(site_id: string, host: string | null, tenant_id: string | null): void {
+  SITE_HOST_CACHE.set(site_id, { host, tenant_id, expires_at: Date.now() + SITE_CACHE_TTL_MS });
 }
 
 /**
- * payload の site が登録しているホスト。tenant lookup (lookupTenantBySiteId) が
- * 同時に host cache を温めるため、通常はキャッシュヒット。JWT 経路等で未取得なら
- * ここで lookup を走らせる (結果は両キャッシュに入る)。
+ * payload の site の登録ホストと登録テナント。tenant lookup (lookupTenantBySiteId) が
+ * 同時にこの cache を温めるため、tracking_js 経路では通常キャッシュヒット。
+ * JWT 経路 (site lookup を経ない) では未取得なので、ここで lookup を走らせる。
+ * v5: 登録テナントも返し、JWT テナントとの一致を束縛条件にする (Codex round3 HIGH)。
  */
-async function getRegisteredSiteHost(env: Env, site_id: string): Promise<string | null> {
+async function getRegisteredSiteBinding(env: Env, site_id: string): Promise<SiteBinding | null> {
   const cached = hostCacheLookup(site_id);
-  if (cached.hit) return cached.host;
+  if (cached.hit) return cached.binding;
   await lookupTenantBySiteId(env, site_id);
   const after = hostCacheLookup(site_id);
-  return after.hit ? after.host : null;
+  return after.hit ? after.binding : null;
+}
+
+/**
+ * v5 (Codex round3 MEDIUM): 同一ホストを登録しているテナント数。Cookie は host 単位なので、
+ * 複数テナントが同じホストを登録していると vid が別テナントへ共有される。1 以外は束縛不可。
+ * 失敗時は +Infinity (fail closed)。同 TTL でホスト単位にキャッシュ。
+ * 束縛の他条件を満たしたリクエストでのみ呼ぶ (未束縛リクエストに追加クエリを課さない)。
+ */
+const HOST_TENANTS_CACHE = new Map<string, { tenants: number; expires_at: number }>();
+
+async function countTenantsRegisteredForHost(env: Env, host: string): Promise<number> {
+  const cached = HOST_TENANTS_CACHE.get(host);
+  if (cached && Date.now() <= cached.expires_at) return cached.tenants;
+
+  const { baseUrl, authHeader } = parseClickHouseEnv(env.CLICKHOUSE_URL);
+  const queryUrl = `${baseUrl}/?database=${encodeURIComponent(env.CLICKHOUSE_DB)}`
+    + `&query=${encodeURIComponent(
+        'SELECT uniqExact(tenant_id) AS tenants FROM sites WHERE lower(domain(url)) = {host:String} FORMAT JSONEachRow'
+      )}`
+    + `&param_host=${encodeURIComponent(host)}`;
+
+  let tenants = Number.POSITIVE_INFINITY;
+  try {
+    const resp = await fetch(queryUrl, { method: 'GET', headers: { Authorization: authHeader } });
+    if (resp.ok) {
+      const line = (await resp.text()).split('\n').find((l) => l.trim().length > 0);
+      if (line) {
+        // ClickHouse は 64bit 整数を JSON で文字列として返す既定設定 → Number() で吸収
+        const row = JSON.parse(line) as { tenants?: unknown };
+        const n = Number(row.tenants);
+        if (Number.isFinite(n)) tenants = n;
+      }
+    } else {
+      console.error(`host tenants lookup HTTP ${resp.status} for host=${host}`);
+    }
+  } catch (e) {
+    console.error(`host tenants lookup error for host=${host}:`, e);
+  }
+  HOST_TENANTS_CACHE.set(host, { tenants, expires_at: Date.now() + SITE_CACHE_TTL_MS });
+  return tenants;
 }
 
 // ── M-3 + H-2: ClickHouse URL / credential parsing ──────────────────
@@ -402,8 +448,8 @@ async function lookupTenantBySiteId(env: Env, site_id: string): Promise<string |
       return null;
     }
     cacheStore(site_id, canonical);
-    // v4: 第一者束縛用の登録ホストも同時にキャッシュ (url 不正/欠落は null = 束縛不可)
-    hostCacheStore(site_id, hostFromUrl(row.url));
+    // v4/v5: 第一者束縛用の登録ホスト + 登録テナントも同時にキャッシュ (url 不正/欠落は null = 束縛不可)
+    hostCacheStore(site_id, hostFromUrl(row.url), canonical);
     return canonical;
   } catch (e) {
     console.error(`sites lookup error for site_id=${site_id}:`, e);
@@ -977,13 +1023,22 @@ export default {
     //   accepted 0 件 (400/401/413/全件 drop) の応答ではこの分岐に到達しない。
     //   注意: request.headers.get('Cookie') の生値はログ・audit・CH のいずれにも書かない
     //   (パスプロキシ経由では顧客サイトの全 Cookie が届く)。
+    //   v5 追加 (Codex round3): (4) サイト登録テナント == accepted のテナント (JWT 経路は
+    //   site 所有を照合しないため、ここで閉じる) (5) 同一ホストを別テナントが登録していない。
     const boundSiteId = pickSingleSiteId(acceptedEvents);
-    const registeredHost = boundSiteId !== null ? await getRegisteredSiteHost(env, boundSiteId) : null;
-    const bound = isFirstPartyBound({
+    const binding = boundSiteId !== null ? await getRegisteredSiteBinding(env, boundSiteId) : null;
+    let bound = isFirstPartyBound({
       secFetchSite: request.headers.get('Sec-Fetch-Site'),
       forwardedHost: request.headers.get('X-Forwarded-Host'),
-      registeredHost,
+      registeredHost: binding?.host ?? null,
+      registeredTenant: binding?.tenant_id ?? null,
+      eventTenant: pickSingleTenantId(acceptedEvents),
+      hostSharedByOtherTenant: false,
     });
+    if (bound && binding?.host) {
+      const tenants = await countTenantsRegisteredForHost(env, binding.host);
+      if (tenants !== 1) bound = false;
+    }
 
     let setCookie: string | null = null;
     if (bound) {
@@ -1112,7 +1167,9 @@ export const __TEST_ONLY__ = {
   cacheStore,
   SITE_TENANT_CACHE,
   SITE_HOST_CACHE,
-  getRegisteredSiteHost,
+  HOST_TENANTS_CACHE,
+  getRegisteredSiteBinding,
+  countTenantsRegisteredForHost,
   EVENTS_COLUMNS,
   BEHAVIOR_COLUMNS,
   IMAGE_VISIBILITY_COLUMNS,

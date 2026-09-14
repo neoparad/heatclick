@@ -67,6 +67,24 @@ async function main() {
     trackingId = existing[0].tracking_id
     console.log(`既存登録を再利用: ${trackingId} (${siteUrl})`)
   } else {
+    // 第一者 Cookie 束縛の前提 (docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md §4 S-9):
+    // 同一ホストを別テナントが登録していると Cookie (host 単位) の vid がテナント間で共有される。
+    // Worker 側は実行時に検出して束縛を拒否するが、登録時点でも防ぐ。
+    const siteHost = new URL(siteUrl).hostname.toLowerCase()
+    const otherTenant = await (
+      await ch.query({
+        query: `SELECT tenant_id FROM sites WHERE lower(domain(url)) = {h:String} AND tenant_id != {t:String} LIMIT 1`,
+        query_params: { h: siteHost, t: TENANT_ID },
+        format: 'JSONEachRow',
+      })
+    ).json()
+    if (otherTenant.length > 0) {
+      console.error(
+        `中止: ホスト ${siteHost} は既に別テナント (${otherTenant[0].tenant_id}) が登録済み。` +
+          ' 同一ホストの複数テナント登録は第一者 Cookie 束縛を無効化するため許可しない。',
+      )
+      process.exit(2)
+    }
     trackingId = generateTrackingId()
     await ch.insert({
       table: 'sites',

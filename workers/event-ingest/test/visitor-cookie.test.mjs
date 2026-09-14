@@ -29,6 +29,7 @@ import {
   parseVisitorIdCookie,
   pickPayloadVisitorId,
   pickSingleSiteId,
+  pickSingleTenantId,
   resolveCanonicalVisitorId,
 } from '../src/visitor-cookie.ts';
 
@@ -208,15 +209,37 @@ test('pickSingleSiteId: single site_id across all events; null when mixed or mis
   assert.equal(pickSingleSiteId([{ site_id: '' }]), null);
 });
 
-test('isFirstPartyBound: true only for same-origin + forwarded host == registered host', () => {
-  const ok = { secFetchSite: 'same-origin', forwardedHost: 'customer.example', registeredHost: 'customer.example' };
-  assert.equal(isFirstPartyBound(ok), true);
-  assert.equal(isFirstPartyBound({ ...ok, forwardedHost: 'CUSTOMER.example:443' }), true, 'normalized compare');
-  assert.equal(isFirstPartyBound({ ...ok, forwardedHost: 'customer.example, edge.internal' }), true, 'first hop');
+test('pickSingleTenantId: single tenant_id across all events; null when mixed or missing', () => {
+  assert.equal(pickSingleTenantId([]), null);
+  assert.equal(pickSingleTenantId([{ tenant_id: 't' }, { tenant_id: 't' }]), 't');
+  assert.equal(pickSingleTenantId([{ tenant_id: 't' }, { tenant_id: 'u' }]), null);
+  assert.equal(pickSingleTenantId([{ tenant_id: 't' }, {}]), null);
+});
+
+const OK_BINDING = {
+  secFetchSite: 'same-origin',
+  forwardedHost: 'customer.example',
+  registeredHost: 'customer.example',
+  registeredTenant: 't_victim',
+  eventTenant: 't_victim',
+  hostSharedByOtherTenant: false,
+};
+
+test('isFirstPartyBound: true only for same-origin + forwarded host == registered host + tenant match + unshared host', () => {
+  assert.equal(isFirstPartyBound(OK_BINDING), true);
+  assert.equal(isFirstPartyBound({ ...OK_BINDING, forwardedHost: 'CUSTOMER.example:443' }), true, 'normalized compare');
+  assert.equal(isFirstPartyBound({ ...OK_BINDING, forwardedHost: 'customer.example, edge.internal' }), true, 'first hop');
+});
+
+test('isFirstPartyBound (v5): false when registered tenant != event tenant (JWT-path cross-tenant, Codex round3 HIGH) or host is shared', () => {
+  assert.equal(isFirstPartyBound({ ...OK_BINDING, eventTenant: 't_attacker' }), false, 'attacker JWT tenant vs victim site');
+  assert.equal(isFirstPartyBound({ ...OK_BINDING, registeredTenant: null }), false, 'unknown registered tenant');
+  assert.equal(isFirstPartyBound({ ...OK_BINDING, eventTenant: null }), false, 'unknown event tenant');
+  assert.equal(isFirstPartyBound({ ...OK_BINDING, hostSharedByOtherTenant: true }), false, 'host registered by multiple tenants');
 });
 
 test('isFirstPartyBound: false for same-site (sibling subdomain), cross-site, missing or wrong metadata', () => {
-  const base = { secFetchSite: 'same-origin', forwardedHost: 'customer.example', registeredHost: 'customer.example' };
+  const base = OK_BINDING;
   assert.equal(isFirstPartyBound({ ...base, secFetchSite: 'same-site' }), false, 'sibling subdomain (Codex round2 HIGH)');
   assert.equal(isFirstPartyBound({ ...base, secFetchSite: 'cross-site' }), false);
   assert.equal(isFirstPartyBound({ ...base, secFetchSite: 'none' }), false);
