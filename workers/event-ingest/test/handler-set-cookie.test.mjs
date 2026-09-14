@@ -277,6 +277,17 @@ test('host registered by two tenants → not bound for either, even when everyth
   }
 });
 
+test('host-tenant count query canonicalizes trailing dots like normalizeHost', async () => {
+  await send({ events: [event({ visitor_id: OK_VID })], headers: BOUND_HEADERS });
+  const countQuery = fetchCalls.find((c) => c.url.includes('uniqExact(tenant_id)'))?.url;
+  assert.ok(countQuery, 'bound request must issue the host-tenant count query');
+  assert.match(
+    countQuery,
+    /replaceRegexpOne\(lower\(domain\(url\)\), '\[\.\]\+\$', ''\)/,
+    'sites.url trailing-dot FQDN notation must not evade the duplicate-host check',
+  );
+});
+
 test('host-tenant count lookup failure (ClickHouse error) → fail closed, not bound', async () => {
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {

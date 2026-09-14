@@ -329,6 +329,10 @@ async function getRegisteredSiteBinding(env: Env, site_id: string): Promise<Site
  */
 const HOST_TENANTS_CACHE = new Map<string, { tenants: number; expires_at: number }>();
 
+// normalizeHost() と同じ末尾ドット規則。sites.url の FQDN 表記が別テナントに存在しても、
+// host-only Cookie の共有を見逃さない。host は query parameter で束縛する。
+const NORMALIZED_SITE_HOST_SQL = "replaceRegexpOne(lower(domain(url)), '[.]+$', '')";
+
 async function countTenantsRegisteredForHost(env: Env, host: string): Promise<number> {
   const cached = HOST_TENANTS_CACHE.get(host);
   if (cached && Date.now() <= cached.expires_at) return cached.tenants;
@@ -336,7 +340,7 @@ async function countTenantsRegisteredForHost(env: Env, host: string): Promise<nu
   const { baseUrl, authHeader } = parseClickHouseEnv(env.CLICKHOUSE_URL);
   const queryUrl = `${baseUrl}/?database=${encodeURIComponent(env.CLICKHOUSE_DB)}`
     + `&query=${encodeURIComponent(
-        'SELECT uniqExact(tenant_id) AS tenants FROM sites WHERE lower(domain(url)) = {host:String} FORMAT JSONEachRow'
+        `SELECT uniqExact(tenant_id) AS tenants FROM sites WHERE ${NORMALIZED_SITE_HOST_SQL} = {host:String} FORMAT JSONEachRow`
       )}`
     + `&param_host=${encodeURIComponent(host)}`;
 
@@ -1010,7 +1014,7 @@ export default {
       }
     }
 
-    // 第一者 visitor_id (docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md v4 §3-1):
+    // 第一者 visitor_id (docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md v5 §3-1):
     //   Cookie 由来 vid の採用と Set-Cookie 発行は **第一者束縛が成立した場合のみ**
     //   (Codex round2 HIGH: 未束縛だと兄弟サブドメイン等から別テナントの site_id を
     //   顧客プロキシへ送るだけで、同乗した被害者 Cookie の vid が別テナントの行に書かれる):

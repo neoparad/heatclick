@@ -1,7 +1,7 @@
 /**
  * visitor_id (`__ugk_vid`) の第一者 Set-Cookie 化 — 純関数モジュール
  *
- * 設計書: docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md (v4) §3-1
+ * 設計書: docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md (v5) §3-1
  *
  * 背景: `__ugk_vid` は tracking.js が document.cookie で発行しており、Safari ITP により
  * 実質7日で失効する。顧客サイトのパスプロキシ (同一オリジン) 経由で Worker が同名・
@@ -22,12 +22,13 @@
  *   - HttpOnly は付けない (scenario-runtime.js が document.cookie から読む)
  *   - SameSite=Lax を None に緩めない (cross-site からの Cookie 付き偽造の唯一の防御)
  *   - **Cookie 由来 vid の採用と Set-Cookie 発行は「第一者束縛」が成立した場合のみ**
- *     (v4、Codex round2 HIGH): Lax は same-site (兄弟サブドメイン) からの送信を防がない。
+ *     (v5、Codex round2/3 HIGH): Lax は same-site (兄弟サブドメイン) からの送信を防がない。
  *     攻撃者が顧客の兄弟サブドメインから顧客プロキシへ「攻撃者自身の site_id/tenant_id」を
  *     送ると、被害者の Cookie が同乗し、Worker が被害者 vid を攻撃者テナントの行に書く。
  *     対策 = isFirstPartyBound: (1) Sec-Fetch-Site: same-origin (ブラウザ付与、ページ JS から
  *     偽装不可、same-site を除外) かつ (2) プロキシが転送した元ホスト == payload の site が
- *     登録しているホスト、かつ (3) accepted events が単一 site_id。
+ *     登録しているホスト、かつ (3) accepted events が単一 site_id、(4) 登録テナントと
+ *     accepted テナントが一致、(5) ホストが他テナントに共有されていないこと。
  */
 
 export const VISITOR_ID_COOKIE = '__ugk_vid';
@@ -135,7 +136,7 @@ export function pickPayloadVisitorId(events: ReadonlyArray<Record<string, unknow
   return null;
 }
 
-// ── 第一者束縛 (v4、Codex round2 HIGH 対応) ─────────────────────────
+// ── 第一者束縛 (v5、Codex round2/3 HIGH 対応) ───────────────────────
 
 /**
  * ホスト名の正準化: 小文字化・ポート除去・末尾ドット除去・IDN は punycode 化。
@@ -151,8 +152,10 @@ export function normalizeHost(raw: unknown): string | null {
   } catch {
     return null;
   }
-  const h = hostname.toLowerCase().replace(/\.$/, '');
-  if (!/^[a-z0-9.-]+$/.test(h)) return null;
+  // DNS の末尾ドットは FQDN 表記であり、sites.url と X-Forwarded-Host の比較では同一視する。
+  // ClickHouse 側の host 照会も `[.]+$` を除去するため、ここは必ず同じ規則を維持する。
+  const h = hostname.toLowerCase().replace(/\.+$/, '');
+  if (h.length === 0 || h.startsWith('.') || h.includes('..') || !/^[a-z0-9.-]+$/.test(h)) return null;
   return h;
 }
 

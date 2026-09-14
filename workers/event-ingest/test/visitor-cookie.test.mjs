@@ -171,10 +171,11 @@ test('pickPayloadVisitorId: first valid visitor_id among events; skips invalid/m
 
 // ── 第一者束縛 (v4、Codex round2 HIGH 対応) ─────────────────────────
 
-test('normalizeHost: lowercases, strips port and trailing dot, rejects garbage, punycodes IDN', () => {
+test('normalizeHost: lowercases, strips port and trailing dots, rejects garbage, punycodes IDN', () => {
   assert.equal(normalizeHost('Customer.Example'), 'customer.example');
   assert.equal(normalizeHost('customer.example:443'), 'customer.example');
   assert.equal(normalizeHost('customer.example.'), 'customer.example');
+  assert.equal(normalizeHost('customer.example..'), 'customer.example');
   assert.equal(normalizeHost('  customer.example  '), 'customer.example');
   assert.equal(normalizeHost('日本.example'), 'xn--wgv71a.example');
   assert.equal(normalizeHost(''), null);
@@ -182,6 +183,8 @@ test('normalizeHost: lowercases, strips port and trailing dot, rejects garbage, 
   assert.equal(normalizeHost(42), null);
   assert.equal(normalizeHost('a'.repeat(254)), null, 'over 253 chars');
   assert.equal(normalizeHost('bad host'), null);
+  assert.equal(normalizeHost('.customer.example'), null);
+  assert.equal(normalizeHost('customer..example'), null);
 });
 
 test('hostFromUrl: extracts and normalizes the host of sites.url', () => {

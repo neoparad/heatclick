@@ -199,7 +199,8 @@ POST `/api/track` ハンドラに追加:
       tenant_id と一致する場合のみ採用する
    5. **(v5) 同一ホストを別テナントが登録していない** — Cookie は host 単位のため、同じホストを
       複数テナントが登録していると、別リクエスト間で同じ vid が別テナントへ渡る。1-4 を満たした
-      リクエストでのみ `SELECT uniqExact(tenant_id) FROM sites WHERE lower(domain(url)) = {host}`
+      リクエストでのみ `SELECT uniqExact(tenant_id) FROM sites WHERE
+      replaceRegexpOne(lower(domain(url)), '[.]+$', '') = {host}`
       を照会 (ホスト単位・同 TTL キャッシュ、失敗時は fail closed) し、1 でなければ束縛しない。
       登録時 (`operator-provision-site.mjs`) にも同一ホストの別テナント登録を拒否する
    **背景 (Codex が実 handler で再現)**: 束縛が無いと、顧客の HTTPS 兄弟サブドメインから
@@ -370,7 +371,8 @@ audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていな�
 - [ ] **ホスト一意性 (v5、Codex [MEDIUM])** — handler 単体テスト (実装済み・pass): 同一ホストを
   2 テナントが登録した構成では両方とも束縛しない / 照会失敗は fail closed / 照会は他条件を
   満たしたリクエストでのみ発行。**デプロイ前に本番 sites で重複ホストが 0 件であることを確認**:
-  `SELECT lower(domain(url)) AS h, uniqExact(tenant_id) AS t FROM sites GROUP BY h HAVING t > 1`
+  `SELECT replaceRegexpOne(lower(domain(url)), '[.]+$', '') AS h, uniqExact(tenant_id) AS t
+   FROM sites GROUP BY h HAVING t > 1`
 - [ ] **プロキシの負のテスト (v5、Codex [MEDIUM])** — dogfood で実測: (a) クライアントが偽の
   `X-Forwarded-Host: evil.example` を付けて顧客プロキシへ送っても Worker に届く値が元 Host で
   **上書き**されていること (追記で `evil.example, customer.com` になる構成は不可 — 先頭採用のため
@@ -481,3 +483,9 @@ audit/drop logging 等) が **Cookie ヘッダの値を引数に含めていな�
 | 誤検知 (www/apex 混在、$proxy_host 送出) | 既知の制約として §2 プロキシ要件に集約 (束縛不成立 = 従来挙動、壊れない) |
 | (直接修正) visitor-cookie.ts の設計書参照 v3→v4 | 取り込み |
 | `.wrangler/` 未追跡 | `.gitignore` に追加 |
+
+## 付録5: v5 の自己修正 (Codex 実装レビュー 3回目)
+
+| Finding | 対応 |
+|---|---|
+| `normalizeHost()` は末尾ドットを除去する一方、ホスト一意性の ClickHouse 照会と登録スクリプトは `lower(domain(url))` をそのまま比較していた | Worker と登録スクリプトの照会を `replaceRegexpOne(lower(domain(url)), '[.]+$', '')` に統一。`https://customer.example./` の別テナント登録を `customer.example` と同一視し、host-only Cookie のテナント間共有を見逃さない。Worker の handler テストで照会 SQL を固定し、JS 正規化の複数末尾ドット・不正ホストも単体テストで固定 |
