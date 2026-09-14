@@ -5,9 +5,9 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test:unit": "node --test test/resolve-tenant.test.mjs",
+    "test:unit": "node --test test/*.test.mjs",
     "test:integration": "node test/test-worker.mjs",
-    "test": "node --test test/resolve-tenant.test.mjs"
+    "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260411.1",

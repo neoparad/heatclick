@@ -41,6 +41,19 @@ function generateTrackingId() {
   return `CIP_${s}`
 }
 
+/** Worker の normalizeHost と同じ登録時 host 正規化。 */
+function normalizeSiteHost(rawUrl) {
+  const host = new URL(rawUrl).hostname.toLowerCase().replace(/\.+$/, '')
+  if (!host || host.startsWith('.') || host.includes('..') || !/^[a-z0-9.-]+$/.test(host)) {
+    throw new Error(`invalid site host: ${rawUrl}`)
+  }
+  return host
+}
+
+// Worker の NORMALIZED_SITE_HOST_SQL と同じ末尾ドット規則。片側だけ異なると、既存の
+// `https://example.com./` 登録を別ホストとして見落とし、host-only Cookie の共有を許してしまう。
+const NORMALIZED_SITE_HOST_SQL = "replaceRegexpOne(lower(domain(url)), '[.]+$', '')"
+
 const env = readFileSync(new URL('../.env.local', import.meta.url), 'utf8')
 const get = (k) => env.match(new RegExp('^' + k + '=(.+)$', 'm'))?.[1].trim()
 
@@ -67,6 +80,24 @@ async function main() {
     trackingId = existing[0].tracking_id
     console.log(`既存登録を再利用: ${trackingId} (${siteUrl})`)
   } else {
+    // 第一者 Cookie 束縛の前提 (docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md §4 S-9):
+    // 同一ホストを別テナントが登録していると Cookie (host 単位) の vid がテナント間で共有される。
+    // Worker 側は実行時に検出して束縛を拒否するが、登録時点でも防ぐ。
+    const siteHost = normalizeSiteHost(siteUrl)
+    const otherTenant = await (
+      await ch.query({
+        query: `SELECT tenant_id FROM sites WHERE ${NORMALIZED_SITE_HOST_SQL} = {h:String} AND tenant_id != {t:String} LIMIT 1`,
+        query_params: { h: siteHost, t: TENANT_ID },
+        format: 'JSONEachRow',
+      })
+    ).json()
+    if (otherTenant.length > 0) {
+      console.error(
+        `中止: ホスト ${siteHost} は既に別テナント (${otherTenant[0].tenant_id}) が登録済み。` +
+          ' 同一ホストの複数テナント登録は第一者 Cookie 束縛を無効化するため許可しない。',
+      )
+      process.exit(2)
+    }
     trackingId = generateTrackingId()
     await ch.insert({
       table: 'sites',
@@ -130,6 +161,18 @@ async function main() {
         data-tenant-id="${TENANT_ID}"
         data-runtime-url="${origin}/api/scenarios/runtime"
         defer></script>
+
+■ ③ (任意・推奨) 第一者化 — Safari ITP の7日制限を回避して訪問者識別を最長400日保持:
+   docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md 参照。前提: サイトが HTTPS 配信。
+   1. 顧客サイト側で /ugoki/track を ingest Worker へリバースプロキシ
+      (Vercel の例: vercel.json の rewrites に
+       { "source": "/ugoki/track", "destination": "https://ugokimap-event-ingest.linkth.workers.dev/api/track" }
+       ※ next.config.js の rewrites は Set-Cookie を落とす報告があるため使わない
+       ※ プロキシは Sec-Fetch-Site と X-Forwarded-Host を Worker へ転送すること。
+          転送されないと Worker は Set-Cookie を返さず、従来どおり7日制限のままになる)
+   2. ①のタグの <script> 内に 1 行追加:
+        window.CLICKINSIGHT_API_URL = '/ugoki/track';
+   3. CSP を使っている場合、connect-src は自オリジンで足りる (Worker の origin は不要になる)
 
 ■ 残作業:
   1. lib/auth/dogfood-users.ts / seed-auth-registry.mjs の SITE_IDS に追加 (コード整合)

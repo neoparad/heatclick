@@ -18,11 +18,23 @@
  *   - MEDIUM 修正 同時統合: M-1 pickColumns tenant_id INSERT-境界 assert / M-3 parseClickHouseUrl URL parser
  */
 
+import {
+  buildVisitorIdSetCookie,
+  hostFromUrl,
+  isFirstPartyBound,
+  pickPayloadVisitorId,
+  pickSingleSiteId,
+  pickSingleTenantId,
+  resolveCanonicalVisitorId,
+} from './visitor-cookie.ts';
+
 export interface Env {
   // ClickHouse access
   CLICKHOUSE_URL: string;        // e.g., http://user:pass@host:port (secret 経由)
   CLICKHOUSE_DB: string;          // 'clickinsight'
-  ALLOWED_ORIGINS: string;        // '*' or comma-separated
+  // ALLOWED_ORIGINS は撤去 (docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md §3-2):
+  //   旧実装は '*' 以外を設定しても allowlist を検証せず任意 Origin をエコーしており
+  //   「制限している風で制限していない」状態だった。公開 ingest endpoint として '*' 固定。
   BATCH_SIZE: string;             // unused in current impl, reserved
   FLUSH_INTERVAL_MS: string;      // unused in current impl, reserved
 
@@ -267,6 +279,92 @@ function cacheStore(site_id: string, tenant_id: string | null): void {
   });
 }
 
+/**
+ * v4 (第一者束縛): site_id → sites.url のホスト。tenant lookup と同じ SELECT で取得し、
+ * 同 TTL でキャッシュ。null = 登録行に url が無い/不正 (束縛不可として扱う)。
+ */
+/** 第一者束縛に使うサイト登録情報 (sites.url のホスト + 登録テナント)。 */
+interface SiteBinding {
+  host: string | null;
+  tenant_id: string | null;
+}
+interface SiteBindingCacheEntry extends SiteBinding {
+  expires_at: number;
+}
+const SITE_HOST_CACHE = new Map<string, SiteBindingCacheEntry>();
+
+function hostCacheLookup(site_id: string): { hit: false } | { hit: true; binding: SiteBinding } {
+  const entry = SITE_HOST_CACHE.get(site_id);
+  if (!entry) return { hit: false };
+  if (Date.now() > entry.expires_at) {
+    SITE_HOST_CACHE.delete(site_id);
+    return { hit: false };
+  }
+  return { hit: true, binding: { host: entry.host, tenant_id: entry.tenant_id } };
+}
+
+function hostCacheStore(site_id: string, host: string | null, tenant_id: string | null): void {
+  SITE_HOST_CACHE.set(site_id, { host, tenant_id, expires_at: Date.now() + SITE_CACHE_TTL_MS });
+}
+
+/**
+ * payload の site の登録ホストと登録テナント。tenant lookup (lookupTenantBySiteId) が
+ * 同時にこの cache を温めるため、tracking_js 経路では通常キャッシュヒット。
+ * JWT 経路 (site lookup を経ない) では未取得なので、ここで lookup を走らせる。
+ * v5: 登録テナントも返し、JWT テナントとの一致を束縛条件にする (Codex round3 HIGH)。
+ */
+async function getRegisteredSiteBinding(env: Env, site_id: string): Promise<SiteBinding | null> {
+  const cached = hostCacheLookup(site_id);
+  if (cached.hit) return cached.binding;
+  await lookupTenantBySiteId(env, site_id);
+  const after = hostCacheLookup(site_id);
+  return after.hit ? after.binding : null;
+}
+
+/**
+ * v5 (Codex round3 MEDIUM): 同一ホストを登録しているテナント数。Cookie は host 単位なので、
+ * 複数テナントが同じホストを登録していると vid が別テナントへ共有される。1 以外は束縛不可。
+ * 失敗時は +Infinity (fail closed)。同 TTL でホスト単位にキャッシュ。
+ * 束縛の他条件を満たしたリクエストでのみ呼ぶ (未束縛リクエストに追加クエリを課さない)。
+ */
+const HOST_TENANTS_CACHE = new Map<string, { tenants: number; expires_at: number }>();
+
+// normalizeHost() と同じ末尾ドット規則。sites.url の FQDN 表記が別テナントに存在しても、
+// host-only Cookie の共有を見逃さない。host は query parameter で束縛する。
+const NORMALIZED_SITE_HOST_SQL = "replaceRegexpOne(lower(domain(url)), '[.]+$', '')";
+
+async function countTenantsRegisteredForHost(env: Env, host: string): Promise<number> {
+  const cached = HOST_TENANTS_CACHE.get(host);
+  if (cached && Date.now() <= cached.expires_at) return cached.tenants;
+
+  const { baseUrl, authHeader } = parseClickHouseEnv(env.CLICKHOUSE_URL);
+  const queryUrl = `${baseUrl}/?database=${encodeURIComponent(env.CLICKHOUSE_DB)}`
+    + `&query=${encodeURIComponent(
+        `SELECT uniqExact(tenant_id) AS tenants FROM sites WHERE ${NORMALIZED_SITE_HOST_SQL} = {host:String} FORMAT JSONEachRow`
+      )}`
+    + `&param_host=${encodeURIComponent(host)}`;
+
+  let tenants = Number.POSITIVE_INFINITY;
+  try {
+    const resp = await fetch(queryUrl, { method: 'GET', headers: { Authorization: authHeader } });
+    if (resp.ok) {
+      const line = (await resp.text()).split('\n').find((l) => l.trim().length > 0);
+      if (line) {
+        // ClickHouse は 64bit 整数を JSON で文字列として返す既定設定 → Number() で吸収
+        const row = JSON.parse(line) as { tenants?: unknown };
+        const n = Number(row.tenants);
+        if (Number.isFinite(n)) tenants = n;
+      }
+    } else {
+      console.error(`host tenants lookup HTTP ${resp.status} for host=${host}`);
+    }
+  } catch (e) {
+    console.error(`host tenants lookup error for host=${host}:`, e);
+  }
+  HOST_TENANTS_CACHE.set(host, { tenants, expires_at: Date.now() + SITE_CACHE_TTL_MS });
+  return tenants;
+}
+
 // ── M-3 + H-2: ClickHouse URL / credential parsing ──────────────────
 
 /**
@@ -318,7 +416,7 @@ async function lookupTenantBySiteId(env: Env, site_id: string): Promise<string |
   // resolveTenant 経路 (b) が常時 reject、Sprint 4 W1 Worker redeploy 後に全 ingest が drop していた。
   const queryUrl = `${baseUrl}/?database=${encodeURIComponent(env.CLICKHOUSE_DB)}`
     + `&query=${encodeURIComponent(
-        "SELECT tenant_id FROM sites WHERE tracking_id = {site_id:String} LIMIT 1 FORMAT JSONEachRow"
+        "SELECT tenant_id, url FROM sites WHERE tracking_id = {site_id:String} LIMIT 1 FORMAT JSONEachRow"
       )}`
     + `&param_site_id=${encodeURIComponent(site_id)}`;
 
@@ -341,7 +439,7 @@ async function lookupTenantBySiteId(env: Env, site_id: string): Promise<string |
       cacheStore(site_id, null);
       return null;
     }
-    const row = JSON.parse(firstLine) as { tenant_id?: unknown };
+    const row = JSON.parse(firstLine) as { tenant_id?: unknown; url?: unknown };
     if (typeof row.tenant_id !== 'string' || row.tenant_id.length === 0) {
       cacheStore(site_id, null);
       return null;
@@ -354,6 +452,8 @@ async function lookupTenantBySiteId(env: Env, site_id: string): Promise<string |
       return null;
     }
     cacheStore(site_id, canonical);
+    // v4/v5: 第一者束縛用の登録ホスト + 登録テナントも同時にキャッシュ (url 不正/欠落は null = 束縛不可)
+    hostCacheStore(site_id, hostFromUrl(row.url), canonical);
     return canonical;
   } catch (e) {
     console.error(`sites lookup error for site_id=${site_id}:`, e);
@@ -575,7 +675,7 @@ async function emitAuditEventsBatch(
 
   // Reviewer R7-3 + Director 続 34 §5.4: resp.ok 検証で silent fail 撲滅
   // (旧コード = fetch 後 resp 内容を見ず success と判断、5xx でも console.error 出ず)
-  // 新コード = (1) network error catch (旧来通り) + (2) HTTP status 検証 + (3) Sentry breadcrumb
+  // 新コード = (1) network error catch (旧来通り) + (2) HTTP status 検証 + (3) 構造化ログ
   try {
     const resp = await fetch(insertUrl, {
       method: 'POST',
@@ -590,7 +690,7 @@ async function emitAuditEventsBatch(
       // ただし response body 全体 log は CH server side で error context を含む可能性 → 256 文字制限
       const respText = await resp.text().catch(() => '');
       const truncated = respText.slice(0, 256);
-      // Cloudflare Workers の Sentry SDK は console.error を breadcrumb に変換 (auto-instrumented)
+      // この Worker は Sentry SDK を使用せず、console.error を Cloudflare のログへ出力する
       // 構造化 message で grep / dashboard で集計可能に
       console.error(
         `[audit_events INSERT non-ok] status=${resp.status} statusText=${resp.statusText} ` +
@@ -769,11 +869,24 @@ function detectAgentFromUA(ua: string): { is_agent: number; agent_type: string }
 
 // ── CORS helpers ────────────────────────────────────────────────────
 
-function corsHeaders(origin: string | null, env: Env): Record<string, string> {
-  const allowed = env.ALLOWED_ORIGINS;
-  const respOrigin = allowed === '*' ? '*' : (origin || '*');
+/**
+ * 公開 ingest endpoint の CORS。ACAO は '*' 固定。
+ *
+ * 不変条件 (docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md §3-2 / §4 S-1):
+ *   - この endpoint に `Access-Control-Allow-Credentials: true` を **追加してはならない**
+ *     ('*' との併用はブラウザが拒否し、かつ任意オリジンへの credentialed CORS になる)。
+ *     必要になったら Origin の完全一致 allowlist (endsWith/includes 禁止、`Origin: null`
+ *     拒否、`Vary: Origin` 付与) を先に実装すること。
+ *   - CORS は ingestion を守らない (text/plain sendBeacon は preflight を経ない)。
+ *     受入制御は site_id→tenant registry 照合 (resolveTenant) が担い、cross-site からの
+ *     Cookie 付き偽造は `__ugk_vid` の SameSite=Lax が防ぐ (visitor-cookie.ts 参照)。
+ *   - 旧 `ALLOWED_ORIGINS` の非 '*' 分岐は allowlist を検証せず Origin をエコーしていた
+ *     ため撤去 (v1 の「厳格 allowlist 化」案は未登録オリジンの application/json 経路の
+ *     preflight を壊すことが判明し不採用)。
+ */
+function corsHeaders(): Record<string, string> {
   return {
-    'Access-Control-Allow-Origin': respOrigin,
+    'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'POST, OPTIONS, GET',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Max-Age': '86400',
@@ -785,8 +898,7 @@ function corsHeaders(origin: string | null, env: Env): Record<string, string> {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    const origin = request.headers.get('Origin');
-    const cors = corsHeaders(origin, env);
+    const cors = corsHeaders();
 
     if (url.pathname === '/health' || url.pathname === '/') {
       return new Response(JSON.stringify({ status: 'ok', worker: 'ugokimap-event-ingest' }), {
@@ -902,7 +1014,59 @@ export default {
       }
     }
 
+    // 第一者 visitor_id (docs/tracking/FIRST_PARTY_VID_DESIGN_2026-08-16.md v5 §3-1):
+    //   Cookie 由来 vid の採用と Set-Cookie 発行は **第一者束縛が成立した場合のみ**
+    //   (Codex round2 HIGH: 未束縛だと兄弟サブドメイン等から別テナントの site_id を
+    //   顧客プロキシへ送るだけで、同乗した被害者 Cookie の vid が別テナントの行に書かれる):
+    //     (1) Sec-Fetch-Site: same-origin  (2) X-Forwarded-Host 先頭 == sites.url のホスト
+    //     (3) accepted events が単一 site_id
+    //   束縛時: Cookie 値 > payload 値 > mint で正準化 (各ソース検証パス時のみ)、全 accepted
+    //   events を上書き、Set-Cookie + Cache-Control: no-store を付与。
+    //   非束縛時 (workers.dev 直叩き・別テナント site_id・same-site 等): イベントは payload の
+    //   visitor_id のまま (従来挙動)、Set-Cookie も返さない (被害者 Cookie の上書き=固定化を防ぐ)。
+    //   accepted 0 件 (400/401/413/全件 drop) の応答ではこの分岐に到達しない。
+    //   注意: request.headers.get('Cookie') の生値はログ・audit・CH のいずれにも書かない
+    //   (パスプロキシ経由では顧客サイトの全 Cookie が届く)。
+    //   v5 追加 (Codex round3): (4) サイト登録テナント == accepted のテナント (JWT 経路は
+    //   site 所有を照合しないため、ここで閉じる) (5) 同一ホストを別テナントが登録していない。
+    const boundSiteId = pickSingleSiteId(acceptedEvents);
+    const binding = boundSiteId !== null ? await getRegisteredSiteBinding(env, boundSiteId) : null;
+    let bound = isFirstPartyBound({
+      secFetchSite: request.headers.get('Sec-Fetch-Site'),
+      forwardedHost: request.headers.get('X-Forwarded-Host'),
+      registeredHost: binding?.host ?? null,
+      registeredTenant: binding?.tenant_id ?? null,
+      eventTenant: pickSingleTenantId(acceptedEvents),
+      hostSharedByOtherTenant: false,
+    });
+    if (bound && binding?.host) {
+      const tenants = await countTenantsRegisteredForHost(env, binding.host);
+      if (tenants !== 1) bound = false;
+    }
+
+    let setCookie: string | null = null;
+    if (bound) {
+      const { vid, source } = resolveCanonicalVisitorId({
+        cookieHeader: request.headers.get('Cookie'),
+        payloadVisitorId: pickPayloadVisitorId(acceptedEvents),
+      });
+      for (const e of acceptedEvents) {
+        e.visitor_id = vid;
+        // サーバーが新規発行した id は定義上「初見」。payload の is_first_visit (client 判定) が
+        // false のままだと新規 id が再訪扱いになるため補正する (Codex round2 指摘)。
+        if (source === 'mint') e.is_first_visit = true;
+      }
+      setCookie = buildVisitorIdSetCookie(vid);
+    }
+
     ctx.waitUntil(flushToClickHouse(env, acceptedEvents));
+
+    const responseHeaders: Record<string, string> = { ...cors, 'Content-Type': 'application/json' };
+    if (setCookie !== null) {
+      responseHeaders['Set-Cookie'] = setCookie;
+      // Set-Cookie 付き応答が中間層でキャッシュされると訪問者間で vid が混線する
+      responseHeaders['Cache-Control'] = 'no-store';
+    }
 
     return new Response(
       JSON.stringify({
@@ -910,7 +1074,7 @@ export default {
         received: acceptedEvents.length,
         dropped: dropContexts.length,
       }),
-      { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } },
+      { status: 200, headers: responseHeaders },
     );
   },
 };
@@ -1006,6 +1170,10 @@ export const __TEST_ONLY__ = {
   cacheLookup,
   cacheStore,
   SITE_TENANT_CACHE,
+  SITE_HOST_CACHE,
+  HOST_TENANTS_CACHE,
+  getRegisteredSiteBinding,
+  countTenantsRegisteredForHost,
   EVENTS_COLUMNS,
   BEHAVIOR_COLUMNS,
   IMAGE_VISIBILITY_COLUMNS,
