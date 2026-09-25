@@ -851,6 +851,7 @@ const AGENT_PATTERNS: ReadonlyArray<{ pattern: RegExp; name: string }> = [
   { pattern: /Applebot-Extended/i,  name: 'Applebot-Extended' },
   { pattern: /cohere-ai/i,          name: 'cohere-ai' },
   { pattern: /Meta-ExternalAgent/i, name: 'Meta-ExternalAgent' },
+  { pattern: /meta-externalads/i,   name: 'meta-externalads' },  // FB 広告クローラー (2026-09-25 Jev shadow 評価で素通り検出)
   { pattern: /HeadlessChrome/i,     name: 'HeadlessChrome' },
   { pattern: /PhantomJS/i,          name: 'PhantomJS' },
   { pattern: /Playwright/i,         name: 'Playwright' },
@@ -1161,6 +1162,7 @@ async function resolveTenantWithDedupe(
 // ── Exports for unit testing ────────────────────────────────────────
 
 export const __TEST_ONLY__ = {
+  detectAgentFromUA,
   resolveTenant,
   resolveTenantWithDedupe,
   verifyJwtHs256,
