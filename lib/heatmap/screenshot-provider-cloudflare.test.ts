@@ -20,7 +20,7 @@ import {
   fetchFromCloudflareBR,
   fetchFromScreenshotWorker,
   getCloudflareBRConfig,
-  workerDeviceScaleFactor,
+  workerPreferredDeviceScaleFactor,
   type CloudflareBRConfig,
   type ScreenshotWorkerConfig,
 } from './screenshot-provider'
@@ -389,15 +389,15 @@ describe('getCloudflareBRConfig — env resolution', () => {
 })
 
 
-describe('workerDeviceScaleFactor / Worker request body (SP sharpness)', () => {
-  it('SP asks the Worker for 2x, PC and TAB stay at 1x', () => {
-    expect(workerDeviceScaleFactor('sp')).toBe(2)
-    expect(workerDeviceScaleFactor('pc')).toBe(1)
-    expect(workerDeviceScaleFactor('tab')).toBe(1)
+describe('workerPreferredDeviceScaleFactor / Worker request body (SP sharpness)', () => {
+  it('SP prefers 2x, PC and TAB prefer nothing (1x)', () => {
+    expect(workerPreferredDeviceScaleFactor('sp')).toBe(2)
+    expect(workerPreferredDeviceScaleFactor('pc')).toBe(1)
+    expect(workerPreferredDeviceScaleFactor('tab')).toBe(1)
   })
 
   async function bodySentFor(device: 'pc' | 'sp' | 'tab') {
-    let sent: { url: string; width: number; deviceScaleFactor: number } | undefined
+    let sent: Record<string, unknown> | undefined
     const fakeFetch: typeof fetch = async (_input, init) => {
       sent = JSON.parse(String(init?.body))
       return jpegResponseWithHeaders(makeJpeg(CAPTURE_WIDTH_FOR_DEVICE[device], 3000), {})
@@ -411,15 +411,20 @@ describe('workerDeviceScaleFactor / Worker request body (SP sharpness)', () => {
     return sent
   }
 
-  it('sends deviceScaleFactor=2 with width=390 for SP', async () => {
+  it('SP keeps the base deviceScaleFactor at 1 and asks for 2x via preferredDeviceScaleFactor', async () => {
     const sent = await bodySentFor('sp')
     expect(sent?.width).toBe(390)
-    expect(sent?.deviceScaleFactor).toBe(2)
+    // 旧 Worker は deviceScaleFactor しか見ない → 1x で従来どおり (デプロイ順に依存しない)
+    expect(sent?.deviceScaleFactor).toBe(1)
+    expect(sent?.preferredDeviceScaleFactor).toBe(2)
   })
 
-  it('sends deviceScaleFactor=1 for PC and TAB', async () => {
-    expect((await bodySentFor('pc'))?.deviceScaleFactor).toBe(1)
-    expect((await bodySentFor('tab'))?.deviceScaleFactor).toBe(1)
+  it('PC and TAB requests are unchanged: deviceScaleFactor 1 and no preferred field at all', async () => {
+    for (const device of ['pc', 'tab'] as const) {
+      const sent = await bodySentFor(device)
+      expect(sent?.deviceScaleFactor).toBe(1)
+      expect(sent).not.toHaveProperty('preferredDeviceScaleFactor')
+    }
   })
 })
 

@@ -23,13 +23,17 @@
  *      timeout→劣化 fallback→空白画像 を防ぐ。続131 アプリ側 truncation guard が以深を全域描画)
  *
  * Constraints:
- *   - deviceScaleFactor is always 1 (overlay coordinate alignment — DO NOT change)
+ *   - The base capture is always taken at deviceScaleFactor (1) exactly as before. SP may additionally get a
+ *     2x re-capture for light pages only (preferredDeviceScaleFactor, capture-plan.ts); if that fails the 1x
+ *     image already in hand is returned. Overlay coordinates are DPR independent: the client uses
+ *     viewportWidth (CSS px) with naturalWidth/naturalHeight (image px) to recover CSS px.
  *   - Always browser.close() in finally
  *   - Total timeout cap: 55s (Worker CPU limit ~60s)
  */
 
 import puppeteer, { type Browser, type HTTPRequest, type Page } from '@cloudflare/puppeteer';
-import { planCapture } from './capture-plan';
+import { canCaptureSharp, capForDsf, withSharpUpgrade } from './capture-plan';
+import { parseRequestBody } from './request';
 
 // ── Env bindings ───────────────────────────────────────────────────────────────
 
@@ -46,6 +50,12 @@ export interface Env {
 
 /** Maximum total request handling time (ms). Workers CPU hard limit is ~60s. */
 const TOTAL_TIMEOUT_MS = 55_000;
+
+/** 全体の締切より手前で応答を組み立てるための余裕 (ms)。2x の撮り直しはこの手前で打ち切る。 */
+const RESPONSE_SAFETY_MS = 3_000;
+
+/** 2x の撮り直し (読み込み直し + autoScroll + 撮影) を試すのに最低限必要な残り時間 (ms)。 */
+const SHARP_MIN_BUDGET_MS = 20_000;
 
 /** puppeteer.launch goto timeout (ms). Included within TOTAL_TIMEOUT_MS. */
 const GOTO_TIMEOUT_MS = 25_000;
@@ -195,39 +205,6 @@ function isBlockedIPv6(ip: string): boolean {
   return false;
 }
 
-// ── Request body schema ────────────────────────────────────────────────────────
-
-interface ScreenshotRequestBody {
-  url: string;
-  width: number;
-  deviceScaleFactor: number;
-}
-
-function parseRequestBody(raw: unknown): ScreenshotRequestBody | string {
-  if (typeof raw !== 'object' || raw === null) {
-    return 'request body must be a JSON object';
-  }
-  const obj = raw as Record<string, unknown>;
-
-  if (typeof obj.url !== 'string' || obj.url.trim().length === 0) {
-    return 'url must be a non-empty string';
-  }
-  const width = obj.width;
-  if (typeof width !== 'number' || !Number.isFinite(width) || width < 320 || width > 3840) {
-    return 'width must be a number in [320, 3840]';
-  }
-  const dsf = obj.deviceScaleFactor;
-  if (typeof dsf !== 'number' || !Number.isFinite(dsf) || dsf <= 0 || dsf > 4) {
-    return 'deviceScaleFactor must be a positive number ≤ 4';
-  }
-
-  return {
-    url: obj.url.trim(),
-    width: Math.round(width),
-    deviceScaleFactor: dsf,
-  };
-}
-
 // ── JSON error helper ──────────────────────────────────────────────────────────
 
 function jsonError(status: number, message: string): Response {
@@ -338,6 +315,92 @@ async function autoScroll(page: Page): Promise<void> {
   await page.evaluate(() => window.scrollTo(0, 0));
 }
 
+/** 1 回の撮影結果。ヘッダに載せる値を一緒に持つ。 */
+interface Shot {
+  bytes: Uint8Array;
+  capped: boolean;
+  /** 撮影した CSS 高さ (px) */
+  capHeight: number;
+  /** ページ全高 (CSS px) */
+  fullHeight: number;
+  /** 撮影で使った倍率 */
+  dsf: number;
+}
+
+/** document の全高と横幅 (CSS px)。 */
+async function measurePage(page: Page): Promise<{ fullHeight: number; scrollWidth: number }> {
+  return page.evaluate(() => ({
+    fullHeight: Math.max(
+      document.body.scrollHeight,
+      document.documentElement.scrollHeight,
+      document.body.offsetHeight,
+    ),
+    scrollWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+  }));
+}
+
+function toBytes(raw: unknown): Uint8Array {
+  return raw instanceof Uint8Array ? raw : new Uint8Array(raw as ArrayBuffer);
+}
+
+/**
+ * 従来どおりの撮影。面積上限を超えるなら上端から clip、そうでなければ fullPage。
+ * 上限は実際に使う倍率で計算する (dsf=1 では従来と完全に同じ)。
+ */
+async function takeShot(
+  page: Page,
+  input: { width: number; dsf: number; fullHeight: number },
+): Promise<Shot> {
+  const { capHeight, capped } = capForDsf(input);
+  const raw = capped
+    ? await page.screenshot({
+        type: 'jpeg',
+        quality: JPEG_QUALITY,
+        clip: { x: 0, y: 0, width: input.width, height: capHeight },
+      })
+    : await page.screenshot({ fullPage: true, type: 'jpeg', quality: JPEG_QUALITY });
+  return {
+    bytes: toBytes(raw),
+    capped,
+    capHeight,
+    fullHeight: input.fullHeight,
+    dsf: input.dsf,
+  };
+}
+
+/**
+ * 2x の撮り直し。倍率を変えてから最初から読み込み直し、autoScroll、再計測、予算を再確認して撮る。
+ * 読み込み直したページが予算外になっていたら null (呼び出し側は 1x を返す)。
+ */
+async function trySharpCapture(
+  page: Page,
+  url: string,
+  width: number,
+  dsf: number,
+): Promise<Shot | null> {
+  await page.setViewport({ width, height: Math.round(width * 1.5), deviceScaleFactor: dsf });
+  await page.goto(url, { waitUntil: 'networkidle0', timeout: GOTO_TIMEOUT_MS });
+  await autoScroll(page);
+  const m = await measurePage(page);
+  if (
+    !canCaptureSharp({
+      width: Math.max(width, m.scrollWidth),
+      dsf,
+      fullHeight: m.fullHeight,
+    })
+  ) {
+    return null;
+  }
+  const raw = await page.screenshot({ fullPage: true, type: 'jpeg', quality: JPEG_QUALITY });
+  return {
+    bytes: toBytes(raw),
+    capped: false,
+    capHeight: m.fullHeight,
+    fullHeight: m.fullHeight,
+    dsf,
+  };
+}
+
 // ── Main fetch handler ─────────────────────────────────────────────────────────
 
 export default {
@@ -401,6 +464,7 @@ export default {
 
     // Race the whole puppeteer flow against a total deadline
     const capturePromise = (async (): Promise<Response> => {
+      const startedAt = Date.now();
       browser = await puppeteer.launch(env.MYBROWSER);
       const page = await browser.newPage();
 
@@ -446,42 +510,46 @@ export default {
       // 続133: 巨大ページ対策 — document 全高を測り、面積上限を超えるなら上端から clip する。
       //   fullPage の代わりに clip {0,0,width,capHeight} にすることで、5万px 級の縦長記事でも
       //   Worker が timeout せず確実に撮り切れる (= 劣化 fallback に落ちず lazy 画像が出る)。
-      const fullHeight = await page.evaluate(() =>
-        Math.max(
-          document.body.scrollHeight,
-          document.documentElement.scrollHeight,
-          document.body.offsetHeight,
-        ),
-      );
-      // 2026-09-29: 倍率を上げる要求 (SP=2x) は、倍率込みの面積が予算内のページだけ通す。
-      //   縦長ページは 1x に戻し (従来どおり)、面積上限もこの倍率で計算する (capture-plan.ts)。
-      const plan = planCapture({
+      //   ここまでは従来どおり (基準の deviceScaleFactor、SP でも 1x)。
+      const measured = await measurePage(page);
+      const base = await takeShot(page, {
         width: parsed.width,
-        requestedDsf: parsed.deviceScaleFactor,
-        fullHeight,
+        dsf: parsed.deviceScaleFactor,
+        fullHeight: measured.fullHeight,
       });
-      if (plan.dsf !== parsed.deviceScaleFactor) {
-        await page.setViewport({
-          width: parsed.width,
-          height: Math.round(parsed.width * 1.5),
-          deviceScaleFactor: plan.dsf,
+
+      // 2026-09-29: 背景画像の粗さ対策。アプリが preferredDeviceScaleFactor (SP=2) を希望してきた場合だけ、
+      //   1x の画像を確保したあとに「2x で最初から読み込み直して」撮り直す。読み込み後に倍率だけ変える方式は
+      //   DPR 依存の CSS 背景の再取得 / レイアウト高の変化 / 撮影キャンバス高の不整合が出るため採らない。
+      //   軽いページ (面積・寸法とも予算内) だけが対象で、2x の撮影が例外・時間切れ・予算外のどれでも
+      //   確保済みの 1x を返す (capture-plan.ts の withSharpUpgrade)。preferred を送らない旧アプリ、
+      //   preferred を無視する旧 Worker のどちらとの組み合わせでも従来と同じ 1x になるので、
+      //   デプロイ順に依存しない。
+      const preferred = parsed.preferredDeviceScaleFactor;
+      const eligible =
+        preferred !== undefined &&
+        preferred > parsed.deviceScaleFactor &&
+        canCaptureSharp({
+          // fullPage の画像幅は document の scrollWidth に従う (横にはみ出すページ対策)
+          width: Math.max(parsed.width, measured.scrollWidth),
+          dsf: preferred,
+          fullHeight: measured.fullHeight,
         });
-      }
-      const capHeight = plan.capHeight;
-      const capped = plan.capped;
+      const shot = await withSharpUpgrade<Shot>({
+        base,
+        eligible,
+        remainingMs: () => startedAt + TOTAL_TIMEOUT_MS - RESPONSE_SAFETY_MS - Date.now(),
+        minBudgetMs: SHARP_MIN_BUDGET_MS,
+        trySharp: () => trySharpCapture(page, parsed.url, parsed.width, preferred as number),
+        onError: (err) => {
+          console.warn(
+            '[screenshot-worker] sharp capture failed; returning the 1x image:',
+            err instanceof Error ? err.message : String(err),
+          );
+        },
+      });
 
-      const screenshotBytes = capped
-        ? await page.screenshot({
-            type: 'jpeg',
-            quality: JPEG_QUALITY,
-            clip: { x: 0, y: 0, width: parsed.width, height: capHeight },
-          })
-        : await page.screenshot({ fullPage: true, type: 'jpeg', quality: JPEG_QUALITY });
-
-      const bytes =
-        screenshotBytes instanceof Uint8Array
-          ? screenshotBytes
-          : new Uint8Array(screenshotBytes as ArrayBuffer);
+      const bytes = shot.bytes;
       const body = new ArrayBuffer(bytes.byteLength);
       new Uint8Array(body).set(bytes);
 
@@ -490,11 +558,11 @@ export default {
         headers: {
           'content-type': 'image/jpeg',
           // 観測用: 上限で切ったか / 実際の全高 (アプリ側 truncation guard と突合できる)
-          'x-capture-capped': capped ? '1' : '0',
-          'x-capture-full-height': String(fullHeight),
-          'x-capture-height': String(capHeight),
-          // 観測用: 実際に撮影で使った倍率 (要求より小さくなることがある)
-          'x-capture-dsf': String(plan.dsf),
+          'x-capture-capped': shot.capped ? '1' : '0',
+          'x-capture-full-height': String(shot.fullHeight),
+          'x-capture-height': String(shot.capHeight),
+          // 観測用: 実際に撮影で使った倍率 (1 なら 2x は試さなかった / 失敗した)
+          'x-capture-dsf': String(shot.dsf),
         },
       });
     })();

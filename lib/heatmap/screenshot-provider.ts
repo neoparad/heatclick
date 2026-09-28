@@ -49,19 +49,21 @@ const CLOUDFLARE_DEVICE_SCALE_FACTOR = 1
 
 /**
  * 2026-09-29: SP の背景画像が粗い (390px の画像が高解像度画面で 2 倍に引き伸ばされる) ため、
- * **専用 Worker 経路だけ** SP を 2x で撮る。上の「1 に固定する理由」との整合:
+ * **専用 Worker 経路だけ** SP で 2x を「希望」する。上の「1 に固定する理由」との整合:
  *   - 座標系は `referenceWidth` (= viewportWidth、DPR 非依存) と `naturalWidth/naturalHeight` の比で
  *     CSS px を復元するので、倍率を上げても overlay は同じ displayScale で整列する。
- *   - 倍率を上げる代償は画像の重さ。Worker 側 (capture-plan.ts) が「倍率込みの面積が予算内の
- *     ページだけ」2x を通し、縦長ページは自動で 1x に戻す。
+ *   - 倍率を上げる代償は画像の重さと撮影時間。Worker 側 (capture-plan.ts) は、まず従来どおり 1x を
+ *     撮って確保し、面積・寸法とも予算内の軽いページだけ 2x で撮り直す。失敗・時間切れなら 1x を返す。
  *   - CF REST / Microlink には面積上限が無いので 1x のまま。
- * **デプロイ順**: 旧 Worker は倍率込みの面積を考慮しないため、Worker を先にデプロイしてから本コードを出す。
+ * **後方互換 (デプロイ順に依存しない)**: 基準の `deviceScaleFactor` は 1 のまま送り、2x は別フィールド
+ * `preferredDeviceScaleFactor` で希望として伝える。旧 Worker はこのフィールドを無視して 1x で撮る
+ * (= 従来と同じ) ので、アプリと Worker のどちらを先に出しても、ロールバックしても安全。
  */
-const SP_WORKER_DEVICE_SCALE_FACTOR = 2
+const SP_WORKER_PREFERRED_DEVICE_SCALE_FACTOR = 2
 
-/** Worker 経路で要求する deviceScaleFactor。SP のみ 2、PC / TAB は 1。 */
-export function workerDeviceScaleFactor(device: HeatmapDevice): number {
-  return device === 'sp' ? SP_WORKER_DEVICE_SCALE_FACTOR : CLOUDFLARE_DEVICE_SCALE_FACTOR
+/** Worker 経路で「軽いページだけ」希望する倍率。SP のみ 2、PC / TAB は 1 (= 希望なし)。 */
+export function workerPreferredDeviceScaleFactor(device: HeatmapDevice): number {
+  return device === 'sp' ? SP_WORKER_PREFERRED_DEVICE_SCALE_FACTOR : CLOUDFLARE_DEVICE_SCALE_FACTOR
 }
 
 /** Cloudflare gotoOptions.timeout (page load 待ち上限)。fullPage の lazy load も待つ。 */
@@ -300,7 +302,7 @@ export function buildCacheKey(input: {
 }): string {
   const width = CAPTURE_WIDTH_FOR_DEVICE[input.device]
   // 続 116: format / quality を cache key に含める (perf 改修で値変更時に cache miss を起こす)
-  const raw = `${input.tenantId}|${input.siteId}|${input.pageUrl}|${input.device}|${width}|fullPage-ni2-lz2|${SCREENSHOT_FORMAT}|q${SCREENSHOT_QUALITY}|dsf${workerDeviceScaleFactor(input.device)}`
+  const raw = `${input.tenantId}|${input.siteId}|${input.pageUrl}|${input.device}|${width}|fullPage-ni2-lz2|${SCREENSHOT_FORMAT}|q${SCREENSHOT_QUALITY}`
   return createHash('sha256').update(raw).digest('hex').slice(0, 32)
 }
 
@@ -544,11 +546,15 @@ export async function fetchFromScreenshotWorker(input: {
 }> {
   const width = CAPTURE_WIDTH_FOR_DEVICE[input.device]
   const endpoint = `${input.config.workerUrl.replace(/\/$/, '')}/screenshot`
+  const preferredDsf = workerPreferredDeviceScaleFactor(input.device)
   const body = JSON.stringify({
     url: input.pageUrl,
     width,
-    // SP のみ 2x (背景画像の粗さ対策)。座標整合と Worker 側の自動 1x 復帰は workerDeviceScaleFactor 参照
-    deviceScaleFactor: workerDeviceScaleFactor(input.device),
+    // 基準の倍率は 1 のまま (旧 Worker が見るのはこれだけ = 従来と同じ動作)。
+    deviceScaleFactor: CLOUDFLARE_DEVICE_SCALE_FACTOR,
+    // SP は 2x を「希望」として別フィールドで伝える (背景画像の粗さ対策)。PC / TAB では送らないので
+    // リクエストは従来と完全に同一。理由と後方互換は workerPreferredDeviceScaleFactor 参照。
+    ...(preferredDsf > CLOUDFLARE_DEVICE_SCALE_FACTOR ? { preferredDeviceScaleFactor: preferredDsf } : {}),
   })
 
   const ctrl = new AbortController()
