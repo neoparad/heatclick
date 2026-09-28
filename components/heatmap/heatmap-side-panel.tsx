@@ -42,6 +42,8 @@ interface HeatmapSidePanelProps {
   enabledSignals: ReadonlySet<SignalKey>
   onToggleSignal: (key: SignalKey) => void
   onSelectHotspot?: (cardId: string) => void
+  /** 続137 (Owner報告⑧): ネガティブスポットクリックで該当位置へスクロール (y=null は位置不明)。 */
+  onSelectNegative?: (y: number | null) => void
 }
 
 export function HeatmapSidePanel({
@@ -55,6 +57,7 @@ export function HeatmapSidePanel({
   enabledSignals,
   onToggleSignal,
   onSelectHotspot,
+  onSelectNegative,
 }: HeatmapSidePanelProps) {
   const tabsId = useId()
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
@@ -147,7 +150,9 @@ export function HeatmapSidePanel({
             onSelectHotspot={onSelectHotspot}
           />
         ) : null}
-        {activeTab === 'negative' ? <NegativeView spots={negativeSpots} /> : null}
+        {activeTab === 'negative' ? (
+          <NegativeView spots={negativeSpots} onSelect={onSelectNegative} />
+        ) : null}
         {activeTab === 'structure' ? <StructureView issues={pageIssues} /> : null}
         {activeTab === 'signals' ? (
           <SignalsView
@@ -297,7 +302,13 @@ function EmotionTag({ emotion }: { emotion: EmotionKey | 'cmp' }) {
  * 続125 ③: ネガティブスポット — dead/rage が観測された要素のランキング。
  * 「押されたのに反応しない」「連打される」= 直すべき場所の負のランキング。
  */
-function NegativeView({ spots }: { spots: NegativeSpot[] }) {
+function NegativeView({
+  spots,
+  onSelect,
+}: {
+  spots: NegativeSpot[]
+  onSelect?: (y: number | null) => void
+}) {
   return (
     <div data-testid="hm-side-negative">
       <div className="mb-2.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
@@ -311,9 +322,12 @@ function NegativeView({ spots }: { spots: NegativeSpot[] }) {
         <ol className="space-y-2">
           {spots.map((s, i) => (
             <li key={s.id}>
-              <div
+              <button
+                type="button"
                 data-testid={`negative-spot-${i + 1}`}
-                className="w-full rounded-md border border-[var(--ug-border)] bg-[var(--ug-panel-2,#fbfbfc)] p-3"
+                onClick={s.y != null ? () => onSelect?.(s.y) : undefined}
+                disabled={s.y == null}
+                className="w-full rounded-md border border-[var(--ug-border)] bg-[var(--ug-panel-2,#fbfbfc)] p-3 text-left disabled:cursor-default enabled:cursor-pointer enabled:hover:border-[#d64545]/50"
                 style={{ borderLeft: '3px solid #d64545' }}
               >
                 <div className="mb-1 flex items-center gap-2">
@@ -340,14 +354,19 @@ function NegativeView({ spots }: { spots: NegativeSpot[] }) {
                 <div className="break-all font-mono text-[10.5px] text-[var(--ug-text-3)]">
                   {s.selector}
                 </div>
-                <div className="mt-2 border-t border-dashed border-[var(--ug-border-2,#eef0f3)] pt-2 font-mono text-[10.5px] text-[var(--ug-text-3)]">
-                  発生{' '}
-                  <b className="font-semibold" style={{ color: 'var(--ug-red,#d64545)' }}>
-                    {s.count.toLocaleString()}
-                  </b>{' '}
-                  回
+                <div className="mt-2 flex items-center border-t border-dashed border-[var(--ug-border-2,#eef0f3)] pt-2 font-mono text-[10.5px] text-[var(--ug-text-3)]">
+                  <span>
+                    発生{' '}
+                    <b className="font-semibold" style={{ color: 'var(--ug-red,#d64545)' }}>
+                      {s.count.toLocaleString()}
+                    </b>{' '}
+                    回
+                  </span>
+                  {s.y == null ? (
+                    <span className="ml-auto text-[9.5px] text-[var(--ug-text-3)]">位置情報なし</span>
+                  ) : null}
                 </div>
-              </div>
+              </button>
             </li>
           ))}
         </ol>

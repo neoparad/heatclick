@@ -217,6 +217,8 @@ export function HeatmapCanvas({
   //   width: '100%' + maxWidth で narrow container 内では outer が pageMaxWidth 未満になるため、
   //   pageMaxWidth ベースの scale だと右側 clip される。実 px で scale 再計算する。
   const hmPageRef = useRef<HTMLDivElement>(null)
+  // 続137 (Owner報告⑧⑨): 縦スクロール容器 (.hm-canvas) への ref。scrollToCanvasY が使う。
+  const canvasScrollRef = useRef<HTMLDivElement>(null)
 
   // ── Phase 2: screenshot underlay state ─────────────────────────────────
   // device は HeatmapToolbar の選択 (pc/sp/tab)。view-model 上の HeatmapDevice と一致するため
@@ -543,6 +545,29 @@ export function HeatmapCanvas({
     error,
   })
 
+  // 続137 (Owner報告⑧⑨): 縦スクロール容器 (.hm-canvas) 内の capture CSS px 座標 y へ
+  //   「縦のみ」でスクロールする統一ヘルパ。旧実装 (要素の scrollIntoView({block:'center'})) は
+  //   inline 既定 'nearest' が効き、.hm-canvas/.hm-page を横方向にもスクロールさせてページが
+  //   横にずれるバグを起こしていた (⑨)。getBoundingClientRect の差分 + 現在 scrollTop から
+  //   絶対コンテンツ座標を求めるため、.hm-page 前に他要素があっても (offsetParent の連鎖を
+  //   仮定せず) 正しく動く。ネガティブスポット (⑧) の位置スクロールもこれを使う。
+  const scrollToCanvasY = useCallback(
+    (yCapturePx: number) => {
+      const container = canvasScrollRef.current
+      const page = hmPageRef.current
+      if (!container || !page) return
+      const containerRect = container.getBoundingClientRect()
+      const pageRect = page.getBoundingClientRect()
+      const targetContentY =
+        container.scrollTop + (pageRect.top - containerRect.top) + yCapturePx * displayScale
+      container.scrollTo({
+        top: Math.max(0, targetContentY - container.clientHeight / 2),
+        behavior: 'smooth',
+      })
+    },
+    [displayScale],
+  )
+
   // hotspot card クリック: 該当 tag を highlight + scroll、real data の場合のみ
   // legacy slide-in detail を起動 (fixture 時は detail 不一致を避けるため抑止 — Codex review MEDIUM)。
   const onSelectHotspot = useCallback(
@@ -552,7 +577,7 @@ export function HeatmapCanvas({
       const tag = rank != null ? vm.tags.find((t) => t.rank === rank) : null
       if (!tag) return
       setHighlightedTagId(tag.id)
-      tagRefs.current.get(tag.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      scrollToCanvasY(tag.y)
       setTimeout(() => setHighlightedTagId(null), 1200)
 
       if (!onHotspotSelect || isDummySource || rank == null) return
@@ -564,7 +589,17 @@ export function HeatmapCanvas({
       const target = flat[Math.max(0, rank - 1)] ?? flat[0]
       if (target) onHotspotSelect(target.point, target.tile)
     },
-    [vm.tags, onHotspotSelect, tiles, isDummySource],
+    [vm.tags, onHotspotSelect, tiles, isDummySource, scrollToCanvasY],
+  )
+
+  // 続137 (Owner報告⑧): ネガティブスポットは y (capture CSS px、位置不明時 null) を保持しているので
+  //   クリックで該当位置へスクロールできる。null (outlier で座標不明) の場合は no-op。
+  const onSelectNegative = useCallback(
+    (y: number | null) => {
+      if (y == null) return
+      scrollToCanvasY(y)
+    },
+    [scrollToCanvasY],
   )
 
   // 全画面時はビューポート全体を fixed で覆う
@@ -627,6 +662,7 @@ export function HeatmapCanvas({
           />
 
           <div
+            ref={canvasScrollRef}
             data-testid="hm-canvas-scroll"
             className="hm-canvas relative flex-1 overflow-y-auto overflow-x-hidden p-5"
             style={{
@@ -869,6 +905,20 @@ export function HeatmapCanvas({
                       >
                         長いページのため画像は上部のみ — ヒートマップは全域を表示中
                       </div>
+                    ) : cap != null && cap.provider !== 'cloudflare' ? (
+                      // 続137 (Owner報告④): fallback (CF REST/Microlink) 撮影は Worker と違い
+                      //   capped/fullPageCssHeight を返さないため、画像が実際より短く撮れていても
+                      //   検知できない (scroll/exit は %データのため click/read のような絶対px検知も
+                      //   使えない、構造上の制約)。高さを捏造して伸ばす代わりに、簡易撮影である事実と
+                      //   自己修復 (r2-screenshot-cache.ts の DEGRADED_FRESH_TTL_MS=1h) を正直に伝える。
+                      <div
+                        role="status"
+                        data-testid="capture-degraded-provider-badge"
+                        className="absolute right-3 top-3 z-10 rounded-full border border-amber-400/40 bg-amber-100/95 px-2.5 py-1 font-mono text-[10.5px] text-amber-900 shadow-sm"
+                        title="通常のWorker撮影ではなく簡易撮影 (簡易撮影は画像が途中までのことがあります)"
+                      >
+                        簡易撮影中 — 次回以降、高精度な画像に更新される場合があります
+                      </div>
                     ) : null}
                   </div>
                   {cap ? (
@@ -918,6 +968,7 @@ export function HeatmapCanvas({
             enabledSignals={activeSignals}
             onToggleSignal={toggleSignal}
             onSelectHotspot={onSelectHotspot}
+            onSelectNegative={onSelectNegative}
           />
         ) : null}
       </div>
