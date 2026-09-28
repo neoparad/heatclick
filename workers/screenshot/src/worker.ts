@@ -29,6 +29,7 @@
  */
 
 import puppeteer, { type Browser, type HTTPRequest, type Page } from '@cloudflare/puppeteer';
+import { planCapture } from './capture-plan';
 
 // ── Env bindings ───────────────────────────────────────────────────────────────
 
@@ -58,8 +59,8 @@ const SCROLL_STEP_PX = 800;
 /** Pause between each scroll step (ms). Gives IntersectionObserver / lazy loaders time to fire. */
 const SCROLL_STEP_DELAY_MS = 90;
 
-/** JPEG quality (matches the main app SCREENSHOT_QUALITY). */
-const JPEG_QUALITY = 75;
+/** JPEG quality (matches the main app SCREENSHOT_QUALITY). 2026-09-29: 75 -> 85 (背景画像の粗さ対策)。 */
+const JPEG_QUALITY = 85;
 
 /**
  * 続133 (本番空白画像の根本 fix): 撮影の最大ピクセル面積。
@@ -72,7 +73,7 @@ const JPEG_QUALITY = 75;
  *   width=1280 → 約 20,300px、width=390(SP) → 約 66,000px (実質無制限) と幅に応じて適応。
  *   超過ページは「上部のみ画像 + 以深はヒートマップを全域描画」(アプリ側 続131 ガードが処理)。
  */
-const MAX_CAPTURE_AREA_PX = 26_000_000;
+// MAX_CAPTURE_AREA_PX / MAX_SHARP_AREA_PX は capture-plan.ts に移動 (倍率込みの面積計算と一緒にテストするため)。
 
 /** autoScroll の最大走査高さ (px)。これ以上は撮影対象外なのでスクロールも打ち切る。 */
 const MAX_SCROLL_PX = 60_000;
@@ -452,9 +453,22 @@ export default {
           document.body.offsetHeight,
         ),
       );
-      const maxHeightByArea = Math.floor(MAX_CAPTURE_AREA_PX / parsed.width);
-      const capHeight = Math.min(fullHeight, maxHeightByArea);
-      const capped = fullHeight > capHeight;
+      // 2026-09-29: 倍率を上げる要求 (SP=2x) は、倍率込みの面積が予算内のページだけ通す。
+      //   縦長ページは 1x に戻し (従来どおり)、面積上限もこの倍率で計算する (capture-plan.ts)。
+      const plan = planCapture({
+        width: parsed.width,
+        requestedDsf: parsed.deviceScaleFactor,
+        fullHeight,
+      });
+      if (plan.dsf !== parsed.deviceScaleFactor) {
+        await page.setViewport({
+          width: parsed.width,
+          height: Math.round(parsed.width * 1.5),
+          deviceScaleFactor: plan.dsf,
+        });
+      }
+      const capHeight = plan.capHeight;
+      const capped = plan.capped;
 
       const screenshotBytes = capped
         ? await page.screenshot({
@@ -479,6 +493,8 @@ export default {
           'x-capture-capped': capped ? '1' : '0',
           'x-capture-full-height': String(fullHeight),
           'x-capture-height': String(capHeight),
+          // 観測用: 実際に撮影で使った倍率 (要求より小さくなることがある)
+          'x-capture-dsf': String(plan.dsf),
         },
       });
     })();
