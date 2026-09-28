@@ -37,10 +37,10 @@ export function parseRequestBody(raw: unknown): ScreenshotRequestBody | string {
     return 'deviceScaleFactor must be a positive number ≤ 4';
   }
 
-  const preferred = obj.preferredDeviceScaleFactor;
-  if (preferred !== undefined && !isValidDsf(preferred)) {
-    return 'preferredDeviceScaleFactor must be a positive number ≤ 4';
-  }
+  // 任意の「希望」。不正な値で撮影自体を失敗させるより、希望を捨てて従来どおり 1x で撮る方が安全。
+  const preferred = isValidDsf(obj.preferredDeviceScaleFactor)
+    ? obj.preferredDeviceScaleFactor
+    : undefined;
 
   return {
     url: obj.url.trim(),

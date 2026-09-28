@@ -9,8 +9,12 @@ import {
   MAX_CAPTURE_AREA_PX,
   MAX_SHARP_AREA_PX,
   MAX_SHARP_DIMENSION_PX,
+  buildCaptureHeaders,
   canCaptureSharp,
   capForDsf,
+  isSharpEligible,
+  isSharpRecaptureConsistent,
+  sharpBudgetMs,
   withSharpUpgrade,
 } from '../src/capture-plan'
 
@@ -70,7 +74,7 @@ describe('canCaptureSharp (2x budget: area AND dimension)', () => {
   })
 
   it('a horizontally overflowing page slips past the area budget only if width is the viewport width', () => {
-    // viewport 390 だけで見ると 390*9000*4 = 14.0M で通るが、実際の画像幅 1200 で見ると 1200*9000*4 = 43.2M
+    // viewport 幅 390 なら 390*7000*4 = 10.9M で通るが、実際の画像幅 1200 で見ると 1200*7000*4 = 33.6M で予算外
     expect(canCaptureSharp({ width: 390, dsf: 2, fullHeight: 7_000 })).toBe(true)
     expect(canCaptureSharp({ width: 1200, dsf: 2, fullHeight: 7_000 })).toBe(false)
   })
@@ -175,6 +179,22 @@ describe('withSharpUpgrade (1x in hand, try 2x, fall back to 1x)', () => {
     expect(r).toBe(BASE)
   })
 
+  it('a failure that arrives after the deadline is not reported a second time', async () => {
+    const onError = jest.fn()
+    const r = await withSharpUpgrade({
+      base: BASE,
+      eligible: true,
+      remainingMs: () => 40,
+      minBudgetMs: 10,
+      trySharp: () =>
+        new Promise<typeof SHARP>((_resolve, reject) => setTimeout(() => reject(new Error('Target closed')), 150)),
+      onError,
+    })
+    expect(r).toBe(BASE)
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    expect(onError).toHaveBeenCalledTimes(1) // 時間切れの 1 回だけ
+  })
+
   it('2x is slower than the remaining budget: returns base at the deadline and ignores the late result', async () => {
     const started = Date.now()
     const r = await withSharpUpgrade({
@@ -186,5 +206,98 @@ describe('withSharpUpgrade (1x in hand, try 2x, fall back to 1x)', () => {
     })
     expect(r).toBe(BASE)
     expect(Date.now() - started).toBeLessThan(300)
+  })
+})
+
+describe('isSharpEligible (preferred hint + budget)', () => {
+  const light = { baseDsf: 1, width: 390, scrollWidth: 390, fullHeight: 5_000 }
+
+  it('eligible: SP prefers 2x on a light page', () => {
+    expect(isSharpEligible({ ...light, preferredDsf: 2 })).toBe(true)
+  })
+
+  it('not eligible when the caller did not ask (PC / TAB, or an old app)', () => {
+    expect(isSharpEligible({ ...light, preferredDsf: undefined })).toBe(false)
+  })
+
+  it('not eligible when the preferred scale is not meaningfully above the base (no pointless reload)', () => {
+    expect(isSharpEligible({ ...light, preferredDsf: 1 })).toBe(false)
+    expect(isSharpEligible({ ...light, preferredDsf: 0.5 })).toBe(false)
+    expect(isSharpEligible({ ...light, preferredDsf: 1.0000001 })).toBe(false)
+    expect(isSharpEligible({ ...light, preferredDsf: 1.5 })).toBe(true)
+  })
+
+  it('uses max(viewport width, scrollWidth) for the budget: a horizontally overflowing page is not eligible', () => {
+    expect(isSharpEligible({ ...light, fullHeight: 7_000, preferredDsf: 2 })).toBe(true)
+    expect(isSharpEligible({ ...light, fullHeight: 7_000, scrollWidth: 1_200, preferredDsf: 2 })).toBe(false)
+  })
+
+  it('a tall SP page is not eligible', () => {
+    expect(isSharpEligible({ ...light, fullHeight: 12_000, preferredDsf: 2 })).toBe(false)
+  })
+})
+
+describe('sharpBudgetMs (time available for the 2x re-capture)', () => {
+  const base = { startedAt: 1_000, totalTimeoutMs: 55_000, safetyMs: 8_000, maxAttemptMs: 25_000 }
+
+  it('early in the request the per-attempt cap is the limiter', () => {
+    expect(sharpBudgetMs({ ...base, now: 1_000 + 10_000 })).toBe(25_000)
+  })
+
+  it('late in the request the global deadline minus the safety margin is the limiter', () => {
+    // deadline = 1_000 + 55_000 - 8_000 = 48_000
+    expect(sharpBudgetMs({ ...base, now: 1_000 + 40_000 })).toBe(7_000)
+  })
+
+  it('goes negative once past the deadline (callers treat < minBudget as "do not try")', () => {
+    expect(sharpBudgetMs({ ...base, now: 1_000 + 50_000 })).toBeLessThan(0)
+  })
+})
+
+describe('isSharpRecaptureConsistent (do not let an error page / other variant replace a good 1x)', () => {
+  it('accepts heights within 0.8x - 1.25x of the 1x height (inclusive)', () => {
+    expect(isSharpRecaptureConsistent(5_000, 5_000)).toBe(true)
+    expect(isSharpRecaptureConsistent(5_000, 4_000)).toBe(true)
+    expect(isSharpRecaptureConsistent(4_000, 5_000)).toBe(true)
+  })
+
+  it('rejects heights outside the band', () => {
+    expect(isSharpRecaptureConsistent(5_000, 3_999)).toBe(false)
+    expect(isSharpRecaptureConsistent(4_000, 5_001)).toBe(false)
+    expect(isSharpRecaptureConsistent(5_000, 600)).toBe(false) // 例: エラーページ
+    expect(isSharpRecaptureConsistent(5_000, 20_000)).toBe(false)
+  })
+
+  it('rejects non-positive / non-finite heights', () => {
+    for (const v of [0, -1, Number.NaN]) {
+      expect(isSharpRecaptureConsistent(v, 5_000)).toBe(false)
+      expect(isSharpRecaptureConsistent(5_000, v)).toBe(false)
+    }
+  })
+})
+
+describe('buildCaptureHeaders', () => {
+  it('1x, not clipped', () => {
+    expect(buildCaptureHeaders({ capped: false, capHeight: 5_000, fullHeight: 5_000, dsf: 1 })).toEqual({
+      'content-type': 'image/jpeg',
+      'x-capture-capped': '0',
+      'x-capture-full-height': '5000',
+      'x-capture-height': '5000',
+      'x-capture-dsf': '1',
+    })
+  })
+
+  it('1x, clipped: capped=1 and the true full height is reported (app truncation guard input)', () => {
+    const h = buildCaptureHeaders({ capped: true, capHeight: 20_312, fullHeight: 52_000, dsf: 1 })
+    expect(h['x-capture-capped']).toBe('1')
+    expect(h['x-capture-full-height']).toBe('52000')
+    expect(h['x-capture-height']).toBe('20312')
+  })
+
+  it('2x sharp shot: capped=0, height in CSS px, dsf=2', () => {
+    const h = buildCaptureHeaders({ capped: false, capHeight: 7_000, fullHeight: 7_000, dsf: 2 })
+    expect(h['x-capture-capped']).toBe('0')
+    expect(h['x-capture-height']).toBe('7000')
+    expect(h['x-capture-dsf']).toBe('2')
   })
 })

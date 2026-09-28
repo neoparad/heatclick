@@ -29,9 +29,11 @@ describe('parseRequestBody', () => {
     })
   })
 
-  it('rejects an invalid preferredDeviceScaleFactor (0, negative, > 4, non-number, NaN)', () => {
-    for (const bad of [0, -1, 4.5, '2', null, Number.NaN]) {
-      expect(typeof parseRequestBody({ ...BASE, preferredDeviceScaleFactor: bad })).toBe('string')
+  it('ignores an invalid preferredDeviceScaleFactor instead of failing the capture (0, negative, > 4, non-number)', () => {
+    for (const bad of [0, -1, 4.5, '2', null, {}, []]) {
+      const r = parseRequestBody({ ...BASE, preferredDeviceScaleFactor: bad })
+      expect(r).toEqual({ url: 'https://example.com/p', width: 390, deviceScaleFactor: 1 })
+      expect(r).not.toHaveProperty('preferredDeviceScaleFactor')
     }
   })
 
