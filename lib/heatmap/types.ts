@@ -228,7 +228,7 @@ export interface HeatmapUnderlayCapture {
   viewportWidth: number
   /** capture viewport 高 (full page なら page 全高、provider が返した値) */
   viewportHeight: number
-  /** image 実 px 幅 (= viewportWidth と一致する想定) */
+  /** image 実 px 幅 (DPR 倍率込み。SP を 2x で撮った場合は viewportWidth の 2 倍) */
   naturalWidth: number
   /** image 実 px 高 (full page、`.hm-page` の minHeight に直結) */
   naturalHeight: number
@@ -248,7 +248,7 @@ export interface HeatmapUnderlayCapture {
   capped?: boolean
   /**
    * P2: 実ページの CSS px 全高 (capped 時の真の document 高)。
-   *   Worker の `x-capture-full-height` 由来。DPR=1 固定のため `pageCssHeight`
+   *   Worker の `x-capture-full-height` 由来。CSS px なので DPR に依存せず `pageCssHeight`
    *   (= naturalHeight * referenceWidth / naturalWidth) と同一空間で直接比較できる。
    *   scroll/exit を画像高でなく真の全高にマップするために使う。
    */

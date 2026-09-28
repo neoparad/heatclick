@@ -20,6 +20,7 @@ import {
   fetchFromCloudflareBR,
   fetchFromScreenshotWorker,
   getCloudflareBRConfig,
+  workerPreferredDeviceScaleFactor,
   type CloudflareBRConfig,
   type ScreenshotWorkerConfig,
 } from './screenshot-provider'
@@ -77,9 +78,15 @@ describe('buildCloudflareBRRequestBody', () => {
     expect(body.viewport.width).toBe(CAPTURE_WIDTH_FOR_DEVICE.sp) // 390
     expect(body.screenshotOptions.fullPage).toBe(true)
     expect(body.screenshotOptions.type).toBe('jpeg')
-    expect(typeof body.screenshotOptions.quality).toBe('number')
+    // 背景画像の粗さ対策 (2026-09-29): 75 → 85。L1 (メモリ) の cache key に含まれる。R2 は CAPTURE_VERSION 管理なので既存画像は TTL 経過後の再撮影で置き換わる
+    expect(body.screenshotOptions.quality).toBe(85)
     expect(body.gotoOptions.waitUntil).toBe('networkidle0')
     expect(body.gotoOptions.timeout).toBeGreaterThanOrEqual(30_000)
+  })
+
+  it('CF REST fallback keeps deviceScaleFactor=1 even for SP (面積上限の無い経路は倍率を上げない)', () => {
+    const body = buildCloudflareBRRequestBody({ pageUrl: 'https://example.com/', device: 'sp' })
+    expect(body.viewport.deviceScaleFactor).toBe(1)
   })
 
   it('builds different viewport widths per device', () => {
@@ -378,5 +385,78 @@ describe('getCloudflareBRConfig — env resolution', () => {
     delete process.env.CLOUDFLARE_ACCOUNT_ID
     process.env.R2_ACCOUNT_ID = 'r2-acct'
     expect(getCloudflareBRConfig()).toEqual({ accountId: 'r2-acct', apiToken: 'tok' })
+  })
+})
+
+
+describe('workerPreferredDeviceScaleFactor / Worker request body (SP sharpness)', () => {
+  it('SP prefers 2x, PC and TAB prefer nothing (1x)', () => {
+    expect(workerPreferredDeviceScaleFactor('sp')).toBe(2)
+    expect(workerPreferredDeviceScaleFactor('pc')).toBe(1)
+    expect(workerPreferredDeviceScaleFactor('tab')).toBe(1)
+  })
+
+  async function bodySentFor(device: 'pc' | 'sp' | 'tab') {
+    let sent: Record<string, unknown> | undefined
+    const fakeFetch: typeof fetch = async (_input, init) => {
+      sent = JSON.parse(String(init?.body))
+      return jpegResponseWithHeaders(makeJpeg(CAPTURE_WIDTH_FOR_DEVICE[device], 3000), {})
+    }
+    await fetchFromScreenshotWorker({
+      pageUrl: 'https://example.com/p',
+      device,
+      config: WORKER_CONFIG,
+      fetchImpl: fakeFetch,
+    })
+    return sent
+  }
+
+  it('SP keeps the base deviceScaleFactor at 1 and asks for 2x via preferredDeviceScaleFactor', async () => {
+    const sent = await bodySentFor('sp')
+    expect(sent?.width).toBe(390)
+    // 旧 Worker は deviceScaleFactor しか見ない → 1x で従来どおり (デプロイ順に依存しない)
+    expect(sent?.deviceScaleFactor).toBe(1)
+    expect(sent?.preferredDeviceScaleFactor).toBe(2)
+  })
+
+  it('PC and TAB requests are unchanged: deviceScaleFactor 1 and no preferred field at all', async () => {
+    for (const device of ['pc', 'tab'] as const) {
+      const sent = await bodySentFor(device)
+      expect(sent?.deviceScaleFactor).toBe(1)
+      expect(sent).not.toHaveProperty('preferredDeviceScaleFactor')
+    }
+  })
+})
+
+describe('fetchFromScreenshotWorker — capped full-height with a 2x image (DPR-aware)', () => {
+  it('compares full-height (CSS px) against the image height converted to CSS px', async () => {
+    // SP 2x: 画像は 780 x 20000 (= CSS 390 x 10000)。実ページ全高は CSS 15000px。
+    // 旧ロジックは 15000 > 20000 が偽で fullPageCssHeight を握り潰していた。
+    const jpeg = makeJpeg(780, 20000)
+    const fakeFetch: typeof fetch = async () =>
+      jpegResponseWithHeaders(jpeg, { 'x-capture-capped': '1', 'x-capture-full-height': '15000' })
+    const out = await fetchFromScreenshotWorker({
+      pageUrl: 'https://example.com/long-sp',
+      device: 'sp',
+      config: WORKER_CONFIG,
+      fetchImpl: fakeFetch,
+    })
+    expect(out.naturalWidth).toBe(780)
+    expect(out.naturalHeight).toBe(20000)
+    expect(out.capped).toBe(true)
+    expect(out.fullPageCssHeight).toBe(15000)
+  })
+
+  it('still ignores a full-height that is not greater than the captured CSS height', async () => {
+    const jpeg = makeJpeg(780, 20000) // CSS 10000
+    const fakeFetch: typeof fetch = async () =>
+      jpegResponseWithHeaders(jpeg, { 'x-capture-capped': '1', 'x-capture-full-height': '9000' })
+    const out = await fetchFromScreenshotWorker({
+      pageUrl: 'https://example.com/x',
+      device: 'sp',
+      config: WORKER_CONFIG,
+      fetchImpl: fakeFetch,
+    })
+    expect(out.fullPageCssHeight).toBeUndefined()
   })
 })

@@ -47,6 +47,25 @@ const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4'
  */
 const CLOUDFLARE_DEVICE_SCALE_FACTOR = 1
 
+/**
+ * 2026-09-29: SP の背景画像が粗い (390px の画像が高解像度画面で 2 倍に引き伸ばされる) ため、
+ * **専用 Worker 経路だけ** SP で 2x を「希望」する。上の「1 に固定する理由」との整合:
+ *   - 座標系は `referenceWidth` (= viewportWidth、DPR 非依存) と `naturalWidth/naturalHeight` の比で
+ *     CSS px を復元するので、倍率を上げても overlay は同じ displayScale で整列する。
+ *   - 倍率を上げる代償は画像の重さと撮影時間。Worker 側 (capture-plan.ts) は、まず従来どおり 1x を
+ *     撮って確保し、面積・寸法とも予算内の軽いページだけ 2x で撮り直す。失敗・時間切れなら 1x を返す。
+ *   - CF REST / Microlink には面積上限が無いので 1x のまま。
+ * **後方互換 (デプロイ順に依存しない)**: 基準の `deviceScaleFactor` は 1 のまま送り、2x は別フィールド
+ * `preferredDeviceScaleFactor` で希望として伝える。旧 Worker はこのフィールドを無視して 1x で撮る
+ * (= 従来と同じ) ので、アプリと Worker のどちらを先に出しても、ロールバックしても安全。
+ */
+const SP_WORKER_PREFERRED_DEVICE_SCALE_FACTOR = 2
+
+/** Worker 経路で「軽いページだけ」希望する倍率。SP のみ 2、PC / TAB は 1 (= 希望なし)。 */
+export function workerPreferredDeviceScaleFactor(device: HeatmapDevice): number {
+  return device === 'sp' ? SP_WORKER_PREFERRED_DEVICE_SCALE_FACTOR : CLOUDFLARE_DEVICE_SCALE_FACTOR
+}
+
 /** Cloudflare gotoOptions.timeout (page load 待ち上限)。fullPage の lazy load も待つ。 */
 const CLOUDFLARE_GOTO_TIMEOUT_MS = 30_000
 
@@ -110,11 +129,11 @@ const MEMORY_CACHE_MAX_ENTRIES = 60
 /**
  * 続 116 perf: Microlink screenshot 圧縮設定。
  *   - format=jpeg は PNG (continuous-tone full page) より 5-10x 軽い
- *   - quality=75 は WP 商品ページの underlay として視認性 / size のバランス良
+ *   - quality=85 (2026-09-29: 75 -> 85、背景画像の粗さ対策。文字の輪郭がにじむのを減らす)
  * cache key に含めて、format / quality 変更時に cache miss を起こす。
  */
 const SCREENSHOT_FORMAT: 'jpeg' | 'png' | 'webp' = 'jpeg'
-const SCREENSHOT_QUALITY = 75
+const SCREENSHOT_QUALITY = 85
 
 export class ScreenshotProviderError extends Error {
   readonly code:
@@ -527,11 +546,15 @@ export async function fetchFromScreenshotWorker(input: {
 }> {
   const width = CAPTURE_WIDTH_FOR_DEVICE[input.device]
   const endpoint = `${input.config.workerUrl.replace(/\/$/, '')}/screenshot`
+  const preferredDsf = workerPreferredDeviceScaleFactor(input.device)
   const body = JSON.stringify({
     url: input.pageUrl,
     width,
-    // deviceScaleFactor は overlay 座標整合のため 1 固定 (上 CLOUDFLARE_DEVICE_SCALE_FACTOR 参照)
+    // 基準の倍率は 1 のまま (旧 Worker が見るのはこれだけ = 従来と同じ動作)。
     deviceScaleFactor: CLOUDFLARE_DEVICE_SCALE_FACTOR,
+    // SP は 2x を「希望」として別フィールドで伝える (背景画像の粗さ対策)。PC / TAB では送らないので
+    // リクエストは従来と完全に同一。理由と後方互換は workerPreferredDeviceScaleFactor 参照。
+    ...(preferredDsf > CLOUDFLARE_DEVICE_SCALE_FACTOR ? { preferredDeviceScaleFactor: preferredDsf } : {}),
   })
 
   const ctrl = new AbortController()
@@ -602,13 +625,15 @@ export async function fetchFromScreenshotWorker(input: {
   const naturalWidth = sanitizeDimension(dims?.width, width)
   const naturalHeight = sanitizeDimension(dims?.height, width * 2)
   // P2: Worker は巨大ページを面積上限で上端 clip したとき capped=1 と実 document 全高を返す。
-  //   x-capture-full-height は CSS px @viewport幅 = overlay の pageCssHeight と同一空間 (DPR=1 固定)。
+  //   x-capture-full-height は CSS px @viewport幅 = overlay の pageCssHeight と同一空間。
+  //   画像が 2x のとき naturalHeight は画像 px なので、比較は CSS px に直してから行う。
   //   sanitizeDimension は SCREENSHOT_DIM_MAX で clamp してしまい巨大全高 (5万px 級) を握り潰すため
   //   ここでは使わず、独自の sanity ceiling (20万px) で検証する。
   const capped = res.headers.get('x-capture-capped') === '1'
   const rawFullHeight = Number(res.headers.get('x-capture-full-height'))
+  const imageCssHeight = (naturalHeight * width) / naturalWidth
   const fullPageCssHeight =
-    capped && Number.isFinite(rawFullHeight) && rawFullHeight > naturalHeight && rawFullHeight <= 200_000
+    capped && Number.isFinite(rawFullHeight) && rawFullHeight > imageCssHeight && rawFullHeight <= 200_000
       ? Math.round(rawFullHeight)
       : undefined
   return { bytes, contentType, naturalWidth, naturalHeight, capped, fullPageCssHeight }

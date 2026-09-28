@@ -138,10 +138,10 @@ describe('buildCacheKey', () => {
 
   // 続 116: format / quality を cache key に含めることで perf 改修時の cache miss を保証
   it('cache key incorporates screenshot format/quality (続 116)', () => {
-    // 現在の値は jpeg / q75 (lib/heatmap/screenshot-provider.ts の SCREENSHOT_FORMAT, SCREENSHOT_QUALITY)
+    // 現在の値は jpeg / q85 (lib/heatmap/screenshot-provider.ts の SCREENSHOT_FORMAT, SCREENSHOT_QUALITY)
     // 値が変わったら hash は別になる、ことを担保する間接 test:
     //   別 device で別 hash になることは既に検証済 (上の test)。
-    //   ここでは現状 (jpeg / q75) の hash が安定して 32 hex であることを再確認する。
+    //   ここでは現状 (jpeg / q85) の hash が安定して 32 hex であることを再確認する。
     const k = buildCacheKey({
       tenantId: 't1',
       siteId: 's1',
