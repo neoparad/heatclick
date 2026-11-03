@@ -23,9 +23,16 @@ const LABEL_MAP: Record<string, [string, string]> = {
 }
 
 export async function GET(req: NextRequest) {
-  const ctx = await requireActiveTenantSite(req)
-  if (!ctx.ok) return ctx.response
-  const { tenantId, site } = ctx
+  let active
+  try {
+    active = await requireActiveTenantSite(req)
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'UNAUTHORIZED'
+    const status = msg.startsWith('FORBIDDEN') ? 403 : 401
+    return NextResponse.json({ error: msg }, { status })
+  }
+  const { ctx, site } = active
+  const tenantId = ctx.tenant_id
 
   const sp = req.nextUrl.searchParams
   if (!isAuthDbConfigured() || sp.get('mock') === '1') {

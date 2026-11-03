@@ -49,12 +49,14 @@ export interface SeoDirRow {
 }
 
 export function pathnameOf(u: string): string {
-  const canon = normalizeUrlFull(u)
-  if (canon) return canon.pathname
   try {
-    return new URL(u).pathname
+    return normalizeUrlFull(u).pathname
   } catch {
-    return String(u || '')
+    try {
+      return new URL(u).pathname
+    } catch {
+      return String(u || '')
+    }
   }
 }
 

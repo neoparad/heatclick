@@ -19,9 +19,16 @@ async function runPool<T, R>(items: T[], concurrency: number, fn: (item: T) => P
 }
 
 export async function POST(req: NextRequest) {
-  const ctx = await requireActiveTenantSite(req)
-  if (!ctx.ok) return ctx.response
-  const { tenantId, site } = ctx
+  let active
+  try {
+    active = await requireActiveTenantSite(req)
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'UNAUTHORIZED'
+    const status = msg.startsWith('FORBIDDEN') ? 403 : 401
+    return NextResponse.json({ error: msg }, { status })
+  }
+  const { ctx, site } = active
+  const tenantId = ctx.tenant_id
 
   const secret = process.env.INSPECT_CRON_SECRET
   if (secret) {

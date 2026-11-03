@@ -1,28 +1,5 @@
 /**
- * SidebarNav — 行動分析配下の nav + 分析セクション + アカウント (続 73 Task 1)
- *
- * mockup `linkscrawl/docs/fusion/mockups/10_ai_chat.html L660-688`
- * 親 SSOT: 続 55 sidebar SSOT (data-nav 値の継承)
- *
- * 行動分析 (7 items、すべて proof route):
- *   ai-chat → /chat
- *   heatmap → /heatmap
- *   session-replay → /sessions  (Phase 1+ で配備予定、Sprint 3 = stub なし)
- *   cv-journey → /cv-journey   (同上)
- *   path-analysis → /path-analysis (同上)
- *   action-tickets → /action-tickets (同上)
- *   site-doc → /site-doc       (同上)
- *
- * 分析セクション (3 items):
- *   performance-behavior → /performance (stub なし)
- *   personas → /personas
- *   pages → /pages
- *
- * アカウント (2 items):
- *   install-settings → /account (settings)
- *   logout → /auth/sign-out
- *
- * usePathname() で active 判定。未配備 page は disabled (cursor-not-allowed) で残す。
+ * SidebarNav — 行動分析配下の nav + M Agent + AISEO / AIアクセス + アカウント
  */
 
 'use client'
@@ -35,26 +12,32 @@ import {
   Camera,
   CheckCircle2,
   ChevronRight,
+  Compass,
   FileText,
   GitBranch,
+  Globe,
   Layers,
   LayoutGrid,
+  Link2,
   LogOut,
   MessageCircle,
   Network,
   Play,
+  Radar,
+  Search,
   Settings,
+  ShieldAlert,
+  Sparkles,
   Users,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { isAiseoPath } from './sidebar-pillar'
 
 interface NavItem {
-  /** data-nav SSOT (続 55 継承) */
   navKey: string
   href: string
   label: string
   icon: ReactNode
-  /** Phase 1 未配備 = disabled 表示 (link 無効化、tooltip 表示) */
   disabled?: boolean
 }
 
@@ -72,6 +55,12 @@ const PRIMARY_NAV: ReadonlyArray<NavItem> = [
     icon: <Activity className="h-4 w-4" aria-hidden />,
   },
   {
+    navKey: 'fusion-cross',
+    href: '/fusion',
+    label: '行動 × 構造 統合診断',
+    icon: <Sparkles className="h-4 w-4" aria-hidden />,
+  },
+  {
     navKey: 'session-replay',
     href: '/sessions',
     label: 'セッションリプレイ',
@@ -79,14 +68,12 @@ const PRIMARY_NAV: ReadonlyArray<NavItem> = [
     disabled: true,
   },
   {
-    // CV経路分析 Phase 1 配備で enabled 化 (docs/cv-journey-implementation-plan.md)
     navKey: 'cv-journey',
     href: '/cv-journey',
     label: 'CV経路分析',
     icon: <GitBranch className="h-4 w-4" aria-hidden />,
   },
   {
-    // 続 75 Task B: paths/page.tsx 配備で enabled 化、href は /paths (user-specified)
     navKey: 'path-analysis',
     href: '/paths',
     label: '経路分析エージェント',
@@ -111,10 +98,9 @@ const PRIMARY_NAV: ReadonlyArray<NavItem> = [
 const ANALYSIS_SUB_NAV: ReadonlyArray<NavItem> = [
   {
     navKey: 'performance-behavior',
-    href: '/performance',
+    href: '/fusion',
     label: 'パフォーマンス × 行動',
     icon: <Activity className="h-3 w-3" aria-hidden />,
-    disabled: true,
   },
   {
     navKey: 'personas',
@@ -131,11 +117,6 @@ const ANALYSIS_SUB_NAV: ReadonlyArray<NavItem> = [
   },
 ]
 
-/**
- * 続 83 §4 Day 2 (2026-05-25 M-Director): M Agent pillar 配下 nav。
- * pathname `/scenarios*` のとき PRIMARY_NAV の代わりにこの配列を render する。
- * 既存 behavior pillar 配下 (PRIMARY_NAV) と排他。
- */
 const M_AGENT_NAV: ReadonlyArray<NavItem> = [
   {
     navKey: 'targeting-banner',
@@ -144,9 +125,6 @@ const M_AGENT_NAV: ReadonlyArray<NavItem> = [
     icon: <LayoutGrid className="h-4 w-4" aria-hidden />,
   },
   {
-    // 2026-06-04 (Owner REQ): CV Bridge / form-tweak scenario type のメニュー枠のみ先行追加。
-    //   本実装(form-intervention scenario type の DSL/runtime/計測)は別チケット (banner MVP 後)。
-    //   現状は disabled の「準備中」表示 = クリック不可のメニューテキストのみ。
     navKey: 'form-intervention',
     href: '/scenarios/form',
     label: 'フォーム最適化',
@@ -155,18 +133,77 @@ const M_AGENT_NAV: ReadonlyArray<NavItem> = [
   },
 ]
 
+const AISEO_FUSION_NAV: ReadonlyArray<NavItem> = [
+  {
+    navKey: 'fusion-url-summary',
+    href: '/fusion',
+    label: '行動×構造×AI 4平面統合',
+    icon: <Sparkles className="h-4 w-4" aria-hidden />,
+  },
+]
+
+const AISEO_AI_VISITS_NAV: ReadonlyArray<NavItem> = [
+  {
+    navKey: 'ai-visits',
+    href: '/ai-visits',
+    label: 'AI訪問状況',
+    icon: <Bot className="h-4 w-4" aria-hidden />,
+  },
+  {
+    navKey: 'visit-risk',
+    href: '/visit-risk',
+    label: 'AI訪問リスク・宣言監査',
+    icon: <ShieldAlert className="h-4 w-4" aria-hidden />,
+  },
+  {
+    navKey: 'journey',
+    href: '/journey',
+    label: 'AIの巡回ルート',
+    icon: <Compass className="h-4 w-4" aria-hidden />,
+  },
+  {
+    navKey: 'search-crawlers',
+    href: '/search-crawlers',
+    label: '検索エンジン巡回',
+    icon: <Radar className="h-4 w-4" aria-hidden />,
+  },
+]
+
+const AISEO_SEO_NAV: ReadonlyArray<NavItem> = [
+  {
+    navKey: 'seo-access',
+    href: '/seo/access',
+    label: 'GSC アクセス数分析',
+    icon: <Search className="h-4 w-4" aria-hidden />,
+  },
+  {
+    navKey: 'seo-sitemap',
+    href: '/seo/sitemap',
+    label: 'サイトマップ・Index状況',
+    icon: <Globe className="h-4 w-4" aria-hidden />,
+  },
+  {
+    navKey: 'seo-internal-links',
+    href: '/seo/internal-links',
+    label: '内部リンク構造',
+    icon: <Network className="h-4 w-4" aria-hidden />,
+  },
+  {
+    navKey: 'aiseo-internal-link-proposals',
+    href: '/aiseo/analytics/internal-links',
+    label: '内部リンク改善提案',
+    icon: <Link2 className="h-4 w-4" aria-hidden />,
+  },
+]
+
 const ACCOUNT_NAV: ReadonlyArray<NavItem> = [
   {
-    // 続 75 Task D: app/(proof)/install/page.tsx 配備で enabled 化、href を /install に統一
     navKey: 'install-settings',
     href: '/install',
     label: '設定 / タグ設置',
     icon: <Settings className="h-4 w-4" aria-hidden />,
   },
   {
-    // docs/heatmap/CAPTURE_STRATEGY_DECISION_2026-08-08.md §5。owner/admin 以外は
-    // page.tsx 側で /heatmap へ redirect されるため、ここではロール分岐しない
-    // (このファイルに role フィルタ機構が無いため新規追加はしない — 現状は全員に表示)。
     navKey: 'heatmap-backfill',
     href: '/operator/heatmap-backfill',
     label: 'スクショ事前生成',
@@ -213,10 +250,6 @@ function NavLink({
     )
   }
 
-  // 続 119: ログアウトは「状態を変える操作」。GET リンクだと Next.js の自動
-  // プリフェッチ (先読み GET) で sign-out が走り「ページ表示だけでログアウト →
-  // 次の soft navigation が no_token で弾かれる」事故になる。フォーム POST は
-  // プリフェッチ対象外なので、この事故を構造的に封じる (ルート側にもガード有=多層防御)。
   if (item.navKey === 'logout') {
     return (
       <form action={item.href} method="post" style={{ display: 'contents' }}>
@@ -234,10 +267,6 @@ function NavLink({
       className={className}
       data-nav={item.navKey}
       aria-current={isActive ? 'page' : undefined}
-      // 続 119: 副作用を持つ GET ルート (/auth/sign-out = cookie 削除) を自動
-      // プリフェッチさせない。プリフェッチで sign-out が走り「ページ表示だけで
-      // ログアウト → 次の soft navigation が no_token で弾かれる」のを防ぐ。
-      // ルート側でも prefetch をガード済 (多層防御)。
       prefetch={item.href === '/auth/sign-out' ? false : undefined}
     >
       {item.icon}
@@ -246,10 +275,6 @@ function NavLink({
   )
 }
 
-/**
- * 続 83 §4 Day 2 (2026-05-25): pathname `/scenarios*` で M Agent pillar 配下表示に切替、
- * それ以外は既存 behavior pillar 配下 (PRIMARY_NAV + ANALYSIS_SUB_NAV) を表示。
- */
 function isMAgentPath(pathname: string): boolean {
   return pathname === '/scenarios' || pathname.startsWith('/scenarios/')
 }
@@ -257,11 +282,11 @@ function isMAgentPath(pathname: string): boolean {
 export function SidebarNav() {
   const pathname = usePathname() ?? '/'
   const mAgentActive = isMAgentPath(pathname)
+  const aiseoActive = isAiseoPath(pathname)
 
   return (
     <>
       {mAgentActive ? (
-        /* 続 83 §4: M Agent pillar 配下 nav */
         <nav
           className="ug-side-nav"
           style={{ paddingTop: 8 }}
@@ -272,9 +297,35 @@ export function SidebarNav() {
             <NavLink key={it.navKey} item={it} pathname={pathname} />
           ))}
         </nav>
+      ) : aiseoActive ? (
+        <>
+          <div className="ug-section-label">融合インサイト</div>
+          <nav
+            className="ug-side-nav"
+            aria-label="融合インサイトナビゲーション"
+            data-pillar-nav="aiseo"
+          >
+            {AISEO_FUSION_NAV.map((it) => (
+              <NavLink key={it.navKey} item={it} pathname={pathname} />
+            ))}
+          </nav>
+
+          <div className="ug-section-label">AIアクセス観測 (AIreceipt)</div>
+          <nav className="ug-side-nav" aria-label="AIアクセスナビゲーション">
+            {AISEO_AI_VISITS_NAV.map((it) => (
+              <NavLink key={it.navKey} item={it} pathname={pathname} />
+            ))}
+          </nav>
+
+          <div className="ug-section-label">SEO・構造分析 (GSC / linkscrawl)</div>
+          <nav className="ug-side-nav" aria-label="SEO構造分析ナビゲーション">
+            {AISEO_SEO_NAV.map((it) => (
+              <NavLink key={it.navKey} item={it} pathname={pathname} />
+            ))}
+          </nav>
+        </>
       ) : (
         <>
-          {/* 行動分析配下 7 items */}
           <nav
             className="ug-side-nav"
             style={{ paddingTop: 8 }}
@@ -286,7 +337,6 @@ export function SidebarNav() {
             ))}
           </nav>
 
-          {/* 分析セクション label */}
           <div className="ug-section-label">分析</div>
           <nav className="ug-side-nav" aria-label="分析ナビゲーション">
             <div className="ug-nav-link" aria-hidden style={{ cursor: 'default' }}>
@@ -307,10 +357,8 @@ export function SidebarNav() {
         </>
       )}
 
-      {/* spacer */}
       <div className="ug-side-flex" />
 
-      {/* アカウント section (両 pillar で共通) */}
       <div className="ug-section-label">アカウント</div>
       <nav className="ug-side-nav" aria-label="アカウントナビゲーション">
         {ACCOUNT_NAV.map((it) => (

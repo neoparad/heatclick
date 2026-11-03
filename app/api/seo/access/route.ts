@@ -25,13 +25,22 @@ function sumTotals(rows: GscRow[]) {
 }
 
 export async function GET(req: NextRequest) {
-  const ctx = await requireActiveTenantSite(req)
-  if (!ctx.ok) return ctx.response
-  const { site } = ctx
+  let active
+  try {
+    active = await requireActiveTenantSite(req)
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'UNAUTHORIZED'
+    const status = msg.startsWith('FORBIDDEN') ? 403 : 401
+    return NextResponse.json({ error: msg }, { status })
+  }
+  const { site } = active
 
   const sp = req.nextUrl.searchParams
   const days = Math.min(90, Math.max(7, Number(sp.get('days') || 28)))
-  const gscSite = site.gscProperty || process.env.GSC_SITE_URL || `sc-domain:${site.canonicalHost}`
+  const gscSite =
+    site.gscProperty ||
+    process.env.GSC_SITE_URL ||
+    `sc-domain:${site.canonicalHost || 'link-th.com'}`
 
   if (!isGscConfigured() || sp.get('mock') === '1') {
     return NextResponse.json(generateSeoAccessMock(days, gscSite))

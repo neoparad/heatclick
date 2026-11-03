@@ -1,17 +1,11 @@
 /**
- * SidebarPillar — 4 ピラー切替コンポーネント (続 73 Task 1)
- *
- * mockup `linkscrawl/docs/fusion/mockups/_partials` (10_ai_chat.html L637-657 抜粋)
- * 親 SSOT: 続 55 sidebar SSOT / 続 66 §3 4 ピラー IA
+ * SidebarPillar — 4 ピラー切替コンポーネント (続 73 Task 1 + 融合SaaS P4 AISEO 有効化)
  *
  * 4 ピラー:
- *   - behavior (active)   : 行動分析 / Behavior · CVR  ← 現在 active
- *   - m-agent (coming)    : M Agent / Marketing AI    (Phase 2)
- *   - aiseo (coming)      : AISEO / SEO · AIO          (Phase 3)
+ *   - behavior (active)   : 行動分析 / Behavior · CVR
+ *   - m-agent (active)    : M Agent / Marketing AI
+ *   - aiseo (active)      : AISEO / SEO · AIO · AIアクセス
  *   - custom-bi (coming)  : カスタムBI / Client reports (Phase 3+)
- *
- * 全 (proof) page で「behavior」が active 固定 (Phase 1 = 行動分析のみ)。
- * Coming soon ピラーは aria-disabled で click 無効化。
  */
 
 'use client'
@@ -37,9 +31,6 @@ const PILLARS: ReadonlyArray<Pillar> = [
     comingSoon: false,
   },
   {
-    // 続 83 §4 (Main Director approval、2026-05-25): M-Director Phase 1 mockup deploy で
-    // m-agent を coming-soon → active 暫定化。href は mockup index (/mockups/) を指す。
-    // Day 2 frontend (/scenarios route) 配備完了で href を /scenarios に切替予定。
     id: 'm-agent',
     title: 'M Agent',
     sub: 'Marketing AI',
@@ -51,7 +42,7 @@ const PILLARS: ReadonlyArray<Pillar> = [
     title: 'AISEO',
     sub: 'SEO / AIO',
     icon: <Search className="h-3 w-3" aria-hidden />,
-    comingSoon: true,
+    comingSoon: false,
   },
   {
     id: 'custom-bi',
@@ -63,21 +54,33 @@ const PILLARS: ReadonlyArray<Pillar> = [
 ]
 
 interface SidebarPillarProps {
-  /** active ピラー — Phase 1 = behavior default、ただし pathname `/scenarios*` 等で自動上書きされる */
   active?: Pillar['id']
 }
 
-/**
- * 続 83 §4 Day 2 (2026-05-25): pathname に応じて active pillar を自動判定。
- * - `/scenarios*` → 'm-agent'
- * - それ以外 → props.active (= AppShell 渡しの 'behavior')
- *
- * これにより (proof)/layout.tsx の `pillar="behavior"` 固定 prop を破壊せず、
- * URL 経路だけで pillar の active 状態が同期する (Main Director 管轄 layout.tsx 不変)。
- */
+const AISEO_PREFIXES = [
+  '/fusion',
+  '/ai-visits',
+  '/visit-risk',
+  '/journey',
+  '/search-crawlers',
+  '/seo',
+  '/aiseo',
+  '/aio',
+  '/llmo',
+  '/daily',
+  '/aio-check',
+  '/exposure',
+]
+
+export function isAiseoPath(pathname: string | null): boolean {
+  if (!pathname) return false
+  return AISEO_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(prefix + '/'))
+}
+
 function resolveActivePillar(pathname: string | null, fallback: Pillar['id']): Pillar['id'] {
   if (!pathname) return fallback
   if (pathname === '/scenarios' || pathname.startsWith('/scenarios/')) return 'm-agent'
+  if (isAiseoPath(pathname)) return 'aiseo'
   return fallback
 }
 
@@ -97,16 +100,15 @@ export function SidebarPillar({ active = 'behavior' }: SidebarPillarProps) {
           .filter(Boolean)
           .join(' ')
 
-        // 続 117 fix (Owner 報告: /scenarios で「行動分析」pillar を押すと URL が
-        //   /scenarios# になるだけで dashboard に戻れず stuck):
-        //   各 pillar は自分の home へ link する。
-        //   - behavior  → /dashboard (行動分析の home、= sign-in 既定の着地先)
-        //   - m-agent   → /scenarios (ターゲティングバナー一覧)
-        //   - aiseo / custom-bi → '#' (coming-soon、onClick で完全 no-op)
-        // 旧実装は behavior の href を '#' 固定にしていたため、別 pillar (/scenarios) に
-        //   居るときに behavior を押しても navigation せず hash だけ付いて行き止まりになっていた。
         const href =
-          p.id === 'm-agent' ? '/scenarios' : p.id === 'behavior' ? '/dashboard' : '#'
+          p.id === 'm-agent'
+            ? '/scenarios'
+            : p.id === 'aiseo'
+            ? '/fusion'
+            : p.id === 'behavior'
+            ? '/dashboard'
+            : '#'
+
         return (
           <a
             key={p.id}
@@ -117,14 +119,10 @@ export function SidebarPillar({ active = 'behavior' }: SidebarPillarProps) {
             aria-current={isActive ? 'page' : undefined}
             title={p.comingSoon ? `${p.title} (準備中)` : p.title}
             onClick={(e) => {
-              // coming-soon は完全 no-op。
               if (p.comingSoon) {
                 e.preventDefault()
                 return
               }
-              // 既に active な pillar 自身を押した場合は遷移不要 (no-op)。
-              // それ以外 (behavior ⇄ m-agent の切替) は通常 navigation を許可し、
-              // 各 pillar の home (/dashboard or /scenarios) へ確実に遷移させる。
               if (isActive) {
                 e.preventDefault()
               }
@@ -135,9 +133,7 @@ export function SidebarPillar({ active = 'behavior' }: SidebarPillarProps) {
               <span className="ug-ps-title">{p.title}</span>
               <span className="ug-ps-sub">{p.sub}</span>
             </span>
-            {p.comingSoon ? (
-              <span className="ug-coming-badge">Coming soon</span>
-            ) : null}
+            {p.comingSoon ? <span className="ug-coming-badge">Coming soon</span> : null}
           </a>
         )
       })}
