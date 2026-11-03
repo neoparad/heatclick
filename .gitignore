@@ -66,3 +66,8 @@ workers/screenshot/package-lock.json
 
 # Cloudflare Workers local build/dry-run output (wrangler)
 .wrangler/
+link-th-*.json
+*-service-account*.json
+*.pem
+*.key
+.dev.vars
