@@ -143,7 +143,7 @@
     const signals = [];
     const ua = navigator.userAgent || '';
     // Known bot UA patterns (curated — extend as new agents appear)
-    const botRe = /(GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|anthropic-ai|PerplexityBot|Perplexity-User|Google-Extended|Googlebot|Bingbot|Bytespider|CCBot|Diffbot|Amazonbot|Applebot-Extended|YouBot|cohere-ai|Meta-ExternalAgent|FacebookBot|DuckAssistBot|Mistral-Bot)/i;
+    const botRe = /(GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|anthropic-ai|PerplexityBot|Perplexity-User|Google-Extended|Googlebot|Bingbot|Bytespider|CCBot|Diffbot|Amazonbot|Applebot-Extended|YouBot|cohere-ai|Meta-ExternalAgent|meta-externalads|FacebookBot|DuckAssistBot|Mistral-Bot)/i;
     const m = ua.match(botRe);
     let type = '';
     if (m) { signals.push('ua:' + m[1]); type = m[1]; }
@@ -151,7 +151,11 @@
     // JS environment fingerprints
     if (navigator.webdriver) signals.push('webdriver');
     if (!navigator.languages || navigator.languages.length === 0) signals.push('no_langs');
-    if (navigator.plugins && navigator.plugins.length === 0) signals.push('no_plugins');
+    // Android Chrome / iOS Safari は仕様上 navigator.plugins が常に空 → モバイル UA では bot 信号にしない
+    // (2026-09-25: この誤検知で Android 訪問者の大半が is_agent=1 になっていた)
+    // v1 は signals 配列 = 判定そのもの (観測と判定が分離していない) ため、v2 と違い観測値も記録しない (意図的差異)。
+    const _mobileUA = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+    if (!_mobileUA && navigator.plugins && navigator.plugins.length === 0) signals.push('no_plugins');
     // Chrome-family without chrome.runtime (common on headless Chromium)
     if (/Chrome\//.test(ua) && typeof window.chrome === 'undefined') signals.push('no_chrome_obj');
     // Missing connection (many headless envs)

@@ -1,6 +1,8 @@
 /**
  * ClickInsight Pro - Tracking Script (Core)
- * Version: 2.3.0+saas-b1 (B-1 流用 from ugokimap/public/tracking.js、2026-05-17)
+ * Version: 2.3.1+saas-b1 (B-1 流用 from ugokimap/public/tracking.js、2026-05-17)
+ *
+ * v2.3.1 (2026-09-25): plugins_empty をモバイル UA では bot 判定から除外 (Android 誤検知)、meta-externalads を UA リストに追加。
  * Target: <15KB minified. Extensions add PII protection, forms, video, image, element tracking.
  *
  * v2.2.0: AXO (Agent Experience Optimization) — AIエージェント検知シグナルを全イベントに付与。
@@ -272,19 +274,26 @@
   // See: docs/fusion/strategy/12_agent_experience_optimization.md
   const _detectAgent = () => {
     const ua = navigator.userAgent || '';
-    const botRe = /(GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|anthropic-ai|PerplexityBot|Perplexity-User|Google-Extended|Googlebot|Bingbot|Bytespider|CCBot|Diffbot|Amazonbot|Applebot-Extended|YouBot|cohere-ai|Meta-ExternalAgent|FacebookBot|DuckAssistBot|Mistral-Bot)/i;
+    const botRe = /(GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|anthropic-ai|PerplexityBot|Perplexity-User|Google-Extended|Googlebot|Bingbot|Bytespider|CCBot|Diffbot|Amazonbot|Applebot-Extended|YouBot|cohere-ai|Meta-ExternalAgent|meta-externalads|FacebookBot|DuckAssistBot|Mistral-Bot)/i;
     const m = ua.match(botRe);
     // v2.3: 複合値 JSON オブジェクト (Task 3 優先 1)
+    // Android Chrome / Samsung Browser / iOS Safari は仕様上 navigator.plugins が常に空。
+    // 2026-09-25 Jev shadow 評価: plugins_empty 単独で全セッションの 53% (ほぼ全て Android) が
+    // is_agent=1 になり heatmap / cv-journey の is_agent=0 フィルタから落ちていた。
+    // 観測値 (plugins_empty) は記録し続け、判定 (hit) にはモバイル UA では使わない。
+    const mobile_ua = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
     const s = {
       webdriver: navigator.webdriver === true,
       plugins_empty: !navigator.plugins || navigator.plugins.length === 0,
+      mobile_ua: mobile_ua,
       languages_empty: !navigator.languages || navigator.languages.length === 0,
       chrome_missing: /Chrome\//.test(ua) && typeof window.chrome === 'undefined',
       connection_missing: !('connection' in navigator) && /Chrome\//.test(ua),
       ua_bot_match: m ? m[1] : null,
       ua_headless_match: /HeadlessChrome|PhantomJS|Electron|Playwright|Puppeteer/i.test(ua),
     };
-    const hit = s.webdriver || s.plugins_empty || s.languages_empty || s.chrome_missing || s.connection_missing || s.ua_bot_match || s.ua_headless_match;
+    const plugins_signal = s.plugins_empty && !mobile_ua;
+    const hit = s.webdriver || plugins_signal || s.languages_empty || s.chrome_missing || s.connection_missing || s.ua_bot_match || s.ua_headless_match;
     const is_agent = hit ? 1 : 0;
     let type = '';
     if (s.ua_bot_match) type = s.ua_bot_match;
