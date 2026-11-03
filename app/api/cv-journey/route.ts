@@ -11,6 +11,10 @@
  * フォールバック（heatmap と同思想）:
  *   - ClickHouse 失敗 / 接続不可 → ダミーデータ（meta.dataSource='dummy'）
  *   - env CV_JOURNEY_DUMMY_ONLY='1' で常時ダミー
+ *
+ * 期間: 日付未指定の境界は resolvePeriod (lib/cv-journey/period.ts) で確定させ、
+ * クエリ条件と meta.periodDays を常に一致させる（旧実装は未指定時に全履歴を集計
+ * しながら periodDays=7 を返す不一致があった）。
  */
 
 import { NextResponse } from 'next/server'
@@ -18,11 +22,31 @@ import { z } from 'zod'
 
 import { getServerSession } from '@/lib/auth/server-session'
 import { getClickHouseClient } from '@/lib/clickhouse'
+import { createCvDefinitionRepository } from '@/lib/conversions/repository'
 import { DEFAULT_FUNNEL } from '@/lib/cv-journey/funnel-config'
+import { resolvePeriod } from '@/lib/cv-journey/period'
 import { buildFunnelData } from '@/lib/cv-journey/query'
 import { buildDummyData } from '@/lib/cv-journey/fixtures'
 import { recordDummyFallback } from '@/lib/monitoring/dummy-fallback-counter'
 import type { CvJourneyError, CvJourneySuccess } from '@/lib/api/cv-journey'
+
+/**
+ * C2 (docs/cv/CV_DEFINITIONS_DESIGN.md §7): サイトの有効なCV定義を取得する。
+ * CV定義は Cloudflare KV (ClickHouseとは別インフラ) に保存されており、その障害で
+ * cv-journey 全体 (既存のCH失敗ダミーフォールバックとは別経路) を巻き込まないよう、
+ * 取得失敗はログのみで空配列にfallbackする (完全後方互換の生conversion_type判定になる)。
+ */
+async function fetchEnabledCvDefinitions(tenantId: string, siteId: string) {
+  try {
+    const repo = createCvDefinitionRepository()
+    const all = await repo.listCvDefinitions(tenantId, siteId)
+    return all.filter((d) => d.enabled).map((d) => ({ cvKey: d.cvKey, trigger: d.trigger, scope: d.scope }))
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'unknown'
+    console.error(`[cv-journey] cv definitions fetch failed, falling back to raw conversion_type: ${msg}`)
+    return []
+  }
+}
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -37,14 +61,6 @@ const querySchema = z.object({
 
 function errorResponse(code: CvJourneyError['error']['code'], message: string, status: number) {
   return NextResponse.json<CvJourneyError>({ success: false, error: { code, message } }, { status })
-}
-
-function periodDays(start?: string, end?: string): number {
-  if (!start || !end) return 7
-  const s = Date.parse(start)
-  const e = Date.parse(end)
-  if (Number.isNaN(s) || Number.isNaN(e)) return 7
-  return Math.max(1, Math.round((e - s) / 86_400_000) + 1)
 }
 
 export async function GET(request: Request) {
@@ -65,34 +81,37 @@ export async function GET(request: Request) {
     return errorResponse('TENANT_FORBIDDEN', 'Access denied to this site', 403)
   }
 
-  const days = periodDays(q.start_date, q.end_date)
+  // 期間の正規化: 未指定境界を確定させ、クエリと meta.periodDays を一致させる
+  const period = resolvePeriod(q.start_date, q.end_date)
 
   // 強制ダミー
   if (process.env.CV_JOURNEY_DUMMY_ONLY === '1') {
     return NextResponse.json<CvJourneySuccess>({
       success: true,
       data: buildDummyData(DEFAULT_FUNNEL),
-      meta: { dataSource: 'dummy', windowSec: DEFAULT_FUNNEL.windowSec, periodDays: days, warnings: [] },
+      meta: { dataSource: 'dummy', windowSec: DEFAULT_FUNNEL.windowSec, periodDays: period.days, warnings: [] },
     })
   }
 
   try {
     const client = getClickHouseClient('analytics_reader')
+    const cvDefinitions = await fetchEnabledCvDefinitions(session.tenant_id, q.site_id)
     const { data, warnings } = await buildFunnelData({
       client,
       tenantId: session.tenant_id,
       siteId: q.site_id,
-      startDate: q.start_date,
-      endDate: q.end_date,
+      startDate: period.startDate,
+      endDate: period.endDate,
       deviceType: q.device_type,
       source: q.source,
       config: DEFAULT_FUNNEL,
+      cvDefinitions,
     })
 
     return NextResponse.json<CvJourneySuccess>({
       success: true,
       data,
-      meta: { dataSource: 'clickhouse_events', windowSec: DEFAULT_FUNNEL.windowSec, periodDays: days, warnings },
+      meta: { dataSource: 'clickhouse_events', windowSec: DEFAULT_FUNNEL.windowSec, periodDays: period.days, warnings },
     })
   } catch (e: unknown) {
     // ClickHouse 接続不可 / 列不在 / timeout → ダミーにフォールバック（heatmap と同思想）
@@ -105,7 +124,7 @@ export async function GET(request: Request) {
       meta: {
         dataSource: 'dummy',
         windowSec: DEFAULT_FUNNEL.windowSec,
-        periodDays: days,
+        periodDays: period.days,
         warnings: ['ClickHouse 接続不可のためダミーデータを表示しています'],
       },
     })

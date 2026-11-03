@@ -6,12 +6,22 @@
  *               windowFunnel 条件に展開する」。値は query_params で束縛し SQL 注入を防ぐ。
  *
  * モックの GA4 風イベント名 (view_item / add_to_cart / purchase) は実スキーマに無いため、
- * 実 `event_type`('pageview'|'conversion') + URL path / conversion_type で表現する。
+ * 実 `event_type`('pageview') + URL path / conversion_type で表現する。
  * セレクタ/click ベース判定は実列の確認待ち (Phase 1.5)。本 MVP では pageview/conversion のみ
  * SQL 展開対象とし、未対応 match は API 側で警告に降格する。
+ *
+ * 実データ契約 (paths Sprint 4-B 実CH検証 2026-07 で確定):
+ *   - conversion_type は event_type='click' 行に載る (event_type='conversion' は本番0件)。
+ *     event_type を固定すると構造的に0件になるため、conversion 判定は conversion_type 単独一致。
+ *   - events の文字列列 (event_type / url / conversion_type) は Nullable。windowFunnel は
+ *     条件に NULL が1つでも混ざると reached=NULL でセッション全体が脱落するため、
+ *     全条件式を ifNull(..., '') で NULL-safe にする。
  */
 
 import { z } from 'zod'
+
+import { buildCvKeyResolutionPredicate } from '@/lib/conversions/predicate'
+import type { CvScope, CvTrigger } from '@/lib/conversions/types'
 
 /** allowlist された match 種別（構造のみ。値は別途 param 束縛） */
 export const funnelMatchSchema = z.object({
@@ -48,6 +58,10 @@ export type FunnelConfig = z.infer<typeof funnelConfigSchema>
  * MVP 標準 EC ファネル。Phase 0 spike [Q1b] の結果で conversion_type を実値に合わせる。
  * 流入メディア(step0)は windowFunnel に含めず attribution dimension として別集計する
  * (council/Codex 合意) ため、ここには含めない。
+ *
+ * ⚠ 実サイト (bihadashop) の実 conversion_type は affiliate_rakuten/amazon/qoo10/other で、
+ *   add_to_cart / purchase は実データに存在しない (EC でなくアフィリエイトサイトのため)。
+ *   既定ファネルの見直しは CV 計測復旧後の別タスク (docs/heatmap/IMPLEMENTATION_PLAN.md 参照)。
  */
 export const DEFAULT_FUNNEL: FunnelConfig = {
   windowSec: 1_800,
@@ -71,24 +85,39 @@ export interface StepCondition {
   reason?: string
 }
 
+/** buildStepCondition が cvKey 解決に使う定義の最小形 (lib/conversions/repository.ts の CvDefinition から射影) */
+export interface CvDefinitionForResolution {
+  trigger: CvTrigger
+  scope?: CvScope
+}
+
 /**
  * ステップを windowFunnel 条件式へ展開する（**allowlist**）。
  * ユーザー由来の値（pathContains / conversionType）は全て `{sN_*:String}` で束縛し、
  * 式に直接埋め込まない（SQL 注入防止）。
+ *
+ * C2 (docs/cv/CV_DEFINITIONS_DESIGN.md §7): conversion ステップの conversionType が
+ * サイトの CV定義 cvKey と一致すれば、その定義の述語を **和集合** (定義述語 OR 生
+ * conversion_type一致) で解決する。cvDefinitionsByKey 未指定/該当なしは完全後方互換
+ * (従来通り生 conversion_type 単独一致)。
  */
-export function buildStepCondition(step: FunnelStep, index: number): StepCondition {
+export function buildStepCondition(
+  step: FunnelStep,
+  index: number,
+  cvDefinitionsByKey?: ReadonlyMap<string, CvDefinitionForResolution>,
+): StepCondition {
   const { type, pathContains, conversionType, selector } = step.match
 
   if (type === 'pageview') {
     if (pathContains) {
       const key = `s${index}_path`
       return {
-        expr: `event_type = 'pageview' AND position(url, {${key}:String}) > 0`,
+        expr: `ifNull(event_type, '') = 'pageview' AND position(ifNull(url, ''), {${key}:String}) > 0`,
         params: { [key]: pathContains },
         supported: true,
       }
     }
-    return { expr: `event_type = 'pageview'`, params: {}, supported: true }
+    return { expr: `ifNull(event_type, '') = 'pageview'`, params: {}, supported: true }
   }
 
   if (type === 'conversion') {
@@ -101,8 +130,22 @@ export function buildStepCondition(step: FunnelStep, index: number): StepConditi
       }
     }
     const key = `s${index}_cv`
+
+    const definition = cvDefinitionsByKey?.get(conversionType)
+    if (definition) {
+      const resolved = buildCvKeyResolutionPredicate(
+        { trigger: definition.trigger, scope: definition.scope, cvKey: conversionType },
+        key,
+      )
+      return { expr: resolved.expr, params: resolved.params, supported: true }
+    }
+
+    // conversion_type 単独一致 (event_type を固定しない)。実データでは conversion_type は
+    // click 行に載っており、event_type='conversion' を AND すると構造的に必ず0件になる
+    // (paths Sprint 4-B と同じ罠)。将来 trackConversion 経由の行 (event_type='conversion')
+    // が来てもこの条件に一致する。
     return {
-      expr: `event_type = 'conversion' AND conversion_type = {${key}:String}`,
+      expr: `ifNull(conversion_type, '') = {${key}:String}`,
       params: { [key]: conversionType },
       supported: true,
     }
