@@ -171,11 +171,22 @@ export async function POST(request: Request) {
 
   // 送信 — user 存在チェックは Sprint 1 では行わず、全 email に送信 (dogfood 招待制で母数小)
   // Sprint 3 以降で user 存在チェック + 「存在しない場合は無音」化
-  await sendMagicLinkEmail({
+  //
+  // 続137 (Owner報告「メールが届かない」): sendMagicLinkEmail の戻り値 (SendResult) を
+  // 従来は完全に握り潰していた。lib/resend.ts の sendEmail() は RESEND_API_KEY 不正/
+  // ドメイン未認証/ネットワーク障害などあらゆる失敗を throw せず {success:false,error}
+  // として返すだけなので、クライアントには常に {success:true} が返り「送信した体で実際は
+  // 送っていない」という無言の失敗が起きうる (このセッションで見つけた同型の障害の5件目)。
+  // client 応答は enumeration 対策のため引き続き success:true 固定 (メール存在有無を
+  // 露呈しない) だが、失敗はサーバ側で必ず可視化する。
+  const sendResult = await sendMagicLinkEmail({
     to: email,
     magic_link_url: verifyUrl.toString(),
     expires_in_minutes: MAGIC_LINK_EXPIRES_MIN,
   })
+  if (!sendResult.success) {
+    console.error('[magic-link] email send failed (client still sees success:true):', sendResult.error)
+  }
 
   return NextResponse.json({ success: true })
 }
