@@ -22,6 +22,10 @@ import type {
   Schedule,
   Variant,
 } from '@/lib/scenarios/types'
+import {
+  getScenarioUpliftPresets,
+  type ScenarioUpliftPreset,
+} from '@/lib/ml/pragmatic-ml-engine'
 
 export interface EditableScenarioFields {
   name: string
@@ -58,6 +62,9 @@ export interface UseScenarioEditorResult {
   setVariants: (next: Variant[]) => void
   setFrequencyCap: (next: FrequencyCap | null) => void
   setSchedule: (next: Schedule | null) => void
+  /** ML Uplift preset list & one-click applicator */
+  upliftPresets: ScenarioUpliftPreset[]
+  applyUpliftPreset: (presetId: ScenarioUpliftPreset['id']) => void
   /** Save 実行 (PUT API call) */
   save: () => Promise<void>
   /** dirty state を original に reset */
@@ -137,6 +144,23 @@ export function useScenarioEditor(opts: UseScenarioEditorOptions): UseScenarioEd
     setDraft((d) => ({ ...d, schedule: next }))
   }, [])
 
+  const upliftPresets = useMemo(() => getScenarioUpliftPresets(), [])
+
+  const applyUpliftPreset = useCallback(
+    (presetId: ScenarioUpliftPreset['id']) => {
+      const found = upliftPresets.find((p) => p.id === presetId)
+      if (!found) return
+      setDraft((d) => ({
+        ...d,
+        condition_ast: found.conditionAst,
+      }))
+      toast.success('ML Uplift プリセットを適用しました', {
+        description: `${found.label} — ${found.expectedLiftNote}`,
+      })
+    },
+    [upliftPresets],
+  )
+
   const reset = useCallback(() => {
     setDraft(initial)
     setError(null)
@@ -208,6 +232,8 @@ export function useScenarioEditor(opts: UseScenarioEditorOptions): UseScenarioEd
     setVariants,
     setFrequencyCap,
     setSchedule,
+    upliftPresets,
+    applyUpliftPreset,
     save,
     reset,
   }

@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react'
 import Link from 'next/link'
+import type { SemanticLinkRecommendation } from '@/lib/ml/pragmatic-ml-engine'
 
 interface HubPage {
   url: string
@@ -40,15 +41,23 @@ interface InternalLinksResponse {
 
 export default function SeoInternalLinksPage() {
   const [data, setData] = useState<InternalLinksResponse | null>(null)
+  const [semanticLinks, setSemanticLinks] = useState<SemanticLinkRecommendation[]>([])
   const [err, setErr] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch('/api/seo/internal-links')
-      .then((r) => r.json())
-      .then((j) => {
+    Promise.all([
+      fetch('/api/seo/internal-links').then((r) => r.json()),
+      fetch('/api/ml/insights')
+        .then((r) => r.json())
+        .catch(() => null),
+    ])
+      .then(([j, ml]) => {
         if (j.error && !j.structure) setErr(j.error)
         else setData(j)
+        if (ml?.ok && Array.isArray(ml.data?.semanticLinks)) {
+          setSemanticLinks(ml.data.semanticLinks)
+        }
       })
       .catch((e) => setErr(String(e)))
       .finally(() => setLoading(false))
@@ -212,6 +221,150 @@ export default function SeoInternalLinksPage() {
           </table>
         </div>
       </div>
+
+      {semanticLinks.length > 0 && (
+        <div
+          className="card"
+          style={{
+            marginBottom: 16,
+            border: '1.5px solid #c7d2fe',
+            background: '#fafbff',
+          }}
+        >
+          <div className="card-head">
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span
+                  style={{
+                    padding: '2px 8px',
+                    borderRadius: 999,
+                    background: '#4f46e5',
+                    color: '#fff',
+                    fontSize: 10.5,
+                    fontWeight: 700,
+                  }}
+                >
+                  Engine 4 · SBERT Cosine × PageRank × Louvain
+                </span>
+                <div className="card-title">
+                  意味ベクトル (SBERT) × PageRank 内部リンク推薦 (ML推奨リンクパス)
+                </div>
+              </div>
+              <div className="card-sub">
+                トピック意味類似度（Cosine Similarity）とPageRank権威勾配・孤立ページ/CVハブ役割を掛け合わせ、欠落している高ROI内部リンクを自動推薦します。
+              </div>
+            </div>
+          </div>
+
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>発リンク元 (Source Hub) → 着地先 (Target)</th>
+                <th>Louvain クラスター</th>
+                <th className="num">意味類似度</th>
+                <th className="num">権威移転スコア</th>
+                <th>推奨アンカーテキスト & 推薦根拠</th>
+              </tr>
+            </thead>
+            <tbody>
+              {semanticLinks.map((rec, idx) => (
+                <tr key={`${rec.sourceUrl}->${rec.targetUrl}-${idx}`}>
+                  <td>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#1e293b' }}>
+                      発: {rec.sourceTitle}
+                    </div>
+                    <div className="mono" style={{ fontSize: 11, color: '#64748b' }}>
+                      {rec.sourceUrl}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 700,
+                        color: '#2563eb',
+                        marginTop: 4,
+                      }}
+                    >
+                      → 着: {rec.targetTitle}
+                    </div>
+                    <div className="mono" style={{ fontSize: 11, color: '#3b82f6' }}>
+                      {rec.targetUrl}
+                    </div>
+                  </td>
+                  <td>
+                    <span
+                      style={{
+                        display: 'inline-block',
+                        padding: '2px 8px',
+                        borderRadius: 6,
+                        background: '#eef2ff',
+                        color: '#4338ca',
+                        fontSize: 11,
+                        fontWeight: 600,
+                      }}
+                    >
+                      {rec.clusterName}
+                    </span>
+                  </td>
+                  <td className="num">
+                    <span
+                      className="mono"
+                      style={{ fontWeight: 700, color: '#059669', fontSize: 12.5 }}
+                    >
+                      {(rec.cosineSimilarity * 100).toFixed(1)}%
+                    </span>
+                  </td>
+                  <td className="num">
+                    <span
+                      className="mono"
+                      style={{
+                        padding: '2px 8px',
+                        borderRadius: 999,
+                        background:
+                          rec.expectedCvrAndSeoImpact === 'high'
+                            ? '#dcfce7'
+                            : '#fef3c7',
+                        color:
+                          rec.expectedCvrAndSeoImpact === 'high'
+                            ? '#166534'
+                            : '#92400e',
+                        fontWeight: 800,
+                        fontSize: 11.5,
+                      }}
+                    >
+                      {rec.authorityTransferScore}/100 ({rec.expectedCvrAndSeoImpact.toUpperCase()})
+                    </span>
+                  </td>
+                  <td style={{ maxWidth: 380 }}>
+                    <div
+                      style={{
+                        fontSize: 11.5,
+                        fontWeight: 700,
+                        color: '#0f172a',
+                        background: '#f1f5f9',
+                        padding: '3px 8px',
+                        borderRadius: 4,
+                        display: 'inline-block',
+                      }}
+                    >
+                      推奨アンカー: 「{rec.recommendedAnchorText}」
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 11.5,
+                        color: 'var(--text-secondary)',
+                        marginTop: 4,
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      {rec.rationale}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-head">

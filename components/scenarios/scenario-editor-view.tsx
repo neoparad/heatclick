@@ -132,6 +132,50 @@ export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewP
               title="条件 (誰に発火するか)"
               meta="depth ≤ 5 / leaf ≤ 30 · AND/OR + 平坦 leaf 編集可"
             >
+              {/* ML Uplift Preset Bar */}
+              <div className="px-4 py-3 bg-indigo-50/60 border-b border-indigo-100">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <span className="text-xs font-bold text-indigo-950 flex items-center gap-1.5">
+                    🤖 ML Uplift（迷い・離脱予兆検知）プリセット
+                  </span>
+                  <span className="font-mono text-[10px] text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded">
+                    Sure Things（自発CV確実層）への過剰介入を自動除外
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {editor.upliftPresets.map((preset) => (
+                    <div
+                      key={preset.id}
+                      className="flex items-start justify-between gap-3 bg-white border border-indigo-200/80 rounded-md px-3 py-2 text-xs"
+                    >
+                      <div className="flex-1">
+                        <div className="font-semibold text-slate-900 flex items-center gap-1.5">
+                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-600 text-white">
+                            {preset.badge}
+                          </span>
+                          <span>{preset.label}</span>
+                        </div>
+                        <div className="text-[11px] text-slate-600 mt-0.5">
+                          {preset.expectedLiftNote}
+                        </div>
+                        <div className="text-[10.5px] text-indigo-800 mt-0.5">
+                          💡 {preset.whyExcludeSureThings}
+                        </div>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => editor.applyUpliftPreset(preset.id)}
+                        className="shrink-0 text-[11px] h-7 border-indigo-300 text-indigo-700 hover:bg-indigo-50"
+                      >
+                        条件に適用
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               <div className="px-4 py-3.5 bg-slate-50 border-b border-slate-100">
                 <ConditionVisualBuilder
                   ast={editor.draft.condition_ast}

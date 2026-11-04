@@ -5,6 +5,11 @@ import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import ConfidenceBadge from '@/components/aiseo/ConfidenceBadge'
 import { PageMeta } from '@/components/layout/page-meta'
+import { MlBottleneckSurvivalPanel } from '@/components/ml/ml-bottleneck-survival-panel'
+import type {
+  BottleneckAttributionResult,
+  KaplanMeierScrollSurvivalResult,
+} from '@/lib/ml/pragmatic-ml-engine'
 import type {
   AiAccessPageSummary,
   CrossDiagnosisItem,
@@ -174,14 +179,26 @@ function FusionViewInner() {
   const urlParam = searchParams.get('url') || 'https://link-th.com/entry/internal-link-optimization'
   const [days, setDays] = useState(30)
   const [data, setData] = useState<FusionApiResponse | null>(null)
+  const [mlInsights, setMlInsights] = useState<{
+    bottleneckAttribution: BottleneckAttributionResult
+    scrollSurvival: KaplanMeierScrollSurvivalResult
+    methodologyNote?: string
+  } | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     setLoading(true)
-    fetch(`/api/fusion/url-summary?url=${encodeURIComponent(urlParam)}&days=${days}`)
-      .then((r) => r.json())
-      .then((j) => {
-        setData(j)
+    Promise.all([
+      fetch(`/api/fusion/url-summary?url=${encodeURIComponent(urlParam)}&days=${days}`).then((r) =>
+        r.json(),
+      ),
+      fetch(`/api/ml/insights?url=${encodeURIComponent(urlParam)}`).then((r) => r.json()),
+    ])
+      .then(([fusionJson, mlJson]) => {
+        setData(fusionJson)
+        if (mlJson?.ok && mlJson.data) {
+          setMlInsights(mlJson.data)
+        }
         setLoading(false)
       })
       .catch(() => setLoading(false))
@@ -577,6 +594,15 @@ function FusionViewInner() {
           </div>
         </div>
       </div>
+
+      {/* Section 0.5: Pragmatic ML — SHAP Bottleneck Attribution & Kaplan-Meier Survival Analysis */}
+      {mlInsights && (
+        <MlBottleneckSurvivalPanel
+          bottleneckAttribution={mlInsights.bottleneckAttribution}
+          scrollSurvival={mlInsights.scrollSurvival}
+          methodologyNote={mlInsights.methodologyNote}
+        />
+      )}
 
       {/* Section 1: Deep Cross-Diagnosis Cards (行動×構造の掛け合わせ診断) */}
       <div className="card" style={{ marginBottom: 22 }}>
