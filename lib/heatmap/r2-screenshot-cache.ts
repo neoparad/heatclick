@@ -128,6 +128,59 @@ export interface HeatmapUnderlayWithR2 {
   tier: R2CacheTier
 }
 
+/**
+ * L1 (in-memory) / L2 (R2) キャッシュのみを照合し、キャッシュミス時は新規撮影を行わず null を返す。
+ *
+ * 用途:
+ *   1. `/api/heatmap/screenshot` で ClickHouse の重い 30 日イベントスキャンより前に
+ *      L1/R2 キャッシュヒット判定を先行実行する (キャッシュキー自体が tenantId/siteId スコープのため安全)。
+ *   2. `cache_only=1` (バックグラウンド先読み) で R2 に既にある場合のみ返し、
+ *      未撮影デバイスの新規撮影による Cloudflare Browser Rendering 429 自爆と Microlink 汚染を防ぐ。
+ */
+export async function lookupHeatmapUnderlayCacheOnly(
+  input: {
+    tenantId: string
+    siteId: string
+    pageUrl: string
+    device: HeatmapDevice
+  },
+  hooks: R2CacheHooks = {},
+): Promise<HeatmapUnderlayWithR2 | null> {
+  const now = hooks.now ?? (() => Date.now())
+  const cacheKey = buildCacheKey(input)
+  const r2 = resolveR2Config(hooks.r2Config)
+
+  // ── L1: in-memory ────────────────────────────────────────────────────────
+  const l1 = getMemoryCachedUnderlay(cacheKey)
+  if (l1) {
+    const served = await reSignR2Url(input, l1, r2)
+    return { capture: { ...served, cached: true }, tier: 'l1' }
+  }
+
+  if (!r2) {
+    return null
+  }
+
+  // ── L2: R2 lookup ─────────────────────────────────────────────────────────
+  const r2Hit = await readFromR2(input, r2, hooks.fetchImpl).catch(() => null)
+  if (r2Hit) {
+    const ageMs = now() - Date.parse(r2Hit.metadata.capturedAt)
+    const freshTtlMs =
+      r2Hit.metadata.provider === 'cloudflare' ? FRESH_TTL_MS : DEGRADED_FRESH_TTL_MS
+    if (Number.isFinite(ageMs) && ageMs <= freshTtlMs) {
+      setMemoryCachedUnderlay(cacheKey, r2Hit.capture)
+      return { capture: { ...r2Hit.capture, cached: true }, tier: 'r2-fresh' }
+    }
+    if (Number.isFinite(ageMs) && ageMs <= STALE_TTL_MS) {
+      setMemoryCachedUnderlay(cacheKey, r2Hit.capture)
+      scheduleRevalidate(input, cacheKey, r2, hooks, now)
+      return { capture: { ...r2Hit.capture, cached: true }, tier: 'r2-stale' }
+    }
+  }
+
+  return null
+}
+
 /** test / DI 用の hook (Redis lock + clock 差し替え) */
 export interface R2CacheHooks {
   /** 現在時刻 (TTL 判定) — default Date.now() */
@@ -163,6 +216,8 @@ export async function getHeatmapUnderlayWithR2Cache(
     siteId: string
     pageUrl: string
     device: HeatmapDevice
+    /** true の場合、L1/R2 キャッシュの読み取りをスキップして強制再撮影し R2 を上書きする */
+    forceRefresh?: boolean
   },
   hooks: R2CacheHooks = {},
 ): Promise<HeatmapUnderlayWithR2> {
@@ -170,13 +225,15 @@ export async function getHeatmapUnderlayWithR2Cache(
   const cacheKey = buildCacheKey(input)
   const r2 = resolveR2Config(hooks.r2Config)
 
-  // ── L1: in-memory ────────────────────────────────────────────────────────
-  const l1 = getMemoryCachedUnderlay(cacheKey)
-  if (l1) {
-    // 署名 GET URL は短命 (5min) だが L1 TTL はそれより長い。失効した署名URLを配らない
-    // よう、R2 由来 capture は毎ヒットで鍵から再署名する (CDN/data URL の degrade 分は据置)。
-    const served = await reSignR2Url(input, l1, r2)
-    return { capture: { ...served, cached: true }, tier: 'l1' }
+  if (!input.forceRefresh) {
+    // ── L1: in-memory ────────────────────────────────────────────────────────
+    const l1 = getMemoryCachedUnderlay(cacheKey)
+    if (l1) {
+      // 署名 GET URL は短命 (5min) だが L1 TTL はそれより長い。失効した署名URLを配らない
+      // よう、R2 由来 capture は毎ヒットで鍵から再署名する (CDN/data URL の degrade 分は据置)。
+      const served = await reSignR2Url(input, l1, r2)
+      return { capture: { ...served, cached: true }, tier: 'l1' }
+    }
   }
 
   // R2 未設定なら L2 を skip して degrade (L1-only capture)
@@ -185,24 +242,26 @@ export async function getHeatmapUnderlayWithR2Cache(
     return { capture, tier: 'degraded' }
   }
 
-  // ── L2: R2 lookup ─────────────────────────────────────────────────────────
-  const r2Hit = await readFromR2(input, r2, hooks.fetchImpl).catch(() => null)
-  if (r2Hit) {
-    const ageMs = now() - Date.parse(r2Hit.metadata.capturedAt)
-    // microlink (劣化 fallback) capture は fresh 窓を 1h に短縮 → SWR で自己修復
-    const freshTtlMs =
-      r2Hit.metadata.provider === 'cloudflare' ? FRESH_TTL_MS : DEGRADED_FRESH_TTL_MS
-    if (Number.isFinite(ageMs) && ageMs <= freshTtlMs) {
-      setMemoryCachedUnderlay(cacheKey, r2Hit.capture)
-      return { capture: { ...r2Hit.capture, cached: true }, tier: 'r2-fresh' }
+  if (!input.forceRefresh) {
+    // ── L2: R2 lookup ─────────────────────────────────────────────────────────
+    const r2Hit = await readFromR2(input, r2, hooks.fetchImpl).catch(() => null)
+    if (r2Hit) {
+      const ageMs = now() - Date.parse(r2Hit.metadata.capturedAt)
+      // microlink (劣化 fallback) capture は fresh 窓を 1h に短縮 → SWR で自己修復
+      const freshTtlMs =
+        r2Hit.metadata.provider === 'cloudflare' ? FRESH_TTL_MS : DEGRADED_FRESH_TTL_MS
+      if (Number.isFinite(ageMs) && ageMs <= freshTtlMs) {
+        setMemoryCachedUnderlay(cacheKey, r2Hit.capture)
+        return { capture: { ...r2Hit.capture, cached: true }, tier: 'r2-fresh' }
+      }
+      if (Number.isFinite(ageMs) && ageMs <= STALE_TTL_MS) {
+        // stale-while-revalidate: 即返しつつ background 再 capture (lock 尊重)
+        setMemoryCachedUnderlay(cacheKey, r2Hit.capture)
+        scheduleRevalidate(input, cacheKey, r2, hooks, now)
+        return { capture: { ...r2Hit.capture, cached: true }, tier: 'r2-stale' }
+      }
+      // staleTtl 超過 → fall through to synchronous capture
     }
-    if (Number.isFinite(ageMs) && ageMs <= STALE_TTL_MS) {
-      // stale-while-revalidate: 即返しつつ background 再 capture (lock 尊重)
-      setMemoryCachedUnderlay(cacheKey, r2Hit.capture)
-      scheduleRevalidate(input, cacheKey, r2, hooks, now)
-      return { capture: { ...r2Hit.capture, cached: true }, tier: 'r2-stale' }
-    }
-    // staleTtl 超過 → fall through to synchronous capture
   }
 
   // ── capture (synchronous), then PUT to R2 ──────────────────────────────────

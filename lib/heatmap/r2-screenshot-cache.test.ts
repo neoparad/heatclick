@@ -11,6 +11,7 @@
 import {
   buildR2Keys,
   getHeatmapUnderlayWithR2Cache,
+  lookupHeatmapUnderlayCacheOnly,
   type R2CacheHooks,
 } from './r2-screenshot-cache'
 import { _resetScreenshotMemoryCache } from './screenshot-provider'
@@ -357,6 +358,41 @@ describe('getHeatmapUnderlayWithR2Cache (tier selection + TTL/SWR)', () => {
       baseHooks(store, counters),
     )
     expect(resB.tier).toBe('capture')
+    expect(counters.microlink).toBe(2)
+  })
+
+  it('lookupHeatmapUnderlayCacheOnly returns null on miss without triggering capture', async () => {
+    const store: FakeR2Store = { objects: new Map() }
+    const counters = { microlink: 0 }
+    const miss = await lookupHeatmapUnderlayCacheOnly(INPUT, baseHooks(store, counters))
+    expect(miss).toBeNull()
+    expect(counters.microlink).toBe(0)
+
+    // Populate cache, then verify lookupHeatmapUnderlayCacheOnly hits L1 and R2
+    await getHeatmapUnderlayWithR2Cache(INPUT, baseHooks(store, counters))
+    expect(counters.microlink).toBe(1)
+
+    const hitL1 = await lookupHeatmapUnderlayCacheOnly(INPUT, baseHooks(store, counters))
+    expect(hitL1?.tier).toBe('l1')
+    expect(counters.microlink).toBe(1)
+
+    _resetScreenshotMemoryCache()
+    const hitR2 = await lookupHeatmapUnderlayCacheOnly(INPUT, baseHooks(store, counters))
+    expect(hitR2?.tier).toBe('r2-fresh')
+    expect(counters.microlink).toBe(1)
+  })
+
+  it('forceRefresh bypasses L1 and R2 cache and triggers a fresh capture', async () => {
+    const store: FakeR2Store = { objects: new Map() }
+    const counters = { microlink: 0 }
+    await getHeatmapUnderlayWithR2Cache(INPUT, baseHooks(store, counters))
+    expect(counters.microlink).toBe(1)
+
+    const refreshed = await getHeatmapUnderlayWithR2Cache(
+      { ...INPUT, forceRefresh: true },
+      baseHooks(store, counters),
+    )
+    expect(refreshed.tier).toBe('capture')
     expect(counters.microlink).toBe(2)
   })
 })

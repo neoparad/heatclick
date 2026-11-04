@@ -61,6 +61,10 @@ const SCROLL_STEP_DELAY_MS = 90;
 /** JPEG quality (matches the main app SCREENSHOT_QUALITY). */
 const JPEG_QUALITY = 75;
 
+/** 長尺ページ (20,000px 超) 用 JPEG quality — メモリ・転送サイズ爆発を防ぐ。 */
+const LONG_PAGE_JPEG_QUALITY = 70;
+const LONG_PAGE_HEIGHT_THRESHOLD_PX = 20_000;
+
 /**
  * 続133 (本番空白画像の根本 fix): 撮影の最大ピクセル面積。
  *
@@ -69,10 +73,11 @@ const JPEG_QUALITY = 75;
  *   lazy 画像が空白、というのが「画像が表示されない」の正体 (ローカル実走査で確定)。
  *
  * 対策: 面積上限を設け、超過時は上端から `MAX_CAPTURE_AREA_PX / width` 高さに clip する。
- *   width=1280 → 約 20,300px、width=390(SP) → 約 66,000px (実質無制限) と幅に応じて適応。
+ *   MAX_CAPTURE_AREA_PX = 48_000_000 により、width=1280(PC) → 37,500px、width=390(SP) → 50,000px+ フルカバー。
+ *   さらに高さ 20,000px 超の長尺ページでは JPEG quality を自動的に 70 に調整してメモリ・転送サイズ爆発を防ぐ。
  *   超過ページは「上部のみ画像 + 以深はヒートマップを全域描画」(アプリ側 続131 ガードが処理)。
  */
-const MAX_CAPTURE_AREA_PX = 26_000_000;
+const MAX_CAPTURE_AREA_PX = 48_000_000;
 
 /** autoScroll の最大走査高さ (px)。これ以上は撮影対象外なのでスクロールも打ち切る。 */
 const MAX_SCROLL_PX = 60_000;
@@ -455,14 +460,16 @@ export default {
       const maxHeightByArea = Math.floor(MAX_CAPTURE_AREA_PX / parsed.width);
       const capHeight = Math.min(fullHeight, maxHeightByArea);
       const capped = fullHeight > capHeight;
+      const effectiveQuality =
+        capHeight > LONG_PAGE_HEIGHT_THRESHOLD_PX ? LONG_PAGE_JPEG_QUALITY : JPEG_QUALITY;
 
       const screenshotBytes = capped
         ? await page.screenshot({
             type: 'jpeg',
-            quality: JPEG_QUALITY,
+            quality: effectiveQuality,
             clip: { x: 0, y: 0, width: parsed.width, height: capHeight },
           })
-        : await page.screenshot({ fullPage: true, type: 'jpeg', quality: JPEG_QUALITY });
+        : await page.screenshot({ fullPage: true, type: 'jpeg', quality: effectiveQuality });
 
       const bytes =
         screenshotBytes instanceof Uint8Array

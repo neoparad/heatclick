@@ -19,6 +19,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { promises as dnsPromises } from 'node:dns'
 import { isIP } from 'node:net'
 
 import { readImageDimensions } from '@/lib/heatmap/image-dimensions'
@@ -84,9 +85,14 @@ const MICROLINK_CDN_HOSTS: ReadonlyArray<string> = [
   'microlink-img-cdn.imgix.net',
 ]
 
-/** screenshot 画像の最小 / 最大 px (provider 応答 sanitize 用) */
+/** screenshot 画像の最小 / 最大 px (provider 応答 sanitize 用。Worker MAX_CAPTURE_AREA_PX=48_000_000 で SP 390px 幅のとき最大 ~123,076px まで取り得るため 130_000 に設定) */
 const SCREENSHOT_DIM_MIN = 16
-const SCREENSHOT_DIM_MAX = 50_000
+const SCREENSHOT_DIM_MAX = 130_000
+
+/** Worker `MAX_CAPTURE_AREA_PX` と同期した最大キャプチャ面積 (48M px = PC 1280px 幅で 37,500px 高までカバー) */
+export const MAX_CAPTURE_AREA_PX = 48_000_000
+/** 長尺ページ (> 20,000px) での自動 JPEG quality 引き下げ設定 */
+export const LONG_PAGE_JPEG_QUALITY = 70
 
 /**
  * device → capture viewport width (Microlink `viewport.width`)。
@@ -172,6 +178,10 @@ export function validateExternalUrl(rawUrl: string): URL {
   if (host.startsWith('[') && host.endsWith(']')) {
     host = host.slice(1, -1)
   }
+  // Strip trailing DNS root dot so "localhost." / "metadata.google.internal." cannot bypass
+  if (host.endsWith('.')) {
+    host = host.slice(0, -1)
+  }
   // 直接 IP 文字列の場合
   const ipVersion = isIP(host)
   if (ipVersion === 4) {
@@ -188,6 +198,82 @@ export function validateExternalUrl(rawUrl: string): URL {
     }
   }
   return parsed
+}
+
+export type DnsLookupAllFn = (
+  hostname: string,
+  options: { all: true },
+) => Promise<ReadonlyArray<{ address: string; family: number }>>
+
+/**
+ * DNS Rebinding SSRF guard: 文字列ベースの `validateExternalUrl` に加えて、
+ * `dns.promises.lookup(hostname, { all: true })` で解決された全 IPv4/IPv6 アドレスが
+ * プライベートIP・ループバック・リンクローカル・クラウドメタデータIPでないことを検証する。
+ */
+export async function validateExternalUrlResolved(
+  rawUrl: string,
+  lookupFn: DnsLookupAllFn = (h, opts) => dnsPromises.lookup(h, opts),
+): Promise<URL> {
+  const parsed = validateExternalUrl(rawUrl)
+  let host = parsed.hostname.toLowerCase()
+  if (host.startsWith('[') && host.endsWith(']')) {
+    host = host.slice(1, -1)
+  }
+  if (host.endsWith('.')) {
+    host = host.slice(0, -1)
+  }
+
+  // 既に IP リテラルの場合は validateExternalUrl で検証済み
+  if (isIP(host) !== 0) {
+    return parsed
+  }
+
+  let records: ReadonlyArray<{ address: string; family: number }>
+  try {
+    records = await lookupFn(host, { all: true })
+  } catch (err) {
+    throw new ScreenshotProviderError(
+      'BLOCKED_URL',
+      `DNS resolution failed for hostname ${host}: ${err instanceof Error ? err.message : 'unknown'}`,
+    )
+  }
+
+  if (!records || records.length === 0) {
+    throw new ScreenshotProviderError(
+      'BLOCKED_URL',
+      `DNS resolution returned no addresses for hostname: ${host}`,
+    )
+  }
+
+  for (const rec of records) {
+    const addr = (rec.address ?? '').trim().toLowerCase()
+    if (!addr || isPrivateOrSpecialIpAddress(addr)) {
+      throw new ScreenshotProviderError(
+        'BLOCKED_URL',
+        `DNS resolved to private/blocked IP (${addr || 'empty'}) for hostname: ${host}`,
+      )
+    }
+  }
+
+  return parsed
+}
+
+export function isPrivateOrSpecialIpAddress(ipRaw: string): boolean {
+  let ip = ipRaw.trim().toLowerCase()
+  if (ip.startsWith('[') && ip.endsWith(']')) {
+    ip = ip.slice(1, -1)
+  }
+  // Strip IPv6 zone index if present (e.g. fe80::1%eth0)
+  const pctIdx = ip.indexOf('%')
+  if (pctIdx >= 0) {
+    ip = ip.slice(0, pctIdx)
+  }
+  const ver = isIP(ip)
+  if (ver === 4) return isPrivateOrSpecialIPv4(ip)
+  if (ver === 6) return isPrivateOrSpecialIPv6(ip)
+  // URL parser normalizes `::ffff:127.0.0.1` to `::ffff:7f00:1`, handle both forms
+  if (ip.includes(':')) return isPrivateOrSpecialIPv6(ip)
+  return true
 }
 
 function isPrivateOrSpecialIPv4(ip: string): boolean {
@@ -213,15 +299,40 @@ function isPrivateOrSpecialIPv4(ip: string): boolean {
 }
 
 function isPrivateOrSpecialIPv6(ip: string): boolean {
-  const lower = ip.toLowerCase()
-  if (lower === '::1' || lower === '::') return true
-  if (lower.startsWith('fc') || lower.startsWith('fd')) return true // ULA
-  if (lower.startsWith('fe80')) return true // link-local
-  if (lower.startsWith('ff')) return true // multicast
+  let lower = ip.toLowerCase()
+  const pctIdx = lower.indexOf('%')
+  if (pctIdx >= 0) {
+    lower = lower.slice(0, pctIdx)
+  }
+  if (lower === '::1' || lower === '::' || /^0+(:0+)*:0*1$/.test(lower) || /^0+(:0+)+$/.test(lower)) {
+    return true
+  }
+  if (lower.startsWith('fc') || lower.startsWith('fd')) return true // ULA fc00::/7
+  if (
+    lower.startsWith('fe8') ||
+    lower.startsWith('fe9') ||
+    lower.startsWith('fea') ||
+    lower.startsWith('feb')
+  ) {
+    return true // link-local fe80::/10
+  }
+  if (lower.startsWith('ff')) return true // multicast ff00::/8
   if (lower.startsWith('::ffff:')) {
-    // IPv4-mapped, validate inner IPv4
+    // IPv4-mapped: dotted-quad (`::ffff:127.0.0.1`) or hex (`::ffff:7f00:1` / `::ffff:7f00:0001`)
     const inner = lower.slice('::ffff:'.length)
-    return isPrivateOrSpecialIPv4(inner)
+    if (inner.includes('.')) {
+      return isPrivateOrSpecialIPv4(inner)
+    }
+    const hexParts = inner.split(':')
+    if (hexParts.length === 2) {
+      const hi = Number.parseInt(hexParts[0] ?? '', 16)
+      const lo = Number.parseInt(hexParts[1] ?? '', 16)
+      if (!Number.isNaN(hi) && !Number.isNaN(lo) && hi >= 0 && hi <= 0xffff && lo >= 0 && lo <= 0xffff) {
+        const ipv4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`
+        return isPrivateOrSpecialIPv4(ipv4)
+      }
+    }
+    return true
   }
   return false
 }

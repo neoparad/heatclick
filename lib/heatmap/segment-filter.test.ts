@@ -4,7 +4,7 @@
  * returning / new の判定方向を固定する。
  */
 
-import { segmentFilterSql } from './segment-filter'
+import { actorFilterSql, segmentFilterSql } from './segment-filter'
 
 describe('segmentFilterSql', () => {
   it('all は空文字 (絞り込みなし)', () => {
@@ -66,5 +66,28 @@ describe('segmentFilterSql', () => {
     const neu = segmentFilterSql('new')
     // new の '>=' を '<' に戻すと returning と一致する
     expect(neu.replace('first_seen >= ', 'first_seen < ')).toBe(ret)
+  })
+
+  it('actor 指定時はサブクエリにも is_agent 条件が含まれる', () => {
+    for (const seg of ['deep_read', 'bounce', 'ad', 'returning', 'new'] as const) {
+      expect(segmentFilterSql(seg, 'human')).toContain('AND is_agent = 0')
+      expect(segmentFilterSql(seg, 'agent')).toContain('AND is_agent = 1')
+      expect(segmentFilterSql(seg, 'all')).not.toContain('is_agent')
+    }
+  })
+})
+
+describe('actorFilterSql', () => {
+  it('human (default) は AND is_agent = 0 を返す', () => {
+    expect(actorFilterSql()).toBe('AND is_agent = 0')
+    expect(actorFilterSql('human')).toBe('AND is_agent = 0')
+  })
+
+  it('agent は AND is_agent = 1 を返す', () => {
+    expect(actorFilterSql('agent')).toBe('AND is_agent = 1')
+  })
+
+  it('all は空文字を返す', () => {
+    expect(actorFilterSql('all')).toBe('')
   })
 })

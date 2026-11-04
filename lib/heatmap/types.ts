@@ -21,6 +21,8 @@ export type SideTab = 'hotspots' | 'negative' | 'signals' | 'structure' | 'summa
 
 export type DeviceKind = 'pc' | 'sp' | 'tab'
 
+export type HeatmapActor = 'human' | 'agent' | 'all'
+
 export type BlobMode = 'click' | 'attention' | 'emotion'
 
 export type BlobSeverity = 'normal' | 'strong'
@@ -191,6 +193,30 @@ export interface PageIssueItem {
   recommendation: string
 }
 
+/**
+ * Task 5: AIエージェント・ヒートマップ用 セクション別 AI 可読性・注目度オーバーレイ帯 (AI Attention Bands)。
+ * 座標 (top, height) は capture CSS px 空間 (overlay 側で displayScale を掛ける)。
+ */
+export interface AiAttentionBand {
+  id: string
+  label: string
+  headingTag: string
+  /** ページ上端からの開始割合 (0-100) */
+  yStartPct: number
+  /** ページ上端からの終了割合 (0-100) */
+  yEndPct: number
+  /** capture CSS px 空間での上端位置 */
+  top: number
+  /** capture CSS px 空間での帯の高さ */
+  height: number
+  /** AI可読性・抽出注目度スコア [0, 1] */
+  extractabilityScore: number
+  /** Confidence [0, 1] */
+  confidence: number
+  evidenceLevel: 'observed' | 'inferred'
+  note: string
+}
+
 export interface HeatmapViewModel {
   blobs: HeatBlob[]
   tags: HeatTag[]
@@ -210,6 +236,8 @@ export interface HeatmapViewModel {
   imageSpots: ImageSpot[]
   /** 続126 ★: クロール由来 issue (構造タブ) */
   pageIssues: PageIssueItem[]
+  /** Task 5: AIエージェント・ヒートマップ セクション別AI注目度帯 */
+  aiAttentionBands?: AiAttentionBand[]
 }
 
 /**

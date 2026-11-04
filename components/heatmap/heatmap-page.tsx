@@ -33,7 +33,14 @@ import {
   type HeatmapPoint,
   type HeatmapSegment,
   type HeatmapTile,
+  type HeatmapTileMeta,
 } from '@/lib/api/heatmap'
+import {
+  fetchAllHeatmapTilesForActor,
+  fetchHeatmapElementsForActor,
+  type AgentHeatmapElementsData,
+} from '@/lib/heatmap/agent-heatmap-client'
+import type { HeatmapActor } from '@/lib/heatmap/types'
 
 // 直接 import (旧: dynamic({ssr:false}))。本コンポーネントは route 側で既に ssr:false の
 // 配下にあり、二重 dynamic は client チャンクの待ちを増やすだけで利点が無いため統合。
@@ -327,6 +334,65 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
     segment,
   })
 
+  // Task 5: AIエージェント・ヒートマップ actor ('human' | 'agent') state & fetch
+  const [actor, setActor] = useState<HeatmapActor>('human')
+  const [agentTiles, setAgentTiles] = useState<HeatmapTile[]>([])
+  const [agentMeta, setAgentMeta] = useState<HeatmapTileMeta | null>(null)
+  const [agentElements, setAgentElements] = useState<AgentHeatmapElementsData | null>(null)
+  const [agentLoading, setAgentLoading] = useState(false)
+  const [agentError, setAgentError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (actor === 'human') return
+    const ctrl = new AbortController()
+    setAgentLoading(true)
+    setAgentError(null)
+
+    Promise.all([
+      fetchAllHeatmapTilesForActor(
+        {
+          ...heatmapQuery,
+          actor,
+        },
+        ctrl.signal,
+      ),
+      fetchHeatmapElementsForActor(
+        {
+          site_id: siteId,
+          page_url: pageUrl,
+          start_date: dateRange.start,
+          end_date: dateRange.end,
+          device_type: deviceFilter,
+          segment,
+          actor,
+        },
+        ctrl.signal,
+      ),
+    ])
+      .then(([tileRes, elRes]) => {
+        if (ctrl.signal.aborted) return
+        setAgentTiles(tileRes.tiles)
+        setAgentMeta(tileRes.meta)
+        setAgentError(tileRes.error)
+        setAgentElements(elRes)
+        setAgentLoading(false)
+      })
+      .catch((err: unknown) => {
+        if (ctrl.signal.aborted) return
+        setAgentError(err instanceof Error ? err.message : 'AI Agent heatmap fetch failed')
+        setAgentLoading(false)
+      })
+
+    return () => ctrl.abort()
+  }, [actor, heatmapQuery, siteId, pageUrl, dateRange.start, dateRange.end, deviceFilter, segment])
+
+  const effectiveTiles = actor === 'human' ? tiles : agentTiles
+  const effectiveMeta = actor === 'human' ? meta : agentMeta
+  const effectiveElements = actor === 'human' ? elements : agentElements
+  const effectiveLoading = actor === 'human' ? loading : agentLoading
+  const effectiveError = actor === 'human' ? error : agentError
+  const effectiveHasMore = actor === 'human' ? hasMore : false
+
   return (
     <div className="relative space-y-3">
       {/*
@@ -430,19 +496,21 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
         onLayerChange={setLayer}
         siteId={siteId}
         pageUrl={pageUrl}
-        tiles={tiles}
-        loading={loading}
-        hasMore={hasMore}
-        pageHeightEstimate={pageHeightEstimate}
-        meta={meta}
-        error={error}
+        tiles={effectiveTiles}
+        loading={effectiveLoading}
+        hasMore={effectiveHasMore}
+        pageHeightEstimate={effectiveMeta?.page_height_estimate ?? pageHeightEstimate}
+        meta={effectiveMeta}
+        error={effectiveError}
         loadMore={loadMore}
         pvLabel={statsLabels.pvLabel}
         ctrLabel={statsLabels.ctrLabel}
         scrollLabel={statsLabels.scrollLabel}
-        elements={elements}
+        elements={effectiveElements}
         device={device}
         onDeviceChange={setDevice}
+        actor={actor}
+        onActorChange={setActor}
         onHotspotSelect={(point, tile) => setSelected({ point, tile })}
       />
 

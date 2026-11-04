@@ -28,6 +28,7 @@ import { MOCKUP_VIEW_MODEL } from '@/lib/fixtures/heatmap-mockup'
 import { MOCK_PAGE_HEIGHT, PAGE_WIDTH } from '@/lib/heatmap/mockup-spec'
 import { logNormalize } from '@/lib/heatmap/normalize'
 import type {
+  AiAttentionBand,
   EmotionDistribution,
   HeatBlob,
   HeatTag,
@@ -246,6 +247,7 @@ function emptyViewModel(): HeatmapViewModel {
     negativeSpots: [],
     imageSpots: [],
     pageIssues: [],
+    aiAttentionBands: [],
   }
 }
 
@@ -350,6 +352,7 @@ function buildScrollReachBands(
 
   // 連続バンド (0,5,…,95)。疎なバケットで帯が抜けないよう各深度の到達率を必ず算出する。
   // reach(s) = (最深 % が s 以上のセッション = key>=s の合計) / 全セッション。単調減少。
+  // Task 3.2: 最終スロット (s=95, 95%〜100%) は targetHeight - top としてページ最下部 (100%) まで隙間なく到達させる。
   const bands: ScrollReachBand[] = []
   for (let s = 0; s < 100; s += SCROLL_BIN_PCT) {
     let reachingAtLeast = 0
@@ -357,9 +360,14 @@ function buildScrollReachBands(
       if (pct >= s) reachingAtLeast += sessions
     }
     const reach = reachingAtLeast / total
+    const top = Math.round((s / 100) * targetHeight)
+    const isLastSlot = s + SCROLL_BIN_PCT >= 100
+    const height = isLastSlot
+      ? Math.max(4, targetHeight - top)
+      : Math.max(4, Math.round((SCROLL_BIN_PCT / 100) * targetHeight))
     bands.push({
-      top: Math.round((s / 100) * targetHeight),
-      height: Math.max(4, Math.round((SCROLL_BIN_PCT / 100) * targetHeight)),
+      top,
+      height,
       reach,
       reachLabel: `${Math.round(reach * 100)}%`,
     })
@@ -384,31 +392,40 @@ function buildExitRows(
 
   const targetHeight = ctx ? ctx.pageHeight : MOCK_PAGE_HEIGHT
 
-  // 深度%バケット (0..100) → セッション数 (dropoff count)
+  // 深度%バケット (0..95) → セッション数 (dropoff count)
+  // SQL の `least(100, intDiv(max_pct, 5) * 5)` で 100% 到達セッションが y=100 で返った場合も、
+  // 最下部スロット (95%〜100% 帯 = key 95) に統合して描画が途切れないようにする。
   const bins = new Map<number, number>()
   let totalSessions = 0
   for (const tile of tiles) {
     for (const p of tile.points) {
-      const pct = Math.max(0, Math.min(100, Math.round(p.y)))
-      bins.set(pct, (bins.get(pct) ?? 0) + p.sessions)
+      const rawPct = Math.max(0, Math.min(100, Math.round(p.y)))
+      const slotPct = rawPct >= 95 ? 95 : Math.floor(rawPct / SCROLL_BIN_PCT) * SCROLL_BIN_PCT
+      bins.set(slotPct, (bins.get(slotPct) ?? 0) + p.sessions)
       totalSessions += p.sessions
     }
   }
 
   if (bins.size === 0 || totalSessions === 0) return []
 
-  // 続125 ② (Owner: 「途中で切れる」): 観測バケットだけでなく **0..95% の全スロット**を
-  // 連続で出す (データ無しスロットは dropoff=0)。描画が構造的に全高をカバーし、
-  // 「切れて見える」状態を作れなくする。
+  // 続125 ② (Owner: 「途中で切れる」) + Task 3.2: 観測バケットだけでなく **0..95% (95%〜100% 終端含む) の全スロット**を
+  // 連続で出す (データ無しスロットは dropoff=0)。
+  // 最終スロット (s=95) は 95% バケットと 100% バケット (least(100, intDiv(max_pct,5)*5)) を合算し、
+  // 高さも targetHeight - top としてページ最下部 (100%) まで正確にカバーする。
   const rows: import('@/lib/heatmap/types').ExitRow[] = []
   for (let s = 0; s < 100; s += SCROLL_BIN_PCT) {
-    const sessions = bins.get(s) ?? 0
+    const isLastSlot = s + SCROLL_BIN_PCT >= 100
+    const sessions = (bins.get(s) ?? 0) + (isLastSlot ? (bins.get(100) ?? 0) : 0)
     const dropoff = sessions / totalSessions
     const level: import('@/lib/heatmap/types').ExitRow['level'] =
       dropoff >= 0.3 ? 'hi' : dropoff >= 0.15 ? 'mid' : dropoff >= 0.05 ? 'lo' : 'ok'
+    const top = Math.round((s / 100) * targetHeight)
+    const height = isLastSlot
+      ? Math.max(4, targetHeight - top)
+      : Math.max(4, Math.round((SCROLL_BIN_PCT / 100) * targetHeight))
     rows.push({
-      top: Math.round((s / 100) * targetHeight),
-      height: Math.max(4, Math.round((SCROLL_BIN_PCT / 100) * targetHeight)),
+      top,
+      height,
       sectionLabel: `${s}%`,
       exitPct: `${Math.round(dropoff * 100)}%`,
       level,
@@ -673,6 +690,54 @@ function buildSignalExtras(
   return { signals, signalCards }
 }
 
+interface RawAiAttentionBandDto {
+  id: string
+  label: string
+  headingTag: string
+  yStartPct: number
+  yEndPct: number
+  yPx: number | null
+  extractabilityScore: number
+  confidence: number
+  evidenceLevel: 'observed' | 'inferred'
+  note: string
+}
+
+/**
+ * Task 5: `/api/heatmap/elements` の `ai_attention_bands` を capture CSS px 空間の AiAttentionBand 配列に変換する。
+ */
+function buildScaledAiAttentionBands(
+  elements: HeatmapElementsData | null | undefined,
+  ctx?: HeatmapCoordinateContext,
+): AiAttentionBand[] {
+  const rawBands = (elements as (HeatmapElementsData & { ai_attention_bands?: RawAiAttentionBandDto[] }) | null | undefined)?.ai_attention_bands
+  if (!Array.isArray(rawBands) || rawBands.length === 0) return []
+
+  const targetHeight = ctx ? ctx.pageHeight : MOCK_PAGE_HEIGHT
+  return rawBands.map((b, i) => {
+    const yStartPct = Math.max(0, Math.min(99, Number(b.yStartPct) || 0))
+    const yEndPct = Math.max(yStartPct + 1, Math.min(100, Number(b.yEndPct) || yStartPct + 20))
+    const top = Math.round((yStartPct / 100) * targetHeight)
+    const isLast = yEndPct >= 100 || i === rawBands.length - 1
+    const height = isLast && yEndPct >= 100
+      ? Math.max(24, targetHeight - top)
+      : Math.max(24, Math.round(((yEndPct - yStartPct) / 100) * targetHeight))
+    return {
+      id: b.id || `ai-band-${i + 1}`,
+      label: b.label || `セクション #${i + 1}`,
+      headingTag: b.headingTag || 'H2',
+      yStartPct,
+      yEndPct,
+      top,
+      height,
+      extractabilityScore: Math.max(0, Math.min(1, Number(b.extractabilityScore) || 0.7)),
+      confidence: Math.max(0, Math.min(1, Number(b.confidence) || 0.75)),
+      evidenceLevel: b.evidenceLevel === 'observed' ? 'observed' : 'inferred',
+      note: b.note || '',
+    }
+  })
+}
+
 export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
   // 「real」とみなすのは meta.data_source が明示的に 'clickhouse_events' の時のみ。
   // 未定義 (legacy deploy) や 'dummy_lcg' は fixture parity に倒す。
@@ -707,12 +772,14 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
   // 続126 ⑤/★: 画像視認スポット + クロール issue も全 real layer に同梱
   const imageSpots = buildImageSpots(opts.elements, pageY, opts.coordinateContext, pageSessions)
   const pageIssues = opts.elements?.issues ?? []
+  const aiAttentionBands = buildScaledAiAttentionBands(opts.elements, opts.coordinateContext)
   const elementExtras = {
     ...signalExtras,
     hotspotCards: elementCards,
     negativeSpots,
     imageSpots,
     pageIssues,
+    aiAttentionBands,
   }
 
   // ── read (熟読 / attention) ─────────────────────────────────────────────
@@ -783,5 +850,6 @@ export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
     negativeSpots,
     imageSpots,
     pageIssues,
+    aiAttentionBands,
   }
 }

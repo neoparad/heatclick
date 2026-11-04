@@ -7,12 +7,16 @@
 
 import {
   CAPTURE_WIDTH_FOR_DEVICE,
+  LONG_PAGE_JPEG_QUALITY,
+  MAX_CAPTURE_AREA_PX,
   ScreenshotProviderError,
   _resetScreenshotMemoryCache,
   buildCacheKey,
   canonicalizePageUrl,
   fetchHeatmapUnderlay,
+  isPrivateOrSpecialIpAddress,
   validateExternalUrl,
+  validateExternalUrlResolved,
 } from './screenshot-provider'
 
 describe('validateExternalUrl (SSRF guard)', () => {
@@ -68,6 +72,99 @@ describe('validateExternalUrl (SSRF guard)', () => {
 
   it('rejects malformed URL', () => {
     expect(() => validateExternalUrl('not a url')).toThrow(/valid absolute URL/)
+  })
+})
+
+describe('validateExternalUrlResolved & isPrivateOrSpecialIpAddress (DNS Rebinding SSRF guard)', () => {
+  it.each([
+    '127.0.0.1',
+    '127.255.255.254',
+    '10.0.0.1',
+    '10.255.255.255',
+    '172.16.0.1',
+    '172.31.255.254',
+    '192.168.0.1',
+    '192.168.255.254',
+    '169.254.169.254', // AWS/GCP cloud metadata
+    '169.254.0.1',
+    '0.0.0.0',
+    '0.1.2.3',
+    '::1',
+    'fc00::1',
+    'fd12:3456:789a::1',
+    'fe80::1',
+    'fe80::1%eth0',
+    '::ffff:127.0.0.1',
+    '::ffff:10.0.0.1',
+    '::ffff:172.16.5.4',
+    '::ffff:192.168.1.10',
+    '::ffff:169.254.169.254',
+    '::ffff:7f00:1', // hex form of ::ffff:127.0.0.1
+    '::ffff:a9fe:a9fe', // hex form of ::ffff:169.254.169.254
+  ])('isPrivateOrSpecialIpAddress detects forbidden IP: %s', (ip) => {
+    expect(isPrivateOrSpecialIpAddress(ip)).toBe(true)
+  })
+
+  it.each([
+    '93.184.216.34',
+    '8.8.8.8',
+    '172.15.255.255',
+    '172.32.0.1',
+    '2606:2800:220:1:248:1893:25c8:1946',
+  ])('isPrivateOrSpecialIpAddress allows public IP: %s', (ip) => {
+    expect(isPrivateOrSpecialIpAddress(ip)).toBe(false)
+  })
+
+  it('accepts URL when DNS resolves only to public IPv4/IPv6 addresses', async () => {
+    const u = await validateExternalUrlResolved('https://bihadashop.jp/entry/foo', async () => [
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:2800:220:1:248:1893:25c8:1946', family: 6 },
+    ])
+    expect(u.hostname).toBe('bihadashop.jp')
+  })
+
+  it.each([
+    '127.0.0.1',
+    '10.0.0.5',
+    '172.16.0.10',
+    '192.168.1.1',
+    '169.254.169.254',
+    '0.0.0.0',
+    '::1',
+    'fc00::1',
+    'fe80::1',
+    '::ffff:127.0.0.1',
+    '::ffff:10.0.0.1',
+    '::ffff:172.16.0.1',
+    '::ffff:192.168.1.1',
+    '::ffff:169.254.169.254',
+  ])('rejects DNS rebinding when domain resolves to private/metadata IP: %s', async (resolvedIp) => {
+    await expect(
+      validateExternalUrlResolved('https://rebind.attacker.example/page', async () => [
+        { address: resolvedIp, family: resolvedIp.includes(':') ? 6 : 4 },
+      ]),
+    ).rejects.toMatchObject({ code: 'BLOCKED_URL' })
+  })
+
+  it('rejects when multi-record DNS lookup includes even one private IP', async () => {
+    await expect(
+      validateExternalUrlResolved('https://dual.attacker.example/page', async () => [
+        { address: '93.184.216.34', family: 4 },
+        { address: '169.254.169.254', family: 4 },
+      ]),
+    ).rejects.toMatchObject({ code: 'BLOCKED_URL' })
+  })
+
+  it('rejects when DNS lookup fails or returns empty list', async () => {
+    await expect(
+      validateExternalUrlResolved('https://nxdomain.example/page', async () => {
+        throw new Error('ENOTFOUND')
+      }),
+    ).rejects.toMatchObject({ code: 'BLOCKED_URL' })
+
+    await expect(
+      validateExternalUrlResolved('https://empty.example/page', async () => []),
+    ).rejects.toMatchObject({ code: 'BLOCKED_URL' })
   })
 })
 

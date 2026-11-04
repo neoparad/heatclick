@@ -15,11 +15,14 @@
  *   ❌ URL bar (続 116 撤去)
  */
 
-import type { DeviceKind } from '@/lib/heatmap/types'
+import type { DeviceKind, HeatmapActor } from '@/lib/heatmap/types'
 
 interface HeatmapToolbarProps {
   device: DeviceKind
   onDeviceChange: (d: DeviceKind) => void
+  /** Task 5: 人間 / AIエージェント アクター切替 */
+  actor?: HeatmapActor
+  onActorChange?: (actor: 'human' | 'agent') => void
   pvLabel?: string
   ctrLabel?: string
   /** 滞在時間 (legacy label、Phase 2 では未配線・将来 hook で実値) */
@@ -71,6 +74,8 @@ const DEVICES: ReadonlyArray<{ key: DeviceKind; label: string; icon: JSX.Element
 export function HeatmapToolbar({
   device,
   onDeviceChange,
+  actor = 'human',
+  onActorChange,
   pvLabel,
   ctrLabel,
   dwellLabel,
@@ -84,7 +89,7 @@ export function HeatmapToolbar({
   return (
     <div
       data-testid="heatmap-toolbar"
-      className="flex items-center gap-2.5 border-b border-[var(--ug-border)] px-3.5 py-2.5"
+      className="flex flex-wrap items-center gap-2.5 border-b border-[var(--ug-border)] px-3.5 py-2.5"
       style={{ background: 'var(--ug-panel-2, #fbfbfc)' }}
     >
       <div
@@ -114,6 +119,47 @@ export function HeatmapToolbar({
             </button>
           )
         })}
+      </div>
+
+      {/* Task 5: アクター切替スイッチ [👤 人間 (Human)] [🤖 AIエージェント (AI Agent)] */}
+      <div
+        role="radiogroup"
+        aria-label="アクター選択 (人間 / AIエージェント)"
+        data-testid="actor-toggle-group"
+        className="inline-flex shrink-0 overflow-hidden rounded-md border border-[var(--ug-border)] bg-white"
+      >
+        <button
+          type="button"
+          role="radio"
+          aria-checked={actor === 'human'}
+          data-testid="actor-tab-human"
+          onClick={() => onActorChange?.('human')}
+          className={
+            'inline-flex items-center gap-1 border-r border-[var(--ug-border)] px-2.5 py-1.5 text-[11.5px] transition ' +
+            (actor === 'human'
+              ? 'bg-[var(--ug-bg-2)] font-semibold text-[var(--ug-text)]'
+              : 'text-[var(--ug-text-2)] hover:bg-[var(--ug-bg-subtle)]')
+          }
+        >
+          <span aria-hidden>👤</span>
+          <span>人間 (Human)</span>
+        </button>
+        <button
+          type="button"
+          role="radio"
+          aria-checked={actor === 'agent'}
+          data-testid="actor-tab-agent"
+          onClick={() => onActorChange?.('agent')}
+          className={
+            'inline-flex items-center gap-1 px-2.5 py-1.5 text-[11.5px] transition ' +
+            (actor === 'agent'
+              ? 'bg-violet-50 font-semibold text-violet-700'
+              : 'text-[var(--ug-text-2)] hover:bg-[var(--ug-bg-subtle)]')
+          }
+        >
+          <span aria-hidden>🤖</span>
+          <span>AIエージェント (AI Agent)</span>
+        </button>
       </div>
 
       {/*

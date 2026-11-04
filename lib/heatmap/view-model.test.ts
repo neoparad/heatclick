@@ -673,5 +673,80 @@ describe('buildHeatmapViewModel', () => {
       // 観測ありスロットは dropoff > 0、なしは 0
       expect(vm.exitRows.filter((r) => (r.dropoff ?? 0) > 0)).toHaveLength(2)
     })
+
+    it('exit layer includes 100% max_scroll_percentage bucket in the 95%..100% slot and reaches 100% height (Task 3.2)', () => {
+      const exitMeta: HeatmapTileMeta = {
+        ...metaWith('clickhouse_events'),
+        heatmap_type: 'exit',
+      }
+      const vm = buildHeatmapViewModel({
+        tiles: [
+          tileWith([
+            { x: 0, y: 10, count: 5, sessions: 5 },
+            { x: 0, y: 100, count: 5, sessions: 5 },
+          ]),
+        ],
+        meta: exitMeta,
+        coordinateContext: { sourceWidth: 1280, referenceWidth: 720, pageHeight: 10_000 },
+      })
+      expect(vm.exitRows).toHaveLength(20)
+      const lastSlot = vm.exitRows[19]
+      expect(lastSlot.top).toBe(9500)
+      expect(lastSlot.top + lastSlot.height).toBe(10_000)
+      expect(lastSlot.dropoff).toBeCloseTo(0.5, 5)
+      expect(lastSlot.exitPct).toBe('50%')
+    })
+
+    it('scales ai_attention_bands into AiAttentionBand array on viewModel (Task 5)', () => {
+      const agentElements = {
+        ...elementsData,
+        actor: 'agent' as const,
+        ai_attention_bands: [
+          {
+            id: 'ai-band-hero',
+            label: 'ファーストビュー・主題定義 (H1 / Lead)',
+            headingTag: 'H1',
+            yStartPct: 0,
+            yEndPct: 20,
+            yPx: null,
+            extractabilityScore: 0.92,
+            confidence: 0.78,
+            evidenceLevel: 'inferred' as const,
+            note: 'AIエージェント最優先抽出ゾーン',
+          },
+          {
+            id: 'ai-band-cta',
+            label: 'アクション・フッターナビゲーション帯',
+            headingTag: 'NAV',
+            yStartPct: 80,
+            yEndPct: 100,
+            yPx: null,
+            extractabilityScore: 0.64,
+            confidence: 0.78,
+            evidenceLevel: 'inferred' as const,
+            note: 'ブラウザ実行型AIエージェントの遷移・CTA探索ゾーン',
+          },
+        ],
+      }
+      const vm = buildHeatmapViewModel({
+        tiles: clickTiles,
+        meta: metaWith('clickhouse_events'),
+        elements: agentElements,
+        coordinateContext: { sourceWidth: 1280, referenceWidth: 720, pageHeight: 10_000 },
+      })
+      expect(vm.aiAttentionBands).toHaveLength(2)
+      expect(vm.aiAttentionBands?.[0]).toMatchObject({
+        id: 'ai-band-hero',
+        top: 0,
+        height: 2000,
+        extractabilityScore: 0.92,
+      })
+      expect(vm.aiAttentionBands?.[1]).toMatchObject({
+        id: 'ai-band-cta',
+        top: 8000,
+        height: 2000,
+        extractabilityScore: 0.64,
+      })
+    })
   })
 })

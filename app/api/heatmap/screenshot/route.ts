@@ -30,13 +30,19 @@ import { z } from 'zod'
 import { getServerSession } from '@/lib/auth/server-session'
 
 import { getClickHouseClient } from '@/lib/clickhouse'
-import { getHeatmapUnderlayWithR2Cache } from '@/lib/heatmap/r2-screenshot-cache'
+import {
+  getHeatmapUnderlayWithR2Cache,
+  lookupHeatmapUnderlayCacheOnly,
+} from '@/lib/heatmap/r2-screenshot-cache'
 import { canonicalizeHeatmapUrl, canonicalUrlSql } from '@/lib/heatmap/canonical-url'
 import {
   ScreenshotProviderError,
   validateExternalUrl,
+  validateExternalUrlResolved,
 } from '@/lib/heatmap/screenshot-provider'
 import { createRouteTimer, type RouteTimer } from '@/lib/perf/server-timing'
+import { resolveTenantSite } from '@/lib/sites/site-registry'
+import { normalizeHost } from '@/lib/url/normalize-url'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -48,11 +54,86 @@ const querySchema = z.object({
   site_id: z.string().min(1).max(128),
   page_url: z.string().url().max(2000),
   device: z.enum(['pc', 'sp', 'tab']).default('pc'),
+  cache_only: z.enum(['0', '1', 'true', 'false']).optional(),
+  refresh: z.enum(['0', '1', 'true', 'false']).optional(),
 })
 
 function tenantHasSite(headerSiteIds: string | null, siteId: string): boolean {
   if (!headerSiteIds) return false
   return headerSiteIds.split(',').map((s) => s.trim()).includes(siteId)
+}
+
+/**
+ * 正規化ホスト (`www.` 除去・小文字) を抽出する。
+ */
+function extractCanonicalHost(rawUrlOrHost: string | null | undefined): string | null {
+  return normalizeHost(rawUrlOrHost)
+}
+
+/**
+ * 対象ホストが登録サイトホストと一致 (またはサブドメイン一致) するか検証する。
+ */
+function isTargetHostMatchedWithSite(targetHost: string | null, siteHost: string | null): boolean {
+  if (!targetHost || !siteHost) return false
+  return targetHost === siteHost || targetHost.endsWith('.' + siteHost)
+}
+
+/**
+ * テナントのサイト所有権および clickinsight.sites (または FusionSiteRecord) の登録 URL ホストを取得する。
+ */
+async function tenantVerifySiteAccess(
+  tenantId: string,
+  siteId: string,
+  sessionSiteIds: string | null,
+  perfReqId?: string,
+): Promise<{ allowed: boolean; registeredHost: string | null }> {
+  if (!tenantHasSite(sessionSiteIds, siteId)) {
+    return { allowed: false, registeredHost: null }
+  }
+
+  // 1) Control Plane Site Registry (dogfood / Postgres tenant_sites) から canonicalHost を確認
+  try {
+    const siteRecord = await resolveTenantSite(tenantId, siteId)
+    if (siteRecord) {
+      const regHost = extractCanonicalHost(siteRecord.canonicalHost ?? siteRecord.siteUrl)
+      if (regHost) {
+        return { allowed: true, registeredHost: regHost }
+      }
+    }
+  } catch {
+    // fall through to ClickHouse sites lookup
+  }
+
+  // 2) ClickHouse clickinsight.sites テーブルから登録 url を確認
+  try {
+    const ch = getClickHouseClient('analytics_reader')
+    const rs = await ch.query({
+      query: `
+        SELECT tenant_id, url
+        FROM clickinsight.sites
+        WHERE tracking_id = {site_id:String}
+        LIMIT 1
+      `,
+      query_params: { site_id: siteId },
+      format: 'JSONEachRow',
+      ...(perfReqId
+        ? { clickhouse_settings: perfLogComment('heatmap-screenshot', 'own-site', perfReqId) }
+        : {}),
+    })
+    const rows = (await rs.json()) as Array<{ tenant_id?: string; url?: string }>
+    const row = rows[0]
+    if (row) {
+      if (row.tenant_id && row.tenant_id !== tenantId) {
+        return { allowed: false, registeredHost: null }
+      }
+      return { allowed: true, registeredHost: extractCanonicalHost(row.url) }
+    }
+  } catch {
+    // ClickHouse sites lookup error: session.user.site_ids で既に所有権確認済みのため続行し、
+    // registeredHost=null として後段の tenantTracksUrl フォールバックに委ねる
+  }
+
+  return { allowed: true, registeredHost: null }
 }
 
 /**
@@ -127,6 +208,8 @@ export async function GET(request: Request) {
     site_id: url.searchParams.get('site_id') ?? undefined,
     page_url: url.searchParams.get('page_url') ?? undefined,
     device: url.searchParams.get('device') ?? undefined,
+    cache_only: url.searchParams.get('cache_only') ?? undefined,
+    refresh: url.searchParams.get('refresh') ?? undefined,
   })
   if (!parsed.success) {
     return jsonWithTiming(
@@ -142,6 +225,8 @@ export async function GET(request: Request) {
     )
   }
   const params = parsed.data
+  const isCacheOnly = params.cache_only === '1' || params.cache_only === 'true'
+  const isForceRefresh = params.refresh === '1' || params.refresh === 'true'
 
   // tenant 検証 — REQ-SEC-126 (§13.7): getServerSession 経由で Layer 2 失効照合を通す
   const session = await t.span('auth', async () => getServerSession())
@@ -154,13 +239,6 @@ export async function GET(request: Request) {
       { status: 401 },
     )
   }
-  if (!tenantHasSite(siteIds, params.site_id)) {
-    return jsonWithTiming(
-      t,
-      { success: false, error: { code: 'TENANT_FORBIDDEN', message: 'site not in tenant' } },
-      { status: 403 },
-    )
-  }
 
   // SSRF guard (before any network egress)
   let canonicalUrl: string
@@ -168,7 +246,6 @@ export async function GET(request: Request) {
     validateExternalUrl(params.page_url)
     // CRITICAL: cache key と ownership lookup の両方で **同一の canonical 文字列**を使う。
     // 続135: tile/elements/page-stats と同一規則 (canonicalizeHeatmapUrl = query/fragment 除去) に統一。
-    //   旧 canonicalizePageUrl は query を残すため events 生 url(query付き)と ownership 照合がズレていた。
     canonicalUrl = canonicalizeHeatmapUrl(params.page_url)
   } catch (err) {
     if (err instanceof ScreenshotProviderError) {
@@ -181,44 +258,124 @@ export async function GET(request: Request) {
     throw err
   }
 
-  // Tenant-owned URL check: 自分の tracking が無い URL の screenshot は撮らせない
-  try {
-    const owns = await t.span('own-ch', async () =>
-      tenantTracksUrl({
-        tenantId,
-        siteId: params.site_id,
-        pageUrl: canonicalUrl,
-        perfReqId: reqId,
-      }),
+  // 1) テナントのサイト所有権を確認
+  const siteAccess = await t.span('own-site', async () =>
+    tenantVerifySiteAccess(tenantId, params.site_id, siteIds, reqId),
+  )
+  if (!siteAccess.allowed) {
+    return jsonWithTiming(
+      t,
+      { success: false, error: { code: 'TENANT_FORBIDDEN', message: 'site not in tenant' } },
+      { status: 403 },
     )
-    if (!owns) {
+  }
+
+  // 2) 登録サイトホスト (canonicalHost / clickinsight.sites.url) がある場合は、
+  //    キャッシュ確認より前にホスト一致 (サブドメイン含む) を検証し、無関係な第三者サイトを即座に 403 拒否する。
+  const targetHost = extractCanonicalHost(canonicalUrl)
+  if (siteAccess.registeredHost) {
+    if (!isTargetHostMatchedWithSite(targetHost, siteAccess.registeredHost)) {
       return jsonWithTiming(
         t,
         {
           success: false,
           error: {
             code: 'URL_NOT_OWNED',
-            message: 'page_url not observed for this tenant/site in the last 30 days',
+            message: `page_url host (${targetHost ?? 'unknown'}) does not match registered site host (${siteAccess.registeredHost})`,
           },
         },
         { status: 403 },
       )
     }
-  } catch (err) {
-    // CH 不可達は **拒否** ではなく **不確実だが SSRF guard 通過したのでフェイル open しない**。
-    // 確実にユーザー操作を止めるため 503 を返し、Frontend は fallback (Mock underlay) を表示する。
-    console.error('[heatmap/screenshot] tenant ownership check failed:', err)
-    return jsonWithTiming(
-      t,
-      {
-        success: false,
-        error: { code: 'OWNERSHIP_CHECK_UNAVAILABLE', message: 'analytics lookup failed' },
-      },
-      { status: 503 },
-    )
   }
 
-  // Provider 呼び出し (L1 in-memory → R2 L2 → capture、TTL/SWR/dedupe は cache 層が担う)
+  // 3) refresh=1 でない限り、ClickHouse の重い 30 日イベントスキャンより先に L1/R2 キャッシュヒット判定を実行
+  //    (キャッシュキー自体が tenantId + siteId スコープを持ち、ドメイン検証も通過済みのため安全)
+  if (!isForceRefresh) {
+    const cachedHit = await t.span('cache-pre', async () =>
+      lookupHeatmapUnderlayCacheOnly({
+        tenantId,
+        siteId: params.site_id,
+        pageUrl: canonicalUrl,
+        device: params.device,
+      }),
+    )
+    if (cachedHit) {
+      t.mark('tier', cachedHit.tier)
+      return jsonWithTiming(
+        t,
+        { success: true, data: cachedHit.capture },
+        { headers: { 'Cache-Control': 'private, max-age=240' } },
+      )
+    }
+  }
+
+  // 4) cache_only=1 のときはキャッシュミス時に新規撮影を行わず即座に 204 No Content を返す
+  //    (バックグラウンド先読みで Cloudflare Browser Rendering 429 自爆 & Microlink 汚染を防止)
+  if (isCacheOnly) {
+    t.mark('tier', 'cache-miss-skip')
+    // eslint-disable-next-line no-console
+    console.info(t.logLine())
+    return new NextResponse(null, {
+      status: 204,
+      headers: { 'Server-Timing': t.headerValue() },
+    })
+  }
+
+  // 5) キャッシュミス時 (新規撮影時) の URL 所有権検証フォールバック:
+  //    登録サイトホストが存在しない場合のみ tenantTracksUrl() (ClickHouse 30日イベントスキャン) で確認。
+  if (!siteAccess.registeredHost) {
+    try {
+      const owns = await t.span('own-ch', async () =>
+        tenantTracksUrl({
+          tenantId,
+          siteId: params.site_id,
+          pageUrl: canonicalUrl,
+          perfReqId: reqId,
+        }),
+      )
+      if (!owns) {
+        return jsonWithTiming(
+          t,
+          {
+            success: false,
+            error: {
+              code: 'URL_NOT_OWNED',
+              message: 'page_url not observed for this tenant/site in the last 30 days',
+            },
+          },
+          { status: 403 },
+        )
+      }
+    } catch (err) {
+      // CH 不可達はフェイル open せず 503 を返し、Frontend は fallback (Mock underlay) を表示する。
+      console.error('[heatmap/screenshot] tenant ownership check failed:', err)
+      return jsonWithTiming(
+        t,
+        {
+          success: false,
+          error: { code: 'OWNERSHIP_CHECK_UNAVAILABLE', message: 'analytics lookup failed' },
+        },
+        { status: 503 },
+      )
+    }
+  }
+
+  // 5) 新規撮影前の DNS Rebinding SSRF 防御 (解決された全 IPv4/IPv6 がプライベート/メタデータ IP でないか検証)
+  try {
+    await t.span('ssrf-dns', async () => validateExternalUrlResolved(canonicalUrl))
+  } catch (err) {
+    if (err instanceof ScreenshotProviderError) {
+      return jsonWithTiming(
+        t,
+        { success: false, error: { code: err.code, message: err.message } },
+        { status: err.code === 'BLOCKED_URL' ? 403 : 400 },
+      )
+    }
+    throw err
+  }
+
+  // 6) Provider 呼び出し (capture → R2 PUT + L1 hydrate)
   try {
     const { capture, tier } = await t.span('cache', async () =>
       getHeatmapUnderlayWithR2Cache({
@@ -226,6 +383,7 @@ export async function GET(request: Request) {
         siteId: params.site_id,
         pageUrl: canonicalUrl,
         device: params.device,
+        forceRefresh: isForceRefresh,
       }),
     )
     t.mark('tier', tier)

@@ -27,9 +27,11 @@ import {
   blobGradient,
 } from '@/lib/heatmap/mockup-spec'
 import type {
+  AiAttentionBand,
   EmotionKey,
   HeatBlob,
   HeatTag,
+  HeatmapActor,
   HeatmapViewModel,
   LayerKey,
   ReadBand,
@@ -50,6 +52,8 @@ interface HeatOverlayProps {
    * 画像とピクセル一致させる。Phase 1 fallback / fixture は 1 (mockup 720 空間そのまま)。
    */
   displayScale?: number
+  /** Task 5: AIエージェント・ヒートマップ表示モード */
+  actor?: HeatmapActor
 }
 
 export function HeatOverlay({
@@ -60,6 +64,7 @@ export function HeatOverlay({
   onTagClick,
   tagRefs,
   displayScale = 1,
+  actor = 'human',
 }: HeatOverlayProps) {
   const visibleBlobs = useMemo(
     () => vm.blobs.filter((b) => blobVisible(b, layers, activeEmotions)),
@@ -175,6 +180,13 @@ export function HeatOverlay({
           displayScale={displayScale}
         />
       ) : null}
+
+      {actor === 'agent' && (vm.aiAttentionBands?.length ?? 0) > 0 ? (
+        <AiAttentionOverlay
+          bands={vm.aiAttentionBands ?? []}
+          displayScale={displayScale}
+        />
+      ) : null}
     </div>
   )
 }
@@ -284,13 +296,17 @@ function ScrollReachOverlay({
   const maxBottom = sorted.reduce((m, b) => Math.max(m, b.top + b.height), 0)
 
   const stops: string[] = []
-  if (maxBottom > 0) {
+  if (maxBottom > 0 && sorted.length > 0) {
+    const firstAlpha = 0.1 + sorted[0].reach * 0.62
+    stops.push(`rgba(47,134,224,${firstAlpha.toFixed(2)}) 0%`)
     for (const band of sorted) {
       const centerPct = (((band.top + band.height / 2) / maxBottom) * 100).toFixed(2)
       // 続137 (Owner報告③): scroll 到達帯の alpha を 0.08〜0.48 → 0.10〜0.72 に拡大し判別性UP。
       const alpha = 0.1 + band.reach * 0.62
       stops.push(`rgba(47,134,224,${alpha.toFixed(2)}) ${centerPct}%`)
     }
+    const lastAlpha = 0.1 + sorted[sorted.length - 1].reach * 0.62
+    stops.push(`rgba(47,134,224,${lastAlpha.toFixed(2)}) 100%`)
   }
 
   // ラベルは 10% 刻み (= 2 バンドごと) のみ表示して clutter を避ける
@@ -352,7 +368,10 @@ function ExitGradientOverlay({
   const maxDrop = sorted.reduce((m, r) => Math.max(m, r.dropoff ?? 0), 0)
 
   const stops: string[] = []
-  if (maxBottom > 0) {
+  if (maxBottom > 0 && sorted.length > 0) {
+    const firstNorm = maxDrop > 0 ? (sorted[0].dropoff ?? 0) / maxDrop : 0
+    const firstAlpha = firstNorm <= 0 ? 0 : 0.12 + Math.pow(firstNorm, 0.85) * 0.66
+    stops.push(`rgba(214,69,69,${firstAlpha.toFixed(2)}) 0%`)
     for (const row of sorted) {
       const centerPct = (((row.top + row.height / 2) / maxBottom) * 100).toFixed(2)
       const norm = maxDrop > 0 ? (row.dropoff ?? 0) / maxDrop : 0
@@ -360,6 +379,9 @@ function ExitGradientOverlay({
       const alpha = norm <= 0 ? 0 : 0.12 + Math.pow(norm, 0.85) * 0.66
       stops.push(`rgba(214,69,69,${alpha.toFixed(2)}) ${centerPct}%`)
     }
+    const lastNorm = maxDrop > 0 ? (sorted[sorted.length - 1].dropoff ?? 0) / maxDrop : 0
+    const lastAlpha = lastNorm <= 0 ? 0 : 0.12 + Math.pow(lastNorm, 0.85) * 0.66
+    stops.push(`rgba(214,69,69,${lastAlpha.toFixed(2)}) 100%`)
   }
 
   const labeled = sorted.filter((r) => (r.dropoff ?? 0) >= 0.05)
@@ -401,6 +423,75 @@ function ExitGradientOverlay({
           <span>離脱 {row.exitPct}</span>
         </div>
       ))}
+    </div>
+  )
+}
+
+/**
+ * Task 5: AIエージェント・ヒートマップ セクション別 AI 可読性・注目度オーバーレイ (AI Attention Bands)。
+ */
+function AiAttentionOverlay({
+  bands,
+  displayScale,
+}: {
+  bands: AiAttentionBand[]
+  displayScale: number
+}) {
+  return (
+    <div
+      className="ai-attention-overlay pointer-events-none absolute inset-0"
+      data-testid="ai-attention-overlay"
+    >
+      {bands.map((band) => {
+        const scorePct = Math.round(band.extractabilityScore * 100)
+        const confPct = Math.round(band.confidence * 100)
+        const isHigh = band.extractabilityScore >= 0.8
+        const isMid = band.extractabilityScore >= 0.65
+        const bgColor = isHigh
+          ? 'rgba(124, 58, 237, 0.14)'
+          : isMid
+            ? 'rgba(59, 130, 246, 0.12)'
+            : 'rgba(245, 158, 11, 0.14)'
+        const borderColor = isHigh
+          ? 'rgba(124, 58, 237, 0.45)'
+          : isMid
+            ? 'rgba(59, 130, 246, 0.4)'
+            : 'rgba(245, 158, 11, 0.5)'
+        return (
+          <div
+            key={band.id}
+            data-testid={`ai-attention-band-${band.id}`}
+            className="absolute left-0 right-0 flex flex-col justify-between border-y px-3 py-1.5"
+            style={{
+              top: band.top * displayScale,
+              height: Math.max(36, band.height * displayScale),
+              background: bgColor,
+              borderColor,
+            }}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-1.5">
+              <span className="inline-flex items-center gap-1.5 rounded bg-[rgba(15,17,23,0.84)] px-2 py-0.5 font-mono text-[10.5px] font-semibold text-white shadow-sm">
+                <span className="rounded bg-violet-500/80 px-1 py-px text-[9.5px] font-bold">
+                  {band.headingTag}
+                </span>
+                <span>{band.label}</span>
+              </span>
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-[rgba(15,17,23,0.84)] px-2.5 py-0.5 font-mono text-[10px] font-semibold text-white shadow-sm">
+                <span>AI抽出注目度 {scorePct}%</span>
+                <span className="opacity-70">·</span>
+                <span className="text-violet-200">
+                  Confidence {confPct}% ({band.evidenceLevel})
+                </span>
+              </span>
+            </div>
+            {band.note ? (
+              <div className="w-fit rounded bg-white/90 px-2 py-0.5 font-mono text-[10px] text-[var(--ug-text-2)] shadow-sm">
+                🤖 {band.note}
+              </div>
+            ) : null}
+          </div>
+        )
+      })}
     </div>
   )
 }

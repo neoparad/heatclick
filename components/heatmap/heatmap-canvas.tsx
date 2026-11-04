@@ -47,6 +47,7 @@ import {
 import type {
   DeviceKind,
   EmotionKey,
+  HeatmapActor,
   HeatmapCoordinateContext,
   HeatmapDevice,
   HeatmapUnderlayCapture,
@@ -106,6 +107,12 @@ export interface HeatmapCanvasProps {
    */
   device?: DeviceKind
   onDeviceChange?: (d: DeviceKind) => void
+  /**
+   * Task 5: AIエージェント・ヒートマップ actor (human | agent | all)。
+   * 親 (HeatmapPage) が own、未指定なら内部 state fallback ('human')。
+   */
+  actor?: HeatmapActor
+  onActorChange?: (next: HeatmapActor) => void
 }
 
 /** view-model に渡す sourceWidth: ClickHouse 正規化済 click_x の最大幅 */
@@ -182,6 +189,8 @@ export function HeatmapCanvas({
   elements,
   device: deviceProp,
   onDeviceChange,
+  actor: actorProp,
+  onActorChange,
 }: HeatmapCanvasProps) {
   // pageHeightEstimate は legacy 契約。mockup parity rebuild では 720px 固定 underlay
   // のため canvas 高さ計算には使わない。Phase 2 (実 screenshot underlay) で復活予定。
@@ -209,6 +218,9 @@ export function HeatmapCanvas({
   const [internalDevice, setInternalDevice] = useState<DeviceKind>('pc')
   const device = deviceProp ?? internalDevice
   const setDevice = onDeviceChange ?? setInternalDevice
+  const [internalActor, setInternalActor] = useState<HeatmapActor>('human')
+  const actor = actorProp ?? internalActor
+  const setActor = onActorChange ?? setInternalActor
   const [highlightedTagId, setHighlightedTagId] = useState<string | null>(null)
 
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -262,22 +274,39 @@ export function HeatmapCanvas({
     ? computePageCssHeight(cap.naturalWidth, cap.naturalHeight, referenceWidth) || MOCK_PAGE_HEIGHT
     : MOCK_PAGE_HEIGHT
 
-  // ── 続131 (実走査監査で根本特定): 切断スクショ検知ガード ─────────────────────
+  // ── 続131 (実走査監査で根本特定) + Task 3.2: 切断スクショ検知ガード ─────────────────────
   //   劣化経路 (Worker 失敗 → CF REST / Microlink) は fullPage を無視して **1 viewport 分
   //   (例 800 CSS px)** の画像を返すことがある。従来はその高さを座標系の全高として採用し、
   //   outlier guard (pageHeight*1.05) が**それ以深の全クリックを廃棄** → 「データはあるのに
   //   『クリックデータがまだありません』」という嘘の空表示・「途中で切れる」の積年の正体。
-  //   対策: px 空間レイヤー (click/read) のデータ最大 y が画像高の 1.3 倍を超えるとき
-  //   capture を「部分画像」と判定し、座標系の全高をデータ範囲まで拡張する。画像は上部に
-  //   そのまま敷き、以深は中立背景 — **データは絶対に隠さない**。
+  //   対策: px 空間レイヤー (click/read) のデータ最大 y および elements (要素クリック/シグナル/画像視認)
+  //   の最大 y が画像高の 1.3 倍を超えるとき capture を「部分画像」と判定し、座標系の全高を
+  //   データ範囲まで拡張する。さらに siteId|pageUrl|device 単位で最大観測高を保持し、
+  //   scroll / exit (% 空間レイヤー) に切替えても座標系が縮まないようにする。
   const isPxSpaceLayer = meta?.heatmap_type === 'click' || meta?.heatmap_type === 'read'
+  const maxObservedDocYByTargetRef = useRef<Map<string, number>>(new Map())
+  const targetKey = `${siteId}|${pageUrl}|${screenshotDevice}`
   const dataMaxDocY = useMemo(() => {
-    if (!isPxSpaceLayer) return 0
-    let max = 0
-    for (const t of tiles) for (const p of t.points) if (p.y > max) max = p.y
+    let max = maxObservedDocYByTargetRef.current.get(targetKey) ?? 0
+    if (isPxSpaceLayer) {
+      for (const t of tiles) for (const p of t.points) if (p.y > max) max = p.y
+    }
+    if (elements) {
+      for (const el of elements.elements ?? []) if (el.y > max) max = el.y
+      for (const sig of elements.signals ?? []) {
+        for (const top of sig.top ?? []) if (top.y > max) max = top.y
+      }
+      for (const img of elements.images ?? []) {
+        const bottom = (img.y ?? 0) + (img.h ?? 0)
+        if (bottom > max) max = bottom
+      }
+    }
+    if (max > 0) {
+      maxObservedDocYByTargetRef.current.set(targetKey, max)
+    }
     return max
-  }, [tiles, isPxSpaceLayer])
-  const captureTruncated = cap != null && isPxSpaceLayer && dataMaxDocY > pageCssHeight * 1.3
+  }, [tiles, isPxSpaceLayer, elements, targetKey])
+  const captureTruncated = cap != null && dataMaxDocY > pageCssHeight * 1.3
   // ── P2 (⑤⑥ scroll/exit 途切れ): Worker が capped した capture は実 document 全高 (fullPageCssHeight)
   //   を返す。続131 のデータ駆動検知 (click/read 限定) と違い、capped は **データの有無に依らず**
   //   全レイヤー (scroll/exit 含む) を真の全高にマップする。これが無いと scroll/exit は capped 画像高で
@@ -386,9 +415,10 @@ export function HeatmapCanvas({
         if (ctrl.signal.aborted) return
         if (res.success) {
           setCaptureState({ kind: 'ready', capture: res.data })
-          // 続124 ⑥ (Owner: 「タブを合わせてから取得は遅い、裏で先に」): 現在デバイスの
-          // capture が確定したら、残り 2 デバイスをバックグラウンドで先読みして server 側
-          // R2 cache を温める。タブ切替時は warm hit で即表示になる。失敗は無視 (非致命)。
+          // 続124 ⑥ + Task 3.1: 現在デバイスの capture が確定したら、残り 2 デバイスを
+          // バックグラウンドで `cache_only=1` で先読みして R2 キャッシュ確認のみ行う。
+          // キャッシュ未ヒット時は 204 No Content を返させ、新規 Puppeteer/CF 撮影を発火しない
+          // (Cloudflare 429 → Microlink 1ビューポート切断フォールバックによるキャッシュ汚染を防止)。
           const others = (['pc', 'sp', 'tab'] as const).filter((d) => d !== screenshotDevice)
           others.forEach((d, i) => {
             const key = `${siteId}|${pageUrl}|${d}`
@@ -396,7 +426,16 @@ export function HeatmapCanvas({
             prefetchedRef.current.add(key)
             setTimeout(
               () => {
-                fetchHeatmapUnderlay({ siteId, pageUrl, device: d }).catch(() => {})
+                const params = new URLSearchParams({
+                  site_id: siteId,
+                  page_url: pageUrl,
+                  device: d,
+                  cache_only: '1',
+                })
+                fetch(`/api/heatmap/screenshot?${params.toString()}`, {
+                  method: 'GET',
+                  credentials: 'include',
+                }).catch(() => {})
               },
               4000 * (i + 1),
             )
@@ -528,13 +567,13 @@ export function HeatmapCanvas({
     .map(layerKeyToHeatmapLayer)
     .find((l): l is HeatmapLayer => l !== null)
   const activeBandCount =
-    activeDataLayer === 'read'
+    (activeDataLayer === 'read'
       ? vm.readBands.length
       : activeDataLayer === 'scroll'
         ? vm.scrollReachBands.length
         : activeDataLayer === 'exit'
           ? vm.exitRows.length
-          : 0
+          : 0) + (actor === 'agent' ? (vm.aiAttentionBands?.length ?? 0) : 0)
   const realEmpty = isRealEmptyHeatmap({
     dataSource: meta?.data_source,
     blobCount: vm.blobs.length,
@@ -623,11 +662,13 @@ export function HeatmapCanvas({
       role="region"
       aria-label={`${pageUrl} のヒートマップ`}
     >
-      {/* ===== Controls bar (.hm-controls): layer toggles (single-select radio) ===== */}
+      {/* ===== Controls bar (.hm-controls): layer toggles (single-select radio) + actor toggle ===== */}
       {controlsVisible && !fullscreen ? (
         <ControlsBar
           activeLayers={activeLayers}
           onToggleLayer={toggleLayer}
+          actor={actor}
+          onActorChange={setActor}
         />
       ) : null}
 
@@ -650,6 +691,8 @@ export function HeatmapCanvas({
           <HeatmapToolbar
             device={device}
             onDeviceChange={setDevice}
+            actor={actor}
+            onActorChange={setActor}
             pvLabel={pvLabel}
             ctrLabel={ctrLabel}
             dwellLabel={dwellLabel}
@@ -672,6 +715,21 @@ export function HeatmapCanvas({
               minHeight: fullscreen ? '100vh' : 540,
             }}
           >
+            {actor === 'agent' ? (
+              <div
+                role="status"
+                data-testid="heatmap-agent-banner"
+                className="sticky top-0 z-10 mx-auto mb-3 flex w-fit flex-wrap items-center gap-2 rounded-full border border-violet-400/50 bg-violet-100/95 px-4 py-1.5 font-mono text-[11px] font-semibold text-violet-950 shadow-sm"
+              >
+                <span>🤖 AIエージェント行動ヒートマップ（Headless / AI Browser Agent is_agent=1 トラフィック）</span>
+                <span className="rounded-full bg-violet-700 px-2 py-0.5 text-[10px] text-white">
+                  {vm.aiAttentionBands?.[0]?.evidenceLevel === 'observed'
+                    ? `Observed · Confidence ${Math.round((vm.aiAttentionBands[0]?.confidence ?? 0.9) * 100)}%`
+                    : `Inferred + Observed · Confidence ${Math.round((vm.aiAttentionBands?.[0]?.confidence ?? 0.78) * 100)}%`}
+                </span>
+              </div>
+            ) : null}
+
             {isDummySource ? (
               <div
                 data-testid="heatmap-dummy-banner"
@@ -710,14 +768,24 @@ export function HeatmapCanvas({
                 data-testid="heatmap-empty-state"
                 className="mx-auto mb-3 max-w-md rounded-lg border border-[var(--ug-border)] bg-white/95 px-5 py-4 text-center shadow-sm backdrop-blur"
               >
-                <p className="text-sm font-semibold text-[var(--ug-text-1)]">
-                  このページのクリックデータはまだありません
-                </p>
-                <p className="mt-1.5 text-xs leading-relaxed text-[var(--ug-text-2)]">
-                  選択中の期間・デバイスで計測されたクリックがまだ届いていません。
-                  計測タグの設置直後はデータ反映に数時間かかることがあります。
-                  半日〜1 日待っても表示されない場合は、タグが正しく設置されているかご確認ください。
-                </p>
+                {actor === 'agent' ? (
+                  <>
+                    <p className="text-sm font-semibold text-[var(--ug-text-1)]">
+                      このURLではブラウザ実行型AIエージェントのDOM操作イベントはまだ記録されていません（HTTPフェッチ型AIクローラはAIアクセス分析・サイトドックのAI意味監査を参照）
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm font-semibold text-[var(--ug-text-1)]">
+                      このページのクリックデータはまだありません
+                    </p>
+                    <p className="mt-1.5 text-xs leading-relaxed text-[var(--ug-text-2)]">
+                      選択中の期間・デバイスで計測されたクリックがまだ届いていません。
+                      計測タグの設置直後はデータ反映に数時間かかることがあります。
+                      半日〜1 日待っても表示されない場合は、タグが正しく設置されているかご確認ください。
+                    </p>
+                  </>
+                )}
               </div>
             ) : null}
 
@@ -816,6 +884,7 @@ export function HeatmapCanvas({
                           highlightedTagId={highlightedTagId}
                           tagRefs={tagRefs}
                           displayScale={displayScale}
+                          actor={actor}
                         />
                         <SignalOverlay
                           signals={vm.signals}
@@ -995,9 +1064,13 @@ export function HeatmapCanvas({
 function ControlsBar({
   activeLayers,
   onToggleLayer,
+  actor,
+  onActorChange,
 }: {
   activeLayers: ReadonlySet<LayerKey>
   onToggleLayer: (k: LayerKey) => void
+  actor: HeatmapActor
+  onActorChange: (next: HeatmapActor) => void
 }) {
   return (
     <div
@@ -1044,6 +1117,49 @@ function ControlsBar({
             </button>
           )
         })}
+      </div>
+
+      <span className="hidden h-4 w-px bg-[var(--ug-border)] md:block" aria-hidden />
+
+      <span className="mr-1 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ug-text-3)]">
+        actor
+      </span>
+      <div
+        role="radiogroup"
+        aria-label="ヒートマップ 行動主体"
+        data-testid="heatmap-actor-toggle-group"
+        className="inline-flex overflow-hidden rounded-md border border-[var(--ug-border)] bg-white"
+      >
+        <button
+          type="button"
+          data-testid="actor-toggle-human"
+          role="radio"
+          aria-checked={actor === 'human'}
+          onClick={() => onActorChange('human')}
+          className={
+            'inline-flex items-center border-r border-[var(--ug-border)] px-3 py-1.5 text-[12px] transition ' +
+            (actor === 'human'
+              ? 'bg-[var(--ug-accent-bg,rgba(79,107,255,.09))] font-semibold text-[var(--ug-brand-1)]'
+              : 'text-[var(--ug-text-2)] hover:bg-[var(--ug-bg-subtle)] hover:text-[var(--ug-text-1)]')
+          }
+        >
+          👤 人間 (Human)
+        </button>
+        <button
+          type="button"
+          data-testid="actor-toggle-agent"
+          role="radio"
+          aria-checked={actor === 'agent'}
+          onClick={() => onActorChange('agent')}
+          className={
+            'inline-flex items-center px-3 py-1.5 text-[12px] transition ' +
+            (actor === 'agent'
+              ? 'bg-[var(--ug-accent-bg,rgba(79,107,255,.09))] font-semibold text-[var(--ug-brand-1)]'
+              : 'text-[var(--ug-text-2)] hover:bg-[var(--ug-bg-subtle)] hover:text-[var(--ug-text-1)]')
+          }
+        >
+          🤖 AIエージェント (AI Agent)
+        </button>
       </div>
     </div>
   )

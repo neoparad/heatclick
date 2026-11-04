@@ -25,6 +25,24 @@
 
 import type { HeatmapSegment } from '@/lib/api/heatmap'
 import { canonicalUrlSql } from '@/lib/heatmap/canonical-url'
+import type { HeatmapActor } from '@/lib/heatmap/types'
+
+/**
+ * actor ('human' | 'agent' | 'all') に応じた `is_agent` WHERE 条件の定数 SQL 断片を返す。
+ *   - 'human' (既定): `AND is_agent = 0`
+ *   - 'agent'       : `AND is_agent = 1`
+ *   - 'all'         : `''` (フィルタなし)
+ */
+export function actorFilterSql(actor: HeatmapActor = 'human'): string {
+  switch (actor) {
+    case 'human':
+      return 'AND is_agent = 0'
+    case 'agent':
+      return 'AND is_agent = 1'
+    case 'all':
+      return ''
+  }
+}
 
 /**
  * returning / new の共通サブクエリ。`comparator` だけ差し替える。
@@ -32,7 +50,8 @@ import { canonicalUrlSql } from '@/lib/heatmap/canonical-url'
  *   visitor_first : visitor のサイト全体 初回来訪時刻
  *   join して first_seen <comparator> sess_start のセッションを返す。
  */
-function visitorRecencyFilter(comparator: '<' | '>='): string {
+function visitorRecencyFilter(comparator: '<' | '>=', actor: HeatmapActor): string {
+  const actorClause = actorFilterSql(actor)
   return `AND session_id IN (
     SELECT ps.session_id
     FROM (
@@ -41,7 +60,7 @@ function visitorRecencyFilter(comparator: '<' | '>='): string {
       WHERE tenant_id = {tenant_id:String}
         AND site_id = {site_id:String}
         AND ${canonicalUrlSql('url')} = {page_url:String}
-        AND is_agent = 0
+        ${actorClause}
         AND visitor_id != ''
         AND timestamp >= toDateTime({start:String})
         AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
@@ -59,7 +78,8 @@ function visitorRecencyFilter(comparator: '<' | '>='): string {
   )`
 }
 
-export function segmentFilterSql(segment: HeatmapSegment): string {
+export function segmentFilterSql(segment: HeatmapSegment, actor: HeatmapActor = 'human'): string {
+  const actorClause = actorFilterSql(actor)
   switch (segment) {
     case 'all':
       return ''
@@ -69,7 +89,7 @@ export function segmentFilterSql(segment: HeatmapSegment): string {
         WHERE tenant_id = {tenant_id:String}
           AND site_id = {site_id:String}
           AND ${canonicalUrlSql('url')} = {page_url:String}
-          AND is_agent = 0
+          ${actorClause}
           AND ((gclid IS NOT NULL AND gclid != '') OR (fbclid IS NOT NULL AND fbclid != ''))
           AND timestamp >= toDateTime({start:String})
           AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
@@ -83,7 +103,7 @@ export function segmentFilterSql(segment: HeatmapSegment): string {
         WHERE tenant_id = {tenant_id:String}
           AND site_id = {site_id:String}
           AND ${canonicalUrlSql('url')} = {page_url:String}
-          AND is_agent = 0
+          ${actorClause}
           AND timestamp >= toDateTime({start:String})
           AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
         GROUP BY session_id
@@ -92,8 +112,8 @@ export function segmentFilterSql(segment: HeatmapSegment): string {
     }
     // 続132: visitor のサイト全体 初回来訪 (first_seen) と当該セッション開始の前後で判定。
     case 'returning':
-      return visitorRecencyFilter('<')
+      return visitorRecencyFilter('<', actor)
     case 'new':
-      return visitorRecencyFilter('>=')
+      return visitorRecencyFilter('>=', actor)
   }
 }
