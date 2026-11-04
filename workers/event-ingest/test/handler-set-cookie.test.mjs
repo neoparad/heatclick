@@ -407,7 +407,7 @@ test('CORS: ACAO is "*" and Allow-Credentials is never sent (OPTIONS and POST)',
   assert.equal(opt.headers.get('access-control-allow-origin'), '*');
   assert.equal(opt.headers.get('access-control-allow-credentials'), null);
 
-  const post = await send({ events: [event({ visitor_id: OK_VID })], headers: { Origin: 'https://evil.example' } });
+  const post = await send({ events: [event({ visitor_id: OK_VID })], headers: { Origin: 'https://customer.example' } });
   assert.equal(post.headers.get('access-control-allow-origin'), '*');
   assert.equal(post.headers.get('access-control-allow-credentials'), null);
 });

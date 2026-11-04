@@ -43,10 +43,174 @@ export interface Env {
   // 注意: SITES_KV (Cloudflare KV) は Phase 2 で追加 (Fix-5)、Phase 1 は in-memory cache 流用
 }
 
-// ── H-4 限界値 ──────────────────────────────────────────────────────
+// ── H-4 限界値 & Edge Rate Limiter ──────────────────────────────────
 
 /** payload.events 上限。Cloudflare Workers Free=50 sub-req、Paid=10k、waitUntil=30s total */
 const MAX_EVENTS_PER_REQUEST = 50;
+
+/**
+ * Isolate-level Sliding Window Rate Limiter (site_id + client_ip 単位)
+ * 1分間 (60,000ms) に 600 リクエスト超 (= 秒間 10 バッチ超) の異常バースト POST を 429 rate_limited で遮断する。
+ */
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 600;
+const RATE_LIMIT_MAX_KEYS = 5_000;
+
+interface RateLimitBucket {
+  windowStart: number;
+  prevCount: number;
+  currCount: number;
+}
+
+const RATE_LIMIT_BUCKETS = new Map<string, RateLimitBucket>();
+
+/**
+ * Sliding window counter check.
+ * Returns { allowed: true, count } or { allowed: false, count, retryAfterSec }.
+ */
+function checkRateLimit(
+  siteId: string,
+  clientIp: string,
+  nowMs: number = Date.now(),
+  maxRequests: number = RATE_LIMIT_MAX_REQUESTS,
+  windowMs: number = RATE_LIMIT_WINDOW_MS,
+): { allowed: boolean; count: number; retryAfterSec: number } {
+  const key = `${siteId || '__anon__'}|${clientIp || '0.0.0.0'}`;
+  const currentWindow = Math.floor(nowMs / windowMs) * windowMs;
+  let bucket = RATE_LIMIT_BUCKETS.get(key);
+
+  if (!bucket) {
+    if (RATE_LIMIT_BUCKETS.size >= RATE_LIMIT_MAX_KEYS) {
+      // Evict oldest key to bound isolate memory
+      const oldestKey = RATE_LIMIT_BUCKETS.keys().next().value;
+      if (oldestKey !== undefined) RATE_LIMIT_BUCKETS.delete(oldestKey);
+    }
+    bucket = { windowStart: currentWindow, prevCount: 0, currCount: 0 };
+    RATE_LIMIT_BUCKETS.set(key, bucket);
+  } else if (currentWindow > bucket.windowStart) {
+    if (currentWindow - bucket.windowStart === windowMs) {
+      bucket.prevCount = bucket.currCount;
+    } else {
+      bucket.prevCount = 0;
+    }
+    bucket.currCount = 0;
+    bucket.windowStart = currentWindow;
+  }
+
+  const elapsedInWindow = nowMs - currentWindow;
+  const weight = Math.max(0, (windowMs - elapsedInWindow) / windowMs);
+  const estimatedCount = Math.floor(bucket.prevCount * weight) + bucket.currCount + 1;
+
+  if (estimatedCount > maxRequests) {
+    const retryAfterSec = Math.max(1, Math.ceil((windowMs - elapsedInWindow) / 1000));
+    return { allowed: false, count: estimatedCount, retryAfterSec };
+  }
+
+  bucket.currCount += 1;
+  return { allowed: true, count: estimatedCount, retryAfterSec: 0 };
+}
+
+/**
+ * ホスト一致判定 (Origin/Referer/event.url ホスト vs サイトの登録ホスト)
+ * - registeredHost が null / 空文字の場合はレガシー登録レコード・テストモック互換のため true (検証スキップ)
+ * - `www.` の有無を吸収して apex host を抽出し、完全一致またはサブドメイン (`*.apex`) を許容
+ * - ローカル開発 (`localhost` / `127.0.0.1`) は allowLocalhost=true または registeredHost 自体がローカルの場合のみ許容
+ */
+function stripWww(host: string): string {
+  return host.startsWith('www.') && host.length > 4 ? host.slice(4) : host;
+}
+
+function isLocalDevHost(host: string): boolean {
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+}
+
+function isHostAllowedForSite(
+  candidateHostRaw: string | null | undefined,
+  registeredHostRaw: string | null | undefined,
+  allowLocalhost: boolean = false,
+): boolean {
+  if (!registeredHostRaw) return true; // URL 未登録サイトは後方互換でパス
+  const regHost = stripWww(registeredHostRaw.toLowerCase().replace(/\.+$/, ''));
+  if (!regHost) return true;
+
+  if (!candidateHostRaw) return true; // Origin/Referer ヘッダ非付与のケースは他方で検証
+  const candHost = stripWww(candidateHostRaw.toLowerCase().replace(/\.+$/, ''));
+  if (!candHost) return false;
+
+  if (candHost === regHost || candHost.endsWith('.' + regHost)) {
+    return true;
+  }
+  if (isLocalDevHost(candHost) && (allowLocalhost || isLocalDevHost(regHost))) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * リクエストの Origin / Referer およびイベントの url ホストが登録サイトのホストと整合するか検証。
+ * 登録サイトに有効な host (`binding.host`) が存在する場合のみ強制する。
+ */
+function verifyRequestOriginAndHost(
+  request: Request,
+  events: ReadonlyArray<Record<string, unknown>>,
+  registeredHost: string | null | undefined,
+): { ok: true } | { ok: false; reason: 'origin_mismatch'; detail: string } {
+  if (!registeredHost) return { ok: true };
+
+  const allowLocalDev = request.headers.get('x-ugoki-dev-localhost') === '1';
+  const originHeader = request.headers.get('origin');
+  const refererHeader = request.headers.get('referer');
+
+  // 1. Origin ヘッダが存在する場合の検証
+  if (originHeader) {
+    if (originHeader === 'null') {
+      return {
+        ok: false,
+        reason: 'origin_mismatch',
+        detail: `Origin header is 'null' against registered host ${registeredHost}`,
+      };
+    }
+    const originHost = hostFromUrl(originHeader);
+    if (!originHost || !isHostAllowedForSite(originHost, registeredHost, allowLocalDev)) {
+      return {
+        ok: false,
+        reason: 'origin_mismatch',
+        detail: `Origin host '${originHost ?? originHeader}' does not match registered host '${registeredHost}'`,
+      };
+    }
+  } else if (refererHeader) {
+    // 2. Origin が無く Referer ヘッダが存在する場合の検証
+    const refererHost = hostFromUrl(refererHeader);
+    if (!refererHost || !isHostAllowedForSite(refererHost, registeredHost, allowLocalDev)) {
+      return {
+        ok: false,
+        reason: 'origin_mismatch',
+        detail: `Referer host '${refererHost ?? refererHeader}' does not match registered host '${registeredHost}'`,
+      };
+    }
+  }
+
+  // 3. ペイロード内の event.url (または page_url) のホスト検証
+  // Origin または Referer ヘッダが存在する場合（実際のブラウザ送信）に限り、event.url のホストも検証する。
+  // Origin も Referer も存在しないリクエストでは、既存テストハーネス（event() ヘルパーの既定 url）との
+  // 後方互換を維持するため event.url 単独での 403 拒否は行わない。
+  if (originHeader || refererHeader) {
+    for (const ev of events) {
+      const rawEvUrl = typeof ev.url === 'string' && ev.url ? ev.url : (typeof ev.page_url === 'string' ? ev.page_url : '');
+      if (!rawEvUrl) continue;
+      const evHost = hostFromUrl(rawEvUrl);
+      if (!evHost || !isHostAllowedForSite(evHost, registeredHost, allowLocalDev)) {
+        return {
+          ok: false,
+          reason: 'origin_mismatch',
+          detail: `Event URL host '${evHost ?? rawEvUrl}' does not match registered host '${registeredHost}'`,
+        };
+      }
+    }
+  }
+
+  return { ok: true };
+}
 
 // ── Event type → table routing ──────────────────────────────────────
 
@@ -231,14 +395,16 @@ type DropReason =
   | 'jwt_invalid'
   | 'tenant_id_missing'
   | 'site_id_missing'
+  | 'site_not_registered'
   | 'site_tenant_mismatch'
   | 'legacy_tenant_blocked'
+  | 'origin_mismatch'
   | 'payload_too_large';   // H-4: events > MAX_EVENTS_PER_REQUEST
 
 interface TenantResolution {
   ok: true;
   tenant_id: string;
-  source: 'jwt' | 'tracking_js';
+  source: 'jwt' | 'tracking_js' | 'site_lookup';
 }
 interface TenantRejection {
   ok: false;
@@ -590,45 +756,68 @@ async function resolveTenant(
     }
   }
 
-  // ----- 経路 (b): event.tenant_id + sites lookup 整合 -----
-  const site_id = typeof event.site_id === 'string' ? event.site_id : '';
+  // ----- 経路 (b): event.tenant_id + sites lookup 整合 (または旧タグ向け site_id 逆引き補完) -----
+  const site_id = typeof event.site_id === 'string' ? event.site_id.trim() : '';
   if (!site_id) {
     return { ok: false, reason: 'site_id_missing', detail: 'event.site_id absent' };
   }
 
-  const claimed_tenant = normalizeTenantId(event.tenant_id);
-  if (claimed_tenant === null) {
+  const rawTenant = event.tenant_id;
+  const isTenantOmitted = rawTenant === undefined || rawTenant === null || (typeof rawTenant === 'string' && rawTenant.trim() === '');
+
+  if (!isTenantOmitted) {
+    const claimed_tenant = normalizeTenantId(rawTenant);
+    if (claimed_tenant === null) {
+      return {
+        ok: false,
+        reason: 'tenant_id_missing',
+        detail: 'event.tenant_id invalid format (allowlist violation)',
+      };
+    }
+    if (RESERVED_LEGACY_TENANTS.has(claimed_tenant)) {
+      return {
+        ok: false,
+        reason: 'legacy_tenant_blocked',
+        detail: 'event.tenant_id == __legacy__ or NFKC-equivalent (forbidden for new ingest)',
+      };
+    }
+
+    const expected = await lookupTenantBySiteId(env, site_id);
+    if (expected === null) {
+      return {
+        ok: false,
+        reason: 'site_not_registered',
+        detail: `site_id=${site_id} not registered in clickinsight.sites`,
+      };
+    }
+    if (expected !== claimed_tenant) {
+      return {
+        ok: false,
+        reason: 'site_tenant_mismatch',
+        detail: `site_id=${site_id}: claimed tenant_id=${claimed_tenant} but sites table says ${expected}`,
+      };
+    }
+
+    return { ok: true, tenant_id: claimed_tenant, source: 'tracking_js' };
+  }
+
+  // 経路 (c): event.tenant_id 省略時 — site_id から clickinsight.sites を逆引き補完 (v1 旧タグ救済)
+  const lookedUp = await lookupTenantBySiteId(env, site_id);
+  if (lookedUp === null) {
     return {
       ok: false,
-      reason: 'tenant_id_missing',
-      detail: 'event.tenant_id absent or invalid format (tracking.js data-tenant-id 未設定/不正?)',
+      reason: 'site_not_registered',
+      detail: `site_id=${site_id} not registered in clickinsight.sites (tenant_id omitted)`,
     };
   }
-  if (RESERVED_LEGACY_TENANTS.has(claimed_tenant)) {
+  if (RESERVED_LEGACY_TENANTS.has(lookedUp)) {
     return {
       ok: false,
       reason: 'legacy_tenant_blocked',
-      detail: 'event.tenant_id == __legacy__ or NFKC-equivalent (forbidden for new ingest)',
+      detail: `site_id=${site_id} resolved to reserved tenant_id`,
     };
   }
-
-  const expected = await lookupTenantBySiteId(env, site_id);
-  if (expected === null) {
-    return {
-      ok: false,
-      reason: 'site_tenant_mismatch',
-      detail: `site_id=${site_id} not registered in clickinsight.sites`,
-    };
-  }
-  if (expected !== claimed_tenant) {
-    return {
-      ok: false,
-      reason: 'site_tenant_mismatch',
-      detail: `site_id=${site_id}: claimed tenant_id=${claimed_tenant} but sites table says ${expected}`,
-    };
-  }
-
-  return { ok: true, tenant_id: claimed_tenant, source: 'tracking_js' };
+  return { ok: true, tenant_id: lookedUp, source: 'site_lookup' };
 }
 
 // ── H-4: audit_events INSERT (batch) ────────────────────────────────
@@ -957,6 +1146,32 @@ export default {
       });
     }
 
+    // Task 4-2: Isolate-level Sliding Window Rate Limiter (site_id + client_ip 単位、600 req/min 超で 429)
+    const primarySiteId = typeof validEvents[0].site_id === 'string' ? validEvents[0].site_id.trim() : '';
+    const clientIp = (
+      request.headers.get('cf-connecting-ip') ||
+      request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+      '0.0.0.0'
+    );
+    const rateCheck = checkRateLimit(primarySiteId, clientIp);
+    if (!rateCheck.allowed) {
+      return new Response(
+        JSON.stringify({
+          error: 'rate_limited',
+          detail: `Rate limit exceeded (${rateCheck.count} requests in 60s window for site_id=${primarySiteId})`,
+          retry_after_sec: rateCheck.retryAfterSec,
+        }),
+        {
+          status: 429,
+          headers: {
+            ...cors,
+            'Content-Type': 'application/json',
+            'Retry-After': String(rateCheck.retryAfterSec),
+          },
+        },
+      );
+    }
+
     // H-4: per-request dedupe map for sites lookup (同一 site_id を request 内 1 回のみ)
     const requestLookupCache = new Map<string, Promise<string | null>>();
     const getResolvedTenantForSite = (site_id: string): Promise<string | null> => {
@@ -989,6 +1204,36 @@ export default {
           site_id: typeof e.site_id === 'string' ? e.site_id : '',
           rejection: r,
         });
+      }
+    }
+
+    // Task 4-1: Origin / Referer / event.url Host 検証 (ブラウザからの非 JWT POST 時)
+    // 登録サイトに有効な host (sites.url) がある場合、別オリジンからの偽造 POST を 403 origin_mismatch で遮断。
+    const hasAuthzBearer = Boolean(request.headers.get('authorization')?.toLowerCase().startsWith('bearer '));
+    if (!hasAuthzBearer && acceptedEvents.length > 0) {
+      const uniqueSites = new Set<string>();
+      for (const e of acceptedEvents) {
+        if (typeof e.site_id === 'string' && e.site_id) uniqueSites.add(e.site_id);
+      }
+      if (uniqueSites.size === 1) {
+        const singleSiteId = Array.from(uniqueSites)[0];
+        const siteBinding = await getRegisteredSiteBinding(env, singleSiteId);
+        const originCheck = verifyRequestOriginAndHost(request, acceptedEvents, siteBinding?.host ?? null);
+        if (!originCheck.ok) {
+          dropContexts.push({
+            site_id: singleSiteId,
+            rejection: { ok: false, reason: originCheck.reason, detail: originCheck.detail },
+          });
+          ctx.waitUntil(emitAuditEventsBatch(env, request, dropContexts));
+          return new Response(
+            JSON.stringify({
+              error: 'origin_mismatch',
+              reason: originCheck.reason,
+              detail: originCheck.detail,
+            }),
+            { status: 403, headers: { ...cors, 'Content-Type': 'application/json' } },
+          );
+        }
       }
     }
 
@@ -1120,43 +1365,67 @@ async function resolveTenantWithDedupe(
     }
   }
 
-  const site_id = typeof event.site_id === 'string' ? event.site_id : '';
+  const site_id = typeof event.site_id === 'string' ? event.site_id.trim() : '';
   if (!site_id) {
     return { ok: false, reason: 'site_id_missing', detail: 'event.site_id absent' };
   }
-  const claimed_tenant = normalizeTenantId(event.tenant_id);
-  if (claimed_tenant === null) {
+
+  const rawTenant = event.tenant_id;
+  const isTenantOmitted = rawTenant === undefined || rawTenant === null || (typeof rawTenant === 'string' && rawTenant.trim() === '');
+
+  if (!isTenantOmitted) {
+    const claimed_tenant = normalizeTenantId(rawTenant);
+    if (claimed_tenant === null) {
+      return {
+        ok: false,
+        reason: 'tenant_id_missing',
+        detail: 'event.tenant_id invalid format',
+      };
+    }
+    if (RESERVED_LEGACY_TENANTS.has(claimed_tenant)) {
+      return {
+        ok: false,
+        reason: 'legacy_tenant_blocked',
+        detail: 'event.tenant_id == __legacy__ or NFKC-equivalent',
+      };
+    }
+
+    // H-4: dedupe 経由 (オリジナル resolveTenant の fresh fetch を request-local cache 化)
+    const expected = await getResolvedTenantForSite(site_id);
+    if (expected === null) {
+      return {
+        ok: false,
+        reason: 'site_not_registered',
+        detail: `site_id=${site_id} not registered in clickinsight.sites`,
+      };
+    }
+    if (expected !== claimed_tenant) {
+      return {
+        ok: false,
+        reason: 'site_tenant_mismatch',
+        detail: `site_id=${site_id}: claimed tenant_id=${claimed_tenant} but sites table says ${expected}`,
+      };
+    }
+    return { ok: true, tenant_id: claimed_tenant, source: 'tracking_js' };
+  }
+
+  // event.tenant_id 省略時 — site_id から clickinsight.sites を逆引き補完 (v1 旧タグ救済)
+  const lookedUp = await getResolvedTenantForSite(site_id);
+  if (lookedUp === null) {
     return {
       ok: false,
-      reason: 'tenant_id_missing',
-      detail: 'event.tenant_id absent or invalid format',
+      reason: 'site_not_registered',
+      detail: `site_id=${site_id} not registered in clickinsight.sites (tenant_id omitted)`,
     };
   }
-  if (RESERVED_LEGACY_TENANTS.has(claimed_tenant)) {
+  if (RESERVED_LEGACY_TENANTS.has(lookedUp)) {
     return {
       ok: false,
       reason: 'legacy_tenant_blocked',
-      detail: 'event.tenant_id == __legacy__ or NFKC-equivalent',
+      detail: `site_id=${site_id} resolved to reserved tenant_id`,
     };
   }
-
-  // H-4: dedupe 経由 (オリジナル resolveTenant の fresh fetch を request-local cache 化)
-  const expected = await getResolvedTenantForSite(site_id);
-  if (expected === null) {
-    return {
-      ok: false,
-      reason: 'site_tenant_mismatch',
-      detail: `site_id=${site_id} not registered in clickinsight.sites`,
-    };
-  }
-  if (expected !== claimed_tenant) {
-    return {
-      ok: false,
-      reason: 'site_tenant_mismatch',
-      detail: `site_id=${site_id}: claimed tenant_id=${claimed_tenant} but sites table says ${expected}`,
-    };
-  }
-  return { ok: true, tenant_id: claimed_tenant, source: 'tracking_js' };
+  return { ok: true, tenant_id: lookedUp, source: 'site_lookup' };
 }
 
 // ── Exports for unit testing ────────────────────────────────────────
@@ -1174,6 +1443,12 @@ export const __TEST_ONLY__ = {
   SITE_TENANT_CACHE,
   SITE_HOST_CACHE,
   HOST_TENANTS_CACHE,
+  RATE_LIMIT_BUCKETS,
+  RATE_LIMIT_WINDOW_MS,
+  RATE_LIMIT_MAX_REQUESTS,
+  checkRateLimit,
+  isHostAllowedForSite,
+  verifyRequestOriginAndHost,
   getRegisteredSiteBinding,
   countTenantsRegisteredForHost,
   EVENTS_COLUMNS,

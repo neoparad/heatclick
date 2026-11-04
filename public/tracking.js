@@ -21,6 +21,7 @@
     }
     // 3. Global variable (set before script load or via GTM)
     if (window.CLICKINSIGHT_SITE_ID) return window.CLICKINSIGHT_SITE_ID;
+    if (window.UGOKI_SITE_ID) return window.UGOKI_SITE_ID;
     // 4. URL query parameter on script src (e.g. tracking.js?id=CIP_xxx)
     for (let i = all.length - 1; i >= 0; i--) {
       try { const u = new URL(all[i].src); const id = u.searchParams.get('id') || u.searchParams.get('site_id'); if (id) return id; } catch {}
@@ -28,6 +29,26 @@
     // 5. Any element with data-site-id
     const any = document.querySelector('script[data-site-id]');
     return any ? any.getAttribute('data-site-id') : '';
+  };
+
+  const getTenantId = () => {
+    const cs = document.currentScript;
+    if (cs) {
+      const t = cs.getAttribute('data-tenant-id') || cs.getAttribute('data-ugoki-tenant-id');
+      if (t) return t;
+    }
+    const all = document.querySelectorAll('script[src*="tracking.js"]');
+    for (let i = all.length - 1; i >= 0; i--) {
+      const t = all[i].getAttribute('data-tenant-id') || all[i].getAttribute('data-ugoki-tenant-id');
+      if (t) return t;
+    }
+    if (window.CLICKINSIGHT_TENANT_ID) return window.CLICKINSIGHT_TENANT_ID;
+    if (window.UGOKI_TENANT_ID) return window.UGOKI_TENANT_ID;
+    for (let i = all.length - 1; i >= 0; i--) {
+      try { const u = new URL(all[i].src); const t = u.searchParams.get('tenant_id'); if (t) return t; } catch {}
+    }
+    const any = document.querySelector('script[data-tenant-id], script[data-ugoki-tenant-id]');
+    return any ? (any.getAttribute('data-tenant-id') || any.getAttribute('data-ugoki-tenant-id') || '') : '';
   };
 
   const getScriptOrigin = () => {
@@ -44,6 +65,7 @@
 
   const config = {
     siteId: getSiteId(),
+    tenantId: getTenantId(),
     debug: window.CLICKINSIGHT_DEBUG || false,
     apiEndpoint: window.CLICKINSIGHT_API_URL || 'https://ugokimap-event-ingest.linkth.workers.dev/api/track',
     requireConsent: window.CLICKINSIGHT_REQUIRE_CONSENT === true,
@@ -56,20 +78,41 @@
   // Sequence counter for event ordering within a session
   let _seqCounter = 0;
 
+  // Normalize event target (handles text nodes, SVG elements, shadow hosts)
+  const _resolveEl = (node) => {
+    if (!node) return null;
+    const el = node.nodeType === 1 ? node : node.parentElement;
+    return el || null;
+  };
+
+  const _getClassName = (el) => {
+    if (!el) return '';
+    if (typeof el.className === 'string') return el.className;
+    if (el.className && typeof el.className.baseVal === 'string') return el.className.baseVal;
+    return el.getAttribute ? (el.getAttribute('class') || '') : '';
+  };
+
   // Generate unique CSS selector for an element
-  const _cssSelector = (el) => {
+  const _cssSelector = (rawEl) => {
+    const el = _resolveEl(rawEl);
     if (!el || el === document.body || el === document.documentElement) return '';
     try {
+      const esc = (typeof CSS !== 'undefined' && typeof CSS.escape === 'function')
+        ? CSS.escape
+        : (s) => String(s).replace(/([^a-zA-Z0-9_-])/g, '\\$1');
       // ID shortcut
-      if (el.id) return '#' + CSS.escape(el.id);
+      if (el.id) return '#' + esc(el.id);
       const parts = [];
       let cur = el;
       while (cur && cur !== document.body && cur !== document.documentElement && parts.length < 5) {
+        if (!cur.tagName) break;
         let seg = cur.tagName.toLowerCase();
-        if (cur.id) { parts.unshift('#' + CSS.escape(cur.id) + '>' + seg.split('>').pop()); parts.unshift(''); break; }
+        if (cur.id) { parts.unshift('#' + esc(cur.id)); break; }
+        const dataTrack = cur.getAttribute && (cur.getAttribute('data-track-id') || cur.getAttribute('data-testid'));
+        if (dataTrack) { seg += '[data-track-id="' + esc(dataTrack) + '"]'; }
         // nth-child for disambiguation
         const parent = cur.parentElement;
-        if (parent) {
+        if (parent && parent.children) {
           const siblings = Array.from(parent.children).filter(c => c.tagName === cur.tagName);
           if (siblings.length > 1) seg += ':nth-child(' + (Array.from(parent.children).indexOf(cur) + 1) + ')';
         }
@@ -84,6 +127,35 @@
   const _genId = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
     const r = (Math.random() * 16) | 0; return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
   });
+
+  const _localGetCookie = (name) => {
+    try {
+      const m = document.cookie.match(new RegExp(
+        '(?:^|; )' + name.replace(/([.$?*|{}()\[\]\\\/+^])/g, '\\$1') + '=([^;]*)'
+      ));
+      return m ? decodeURIComponent(m[1]) : '';
+    } catch { return ''; }
+  };
+  const _localSetCookie = (name, value, days) => {
+    try {
+      const d = new Date(Date.now() + days * 86400000);
+      const secure = (typeof location !== 'undefined' && location.protocol === 'https:') ? '; Secure' : '';
+      document.cookie = name + '=' + encodeURIComponent(value)
+        + '; expires=' + d.toUTCString() + '; path=/; SameSite=Lax' + secure;
+    } catch { /* ignore */ }
+  };
+
+  let _isFirstVisit = false;
+  const _getVisitorId = () => {
+    let vid = _localGetCookie('__ugk_vid');
+    if (!vid) {
+      vid = _localGetCookie('ci_user_id') || localStorage.getItem('ci_user_id') || _genId();
+      _localSetCookie('__ugk_vid', vid, 365);
+      _isFirstVisit = true;
+    }
+    return vid;
+  };
+  const _visitorId = _getVisitorId();
 
   const _getSession = () => {
     let sid = sessionStorage.getItem('ci_sid');
@@ -103,17 +175,34 @@
       if (uid) return uid;
     }
     let uid = localStorage.getItem('ci_user_id');
-    if (!uid) { uid = _genId(); localStorage.setItem('ci_user_id', uid); }
+    if (!uid) { uid = _visitorId || _genId(); localStorage.setItem('ci_user_id', uid); }
     if (_utils.setCookie) _utils.setCookie('ci_user_id', uid, 730);
     return uid;
   };
 
   const _vp = () => ({ width: window.innerWidth || document.documentElement.clientWidth, height: window.innerHeight || document.documentElement.clientHeight });
+  const _docHeight = () => Math.max(
+    (document.documentElement && document.documentElement.scrollHeight) || 0,
+    (document.body && document.body.scrollHeight) || 0,
+    _vp().height || 0
+  );
 
-  const _elPath = (el) => {
+  const _nearestSectionSelector = (rawEl) => {
+    const el = _resolveEl(rawEl);
+    if (!el || typeof el.closest !== 'function') return '';
+    try {
+      const sec = el.closest('section, article, main, header, footer, nav, aside, [data-section], [id]');
+      if (!sec || sec === document.body || sec === document.documentElement) return '';
+      return _cssSelector(sec);
+    } catch { return ''; }
+  };
+
+  const _elPath = (rawEl) => {
+    const el = _resolveEl(rawEl);
     if (!el) return '';
     const p = []; let c = el;
-    while (c && c !== document.body && p.length < 4) {
+    while (c && c !== document.body && c !== document.documentElement && p.length < 4) {
+      if (!c.tagName) break;
       let s = c.tagName.toLowerCase();
       if (c.id) { p.unshift(s+'#'+c.id); break; }
       p.unshift(s); c = c.parentElement;
@@ -124,7 +213,7 @@
   const _throttle = (fn, d) => { let last = 0; return function(...a) { const n = Date.now(); if (n - last >= d) { last = n; return fn.apply(this, a); } }; };
 
   // Extensible utils — extensions can add sanitizePII, sanitizeUrl, getCookie, setCookie
-  const _utils = { getElementPath: _elPath, getCssSelector: _cssSelector, throttle: _throttle };
+  const _utils = { getElementPath: _elPath, getCssSelector: _cssSelector, getNearestSectionSelector: _nearestSectionSelector, getDocumentHeight: _docHeight, throttle: _throttle };
 
   // GA4 client_id (for BigQuery demographic join)
   const _gaClientId = (document.cookie.match(/_ga=GA\d+\.\d+\.(\d+\.\d+)/)||[])[1] || '';
@@ -135,34 +224,73 @@
   const _devType = () => { const w = _vp().width; return w >= 1024 ? 'desktop' : w >= 768 ? 'tablet' : 'mobile'; };
   const _refType = (r) => { if (!r) return 'direct'; try { const h = new URL(r).hostname; return /google|bing|yahoo/i.test(h)?'organic':/facebook|instagram|twitter/i.test(h)?'social':'referral'; } catch { return 'direct'; } };
 
-  // ── AXO: AI Agent detection (AXO-001) ───────────────────────────────
-  // Client-side signals only. Runs once at load. Server-side detection
-  // (UA / IP range) is done downstream via SQL on user_agent column.
-  // See: docs/fusion/strategy/12_agent_experience_optimization.md
+  // ── AXO: AI Agent detection (AXO-001 / Multi-Signal Calibrated) ───────
+  // High-confidence signals (explicit Bot/AI UA, Headless UA, webdriver/phantom/nightmare)
+  // trigger is_agent=1 immediately.
+  // Weak environmental signals (languages_empty, chrome_missing, zero_screen, no_webgl)
+  // require >= 2 weak signals to trigger is_agent=1.
+  // Auxiliary signals (plugins_empty, connection_missing) are recorded in agent_signals
+  // for observability, but NEVER trigger is_agent=1 on their own (prevents Mac Safari &
+  // non-NetworkInformation browser false positives).
   const _detectAgent = () => {
-    const signals = [];
     const ua = navigator.userAgent || '';
-    // Known bot UA patterns (curated — extend as new agents appear)
-    const botRe = /(GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|anthropic-ai|PerplexityBot|Perplexity-User|Google-Extended|Googlebot|Bingbot|Bytespider|CCBot|Diffbot|Amazonbot|Applebot-Extended|YouBot|cohere-ai|Meta-ExternalAgent|meta-externalads|FacebookBot|DuckAssistBot|Mistral-Bot)/i;
+    const botRe = /(GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|anthropic-ai|PerplexityBot|Perplexity-User|Google-Extended|Googlebot|AdsBot-Google|Mediapartners-Google|Bingbot|BingPreview|Slurp|Bytespider|CCBot|Diffbot|Amazonbot|Applebot-Extended|YouBot|cohere-ai|Meta-ExternalAgent|meta-externalads|facebookexternalhit|FacebookBot|DuckAssistBot|Mistral-Bot)/i;
+    const genericBotRe = /(bot|crawl|spider|slurp|mediapartners|adsbot|bingpreview|facebookexternalhit)/i;
+    const headlessRe = /(HeadlessChrome|PhantomJS|Electron|Playwright|Puppeteer|SlimerJS|Nightmare)/i;
     const m = ua.match(botRe);
+    const hm = ua.match(headlessRe);
+    const gm = !m && !hm ? ua.match(genericBotRe) : null;
+    const mobile_ua = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+    const phantom_marker = Boolean(window._phantom || window.__nightmare || window.callPhantom || window._selenium || window.__webdriver_evaluate);
+    const zero_screen = (window.innerWidth === 0 && window.innerHeight === 0) || (typeof screen !== 'undefined' && screen.width === 0 && screen.height === 0);
+    let no_webgl = false;
+    try {
+      const cv = document.createElement('canvas');
+      const gl = cv.getContext && (cv.getContext('webgl') || cv.getContext('experimental-webgl'));
+      if (!gl) {
+        no_webgl = true;
+      } else if (typeof gl.getParameter === 'function') {
+        const dbg = gl.getExtension && gl.getExtension('WEBGL_debug_renderer_info');
+        const renderer = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || '') : '';
+        if (/SwiftShader|llvmpipe|Offscreen/i.test(renderer)) no_webgl = true;
+      }
+    } catch { no_webgl = true; }
+
+    const s = {
+      webdriver: navigator.webdriver === true,
+      phantom_marker: phantom_marker,
+      plugins_empty: !navigator.plugins || navigator.plugins.length === 0,
+      mobile_ua: mobile_ua,
+      languages_empty: !navigator.languages || navigator.languages.length === 0,
+      chrome_missing: /Chrome\//.test(ua) && !/Edge\/|Edg\/|OPR\//.test(ua) && typeof window.chrome === 'undefined',
+      connection_missing: !('connection' in navigator) && /Chrome\//.test(ua),
+      zero_screen: zero_screen,
+      no_webgl: no_webgl,
+      ua_bot_match: m ? m[1] : (gm ? gm[1] : null),
+      ua_headless_match: Boolean(hm),
+    };
+
+    const strongSignals = [];
+    if (s.ua_bot_match) strongSignals.push('ua:' + s.ua_bot_match);
+    if (s.ua_headless_match) strongSignals.push('ua:headless');
+    if (s.webdriver) strongSignals.push('webdriver');
+    if (s.phantom_marker) strongSignals.push('phantom');
+
+    const weakSignals = [];
+    if (s.languages_empty) weakSignals.push('no_langs');
+    if (s.chrome_missing) weakSignals.push('no_chrome_obj');
+    if (s.zero_screen) weakSignals.push('zero_screen');
+    if (s.no_webgl) weakSignals.push('no_webgl');
+
+    const is_agent = (strongSignals.length >= 1 || weakSignals.length >= 2) ? 1 : 0;
     let type = '';
-    if (m) { signals.push('ua:' + m[1]); type = m[1]; }
-    if (/HeadlessChrome|PhantomJS|Electron|Playwright|Puppeteer/i.test(ua)) signals.push('ua:headless');
-    // JS environment fingerprints
-    if (navigator.webdriver) signals.push('webdriver');
-    if (!navigator.languages || navigator.languages.length === 0) signals.push('no_langs');
-    // Android Chrome / iOS Safari は仕様上 navigator.plugins が常に空 → モバイル UA では bot 信号にしない
-    // (2026-09-25: この誤検知で Android 訪問者の大半が is_agent=1 になっていた)
-    // v1 は signals 配列 = 判定そのもの (観測と判定が分離していない) ため、v2 と違い観測値も記録しない (意図的差異)。
-    const _mobileUA = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
-    if (!_mobileUA && navigator.plugins && navigator.plugins.length === 0) signals.push('no_plugins');
-    // Chrome-family without chrome.runtime (common on headless Chromium)
-    if (/Chrome\//.test(ua) && typeof window.chrome === 'undefined') signals.push('no_chrome_obj');
-    // Missing connection (many headless envs)
-    if (!('connection' in navigator) && /Chrome\//.test(ua)) signals.push('no_conn');
-    const is_agent = signals.length > 0 ? 1 : 0;
-    if (is_agent && !type) type = signals[0].split(':')[1] || 'unknown';
-    return { is_agent: is_agent, agent_type: type || '', agent_signals: signals.join(',') };
+    if (s.ua_bot_match) type = s.ua_bot_match;
+    else if (s.ua_headless_match) type = 'headless';
+    else if (s.webdriver) type = 'webdriver';
+    else if (s.phantom_marker) type = 'phantom';
+    else if (is_agent) type = 'heuristic_multi';
+
+    return { is_agent: is_agent, agent_type: type, agent_signals: JSON.stringify(s) };
   };
   const _agent = _detectAgent();
 
@@ -174,7 +302,32 @@
 
   const queueEvent = (ev) => {
     _seqCounter++;
-    const d = { ...ev, id: _genId(), site_id: config.siteId, session_id: _getSession(), user_id: _getUserId(), external_id: _externalId || null, ga_client_id: _gaClientId, timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, device_type: _devType(), referrer_type: _refType(document.referrer), sequence_id: _seqCounter, is_agent: _agent.is_agent, agent_type: _agent.agent_type, agent_signals: _agent.agent_signals, ..._utm };
+    const d = {
+      ...ev,
+      id: _genId(),
+      site_id: config.siteId,
+      tenant_id: config.tenantId || '',
+      session_id: _getSession(),
+      user_id: _getUserId(),
+      visitor_id: _visitorId,
+      is_first_visit: _isFirstVisit,
+      external_id: _externalId || null,
+      ga_client_id: _gaClientId,
+      timestamp: new Date().toISOString(),
+      url: window.location.href,
+      referrer: document.referrer,
+      user_agent: navigator.userAgent,
+      viewport_width: _vp().width,
+      viewport_height: _vp().height,
+      document_height: _docHeight(),
+      device_type: _devType(),
+      referrer_type: _refType(document.referrer),
+      sequence_id: _seqCounter,
+      is_agent: _agent.is_agent,
+      agent_type: _agent.agent_type,
+      agent_signals: _agent.agent_signals,
+      ..._utm,
+    };
     if (!d.site_id || d.site_id.trim() === '') return;
     _q.push(d);
     if (_q.length >= config.batchSize) sendBatch(); else if (!_bt) _bt = setTimeout(sendBatch, config.batchInterval);
@@ -209,43 +362,51 @@
 
   const trackers = {
     click: (e) => {
-      const el = e.target, rect = el.getBoundingClientRect(), sy = window.scrollY||window.pageYOffset;
+      const el = _resolveEl(e.target);
+      if (!el) return;
+      const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0 };
+      const sy = window.scrollY||window.pageYOffset;
       const now = Date.now(), cx = Math.round(e.clientX), cy = Math.round(e.clientY + sy);
+      const dh = _docHeight(), secSel = _nearestSectionSelector(el);
       rClicks.push({ x: cx, y: cy, t: now });
       rClicks = rClicks.filter(c => now - c.t < 2000);
       const isRage = rClicks.filter(c => Math.abs(c.x-cx)<30 && Math.abs(c.y-cy)<30).length >= 3;
       // Use sanitizePII/sanitizeUrl if utils extension loaded, else simple truncation
       const rawText = el.textContent?.trim().substring(0, 100) || '';
-      const rawHref = el.href || el.closest('a')?.href || '';
+      const rawHref = el.href || (typeof el.closest === 'function' ? el.closest('a')?.href : '') || '';
+      const tagName = el.tagName ? el.tagName.toLowerCase() : '';
       queueEvent({
         event_type: isRage ? 'rage_click' : _isDead(el) ? 'dead_click' : 'click',
-        element_tag_name: el.tagName.toLowerCase(), element_id: el.id||'', element_class_name: el.className||'',
+        element_tag_name: tagName, element_tag: tagName, element_id: el.id||'', element_class_name: _getClassName(el),
         element_text: _utils.sanitizePII ? _utils.sanitizePII(rawText) : rawText,
         element_href: _utils.sanitizeUrl ? _utils.sanitizeUrl(rawHref) : rawHref,
-        element_path: _elPath(el), element_selector: _cssSelector(el), click_x: cx, click_y: cy,
+        element_path: _elPath(el), element_selector: _cssSelector(el), section_selector: secSel,
+        click_x: cx, click_y: cy,
         element_x: Math.round(rect.left), element_y: Math.round(rect.top + sy),
+        document_height: dh,
       });
     },
 
     scroll: _throttle(() => {
-      const sy = window.scrollY||window.pageYOffset, dh = document.documentElement.scrollHeight;
+      const sy = window.scrollY||window.pageYOffset, dh = _docHeight();
       const ms = dh - window.innerHeight, sp = ms > 0 ? Math.round((sy/ms)*100) : 0;
       if (sp > maxSD) maxSD = sp;
-      queueEvent({ event_type: 'scroll', scroll_y: Math.round(sy), scroll_percentage: Math.min(100, Math.max(0, sp)) });
+      queueEvent({ event_type: 'scroll', scroll_y: Math.round(sy), scroll_percentage: Math.min(100, Math.max(0, sp)), document_height: dh });
       if (scrollStopT) clearTimeout(scrollStopT);
       if (readStart && readY !== null) {
         const dur = Date.now() - readStart;
-        if (dur >= 500) queueEvent({ event_type: 'read_area', read_y: Math.round(sy + (window.innerHeight/2)), read_duration: dur });
+        if (dur >= 500) queueEvent({ event_type: 'read_area', read_y: Math.round(sy + (window.innerHeight/2)), read_duration: dur, document_height: dh });
         readStart = null; readY = null;
       }
       scrollStopT = setTimeout(() => { if (pageVis) { readY = Math.round(sy + (window.innerHeight/2)); readStart = Date.now(); } }, 500);
     }, 200),
 
-    pageview: () => { queueEvent({ event_type: 'pageview', page_title: document.title }); },
+    pageview: () => { queueEvent({ event_type: 'pageview', page_title: document.title, document_height: _docHeight() }); },
 
     pageleave: () => {
-      if (maxSD > 0) queueEvent({ event_type: 'scroll_depth', scroll_percentage: maxSD, is_final: true });
-      if (readStart && readY !== null) { const d = Date.now()-readStart; if (d>=500) queueEvent({ event_type:'read_area', read_y:readY, read_duration:d }); }
+      const dh = _docHeight();
+      if (maxSD > 0) queueEvent({ event_type: 'scroll_depth', scroll_percentage: maxSD, is_final: true, document_height: dh });
+      if (readStart && readY !== null) { const d = Date.now()-readStart; if (d>=500) queueEvent({ event_type:'read_area', read_y:readY, read_duration:d, document_height: dh }); }
       for (const ext of _exts) { if (ext.flush) ext.flush(); }
       sendBatch();
     },
@@ -259,7 +420,17 @@
   const shouldLoad = (name) => { if (config.extensions==='all') return true; if (config.extensions==='none') return false; return config.extensions.split(',').map(s=>s.trim()).includes(name); };
 
   const loadExtensions = () => {
-    const base = scriptOrigin ? scriptOrigin + '/tracking-ext-' : '/tracking-ext-';
+    let extBase = '/tracking-ext-';
+    if (cs && cs.src) {
+      try {
+        const u = new URL(cs.src);
+        const dir = u.pathname.replace(/[^/]+$/, '');
+        extBase = u.origin + dir + 'tracking-ext-';
+      } catch {}
+    } else if (scriptOrigin) {
+      extBase = scriptOrigin + '/tracking-ext-';
+    }
+    const base = extBase;
     // Utils extension loads first (provides PII/cookie/URL handling)
     const names = ['utils', 'form', 'video', 'image', 'element', 'active-time', 'behavior', 'scroll-timeline', 'spa', 'web-vitals'];
     for (const name of names) {
@@ -280,7 +451,7 @@
     document.addEventListener('visibilitychange', () => {
       pageVis = !document.hidden;
       if (document.hidden) {
-        if (readStart && readY !== null) { const d=Date.now()-readStart; if(d>=500) queueEvent({event_type:'read_area',read_y:readY,read_duration:d}); readStart=null; readY=null; }
+        if (readStart && readY !== null) { const d=Date.now()-readStart; if(d>=500) queueEvent({event_type:'read_area',read_y:readY,read_duration:d,document_height:_docHeight()}); readStart=null; readY=null; }
         if (scrollStopT) { clearTimeout(scrollStopT); scrollStopT=null; }
         sendBatch();
       }

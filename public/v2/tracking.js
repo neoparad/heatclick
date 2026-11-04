@@ -76,22 +76,26 @@
   const getTenantId = () => {
     // 1. data-tenant-id attribute on current script
     const cs = document.currentScript;
-    if (cs) { const t = cs.getAttribute('data-tenant-id'); if (t) return t; }
+    if (cs) {
+      const t = cs.getAttribute('data-tenant-id') || cs.getAttribute('data-ugoki-tenant-id');
+      if (t) return t;
+    }
     // 2. data-tenant-id on any tracking.js script tag
     const all = document.querySelectorAll('script[src*="tracking.js"]');
     for (let i = all.length - 1; i >= 0; i--) {
-      const t = all[i].getAttribute('data-tenant-id');
+      const t = all[i].getAttribute('data-tenant-id') || all[i].getAttribute('data-ugoki-tenant-id');
       if (t) return t;
     }
     // 3. Global variable (set before script load or via GTM)
     if (window.CLICKINSIGHT_TENANT_ID) return window.CLICKINSIGHT_TENANT_ID;
+    if (window.UGOKI_TENANT_ID) return window.UGOKI_TENANT_ID;
     // 4. URL query parameter on script src (e.g. tracking.js?tenant_id=linkth_internal) — クエリ string 代替
     for (let i = all.length - 1; i >= 0; i--) {
       try { const u = new URL(all[i].src); const t = u.searchParams.get('tenant_id'); if (t) return t; } catch {}
     }
     // 5. Any element with data-tenant-id (fallback for non-script attribute)
-    const any = document.querySelector('script[data-tenant-id]');
-    return any ? any.getAttribute('data-tenant-id') : '';
+    const any = document.querySelector('script[data-tenant-id], script[data-ugoki-tenant-id]');
+    return any ? (any.getAttribute('data-tenant-id') || any.getAttribute('data-ugoki-tenant-id') || '') : '';
   };
 
   const getScriptOrigin = () => {
@@ -242,6 +246,20 @@
   };
 
   const _vp = () => ({ width: window.innerWidth || document.documentElement.clientWidth, height: window.innerHeight || document.documentElement.clientHeight });
+  const _docHeight = () => Math.max(
+    (document.documentElement && document.documentElement.scrollHeight) || 0,
+    (document.body && document.body.scrollHeight) || 0,
+    _vp().height || 0
+  );
+
+  const _nearestSectionSelector = (el) => {
+    if (!el || typeof el.closest !== 'function') return '';
+    try {
+      const sec = el.closest('section, article, main, header, footer, nav, aside, [data-section], [id]');
+      if (!sec || sec === document.body || sec === document.documentElement) return '';
+      return _cssSelector(sec);
+    } catch { return ''; }
+  };
 
   const _elPath = (el) => {
     if (!el) return '';
@@ -257,7 +275,7 @@
   const _throttle = (fn, d) => { let last = 0; return function(...a) { const n = Date.now(); if (n - last >= d) { last = n; return fn.apply(this, a); } }; };
 
   // Extensible utils — extensions can add sanitizePII, sanitizeUrl, getCookie, setCookie
-  const _utils = { getElementPath: _elPath, getCssSelector: _cssSelector, throttle: _throttle };
+  const _utils = { getElementPath: _elPath, getCssSelector: _cssSelector, getNearestSectionSelector: _nearestSectionSelector, getDocumentHeight: _docHeight, throttle: _throttle };
 
   // GA4 client_id (for BigQuery demographic join)
   const _gaClientId = (document.cookie.match(/_ga=GA\d+\.\d+\.(\d+\.\d+)/)||[])[1] || '';
@@ -268,37 +286,58 @@
   const _devType = () => { const w = _vp().width; return w >= 1024 ? 'desktop' : w >= 768 ? 'tablet' : 'mobile'; };
   const _refType = (r) => { if (!r) return 'direct'; try { const h = new URL(r).hostname; return /google|bing|yahoo/i.test(h)?'organic':/facebook|instagram|twitter/i.test(h)?'social':'referral'; } catch { return 'direct'; } };
 
-  // ── AXO: AI Agent detection (AXO-001) ───────────────────────────────
-  // Client-side signals only. Runs once at load. Server-side detection
-  // (UA / IP range) is done downstream via SQL on user_agent column.
-  // See: docs/fusion/strategy/12_agent_experience_optimization.md
+  // ── AXO: AI Agent detection (AXO-001 / Multi-Signal Calibrated) ───────
+  // High-confidence signals (explicit Bot/AI UA, Headless UA, webdriver/phantom/nightmare)
+  // trigger is_agent=1 immediately.
+  // Weak environmental signals (languages_empty, chrome_missing, zero_screen)
+  // require >= 2 weak signals to trigger is_agent=1.
+  // Auxiliary signals (plugins_empty, connection_missing) are recorded in agent_signals
+  // for observability, but NEVER trigger is_agent=1 on their own (prevents Mac Safari &
+  // non-NetworkInformation browser false positives).
   const _detectAgent = () => {
     const ua = navigator.userAgent || '';
-    const botRe = /(GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|anthropic-ai|PerplexityBot|Perplexity-User|Google-Extended|Googlebot|Bingbot|Bytespider|CCBot|Diffbot|Amazonbot|Applebot-Extended|YouBot|cohere-ai|Meta-ExternalAgent|meta-externalads|FacebookBot|DuckAssistBot|Mistral-Bot)/i;
+    const botRe = /(GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|anthropic-ai|PerplexityBot|Perplexity-User|Google-Extended|Googlebot|AdsBot-Google|Mediapartners-Google|Bingbot|BingPreview|Slurp|Bytespider|CCBot|Diffbot|Amazonbot|Applebot-Extended|YouBot|cohere-ai|Meta-ExternalAgent|meta-externalads|facebookexternalhit|FacebookBot|DuckAssistBot|Mistral-Bot)/i;
+    const genericBotRe = /(bot|crawl|spider|slurp|mediapartners|adsbot|bingpreview|facebookexternalhit)/i;
+    const headlessRe = /(HeadlessChrome|PhantomJS|Electron|Playwright|Puppeteer|SlimerJS|Nightmare)/i;
     const m = ua.match(botRe);
-    // v2.3: 複合値 JSON オブジェクト (Task 3 優先 1)
-    // Android Chrome / Samsung Browser / iOS Safari は仕様上 navigator.plugins が常に空。
-    // 2026-09-25 Jev shadow 評価: plugins_empty 単独で全セッションの 53% (ほぼ全て Android) が
-    // is_agent=1 になり heatmap / cv-journey の is_agent=0 フィルタから落ちていた。
-    // 観測値 (plugins_empty) は記録し続け、判定 (hit) にはモバイル UA では使わない。
+    const hm = ua.match(headlessRe);
+    const gm = !m && !hm ? ua.match(genericBotRe) : null;
     const mobile_ua = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+    const phantom_marker = Boolean(window._phantom || window.__nightmare || window.callPhantom || window._selenium || window.__webdriver_evaluate);
+    const zero_screen = (window.innerWidth === 0 && window.innerHeight === 0) || (typeof screen !== 'undefined' && screen.width === 0 && screen.height === 0);
+
     const s = {
       webdriver: navigator.webdriver === true,
+      phantom_marker: phantom_marker,
       plugins_empty: !navigator.plugins || navigator.plugins.length === 0,
       mobile_ua: mobile_ua,
       languages_empty: !navigator.languages || navigator.languages.length === 0,
-      chrome_missing: /Chrome\//.test(ua) && typeof window.chrome === 'undefined',
+      chrome_missing: /Chrome\//.test(ua) && !/Edge\/|Edg\/|OPR\//.test(ua) && typeof window.chrome === 'undefined',
       connection_missing: !('connection' in navigator) && /Chrome\//.test(ua),
-      ua_bot_match: m ? m[1] : null,
-      ua_headless_match: /HeadlessChrome|PhantomJS|Electron|Playwright|Puppeteer/i.test(ua),
+      zero_screen: zero_screen,
+      ua_bot_match: m ? m[1] : (gm ? gm[1] : null),
+      ua_headless_match: Boolean(hm),
     };
-    const plugins_signal = s.plugins_empty && !mobile_ua;
-    const hit = s.webdriver || plugins_signal || s.languages_empty || s.chrome_missing || s.connection_missing || s.ua_bot_match || s.ua_headless_match;
-    const is_agent = hit ? 1 : 0;
+
+    const strongSignals = [];
+    if (s.ua_bot_match) strongSignals.push('ua:' + s.ua_bot_match);
+    if (s.ua_headless_match) strongSignals.push('ua:headless');
+    if (s.webdriver) strongSignals.push('webdriver');
+    if (s.phantom_marker) strongSignals.push('phantom');
+
+    const weakSignals = [];
+    if (s.languages_empty) weakSignals.push('no_langs');
+    if (s.chrome_missing) weakSignals.push('no_chrome_obj');
+    if (s.zero_screen) weakSignals.push('zero_screen');
+
+    const is_agent = (strongSignals.length >= 1 || weakSignals.length >= 2) ? 1 : 0;
     let type = '';
     if (s.ua_bot_match) type = s.ua_bot_match;
     else if (s.ua_headless_match) type = 'headless';
-    else if (is_agent) type = 'unknown';
+    else if (s.webdriver) type = 'webdriver';
+    else if (s.phantom_marker) type = 'phantom';
+    else if (is_agent) type = 'heuristic_multi';
+
     return { is_agent: is_agent, agent_type: type, agent_signals: JSON.stringify(s) };
   };
   const _agent = _detectAgent();
@@ -359,7 +398,7 @@
     _seqCounter++;
     // Sprint 4 W1 (続 82): visitor_id / is_first_visit を全 event に注入
     //   session_end event は別途 session_duration_sec / page_views_in_session を含めて queueEvent 呼出。
-    const d = { ...ev, id: _genId(), site_id: config.siteId, tenant_id: config.tenantId, session_id: _getSession(), user_id: _getUserId(), visitor_id: _visitorId, is_first_visit: _isFirstVisit, external_id: _externalId || null, ga_client_id: _gaClientId, timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, device_type: _devType(), referrer_type: _refType(document.referrer), sequence_id: _seqCounter, is_agent: _agent.is_agent, agent_type: _agent.agent_type, agent_signals: _agent.agent_signals, stealth_score: _stealth.stealth_score, stealth_signals: _stealth.stealth_signals, ..._utm };
+    const d = { ...ev, id: _genId(), site_id: config.siteId, tenant_id: config.tenantId, session_id: _getSession(), user_id: _getUserId(), visitor_id: _visitorId, is_first_visit: _isFirstVisit, external_id: _externalId || null, ga_client_id: _gaClientId, timestamp: new Date().toISOString(), url: window.location.href, referrer: document.referrer, user_agent: navigator.userAgent, viewport_width: _vp().width, viewport_height: _vp().height, document_height: _docHeight(), device_type: _devType(), referrer_type: _refType(document.referrer), sequence_id: _seqCounter, is_agent: _agent.is_agent, agent_type: _agent.agent_type, agent_signals: _agent.agent_signals, stealth_score: _stealth.stealth_score, stealth_signals: _stealth.stealth_signals, ..._utm };
     if (!d.site_id || d.site_id.trim() === '') return;
     // B-1: tenant_id 拾い忘れ防御 — 起動時 check で抑止済だが二重ガード (続 14 R3)
     if (!d.tenant_id || d.tenant_id.trim() === '') return;
@@ -490,31 +529,35 @@
     click: (e) => {
       const el = e.target, rect = el.getBoundingClientRect(), sy = window.scrollY||window.pageYOffset;
       const now = Date.now(), cx = Math.round(e.clientX), cy = Math.round(e.clientY + sy);
+      const dh = _docHeight(), secSel = _nearestSectionSelector(el);
       rClicks.push({ x: cx, y: cy, t: now });
       rClicks = rClicks.filter(c => now - c.t < 2000);
       const isRage = rClicks.filter(c => Math.abs(c.x-cx)<30 && Math.abs(c.y-cy)<30).length >= 3;
       // Use sanitizePII/sanitizeUrl if utils extension loaded, else simple truncation
       const rawText = el.textContent?.trim().substring(0, 100) || '';
       const rawHref = el.href || el.closest('a')?.href || '';
+      const tagName = el.tagName ? el.tagName.toLowerCase() : '';
       queueEvent({
         event_type: isRage ? 'rage_click' : _isDead(el) ? 'dead_click' : 'click',
-        element_tag_name: el.tagName.toLowerCase(), element_id: el.id||'', element_class_name: el.className||'',
+        element_tag_name: tagName, element_tag: tagName, element_id: el.id||'', element_class_name: el.className||'',
         element_text: _utils.sanitizePII ? _utils.sanitizePII(rawText) : rawText,
         element_href: _utils.sanitizeUrl ? _utils.sanitizeUrl(rawHref) : rawHref,
-        element_path: _elPath(el), element_selector: _cssSelector(el), click_x: cx, click_y: cy,
+        element_path: _elPath(el), element_selector: _cssSelector(el), section_selector: secSel,
+        click_x: cx, click_y: cy,
         element_x: Math.round(rect.left), element_y: Math.round(rect.top + sy),
+        document_height: dh,
       });
     },
 
     scroll: _throttle(() => {
-      const sy = window.scrollY||window.pageYOffset, dh = document.documentElement.scrollHeight;
+      const sy = window.scrollY||window.pageYOffset, dh = _docHeight();
       const ms = dh - window.innerHeight, sp = ms > 0 ? Math.round((sy/ms)*100) : 0;
       if (sp > maxSD) maxSD = sp;
-      queueEvent({ event_type: 'scroll', scroll_y: Math.round(sy), scroll_percentage: Math.min(100, Math.max(0, sp)) });
+      queueEvent({ event_type: 'scroll', scroll_y: Math.round(sy), scroll_percentage: Math.min(100, Math.max(0, sp)), document_height: dh });
       if (scrollStopT) clearTimeout(scrollStopT);
       if (readStart && readY !== null) {
         const dur = Date.now() - readStart;
-        if (dur >= 500) queueEvent({ event_type: 'read_area', read_y: Math.round(sy + (window.innerHeight/2)), read_duration: dur });
+        if (dur >= 500) queueEvent({ event_type: 'read_area', read_y: Math.round(sy + (window.innerHeight/2)), read_duration: dur, document_height: dh });
         readStart = null; readY = null;
       }
       scrollStopT = setTimeout(() => { if (pageVis) { readY = Math.round(sy + (window.innerHeight/2)); readStart = Date.now(); } }, 500);
@@ -523,12 +566,13 @@
     pageview: () => {
       // Sprint 4 W1 (続 82): session 内 page view 数を increment (session_end で集計)
       _incrementPageViewsInSession();
-      queueEvent({ event_type: 'pageview', page_title: document.title });
+      queueEvent({ event_type: 'pageview', page_title: document.title, document_height: _docHeight() });
     },
 
     pageleave: () => {
-      if (maxSD > 0) queueEvent({ event_type: 'scroll_depth', scroll_percentage: maxSD, is_final: true });
-      if (readStart && readY !== null) { const d = Date.now()-readStart; if (d>=500) queueEvent({ event_type:'read_area', read_y:readY, read_duration:d }); }
+      const dh = _docHeight();
+      if (maxSD > 0) queueEvent({ event_type: 'scroll_depth', scroll_percentage: maxSD, is_final: true, document_height: dh });
+      if (readStart && readY !== null) { const d = Date.now()-readStart; if (d>=500) queueEvent({ event_type:'read_area', read_y:readY, read_duration:d, document_height: dh }); }
       for (const ext of _exts) { if (ext.flush) ext.flush(); }
       // Sprint 4 W1 (続 82): beforeunload で session_end 発火 (best-effort、sendBeacon)
       _fireSessionEnd('beforeunload');

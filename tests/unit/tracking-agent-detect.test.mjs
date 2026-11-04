@@ -10,9 +10,10 @@
  *
  * このテストが保証すること:
  *   1. モバイル UA (Android / iPhone) では plugins が空でも is_agent=0
- *   2. デスクトップ UA で plugins が空なら従来どおり is_agent=1 (headless の主要シグナルを維持)
- *   3. meta-externalads UA は is_agent=1 / agent_type='meta-externalads'
- *   4. agent_signals には plugins_empty の観測値がそのまま残る (観測性は落とさない)
+ *   2. デスクトップ UA (Mac Safari / Desktop Chrome) でも plugins_empty または connection_missing 単独では is_agent=0 (単一補助シグナル誤爆排除)
+ *   3. 強シグナル (Bot UA / Headless UA / webdriver / phantom) が 1 つ以上、または弱シグナル (languages_empty / chrome_missing / zero_screen) が 2 つ以上重なった場合のみ is_agent=1
+ *   4. meta-externalads UA は is_agent=1 / agent_type='meta-externalads'
+ *   5. agent_signals には plugins_empty / connection_missing の観測値がそのまま残る (観測性は落とさない)
  *
  * Runtime: node:test + vm.runInContext sandbox (tests/unit/tracking-tenant-id.test.js と同方式)。
  * Run: `node --test tests/unit/tracking-agent-detect.test.mjs`
@@ -32,12 +33,25 @@ const UA = {
   androidChrome: 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36',
   samsung: 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/30.0 Chrome/146.0.0.0 Mobile Safari/537.36',
   iphone: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+  macSafari: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
   desktopChrome: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36',
   metaAds: 'meta-externalads/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)',
+  gptBot: 'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)',
 }
 
 /** Run tracking.js in a sandbox, emit one event, flush, return the first beacon event. */
-function detectWith({ userAgent, plugins = [], hasChromeObject = true }) {
+function detectWith({
+  userAgent,
+  plugins = [],
+  hasChromeObject = true,
+  webdriver = false,
+  languages = ['ja', 'en'],
+  hasConnection = true,
+  phantom = false,
+  innerWidth = 390,
+  innerHeight = 844,
+  scriptSource = TRACKING_JS,
+}) {
   const beaconCalls = []
   const noop = () => {}
   const scriptEl = {
@@ -51,7 +65,7 @@ function detectWith({ userAgent, plugins = [], hasChromeObject = true }) {
   }
   const documentMock = {
     currentScript: scriptEl,
-    querySelector: (sel) => (sel === 'script[data-site-id]' || sel === 'script[data-tenant-id]' ? scriptEl : null),
+    querySelector: (sel) => (sel.includes('data-site-id') || sel.includes('data-tenant-id') ? scriptEl : null),
     querySelectorAll: () => [scriptEl],
     cookie: '', hidden: false, visibilityState: 'visible', referrer: '', title: 'test', readyState: 'complete',
     addEventListener: noop, removeEventListener: noop,
@@ -62,15 +76,15 @@ function detectWith({ userAgent, plugins = [], hasChromeObject = true }) {
     getElementsByTagName: () => [],
   }
   const navigatorMock = {
-    userAgent, language: 'ja', languages: ['ja', 'en'], plugins,
+    userAgent, language: languages[0] || '', languages, plugins, webdriver,
     sendBeacon(url, data) { beaconCalls.push({ url, data }); return true },
     doNotTrack: null, cookieEnabled: true, platform: 'node', hardwareConcurrency: 4, maxTouchPoints: 0,
-    connection: { effectiveType: '4g' },
   }
+  if (hasConnection) navigatorMock.connection = { effectiveType: '4g' }
   const windowMock = {
     location: { href: 'https://example.com/landing', origin: 'https://example.com', pathname: '/landing', hostname: 'example.com', search: '', hash: '' },
     history: { pushState: noop, replaceState: noop },
-    innerWidth: 390, innerHeight: 844, scrollX: 0, scrollY: 0, pageXOffset: 0, pageYOffset: 0, devicePixelRatio: 1,
+    innerWidth, innerHeight, scrollX: 0, scrollY: 0, pageXOffset: 0, pageYOffset: 0, devicePixelRatio: 1,
     addEventListener: noop, removeEventListener: noop,
     Blob: function MockBlob(parts) { this.parts = parts },
     URL, URLSearchParams,
@@ -88,6 +102,7 @@ function detectWith({ userAgent, plugins = [], hasChromeObject = true }) {
     ResizeObserver: function MockRO() { return { observe: noop, disconnect: noop } },
   }
   if (hasChromeObject) windowMock.chrome = { runtime: { sendMessage: noop } }
+  if (phantom) windowMock._phantom = true
   const sandbox = {
     document: documentMock, window: windowMock, navigator: navigatorMock,
     sessionStorage: makeStorage(), localStorage: makeStorage(),
@@ -109,7 +124,7 @@ function detectWith({ userAgent, plugins = [], hasChromeObject = true }) {
   windowMock.localStorage = sandbox.localStorage
   sandbox.globalThis = sandbox
   vm.createContext(sandbox)
-  vm.runInContext(TRACKING_JS, sandbox, { timeout: 1500 })
+  vm.runInContext(scriptSource, sandbox, { timeout: 1500 })
 
   const api = windowMock.ClickInsight
   assert.ok(api && typeof api.track === 'function', 'ClickInsight API must be exposed')
@@ -142,10 +157,32 @@ test('agent_signals still records plugins_empty=true on mobile (observability pr
   assert.equal(ev.signals.plugins_empty, true)
 })
 
-test('desktop Chrome with empty navigator.plugins IS still flagged (headless signal kept)', () => {
-  const ev = detectWith({ userAgent: UA.desktopChrome, plugins: [] })
+test('desktop Mac Safari / Chrome with ONLY empty navigator.plugins is NOT flagged (single auxiliary signal false-positive prevented)', () => {
+  const safariEv = detectWith({ userAgent: UA.macSafari, plugins: [] })
+  assert.equal(safariEv.is_agent, 0, `Mac Safari must not be flagged as agent: ${safariEv.agent_signals}`)
+  assert.equal(safariEv.signals.plugins_empty, true)
+
+  const chromeEv = detectWith({ userAgent: UA.desktopChrome, plugins: [] })
+  assert.equal(chromeEv.is_agent, 0, `Desktop Chrome with only plugins_empty must not be flagged: ${chromeEv.agent_signals}`)
+  assert.equal(chromeEv.signals.plugins_empty, true)
+})
+
+test('desktop Chrome with ONLY connection_missing is NOT flagged (single auxiliary signal false-positive prevented)', () => {
+  const ev = detectWith({ userAgent: UA.desktopChrome, plugins: [{ name: 'PDF Viewer' }], hasConnection: false })
+  assert.equal(ev.is_agent, 0, `connection_missing alone must not flag as agent: ${ev.agent_signals}`)
+  assert.equal(ev.signals.connection_missing, true)
+})
+
+test('desktop Chrome with webdriver=true (strong signal) IS flagged as agent', () => {
+  const ev = detectWith({ userAgent: UA.desktopChrome, plugins: [], webdriver: true })
   assert.equal(ev.is_agent, 1)
-  assert.equal(ev.agent_type, 'unknown')
+  assert.equal(ev.agent_type, 'webdriver')
+})
+
+test('desktop Chrome with >= 2 weak signals (no_langs + no_chrome_obj) IS flagged as heuristic_multi', () => {
+  const ev = detectWith({ userAgent: UA.desktopChrome, plugins: [], languages: [], hasChromeObject: false })
+  assert.equal(ev.is_agent, 1)
+  assert.equal(ev.agent_type, 'heuristic_multi')
 })
 
 test('desktop Chrome with plugins present is NOT flagged', () => {
@@ -157,4 +194,17 @@ test('meta-externalads (Facebook ads crawler) IS flagged with its UA name', () =
   const ev = detectWith({ userAgent: UA.metaAds, plugins: [{ name: 'x' }] })
   assert.equal(ev.is_agent, 1)
   assert.equal(ev.agent_type, 'meta-externalads')
+})
+
+test('v1 public/tracking.js and v2 public/v2/tracking.js share identical multi-signal _detectAgent criteria', () => {
+  const v1Src = fs.readFileSync(path.join(__dirname, '..', '..', 'public', 'tracking.js'), 'utf-8')
+  const v1Safari = detectWith({ userAgent: UA.macSafari, plugins: [], scriptSource: v1Src })
+  assert.equal(v1Safari.is_agent, 0, 'v1 Mac Safari with plugins_empty alone must be is_agent=0')
+  assert.equal(v1Safari.tenant_id, 'linkth_internal', 'v1 payload must include tenant_id')
+  assert.ok(v1Safari.visitor_id && v1Safari.visitor_id.length >= 8, 'v1 payload must include visitor_id')
+  assert.ok(v1Safari.document_height > 0, 'v1 payload must include document_height')
+
+  const v1Gpt = detectWith({ userAgent: UA.gptBot, plugins: [], scriptSource: v1Src })
+  assert.equal(v1Gpt.is_agent, 1, 'v1 GPTBot must be is_agent=1')
+  assert.equal(v1Gpt.agent_type, 'GPTBot')
 })
