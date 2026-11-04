@@ -8,8 +8,10 @@
  *   1. 上段: PageSelector + EvidenceBadge
  *   2. SegmentChip 群: PC+SP / PC / SP, 直近 7/14/30 日 (集計フィルタ、page-level)
  *   3. (旧 PageStatsBar は続116で撤去 → PV/CTR/到達率/滞留 は HeatmapCanvas の canvas-top に集約)
- *   4. HeatmapCanvas: mockup の `.hm-controls` + `.hm-main` (canvas + side) 全部を内包
- *   5. HotspotDetail (slide-in、legacy)
+ *   4. AgentHeatmapPanel: actor='agent' | 'all' 選択時にブラウザ操作エージェント行動インサイト＋
+ *      Dead-Click詰まり＋HTTPクローラーセクション可読性オーバーレイを表示
+ *   5. HeatmapCanvas: mockup の `.hm-controls` + `.hm-main` (canvas + side) 全部を内包
+ *   6. HotspotDetail (slide-in、legacy)
  *
  * 旧 deck.gl / nivo / three.js は本 dispatch で全廃。LayerToggle / HotspotRankingsPanel
  * / emotion-chip-skeleton も HeatmapCanvas 内に統合 (mockup parity)。
@@ -39,6 +41,7 @@ import {
   fetchAllHeatmapTilesForActor,
   fetchHeatmapElementsForActor,
   type AgentHeatmapElementsData,
+  type AgentSubtype,
 } from '@/lib/heatmap/agent-heatmap-client'
 import type { HeatmapActor } from '@/lib/heatmap/types'
 
@@ -46,6 +49,7 @@ import type { HeatmapActor } from '@/lib/heatmap/types'
 // 配下にあり、二重 dynamic は client チャンクの待ちを増やすだけで利点が無いため統合。
 import type { PageOption } from '@/lib/pages/fetch-pages'
 
+import { AgentHeatmapPanel } from './agent-heatmap-panel'
 import { HeatmapCanvas } from './heatmap-canvas'
 import { HotspotDetail } from './hotspot-detail'
 
@@ -334,8 +338,9 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
     segment,
   })
 
-  // Task 5: AIエージェント・ヒートマップ actor ('human' | 'agent') state & fetch
+  // Task 5: AIエージェント・ヒートマップ actor ('human' | 'agent') + Subtype state & fetch
   const [actor, setActor] = useState<HeatmapActor>('human')
+  const [agentSubtype, setAgentSubtype] = useState<AgentSubtype>('all')
   const [agentTiles, setAgentTiles] = useState<HeatmapTile[]>([])
   const [agentMeta, setAgentMeta] = useState<HeatmapTileMeta | null>(null)
   const [agentElements, setAgentElements] = useState<AgentHeatmapElementsData | null>(null)
@@ -353,6 +358,7 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
         {
           ...heatmapQuery,
           actor,
+          agentSubtype,
         },
         ctrl.signal,
       ),
@@ -365,6 +371,7 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
           device_type: deviceFilter,
           segment,
           actor,
+          agentSubtype,
         },
         ctrl.signal,
       ),
@@ -384,7 +391,17 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
       })
 
     return () => ctrl.abort()
-  }, [actor, heatmapQuery, siteId, pageUrl, dateRange.start, dateRange.end, deviceFilter, segment])
+  }, [
+    actor,
+    agentSubtype,
+    heatmapQuery,
+    siteId,
+    pageUrl,
+    dateRange.start,
+    dateRange.end,
+    deviceFilter,
+    segment,
+  ])
 
   const effectiveTiles = actor === 'human' ? tiles : agentTiles
   const effectiveMeta = actor === 'human' ? meta : agentMeta
@@ -471,7 +488,7 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
           ))}
         </div>
 
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
           <EvidenceBadge
             evidence={{
               level: 'observed',
@@ -484,11 +501,19 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
       </div>
 
       {/*
-        2026-05-29 (続 115) Phase 2 / B 改修:
-          旧段 2 `PageStatsBar` (URL + PV/sessions/CTR/到達率) を撤去。
-          canvas-top (HeatmapToolbar) の URL bar + stat 領域に値を集約表示する。
-          fetch 仕様は不変 (usePageStats hook で抽出)。
+        AIエージェント (actor === 'agent' || actor === 'all') 選択時:
+        ブラウザ操作エージェントの行動サマリー・Dead-Click詰まりホットスポット・
+        HTTP型クローラーセクション可読性オーバーレイを表示
       */}
+      {(actor === 'agent' || actor === 'all') && (
+        <AgentHeatmapPanel
+          siteId={siteId}
+          pageUrl={pageUrl}
+          device={deviceFilter}
+          agentSubtype={agentSubtype}
+          onAgentSubtypeChange={setAgentSubtype}
+        />
+      )}
 
       {/* 3. HeatmapCanvas (内部 ControlsBar に LAYER + EMOTION = 段 2、その下に canvas + side) */}
       <HeatmapCanvas

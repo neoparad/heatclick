@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import { CrawlerAcquisitionDrawer } from '@/components/aiseo/crawler-acquisition-drawer'
 import { checkDeclarationFiles, looksLikeCoverageGap } from '@/lib/aiseo/declaration-files'
 import type { AnalyticsPayload } from '@/lib/aiseo/mock'
 import type { AgentStat } from '@/lib/aiseo/risk'
@@ -35,6 +36,7 @@ export default function AiVisitsPage() {
     data?: AnalyticsPayload
     error?: string
   }>({ status: 'loading' })
+  const [inspectUrl, setInspectUrl] = useState<string | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -189,7 +191,7 @@ export default function AiVisitsPage() {
 
             <div className="section">
               <div className="section-head">
-                <div className="section-title">ページ別</div>
+                <div className="section-title">ページ別（クリックで取得内容・取りこぼしを検査）</div>
                 <div className="section-tools">
                   <span className="tool">AIアクセス順 ▼</span>
                 </div>
@@ -200,12 +202,17 @@ export default function AiVisitsPage() {
                     <th>ページ</th>
                     <th className="right">AIアクセス</th>
                     <th>主要エージェント</th>
-                    <th className="right">4面診断</th>
+                    <th className="right">取得内容・4面診断</th>
                   </tr>
                 </thead>
                 <tbody>
                   {urls.map((u) => (
-                    <tr key={u.url}>
+                    <tr
+                      key={u.url}
+                      className={`clickrow ${inspectUrl === u.url ? 'sel' : ''}`}
+                      onClick={() => u.url && setInspectUrl(u.url)}
+                      data-testid={`ai-visit-url-row-${u.url}`}
+                    >
                       <td className="url-cell">{u.url || '(空)'}</td>
                       <td className="right barcell">
                         <span className="b" style={{ width: `${(u.hits / maxHits) * 100}%` }} />
@@ -224,13 +231,32 @@ export default function AiVisitsPage() {
                         </div>
                       </td>
                       <td className="right">
-                        <Link
-                          href={`/fusion?url=${encodeURIComponent(u.url)}`}
-                          className="chip rag"
-                          style={{ textDecoration: 'none' }}
-                        >
-                          行動×構造×AI →
-                        </Link>
+                        <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            data-testid={`inspect-acquisition-btn-${u.url}`}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              if (u.url) setInspectUrl(u.url)
+                            }}
+                            className="chip train"
+                            style={{
+                              cursor: 'pointer',
+                              border: '1px solid rgba(91, 71, 194, 0.28)',
+                              fontWeight: 600,
+                            }}
+                          >
+                            🔍 取得内容を検査 (何が取得されたか)
+                          </button>
+                          <Link
+                            href={`/fusion?url=${encodeURIComponent(u.url)}`}
+                            onClick={(e) => e.stopPropagation()}
+                            className="chip rag"
+                            style={{ textDecoration: 'none' }}
+                          >
+                            行動×構造×AI →
+                          </Link>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -292,6 +318,13 @@ export default function AiVisitsPage() {
             </div>
           </>
         )}
+
+        <CrawlerAcquisitionDrawer
+          open={Boolean(inspectUrl)}
+          url={inspectUrl}
+          siteId={data?.site_label?.replace(/\s*\(mock\)\s*$/, '') || 'default'}
+          onClose={() => setInspectUrl(null)}
+        />
       </div>
     </div>
   )

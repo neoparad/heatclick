@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import { CrawlerAcquisitionDrawer } from '@/components/aiseo/crawler-acquisition-drawer'
 import { generateMockJourney, type JourneyPayload } from '@/lib/aiseo/mock'
 import {
   buildJourneys,
@@ -37,6 +38,7 @@ export default function AgentJourneyPage() {
   const [data, setData] = useState<JourneyPayload>(mock)
   const [source, setSource] = useState<'mock' | 'live'>('mock')
   const [picked, setPicked] = useState<string | null>(null)
+  const [inspectUrl, setInspectUrl] = useState<string | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -168,13 +170,39 @@ export default function AgentJourneyPage() {
             </div>
             <div className="jrny">
               {s.steps.map((st, i) => (
-                <div className="jrny-step" key={i}>
+                <div
+                  className="jrny-step clickrow"
+                  key={i}
+                  data-testid={`journey-step-${s.id}-${i}`}
+                  onClick={() => st.url && setInspectUrl(st.url)}
+                  style={{ borderRadius: 8, padding: '4px 6px' }}
+                >
                   <div className="jrny-rail">
                     <span className="jrny-num">{i + 1}</span>
                     {i < s.steps.length - 1 && <span className="jrny-line" />}
                   </div>
                   <div className="jrny-body">
-                    <div className="jrny-url">{pathOf(st.url)}</div>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="jrny-url">{pathOf(st.url)}</div>
+                      {st.url && (
+                        <button
+                          type="button"
+                          data-testid={`journey-inspect-btn-${s.id}-${i}`}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            if (st.url) setInspectUrl(st.url)
+                          }}
+                          className="chip train"
+                          style={{
+                            cursor: 'pointer',
+                            border: '1px solid rgba(91, 71, 194, 0.28)',
+                            fontWeight: 600,
+                          }}
+                        >
+                          🔍 取得内容を検査 (何が取得されたか)
+                        </button>
+                      )}
+                    </div>
                     <div className="jrny-meta">
                       <span className={'cov ' + statusClass(st.status_code)}>
                         {st.status_code}
@@ -199,6 +227,13 @@ export default function AgentJourneyPage() {
             <div className="empty">このエージェントの動線データがありません</div>
           </div>
         )}
+
+        <CrawlerAcquisitionDrawer
+          open={Boolean(inspectUrl)}
+          url={inspectUrl}
+          siteId={data.site_label?.replace(/\s*\(mock\)\s*$/, '') || 'default'}
+          onClose={() => setInspectUrl(null)}
+        />
       </div>
     </div>
   )

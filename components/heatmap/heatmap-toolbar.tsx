@@ -10,11 +10,18 @@
  *
  * 構成 (続 116 以降):
  *   - device tabs (PC / SP / TAB)
+ *   - actor tabs (人間 / AIエージェント) + AIエージェント種別サブフィルタ
  *   - stats (PV / CTR / 到達率 / 滞留) — 大きめ font + ゆとり間隔
  *   - action buttons (filter 表示/非表示 / side panel / 全画面)
  *   ❌ URL bar (続 116 撤去)
  */
 
+import { useState } from 'react'
+
+import {
+  AGENT_SUBTYPE_OPTIONS,
+  type AgentSubtype,
+} from '@/lib/heatmap/agent-heatmap-client'
 import type { DeviceKind, HeatmapActor } from '@/lib/heatmap/types'
 
 interface HeatmapToolbarProps {
@@ -23,6 +30,9 @@ interface HeatmapToolbarProps {
   /** Task 5: 人間 / AIエージェント アクター切替 */
   actor?: HeatmapActor
   onActorChange?: (actor: 'human' | 'agent') => void
+  /** AIエージェントサブタイプ絞り込み (すべて / Playwright / HeadlessChrome / ChatGPT) */
+  agentSubtype?: AgentSubtype
+  onAgentSubtypeChange?: (subtype: AgentSubtype) => void
   pvLabel?: string
   ctrLabel?: string
   /** 滞在時間 (legacy label、Phase 2 では未配線・将来 hook で実値) */
@@ -76,6 +86,8 @@ export function HeatmapToolbar({
   onDeviceChange,
   actor = 'human',
   onActorChange,
+  agentSubtype,
+  onAgentSubtypeChange,
   pvLabel,
   ctrLabel,
   dwellLabel,
@@ -86,6 +98,13 @@ export function HeatmapToolbar({
   onToggleSide,
   onEnterFullscreen,
 }: HeatmapToolbarProps) {
+  const [internalSubtype, setInternalSubtype] = useState<AgentSubtype>('all')
+  const currentSubtype = agentSubtype ?? internalSubtype
+  const handleSubtypeSelect = (next: AgentSubtype) => {
+    setInternalSubtype(next)
+    onAgentSubtypeChange?.(next)
+  }
+
   return (
     <div
       data-testid="heatmap-toolbar"
@@ -161,6 +180,42 @@ export function HeatmapToolbar({
           <span>AIエージェント (AI Agent)</span>
         </button>
       </div>
+
+      {/* AIエージェント選択時のサブタイプ絞り込みピル */}
+      {(actor === 'agent' || actor === 'all') && (
+        <div
+          role="radiogroup"
+          aria-label="AIエージェント種別絞り込み"
+          data-testid="toolbar-agent-subtype-group"
+          className="inline-flex flex-wrap items-center gap-1 rounded-md border border-violet-200 bg-violet-50/60 px-1.5 py-1"
+        >
+          <span className="px-1 font-mono text-[10px] font-semibold uppercase tracking-wider text-violet-600">
+            Subtype:
+          </span>
+          {AGENT_SUBTYPE_OPTIONS.map((opt) => {
+            const active = currentSubtype === opt.key
+            return (
+              <button
+                key={opt.key}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                data-testid={`toolbar-agent-subtype-${opt.key}`}
+                onClick={() => handleSubtypeSelect(opt.key)}
+                title={opt.label}
+                className={
+                  'rounded px-2 py-0.5 text-[11px] transition ' +
+                  (active
+                    ? 'bg-violet-600 font-semibold text-white shadow-sm'
+                    : 'bg-white text-violet-700 hover:bg-violet-100')
+                }
+              >
+                {opt.shortLabel}
+              </button>
+            )
+          })}
+        </div>
+      )}
 
       {/*
         続 116 D 改修: canvas-top URL bar を撤去。
