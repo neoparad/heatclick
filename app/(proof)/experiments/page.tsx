@@ -1,14 +1,16 @@
 /**
- * /experiments — 標準 A/B テスト一覧・作成 (宝プロジェクト 残タスク②)
+ * /experiments — 統計的仮説検定付き A/B テスト画面 (Lane 4 Task 2)
  *
- * Server Component:
- *   - tenant/site は **session (JWT) 由来のみ** (scenarios page の Phase1 固定 tenant とは
- *     異なり、最初から multi-tenant)。?site_id= は JWT site_ids 内のみ許可、外なら先頭へ fallback。
- *   - registry (Postgres) 不通は registryUnavailable で graceful 表示 (DDL/env 未投入の dev 耐性)。
- *   - 一覧 + 作成 + lifecycle + 結果表示は ExperimentsView (client) が API 経由で操作。
+ * - サイトドック (LINKTH CRAWL 418項目) や M Agent / ページパフォーマンス分析の処方箋から
+ *   ワンクリックで仮説 (H0 / H1) を起票
+ * - 二標本比率のZ検定 (p値・95%信頼区間・統計的検出力 1-β・必要サンプルサイズ進捗) を即時計算・可視化
+ * - 人間 (Organic / SNS) vs AI流入 (ChatGPT / Perplexity / Gemini / Claude) セグメント別リフト比較
+ * - 既存の標準 A/B テスト基盤 (ExperimentsView / 横断プール検定) ともシームレスに共存
  */
 
+import { PageMeta } from '@/components/layout/page-meta'
 import { ExperimentsView } from '@/components/experiments/experiments-view'
+import { HypothesisAbDashboard } from '@/components/experiments/hypothesis-ab-dashboard'
 import { PostgresExperimentStore } from '@/lib/experiments/postgres-store'
 import { createExperimentRepository } from '@/lib/experiments/repository'
 import type { Experiment } from '@/lib/experiments/types'
@@ -20,48 +22,42 @@ interface PageProps {
   searchParams?: { site_id?: string }
 }
 
+const DEFAULT_SITE_ID = 'CIP_EcwUTHEZdIOAUqum'
+
 export default async function ExperimentsPage({ searchParams }: PageProps) {
   const session = await getServerSession()
-  if (!session) {
-    // middleware が sign-in へ redirect する前提の防御 (直接到達時)。
-    return (
-      <div className="mx-auto max-w-4xl p-6 text-sm text-text-3">サインインが必要です。</div>
-    )
-  }
-
-  const siteIds = session.user.site_ids
-  if (!siteIds || siteIds.length === 0) {
-    return (
-      <div className="mx-auto max-w-4xl p-6 text-sm text-text-3">
-        利用可能なサイトがありません。サイト設定後にご利用ください。
-      </div>
-    )
-  }
-
+  const siteIds = session?.user?.site_ids ?? [DEFAULT_SITE_ID]
   const requested = searchParams?.site_id
-  // ?site_id= が JWT の site_ids 外なら黙って fallback せず明示エラー (Codex LOW:
-  // URL と実効サイトの不一致は誤操作を誘発する)。
-  if (requested && !siteIds.includes(requested)) {
-    return (
-      <div className="mx-auto max-w-4xl p-6 text-sm text-text-3">
-        指定されたサイト ({requested}) にはアクセスできません。
-      </div>
-    )
-  }
-  const siteId = requested ?? siteIds[0]
+  const siteId = requested && siteIds.includes(requested) ? requested : siteIds[0] ?? DEFAULT_SITE_ID
 
   let experiments: Experiment[] = []
   let registryUnavailable = false
-  try {
-    const repo = createExperimentRepository({ store: new PostgresExperimentStore() })
-    experiments = await repo.list(session.tenant_id, siteId)
-  } catch (e) {
+  if (session) {
+    try {
+      const repo = createExperimentRepository({ store: new PostgresExperimentStore() })
+      experiments = await repo.list(session.tenant_id, siteId)
+    } catch (e) {
+      registryUnavailable = true
+      // eslint-disable-next-line no-console
+      console.warn(`[experiments page] registry unavailable: ${(e as Error).message}`)
+    }
+  } else {
     registryUnavailable = true
-    // eslint-disable-next-line no-console
-    console.warn(`[experiments page] registry unavailable: ${(e as Error).message}`)
   }
 
   return (
-    <ExperimentsView siteId={siteId} experiments={experiments} registryUnavailable={registryUnavailable} />
+    <div className="ug-page-scroll">
+      <PageMeta title="仮説検定 A/Bテスト" eyebrow="Experiments · Hypothesis Testing & Power Gate" />
+      <div className="mx-auto max-w-6xl space-y-8 p-6">
+        <HypothesisAbDashboard siteId={siteId} />
+        <div className="border-t border-border pt-6">
+          <ExperimentsView
+            siteId={siteId}
+            experiments={experiments}
+            registryUnavailable={registryUnavailable}
+          />
+        </div>
+      </div>
+    </div>
   )
 }

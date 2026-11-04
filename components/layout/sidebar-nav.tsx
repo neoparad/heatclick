@@ -1,5 +1,21 @@
 /**
- * SidebarNav — 行動分析配下の nav + M Agent + AISEO / AIアクセス + アカウント
+ * SidebarNav — ログイン直後 14メニュー統合左サイドバー (Lane 4 オーナー決定仕様)
+ *
+ * 上部ピラー切替を廃止し、ログイン直後から全14メニューがこの順序で常時一望・クリック可能:
+ *  1. AIチャット (/chat) — 最上段メイン配置
+ *  2. サマリーボード (/dashboard)
+ *  3. ヒートマップ (/heatmap)
+ *  4. AISEO (/aiseo)
+ *  5. AIアクセス分析 (/ai-visits)
+ *  6. サーチコンソール分析 (/seo/access)
+ *  7. ページパフォーマンス分析 (/fusion)
+ *  8. 経路分析 (/paths)
+ *  9. CV分析 (/cv-journey)
+ * 10. 内部リンク提案 (/seo/internal-links) — CV分析の直下に独立配置
+ * 11. サイトドック (/site-doc)
+ * 12. ページ速度分析 (/performance)
+ * 13. M Agent (/scenarios)
+ * 14. A/Bテスト (/experiments) — M Agentの直下に配置
  */
 
 'use client'
@@ -11,192 +27,154 @@ import {
   Bot,
   Camera,
   CheckCircle2,
-  ChevronRight,
-  Compass,
-  FileText,
+  FlaskConical,
+  Gauge,
   GitBranch,
-  Globe,
-  Layers,
+  LayoutDashboard,
   LayoutGrid,
   Link2,
   LogOut,
   MessageCircle,
   Network,
-  Play,
-  Radar,
   Search,
   Settings,
-  ShieldAlert,
   Sparkles,
-  Users,
+  TrendingUp,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { isAiseoPath } from './sidebar-pillar'
 
-interface NavItem {
+export interface NavItem {
+  order: number
   navKey: string
   href: string
+  /** アクティブ判定に含める関連パス prefix */
+  matchPrefixes?: ReadonlyArray<string>
   label: string
+  badge?: string
+  highlight?: boolean
   icon: ReactNode
-  disabled?: boolean
 }
 
-const PRIMARY_NAV: ReadonlyArray<NavItem> = [
+export const UNIFIED_14_MENUS: ReadonlyArray<NavItem> = [
   {
+    order: 1,
     navKey: 'ai-chat',
     href: '/chat',
     label: 'AIチャット',
+    badge: 'AI Analyst',
+    highlight: true,
     icon: <MessageCircle className="h-4 w-4" aria-hidden />,
   },
   {
+    order: 2,
+    navKey: 'summary-board',
+    href: '/dashboard',
+    label: 'サマリーボード',
+    icon: <LayoutDashboard className="h-4 w-4" aria-hidden />,
+  },
+  {
+    order: 3,
     navKey: 'heatmap',
     href: '/heatmap',
     label: 'ヒートマップ',
     icon: <Activity className="h-4 w-4" aria-hidden />,
   },
   {
-    navKey: 'fusion-cross',
-    href: '/fusion',
-    label: '行動 × 構造 統合診断',
-    icon: <Sparkles className="h-4 w-4" aria-hidden />,
+    order: 4,
+    navKey: 'aiseo',
+    href: '/aiseo',
+    matchPrefixes: ['/aiseo', '/aio', '/llmo', '/exposure'],
+    label: 'AISEO',
+    badge: 'GA4×AIO',
+    icon: <TrendingUp className="h-4 w-4" aria-hidden />,
   },
   {
-    navKey: 'session-replay',
-    href: '/sessions',
-    label: 'セッションリプレイ',
-    icon: <Play className="h-4 w-4" aria-hidden />,
-    disabled: true,
-  },
-  {
-    navKey: 'cv-journey',
-    href: '/cv-journey',
-    label: 'CV経路分析',
-    icon: <GitBranch className="h-4 w-4" aria-hidden />,
-  },
-  {
-    navKey: 'path-analysis',
-    href: '/paths',
-    label: '経路分析エージェント',
-    icon: <Network className="h-4 w-4" aria-hidden />,
-  },
-  {
-    navKey: 'action-tickets',
-    href: '/action-tickets',
-    label: 'AI提案チケット',
-    icon: <Bot className="h-4 w-4" aria-hidden />,
-    disabled: true,
-  },
-  {
-    navKey: 'site-doc',
-    href: '/site-doc',
-    label: 'サイトドック',
-    icon: <CheckCircle2 className="h-4 w-4" aria-hidden />,
-    disabled: true,
-  },
-]
-
-const ANALYSIS_SUB_NAV: ReadonlyArray<NavItem> = [
-  {
-    navKey: 'performance-behavior',
-    href: '/fusion',
-    label: 'パフォーマンス × 行動',
-    icon: <Activity className="h-3 w-3" aria-hidden />,
-  },
-  {
-    navKey: 'personas',
-    href: '/personas',
-    label: 'ペルソナ',
-    icon: <Users className="h-3 w-3" aria-hidden />,
-  },
-  {
-    navKey: 'pages',
-    href: '/pages',
-    label: 'ページ一覧',
-    icon: <FileText className="h-3 w-3" aria-hidden />,
-    disabled: true,
-  },
-]
-
-const M_AGENT_NAV: ReadonlyArray<NavItem> = [
-  {
-    navKey: 'targeting-banner',
-    href: '/scenarios',
-    label: 'ターゲティングバナー',
-    icon: <LayoutGrid className="h-4 w-4" aria-hidden />,
-  },
-  {
-    navKey: 'form-intervention',
-    href: '/scenarios/form',
-    label: 'フォーム最適化',
-    icon: <FileText className="h-4 w-4" aria-hidden />,
-    disabled: true,
-  },
-]
-
-const AISEO_FUSION_NAV: ReadonlyArray<NavItem> = [
-  {
-    navKey: 'fusion-url-summary',
-    href: '/fusion',
-    label: '行動×構造×AI 4平面統合',
-    icon: <Sparkles className="h-4 w-4" aria-hidden />,
-  },
-]
-
-const AISEO_AI_VISITS_NAV: ReadonlyArray<NavItem> = [
-  {
+    order: 5,
     navKey: 'ai-visits',
     href: '/ai-visits',
-    label: 'AI訪問状況',
+    matchPrefixes: ['/ai-visits', '/visit-risk', '/journey', '/search-crawlers'],
+    label: 'AIアクセス分析',
     icon: <Bot className="h-4 w-4" aria-hidden />,
   },
   {
-    navKey: 'visit-risk',
-    href: '/visit-risk',
-    label: 'AI訪問リスク・宣言監査',
-    icon: <ShieldAlert className="h-4 w-4" aria-hidden />,
-  },
-  {
-    navKey: 'journey',
-    href: '/journey',
-    label: 'AIの巡回ルート',
-    icon: <Compass className="h-4 w-4" aria-hidden />,
-  },
-  {
-    navKey: 'search-crawlers',
-    href: '/search-crawlers',
-    label: '検索エンジン巡回',
-    icon: <Radar className="h-4 w-4" aria-hidden />,
-  },
-]
-
-const AISEO_SEO_NAV: ReadonlyArray<NavItem> = [
-  {
-    navKey: 'seo-access',
+    order: 6,
+    navKey: 'gsc-analysis',
     href: '/seo/access',
-    label: 'GSC アクセス数分析',
+    matchPrefixes: ['/seo/access', '/seo/sitemap'],
+    label: 'サーチコンソール分析',
     icon: <Search className="h-4 w-4" aria-hidden />,
   },
   {
-    navKey: 'seo-sitemap',
-    href: '/seo/sitemap',
-    label: 'サイトマップ・Index状況',
-    icon: <Globe className="h-4 w-4" aria-hidden />,
+    order: 7,
+    navKey: 'page-performance',
+    href: '/fusion',
+    label: 'ページパフォーマンス分析',
+    icon: <Sparkles className="h-4 w-4" aria-hidden />,
   },
   {
-    navKey: 'seo-internal-links',
-    href: '/seo/internal-links',
-    label: '内部リンク構造',
+    order: 8,
+    navKey: 'path-analysis',
+    href: '/paths',
+    matchPrefixes: ['/paths', '/personas'],
+    label: '経路分析',
     icon: <Network className="h-4 w-4" aria-hidden />,
   },
   {
-    navKey: 'aiseo-internal-link-proposals',
-    href: '/aiseo/analytics/internal-links',
-    label: '内部リンク改善提案',
+    order: 9,
+    navKey: 'cv-analysis',
+    href: '/cv-journey',
+    label: 'CV分析',
+    icon: <GitBranch className="h-4 w-4" aria-hidden />,
+  },
+  {
+    order: 10,
+    navKey: 'internal-link-proposals',
+    href: '/seo/internal-links',
+    matchPrefixes: ['/seo/internal-links', '/aiseo/analytics/internal-links', '/aiseo/contents/internal-links'],
+    label: '内部リンク提案',
     icon: <Link2 className="h-4 w-4" aria-hidden />,
+  },
+  {
+    order: 11,
+    navKey: 'site-doc',
+    href: '/site-doc',
+    label: 'サイトドック',
+    badge: '418項目',
+    icon: <CheckCircle2 className="h-4 w-4" aria-hidden />,
+  },
+  {
+    order: 12,
+    navKey: 'page-speed',
+    href: '/performance',
+    label: 'ページ速度分析',
+    badge: '90ルール',
+    icon: <Gauge className="h-4 w-4" aria-hidden />,
+  },
+  {
+    order: 13,
+    navKey: 'm-agent',
+    href: '/scenarios',
+    label: 'M Agent',
+    icon: <LayoutGrid className="h-4 w-4" aria-hidden />,
+  },
+  {
+    order: 14,
+    navKey: 'ab-experiments',
+    href: '/experiments',
+    label: 'A/Bテスト',
+    badge: '仮説検定',
+    icon: <FlaskConical className="h-4 w-4" aria-hidden />,
   },
 ]
 
-const ACCOUNT_NAV: ReadonlyArray<NavItem> = [
+interface AccountNavItem {
+  navKey: string
+  href: string
+  label: string
+  icon: ReactNode
+}
+
+const ACCOUNT_NAV: ReadonlyArray<AccountNavItem> = [
   {
     navKey: 'install-settings',
     href: '/install',
@@ -217,153 +195,144 @@ const ACCOUNT_NAV: ReadonlyArray<NavItem> = [
   },
 ]
 
-function isActiveLink(pathname: string, href: string): boolean {
-  if (href === '/') return pathname === '/'
-  return pathname === href || pathname.startsWith(href + '/')
+function isActiveMenu(pathname: string, item: NavItem): boolean {
+  // /aiseo/analytics/internal-links は #10 内部リンク提案 を優先アクティブにする
+  if (
+    item.navKey === 'aiseo' &&
+    (pathname.startsWith('/aiseo/analytics/internal-links') ||
+      pathname.startsWith('/aiseo/contents/internal-links'))
+  ) {
+    return false
+  }
+  const prefixes = item.matchPrefixes ?? [item.href]
+  return prefixes.some((p) => (p === '/' ? pathname === '/' : pathname === p || pathname.startsWith(p + '/')))
 }
 
-function NavLink({
-  item,
-  pathname,
-  variant = 'primary',
-}: {
-  item: NavItem
-  pathname: string
-  variant?: 'primary' | 'sub'
-}) {
-  const baseClass = variant === 'sub' ? 'ug-sub-link' : 'ug-nav-link'
-  const isActive = !item.disabled && isActiveLink(pathname, item.href)
-  const className = `${baseClass} ${isActive ? 'active' : ''}`.trim()
-
-  if (item.disabled) {
-    return (
-      <span
-        className={className}
-        data-nav={item.navKey}
-        aria-disabled="true"
-        title={`${item.label} (準備中)`}
-        style={{ opacity: 0.55, cursor: 'not-allowed' }}
-      >
-        {item.icon}
-        <span>{item.label}</span>
-      </span>
-    )
-  }
-
-  if (item.navKey === 'logout') {
-    return (
-      <form action={item.href} method="post" style={{ display: 'contents' }}>
-        <button type="submit" className={className} data-nav={item.navKey}>
-          {item.icon}
-          <span>{item.label}</span>
-        </button>
-      </form>
-    )
-  }
+function UnifiedMenuLink({ item, pathname }: { item: NavItem; pathname: string }) {
+  const isActive = isActiveMenu(pathname, item)
+  const className = `ug-nav-link ${isActive ? 'active' : ''}`.trim()
 
   return (
     <Link
       href={item.href}
       className={className}
       data-nav={item.navKey}
+      data-menu-order={item.order}
       aria-current={isActive ? 'page' : undefined}
-      prefetch={item.href === '/auth/sign-out' ? false : undefined}
+      style={
+        item.highlight && !isActive
+          ? {
+              background: 'rgba(255, 255, 255, 0.10)',
+              border: '1px solid rgba(255, 255, 255, 0.18)',
+              fontWeight: 600,
+            }
+          : undefined
+      }
     >
       {item.icon}
-      <span>{item.label}</span>
+      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {item.label}
+      </span>
+      {item.badge ? (
+        <span
+          style={{
+            fontSize: 9.5,
+            fontWeight: 700,
+            padding: '1px 5px',
+            borderRadius: 999,
+            background: isActive ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.12)',
+            color: 'rgba(255,255,255,0.9)',
+            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+            letterSpacing: '-0.01em',
+          }}
+        >
+          {item.badge}
+        </span>
+      ) : null}
     </Link>
   )
 }
 
-function isMAgentPath(pathname: string): boolean {
-  return pathname === '/scenarios' || pathname.startsWith('/scenarios/')
-}
-
 export function SidebarNav() {
   const pathname = usePathname() ?? '/'
-  const mAgentActive = isMAgentPath(pathname)
-  const aiseoActive = isAiseoPath(pathname)
+
+  const topMenus = UNIFIED_14_MENUS.slice(0, 3) // 1..3: AIチャット, サマリーボード, ヒートマップ
+  const aiSearchMenus = UNIFIED_14_MENUS.slice(3, 7) // 4..7: AISEO, AIアクセス分析, サーチコンソール分析, ページパフォーマンス分析
+  const journeyLinkMenus = UNIFIED_14_MENUS.slice(7, 10) // 8..10: 経路分析, CV分析, 内部リンク提案
+  const auditSpeedMenus = UNIFIED_14_MENUS.slice(10, 12) // 11..12: サイトドック, ページ速度分析
+  const actionTestMenus = UNIFIED_14_MENUS.slice(12, 14) // 13..14: M Agent, A/Bテスト
 
   return (
     <>
-      {mAgentActive ? (
-        <nav
-          className="ug-side-nav"
-          style={{ paddingTop: 8 }}
-          aria-label="M Agent ナビゲーション"
-          data-pillar-nav="m-agent"
-        >
-          {M_AGENT_NAV.map((it) => (
-            <NavLink key={it.navKey} item={it} pathname={pathname} />
-          ))}
-        </nav>
-      ) : aiseoActive ? (
-        <>
-          <div className="ug-section-label">融合インサイト</div>
-          <nav
-            className="ug-side-nav"
-            aria-label="融合インサイトナビゲーション"
-            data-pillar-nav="aiseo"
-          >
-            {AISEO_FUSION_NAV.map((it) => (
-              <NavLink key={it.navKey} item={it} pathname={pathname} />
-            ))}
-          </nav>
+      <div className="ug-section-label">AI アナリスト & 全体俯瞰</div>
+      <nav
+        className="ug-side-nav"
+        aria-label="メイン統合ナビゲーション"
+        data-pillar-nav="unified-14"
+      >
+        {topMenus.map((it) => (
+          <UnifiedMenuLink key={it.navKey} item={it} pathname={pathname} />
+        ))}
+      </nav>
 
-          <div className="ug-section-label">AIアクセス観測 (AIreceipt)</div>
-          <nav className="ug-side-nav" aria-label="AIアクセスナビゲーション">
-            {AISEO_AI_VISITS_NAV.map((it) => (
-              <NavLink key={it.navKey} item={it} pathname={pathname} />
-            ))}
-          </nav>
+      <div className="ug-section-label">AI検索・SEO・URLカルテ</div>
+      <nav className="ug-side-nav" aria-label="AI検索・SEOナビゲーション">
+        {aiSearchMenus.map((it) => (
+          <UnifiedMenuLink key={it.navKey} item={it} pathname={pathname} />
+        ))}
+      </nav>
 
-          <div className="ug-section-label">SEO・構造分析 (GSC / linkscrawl)</div>
-          <nav className="ug-side-nav" aria-label="SEO構造分析ナビゲーション">
-            {AISEO_SEO_NAV.map((it) => (
-              <NavLink key={it.navKey} item={it} pathname={pathname} />
-            ))}
-          </nav>
-        </>
-      ) : (
-        <>
-          <nav
-            className="ug-side-nav"
-            style={{ paddingTop: 8 }}
-            aria-label="行動分析ナビゲーション"
-            data-pillar-nav="behavior"
-          >
-            {PRIMARY_NAV.map((it) => (
-              <NavLink key={it.navKey} item={it} pathname={pathname} />
-            ))}
-          </nav>
+      <div className="ug-section-label">回遊・CV・内部リンク</div>
+      <nav className="ug-side-nav" aria-label="回遊・CV・内部リンクナビゲーション">
+        {journeyLinkMenus.map((it) => (
+          <UnifiedMenuLink key={it.navKey} item={it} pathname={pathname} />
+        ))}
+      </nav>
 
-          <div className="ug-section-label">分析</div>
-          <nav className="ug-side-nav" aria-label="分析ナビゲーション">
-            <div className="ug-nav-link" aria-hidden style={{ cursor: 'default' }}>
-              <Layers className="h-4 w-4" aria-hidden />
-              <span>分析</span>
-              <ChevronRight
-                className="h-3 w-3 ml-auto opacity-60"
-                style={{ transform: 'rotate(90deg)' }}
-                aria-hidden
-              />
-            </div>
-            <div className="ug-side-sub">
-              {ANALYSIS_SUB_NAV.map((it) => (
-                <NavLink key={it.navKey} item={it} pathname={pathname} variant="sub" />
-              ))}
-            </div>
-          </nav>
-        </>
-      )}
+      <div className="ug-section-label">技術・意味監査 & 速度</div>
+      <nav className="ug-side-nav" aria-label="技術・意味監査・速度ナビゲーション">
+        {auditSpeedMenus.map((it) => (
+          <UnifiedMenuLink key={it.navKey} item={it} pathname={pathname} />
+        ))}
+      </nav>
+
+      <div className="ug-section-label">施策実行 & 仮説検定</div>
+      <nav className="ug-side-nav" aria-label="施策実行・A/Bテストナビゲーション">
+        {actionTestMenus.map((it) => (
+          <UnifiedMenuLink key={it.navKey} item={it} pathname={pathname} />
+        ))}
+      </nav>
 
       <div className="ug-side-flex" />
 
       <div className="ug-section-label">アカウント</div>
       <nav className="ug-side-nav" aria-label="アカウントナビゲーション">
-        {ACCOUNT_NAV.map((it) => (
-          <NavLink key={it.navKey} item={it} pathname={pathname} />
-        ))}
+        {ACCOUNT_NAV.map((item) => {
+          const isActive = pathname === item.href || pathname.startsWith(item.href + '/')
+          const className = `ug-nav-link ${isActive ? 'active' : ''}`.trim()
+          if (item.navKey === 'logout') {
+            return (
+              <form key={item.navKey} action={item.href} method="post" style={{ display: 'contents' }}>
+                <button type="submit" className={className} data-nav={item.navKey}>
+                  {item.icon}
+                  <span>{item.label}</span>
+                </button>
+              </form>
+            )
+          }
+          return (
+            <Link
+              key={item.navKey}
+              href={item.href}
+              className={className}
+              data-nav={item.navKey}
+              aria-current={isActive ? 'page' : undefined}
+            >
+              {item.icon}
+              <span>{item.label}</span>
+            </Link>
+          )
+        })}
       </nav>
     </>
   )

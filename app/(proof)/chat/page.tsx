@@ -43,7 +43,10 @@ export default function ChatPage({ searchParams }: ChatPageProps) {
 
   return (
     <>
-      <PageMeta title="UGOKIMAP AI" eyebrow="AI Chat · 行動分析" />
+      <PageMeta
+        title="AIチャット（5平面横断AIアナリスト & 18ツール自律Answer Engine）"
+        eyebrow="AI Analyst · Structure × Behavior × GSC × GA4 AI × AIreceipt"
+      />
       <ChatConversationPane
         siteId={siteId}
         initialPeriodDays={periodDays}

@@ -3,25 +3,12 @@
  *
  * 親 SSOT Part V P-AI / mockup 10_ai_chat.html / D-07 / 続 60 §7 [→Frontend]
  * 配備: 続 63 (Frontend Sprint 3 W1)
- *
- * 責務:
- *   1. メッセージスレッド state を保持 (useState<ChatMessage[]>)
- *   2. POST /api/chat (続 58 stub) を呼出し、応答を AssistantMessage に変換
- *   3. 子 component (Sidebar / MessageList / Suggestions / Input) を組み立てる
- *
- * Sprint 3 W1 範囲:
- *   - JSON POST のみ (SSE streaming は W2)
- *   - 会話履歴 sidebar は dummy fixture、選択 / 新規だけ動作
- *   - エラー時は assistant message に error status で挿入 (toast は W2)
- *
- * Sprint 3 W2:
- *   - SSE streaming (fetch + ReadableStream で incremental reply)
- *   - 会話履歴 sidebar を `/api/chat/conversations` 結線
- *   - `evidence_level=inferred` 時の数値強調禁止を AI 応答 markdown render で検証
+ * 拡張: Lane 4 (5平面横断AIアナリスト: LINKTH CRAWL 18ツールAnswer Engine × 行動 × GSC × GA4 AI流入 × AIreceipt)
  */
 
 'use client'
 
+import Link from 'next/link'
 import { useCallback, useMemo, useState } from 'react'
 
 import type { ChatReply, EvidenceRef } from '@/types/evidence'
@@ -60,10 +47,23 @@ interface ApiError {
 type ApiResponseBody = ApiSuccess | ApiError
 
 const INITIAL_SUGGESTIONS: ReadonlyArray<string> = [
-  '同期間の他ページも比較',
-  'CVR の時系列推移',
-  'デバイス別の離脱差分',
+  '速度遅延による描画前離脱と推定CV損失数（/performance）',
+  'デッドクリック集中箇所と<h>装飾乱用パッチ（/site-doc）',
+  '主要LPのTeacher Verdict 7本柱とKaplan-Meier生存曲線（/fusion）',
+  'ChatGPT/Perplexity流入とAIO引用差分（/aiseo）',
+  '稼働中A/Bテストの仮説検定p値・検出力ゲート判定（/experiments）',
 ]
+
+const FIVE_PLANE_NAV_PILLS = [
+  { label: '① 構造・418監査 (サイトドック)', href: '/site-doc' },
+  { label: '② 人間・AIヒートマップ', href: '/heatmap' },
+  { label: '③ URLカルテ・7本柱 (Fusion)', href: '/fusion' },
+  { label: '④ 90速度ルール×CV損失', href: '/performance' },
+  { label: '⑤ AISEO (GA4 AI流入・AIO)', href: '/aiseo' },
+  { label: '⑥ 内部リンク提案', href: '/seo/internal-links' },
+  { label: '⑦ M Agent 介入', href: '/scenarios' },
+  { label: '⑧ 仮説検定 A/Bテスト', href: '/experiments' },
+] as const
 
 function nowHHMM(): string {
   const d = new Date()
@@ -119,9 +119,6 @@ export function ChatConversationPane({
       }
 
       setMessages((prev) => [...prev, userMsg, pendingAssistant])
-      // 続 72 (B-3 fix): draft の optimistic clear は success まで遅延。
-      // 旧 = 即 setDraft('') → error 時 user は同じ質問を打ち直す必要があった (UX 退化)
-      // 新 = success 確認後にのみ clear、error/network 時は draft を保持して即 retry 可能
       setIsSending(true)
 
       try {
@@ -148,7 +145,6 @@ export function ChatConversationPane({
               return { ...m, text: errMessage, status: 'error' }
             }),
           )
-          // 続 72 (B-3 fix): error 時は draft 保持 (retry 可能化)、return で early-out
           return
         }
 
@@ -173,7 +169,6 @@ export function ChatConversationPane({
             return updated
           }),
         )
-        // success が確定したので draft クリア (続 72 B-3 fix)
         setDraft('')
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'network error'
@@ -183,7 +178,6 @@ export function ChatConversationPane({
             return { ...m, text: `[NETWORK] ${msg}`, status: 'error' }
           }),
         )
-        // network 例外時も draft 保持 (続 72 B-3 fix)
       } finally {
         setIsSending(false)
       }
@@ -204,14 +198,11 @@ export function ChatConversationPane({
   }, [])
 
   const handleSelectConversation = useCallback((id: string) => {
-    // Sprint 3 W1: 履歴 fetch は W2 で本接続。今は選択状態だけ更新。
     setActiveConversationId(id)
   }, [])
 
   const handleAction = useCallback(
     (action: ChatActionKey, message: AssistantMessage) => {
-      // Sprint 3 W2 で toast / Notion / Linear / Proposal API に結線。
-      // 副作用 (clipboard) は ChatActionButtons 内で完了済。ここではログ目的のみ。
       void action
       void message
     },
@@ -220,10 +211,6 @@ export function ChatConversationPane({
 
   return (
     <div
-      // 続 72 (B-3 fix): 旧 `h-[calc(100vh-3.5rem)]` は親 <main> の header + DummyBanner
-      // (合計約 120px) を過小評価しており、pane の底辺 (ChatInput) が viewport 外に
-      // 押し出されて「入力欄が消える」現象を引き起こしていた。
-      // 親 <main> が flex-col なので `flex-1 min-h-0` で残余高を正しく充填。
       className="grid flex-1 min-h-0 grid-cols-1 overflow-hidden border-t border-border bg-background lg:grid-cols-[260px_1fr]"
       data-testid="chat-pane"
       data-api-mode={apiMode}
@@ -239,21 +226,36 @@ export function ChatConversationPane({
       </div>
 
       <section className="flex min-h-0 flex-col" aria-label="UGOKIMAP AI 会話">
-        <header className="flex items-center gap-3 border-b border-border bg-background px-4 py-2 sm:px-6">
-          <div className="flex-1 min-w-0">
-            <p className="truncate text-sm font-medium">
-              {messages.length === 0
-                ? '新しい会話'
-                : (messages.find((m) => m.role === 'user')?.text ?? '会話').slice(0, 60)}
-            </p>
-            <p className="font-mono text-[10px] text-text-3">
-              {activeConversationId.slice(0, 12)} · {messages.length} messages · site={siteId}
-            </p>
+        <header className="flex flex-col gap-2 border-b border-border bg-background px-4 py-2.5 sm:px-6">
+          <div className="flex items-center gap-3">
+            <div className="flex-1 min-w-0">
+              <p className="truncate text-sm font-semibold">
+                {messages.length === 0
+                  ? '5平面横断AIアナリスト（クロール構造418項目 × 行動ヒートマップ × GSC × GA4 AI流入 × AIreceipt）'
+                  : (messages.find((m) => m.role === 'user')?.text ?? '会話').slice(0, 60)}
+              </p>
+              <p className="font-mono text-[10px] text-text-3">
+                {activeConversationId.slice(0, 12)} · {messages.length} messages · site={siteId} · 18-Tool Autonomous Answer Engine + HMAC verify_citation
+              </p>
+            </div>
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-text-2">
+              <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />
+              5-Plane Fusion Engine · {apiMode}
+            </span>
           </div>
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-text-2">
-            <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />
-            UGOKI Engine · {apiMode}
-          </span>
+
+          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+            <span className="text-[11px] font-semibold text-text-3 mr-1">横断分析メニュー直通:</span>
+            {FIVE_PLANE_NAV_PILLS.map((pill) => (
+              <Link
+                key={pill.href}
+                href={pill.href}
+                className="inline-flex items-center rounded-md border border-border bg-muted/60 px-2 py-0.5 text-[11px] font-medium text-text-2 hover:bg-primary/10 hover:text-primary transition-colors"
+              >
+                {pill.label}
+              </Link>
+            ))}
+          </div>
         </header>
 
         <ChatMessageList
