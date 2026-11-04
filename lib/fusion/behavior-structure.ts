@@ -834,3 +834,69 @@ export function buildFusionDatasetForUrl(rawUrl: string, siteId = 'default'): Ur
     directoryMatrix,
   }
 }
+
+// ============================================================================
+// LINKTH CRAWL v1 (418項目監査 / 7本柱 Teacher Verdict / Kaplan-Meier / 80+特徴量 CVR予測) 拡張
+// ============================================================================
+
+import {
+  getPerformanceFusion,
+  getSiteDocAudit,
+  getUrlFusionMl,
+} from '@/lib/linkscrawl/client'
+import type {
+  CvrPredictionResult,
+  PerformanceFusionResponse,
+  ScrollSurvivalAnalysis,
+  SiteDocAuditResponse,
+  TeacherVerdictCarte,
+  UrlFusionMlResponse,
+} from '@/lib/linkscrawl/types'
+
+export interface EnrichedFusionIntelligence {
+  siteId: string
+  canonicalUrl: string
+  urlMatchKey: string
+  urlHash16: string
+  crossDiagnoses: CrossDiagnosisItem[]
+  siteDoc418: SiteDocAuditResponse
+  performance90: PerformanceFusionResponse
+  urlFusionMl: UrlFusionMlResponse
+  teacherVerdict: TeacherVerdictCarte
+  scrollSurvival: ScrollSurvivalAnalysis
+  cvrPrediction: CvrPredictionResult
+}
+
+/**
+ * URLに対する4平面行動×構造診断に加えて、LINKTH CRAWL v1 の418項目監査・
+ * 7本柱 Teacher Verdict・Kaplan-Meier スクロール生存曲線・80+特徴量 CVR予測を一括結合する。
+ */
+export async function buildEnrichedFusionIntelligenceForUrl(params: {
+  url: string
+  siteId?: string
+}): Promise<EnrichedFusionIntelligence> {
+  const siteId = params.siteId || 'default'
+  const baseDataset = buildFusionDatasetForUrl(params.url, siteId)
+  const crossDiagnoses = diagnoseBehaviorAndStructure(baseDataset)
+
+  const [siteDoc418, performance90, urlFusionMl] = await Promise.all([
+    getSiteDocAudit({ siteId, url: baseDataset.canonicalUrl }),
+    getPerformanceFusion({ siteId, url: baseDataset.canonicalUrl }),
+    getUrlFusionMl({ siteId, url: baseDataset.canonicalUrl }),
+  ])
+
+  return {
+    siteId,
+    canonicalUrl: baseDataset.canonicalUrl,
+    urlMatchKey: baseDataset.urlMatchKey,
+    urlHash16: baseDataset.urlHash16,
+    crossDiagnoses,
+    siteDoc418,
+    performance90,
+    urlFusionMl,
+    teacherVerdict: urlFusionMl.teacherVerdict,
+    scrollSurvival: urlFusionMl.scrollSurvival,
+    cvrPrediction: urlFusionMl.cvrPrediction,
+  }
+}
+

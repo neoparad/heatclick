@@ -1,4 +1,5 @@
 import {
+  buildEnrichedFusionIntelligenceForUrl,
   buildFusionDatasetForUrl,
   diagnoseBehaviorAndStructure,
 } from './behavior-structure'
@@ -41,4 +42,18 @@ describe('lib/fusion/behavior-structure', () => {
     expect(deadClickDiag).toBeDefined()
     expect(deadClickDiag?.confidence.level).toBe('suspected')
   })
+
+  it('builds enriched fusion intelligence uniting 4-plane diagnoses with LINKTH CRAWL 418-item audit, 7-pillar Teacher Verdict, Kaplan-Meier survival, and 80+ feature CVR prediction', async () => {
+    const enriched = await buildEnrichedFusionIntelligenceForUrl({
+      url: 'https://link-th.com/entry/internal-link-optimization',
+      siteId: 'site-1',
+    })
+
+    expect(enriched.siteDoc418.totalDetectionRules).toBe(418)
+    expect(enriched.performance90.totalSpeedRulesChecked).toBe(90)
+    expect(enriched.teacherVerdict.pillars).toHaveLength(7)
+    expect(enriched.scrollSurvival.medianDropoffYpx).toBeGreaterThan(0)
+    expect(enriched.cvrPrediction.featureCountUsed).toBeGreaterThanOrEqual(80)
+  })
 })
+
