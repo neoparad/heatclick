@@ -512,6 +512,11 @@ export function HeatmapPage({ siteId, initialPageUrl, pageOptions }: HeatmapPage
           device={deviceFilter}
           agentSubtype={agentSubtype}
           onAgentSubtypeChange={setAgentSubtype}
+          onSelectCoordinate={(yPx) => {
+            if (typeof window !== 'undefined') {
+              window.scrollTo({ top: Math.max(0, yPx), behavior: 'smooth' })
+            }
+          }}
         />
       )}
 

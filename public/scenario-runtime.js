@@ -154,16 +154,32 @@
     if (/mobile|iphone|android|webos|blackberry|iemobile|opera mini/.test(ua)) return 'mobile'
     return 'desktop'
   }
+  function _resolvePredictedIntent(scrollMax, durSec, isAgent) {
+    var manual = sessionStorage.getItem('ci_predicted_intent')
+    if (manual) return manual
+    if (isAgent) return 'ai_agent'
+    var rage = parseInt(sessionStorage.getItem('ci_rage_clicks') || '0', 10) || 0
+    var dead = parseInt(sessionStorage.getItem('ci_dead_clicks') || '0', 10) || 0
+    var rev = parseInt(sessionStorage.getItem('ci_scroll_reversals') || '0', 10) || 0
+    var hasFriction = rage >= 1 || dead >= 2 || rev >= 2 || durSec >= 45
+    if (scrollMax >= 50 && durSec >= 30 && hasFriction) return 'persuadable_high_uplift'
+    if (scrollMax >= 55 && durSec >= 12 && !hasFriction) return 'sure_thing_do_not_disturb'
+    if (durSec < 15 && scrollMax < 25 && (rage >= 2 || dead >= 3)) return 'lost_cause'
+    return 'early_browsing'
+  }
   function buildCtx() {
     var nowSec = Math.floor(Date.now() / 1000)
     var startTs = parseInt(sessionStorage.getItem('ci_sst') || '0', 10) || Date.now()
+    var durSec = Math.max(0, nowSec - Math.floor(startTs / 1000))
+    var scrollMax = parseInt(sessionStorage.getItem('ci_scroll_max') || '0', 10) || 0
+    var isAgent = window.CLICKINSIGHT_IS_AGENT === true
     return {
       tenant_id: TENANT_ID,
       site_id: SITE_ID,
       visitor_id: _cookie('__ugk_vid'),
       session_id: sessionStorage.getItem('ci_sid') || '',
       is_first_visit: sessionStorage.getItem('ci_first_visit') === '1',
-      session_duration_sec: Math.max(0, nowSec - Math.floor(startTs / 1000)),
+      session_duration_sec: durSec,
       page_views_in_session: parseInt(sessionStorage.getItem('ci_spv') || '0', 10),
       session_count: _resolveSessionCount(),
       url_path: window.location.pathname,
@@ -174,10 +190,11 @@
       utm_campaign: _qs('utm_campaign'),
       device_type: _deviceType(),
       visited_paths: (function () { try { return JSON.parse(sessionStorage.getItem('ci_vp') || '[]') } catch (e) { return [] } })(),
-      scroll_depth_max_pct: parseInt(sessionStorage.getItem('ci_scroll_max') || '0', 10),
+      scroll_depth_max_pct: scrollMax,
       hour_of_day: new Date().getHours(),
       language: (navigator.language || '').split('-')[0] || '',
-      is_agent: window.CLICKINSIGHT_IS_AGENT === true,
+      is_agent: isAgent,
+      predicted_intent: _resolvePredictedIntent(scrollMax, durSec, isAgent),
     }
   }
   function _appendVisitedPath() {
@@ -198,7 +215,7 @@
 
   // Phase 2/3 フィールドは buildCtx() 未実装。条件が設定されても常に false を返す。
   // 「NEQ/NOT_EXISTS が undefined と比較して意図せず true になる」リスクを防ぐ (Codex 指摘)。
-  var _UNIMPLEMENTED_FIELDS = { cart_value: 1, persona_label: 1, predicted_intent: 1 }
+  var _UNIMPLEMENTED_FIELDS = { cart_value: 1, persona_label: 1 }
 
   var LEAF_OPS = {
     EQ: 1, NEQ: 1, GT: 1, GTE: 1, LT: 1, LTE: 1,

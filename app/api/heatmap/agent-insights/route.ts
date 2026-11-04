@@ -11,6 +11,7 @@
  */
 
 import { NextResponse } from 'next/server'
+import { getServerSession } from '@/lib/auth/server-session'
 import {
   buildAgentHybridInsights,
   fetchAgentBehaviorSummary,
@@ -28,15 +29,27 @@ export async function GET(request: Request) {
   const device = (sp.get('device') || sp.get('device_type') || 'desktop').trim()
   const agentSubtype = parseAgentSubtype(sp.get('agent_subtype'))
 
+  let tenantId = 'default'
+  try {
+    const session = await getServerSession()
+    if (session?.tenant_id) {
+      tenantId = session.tenant_id
+    }
+  } catch {
+    tenantId = 'default'
+  }
+
   try {
     const [rawPoints, rawSummary] = await Promise.all([
       fetchAgentHeatmapPoints({
+        tenantId,
         siteId,
         pageUrl,
         deviceType: device,
         agentSubtype,
       }),
       fetchAgentBehaviorSummary({
+        tenantId,
         siteId,
         pageUrl,
         deviceType: device,

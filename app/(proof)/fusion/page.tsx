@@ -487,7 +487,7 @@ function FusionViewInner() {
             >
               <div style={{ fontSize: 10, fontWeight: 700, color: '#065f46' }}>80+特徴量 CVR予測 (`ml_cvr_predict`)</div>
               <div className="mono" style={{ fontSize: 18, fontWeight: 800, color: '#065f46' }}>
-                現在 {mlProfile.currentCvrPct}% → 改善後 {mlProfile.predictedPotentialCvrPct}% (+{mlProfile.estimatedMonthlyCvGain} CV/月)
+                現在 {mlInsights ? (mlInsights.bottleneckAttribution.baselineCvr * 100).toFixed(2) : mlProfile.currentCvrPct}% → 改善後 {mlInsights ? (mlInsights.bottleneckAttribution.predictedOptimalCvr * 100).toFixed(2) : mlProfile.predictedPotentialCvrPct}% (+{mlProfile.estimatedMonthlyCvGain} CV/月)
               </div>
             </div>
           </div>

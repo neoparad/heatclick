@@ -16,6 +16,7 @@
  *      - Hybrid dense/TF-IDF cosine similarity × PageRank authority flow × conversion/orphan role ranking.
  */
 
+import { analyzeCrawlerPageAcquisition } from '@/lib/aiseo/crawler-acquisition'
 import { normalCdf } from '@/lib/experiments/hypothesis-testing'
 import { buildFusionDatasetForUrl } from '@/lib/fusion/behavior-structure'
 import {
@@ -1117,10 +1118,11 @@ export async function buildPragmaticMlInsightsForUrl(params: {
   const client = getLinksCrawlClient(params.config)
   const fusionBase = buildFusionDatasetForUrl(params.url, params.siteId)
 
-  const [cvrPred, speedLoss, frictionData] = await Promise.all([
+  const [cvrPred, speedLoss, frictionData, acqReport] = await Promise.all([
     client.getCvrPrediction(params.siteId, fusionBase.canonicalUrl),
     client.getSpeedLoss(params.siteId, fusionBase.canonicalUrl),
     client.getFrictionHotspots(params.siteId, fusionBase.canonicalUrl),
+    analyzeCrawlerPageAcquisition({ siteId: params.siteId, url: fusionBase.canonicalUrl }).catch(() => null),
   ])
 
   const firstCtaSec = frictionData.contentMap.find((s) => s.hasCta)
@@ -1139,7 +1141,7 @@ export async function buildPragmaticMlInsightsForUrl(params: {
     rageAndDeadClickRate: rageAndDeadRate,
     headingSemanticBreaks:
       frictionData.semanticAudit.headingDecorativeAbuse.abusedCount || 5,
-    ssrVisibilityRatio: 0.68,
+    ssrVisibilityRatio: acqReport ? acqReport.ssrVisibilityScore / 100 : 0.68,
     mobileTapTargetViolations:
       frictionData.designAudit.defects.find(
         (d) => d.code === 'tap_target_too_small',

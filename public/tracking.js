@@ -166,6 +166,9 @@
       sessionStorage.setItem('ci_sst', now.toString());
       sessionStorage.setItem('ci_spv', '0');
       sessionStorage.setItem('ci_scroll_max', '0');
+      sessionStorage.setItem('ci_rage_clicks', '0');
+      sessionStorage.setItem('ci_dead_clicks', '0');
+      sessionStorage.setItem('ci_scroll_reversals', '0');
       sessionStorage.setItem('ci_first_visit', _isFirstVisit ? '1' : '0');
     } else {
       if (!sessionStorage.getItem('ci_sst')) sessionStorage.setItem('ci_sst', la || now.toString());
@@ -379,6 +382,8 @@
       rClicks.push({ x: cx, y: cy, t: now });
       rClicks = rClicks.filter(c => now - c.t < 2000);
       const isRage = rClicks.filter(c => Math.abs(c.x-cx)<30 && Math.abs(c.y-cy)<30).length >= 3;
+      const isDead = !isRage && _isDead(el);
+      try { if (isRage) sessionStorage.setItem('ci_rage_clicks', String((parseInt(sessionStorage.getItem('ci_rage_clicks')||'0',10)||0)+1)); else if (isDead) sessionStorage.setItem('ci_dead_clicks', String((parseInt(sessionStorage.getItem('ci_dead_clicks')||'0',10)||0)+1)); } catch {}
       // Use sanitizePII/sanitizeUrl if utils extension loaded, else simple truncation
       const rawText = el.textContent?.trim().substring(0, 100) || '';
       const rawHref = el.href || (typeof el.closest === 'function' ? el.closest('a')?.href : '') || '';

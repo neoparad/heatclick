@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react'
 import Link from 'next/link'
-import type { SemanticLinkRecommendation } from '@/lib/ml/pragmatic-ml-engine'
+import { recommendSemanticInternalLinks, type InternalLinkCandidatePage, type SemanticLinkRecommendation } from '@/lib/ml/pragmatic-ml-engine'
 
 interface HubPage {
   url: string
@@ -55,7 +55,37 @@ export default function SeoInternalLinksPage() {
       .then(([j, ml]) => {
         if (j.error && !j.structure) setErr(j.error)
         else setData(j)
-        if (ml?.ok && Array.isArray(ml.data?.semanticLinks)) {
+        const hubs: HubPage[] = j?.structure?.hub_pages || []
+        const orph: Array<{ source_url: string; description: string }> = j?.orphans || []
+        if (hubs.length + orph.length >= 2) {
+          const candidates: InternalLinkCandidatePage[] = [
+            ...hubs.map((h, i) => ({
+              url: h.url,
+              title: h.title || h.url,
+              topicKeywords: (h.title || h.url).split(/[\s・：:／/、,（）()「」\-_]+/).filter((w) => w.length >= 2),
+              pageRank: h.page_rank ?? Math.max(0.45, 0.88 - i * 0.08),
+              inboundCount: h.inbound_count,
+              outboundCount: h.outbound_count,
+              depth: h.depth,
+              clusterId: h.url.includes('/column') ? 'cluster-aiseo' : 'cluster-tech-seo',
+              clusterName: h.url.includes('/column') ? 'AIO / LLMO & コラム群' : '主要ピラー & 構造ハブ',
+            })),
+            ...orph.map((o) => ({
+              url: o.source_url,
+              title: o.description || o.source_url,
+              topicKeywords: (o.description || o.source_url).split(/[\s・：:／/、,（）()「」\-_]+/).filter((w) => w.length >= 2),
+              pageRank: 0.22,
+              inboundCount: 0,
+              outboundCount: 2,
+              depth: 4,
+              clusterId: 'cluster-tech-seo',
+              clusterName: '孤立ページ救済対象 (Orphan)',
+              isOrphan: true,
+            })),
+          ]
+          const liveRecs = recommendSemanticInternalLinks(candidates, { maxRecommendations: 6 })
+          setSemanticLinks(liveRecs.length > 0 ? liveRecs : ml?.data?.semanticLinks || [])
+        } else if (ml?.ok && Array.isArray(ml.data?.semanticLinks)) {
           setSemanticLinks(ml.data.semanticLinks)
         }
       })

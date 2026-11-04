@@ -191,3 +191,56 @@ test('scenario_match beacon uses a text/plain Blob (CORS simple request, no pref
   assert.ok(match, 'expected a match beacon')
   assert.equal(match.type, 'text/plain')
 })
+
+
+test('Uplift preset (predicted_intent === persuadable_high_uplift): fires on high-engagement hesitant session', () => {
+  const { runtime, beacons } = setup({
+    sessionSeed: {
+      ci_sid: 'sess_uplift',
+      ci_sst: String(Date.now() - 40_000), // 40s duration
+      ci_scroll_max: '65',
+      ci_scroll_reversals: '3',
+    },
+  })
+  const upliftScenario = {
+    ...scenario('live'),
+    condition_ast: {
+      op: 'AND',
+      children: [
+        { op: 'GTE', field: 'scroll_depth_max_pct', value: 50 },
+        { op: 'GTE', field: 'session_duration_sec', value: 30 },
+        { op: 'EQ', field: 'is_agent', value: false },
+        { op: 'EQ', field: 'predicted_intent', value: 'persuadable_high_uplift' },
+      ],
+    },
+  }
+  runtime.evaluateAll([upliftScenario])
+  assert.equal(beacons.some((b) => b.payload.match_type === 'match'), true)
+})
+
+test('Uplift preset (predicted_intent === persuadable_high_uplift): does NOT disturb smooth Sure-Thing session', () => {
+  const { runtime, beacons } = setup({
+    sessionSeed: {
+      ci_sid: 'sess_sure',
+      ci_sst: String(Date.now() - 32_000), // 32s smooth duration (<45s) and 0 friction
+      ci_scroll_max: '70',
+      ci_rage_clicks: '0',
+      ci_dead_clicks: '0',
+      ci_scroll_reversals: '0',
+    },
+  })
+  const upliftScenario = {
+    ...scenario('live'),
+    condition_ast: {
+      op: 'AND',
+      children: [
+        { op: 'GTE', field: 'scroll_depth_max_pct', value: 50 },
+        { op: 'GTE', field: 'session_duration_sec', value: 30 },
+        { op: 'EQ', field: 'is_agent', value: false },
+        { op: 'EQ', field: 'predicted_intent', value: 'persuadable_high_uplift' },
+      ],
+    },
+  }
+  runtime.evaluateAll([upliftScenario])
+  assert.equal(beacons.length, 0, 'Sure-Thing session must not be disturbed')
+})

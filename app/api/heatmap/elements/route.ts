@@ -44,6 +44,7 @@ const querySchema = z.object({
   segment: z.enum(['all', 'deep_read', 'bounce', 'ad', 'returning', 'new']).default('all'),
   // AIエージェント・ヒートマップ対応: actor='human'|'agent'|'all' (既定 'human')
   actor: z.enum(['human', 'agent', 'all']).default('human'),
+  agent_subtype: z.enum(['all', 'webdriver', 'headless', 'ai_user_agent', 'heuristic_multi']).default('all'),
 })
 
 /**
@@ -277,6 +278,7 @@ export async function GET(request: Request) {
     device_type: url.searchParams.get('device_type') ?? undefined,
     segment: url.searchParams.get('segment') ?? undefined,
     actor: url.searchParams.get('actor') ?? undefined,
+    agent_subtype: url.searchParams.get('agent_subtype') ?? undefined,
   })
   if (!parsed.success) {
     return jsonWithTiming(
@@ -311,7 +313,7 @@ export async function GET(request: Request) {
 
   const deviceFilter = params.device_type ? `AND device_type = {device_type:String}` : ''
   const segmentFilter = segmentFilterSql(params.segment, params.actor)
-  const actorFilter = actorFilterSql(params.actor)
+  const actorFilter = actorFilterSql(params.actor, params.agent_subtype)
   const queryParams: Record<string, string> = {
     tenant_id: session.tenant_id,
     site_id: params.site_id,

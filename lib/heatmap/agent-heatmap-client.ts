@@ -26,6 +26,7 @@ import type {
 } from '@/lib/api/heatmap-elements'
 import { getClickHouseClient } from '@/lib/clickhouse'
 import { canonicalizeHeatmapUrl, canonicalUrlSql } from '@/lib/heatmap/canonical-url'
+import { agentSubtypeFilterSql } from '@/lib/heatmap/segment-filter'
 import type { HeatmapActor, HeatmapDevice } from '@/lib/heatmap/types'
 import { normalizeUrlFull } from '@/lib/url/normalize-url'
 
@@ -301,6 +302,7 @@ export async function prefetchHeatmapUnderlayCacheOnly(input: {
  * Gracefully degrades to `[]` if ClickHouse is offline or unconfigured.
  */
 export async function fetchAgentHeatmapPoints(params: {
+  tenantId?: string
   siteId: string
   pageUrl: string
   deviceType?: string
@@ -316,6 +318,8 @@ export async function fetchAgentHeatmapPoints(params: {
   try {
     const ch = getClickHouseClient('analytics_reader')
     const canonUrl = canonicalizeHeatmapUrl(params.pageUrl)
+    const subFilter = agentSubtypeFilterSql(parseAgentSubtype(params.agentSubtype))
+    const tenantClause = params.tenantId && params.tenantId !== 'default' ? 'tenant_id = {tenant_id:String} AND' : ''
     const rs = await ch.query({
       query: `
         SELECT
@@ -326,15 +330,17 @@ export async function fetchAgentHeatmapPoints(params: {
           anyLast(element_selector) AS selector,
           anyLast(event_type) AS eventType
         FROM clickinsight.events
-        WHERE site_id = {site_id:String}
+        WHERE ${tenantClause} site_id = {site_id:String}
           AND ${canonicalUrlSql('url')} = {page_url:String}
           AND is_agent = 1
+          ${subFilter}
           AND event_type IN ('click', 'dead_click', 'rage_click')
         GROUP BY element_selector, event_type
         ORDER BY count DESC
         LIMIT 25
       `,
       query_params: {
+        tenant_id: params.tenantId || 'default',
         site_id: params.siteId,
         page_url: canonUrl,
       },
@@ -359,6 +365,7 @@ export async function fetchAgentHeatmapPoints(params: {
  * Gracefully degrades to `null` if ClickHouse is offline or returns 0 agent sessions.
  */
 export async function fetchAgentBehaviorSummary(params: {
+  tenantId?: string
   siteId: string
   pageUrl: string
   deviceType?: string
@@ -374,6 +381,8 @@ export async function fetchAgentBehaviorSummary(params: {
   try {
     const ch = getClickHouseClient('analytics_reader')
     const canonUrl = canonicalizeHeatmapUrl(params.pageUrl)
+    const subFilter = agentSubtypeFilterSql(parseAgentSubtype(params.agentSubtype))
+    const tenantClause = params.tenantId && params.tenantId !== 'default' ? 'tenant_id = {tenant_id:String} AND' : ''
     const rs = await ch.query({
       query: `
         SELECT
@@ -383,11 +392,13 @@ export async function fetchAgentBehaviorSummary(params: {
           countIf(event_type = 'rage_click') AS rage_clicks,
           round(avgIf(scroll_percentage, scroll_percentage > 0)) AS avg_scroll
         FROM clickinsight.events
-        WHERE site_id = {site_id:String}
+        WHERE ${tenantClause} site_id = {site_id:String}
           AND ${canonicalUrlSql('url')} = {page_url:String}
           AND is_agent = 1
+          ${subFilter}
       `,
       query_params: {
+        tenant_id: params.tenantId || 'default',
         site_id: params.siteId,
         page_url: canonUrl,
       },

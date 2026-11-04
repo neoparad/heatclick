@@ -25,7 +25,7 @@ import { getServerSession } from '@/lib/auth/server-session'
 
 import { getClickHouseClient } from '@/lib/clickhouse'
 import type { HeatmapSegment } from '@/lib/api/heatmap'
-import { actorFilterSql, segmentFilterSql } from '@/lib/heatmap/segment-filter'
+import { actorFilterSql, segmentFilterSql, type HeatmapAgentSubtype } from '@/lib/heatmap/segment-filter'
 import type { HeatmapActor } from '@/lib/heatmap/types'
 import { canonicalizeHeatmapUrl, canonicalUrlSql } from '@/lib/heatmap/canonical-url'
 import { createRouteTimer, type RouteTimer } from '@/lib/perf/server-timing'
@@ -60,6 +60,7 @@ const querySchema = z.object({
   segment: z.enum(['all', 'deep_read', 'bounce', 'ad', 'returning', 'new']).default('all'),
   // Task 5: AIエージェント・ヒートマップ対応 ('human' | 'agent' | 'all', 既定 'human')
   actor: z.enum(['human', 'agent', 'all']).default('human'),
+  agent_subtype: z.enum(['all', 'webdriver', 'headless', 'ai_user_agent', 'heuristic_multi']).default('all'),
 })
 
 // 続120: 旧 30_000 は縦長記事で深部クリックを取りこぼしていた (click_y は UInt16 で
@@ -83,9 +84,10 @@ function buildQueryHash(params: {
   end_date?: string
   segment?: string
   actor?: string
+  agent_subtype?: string
 }): string {
-  // 続125: segment / actor も hash に含める (切替を跨いだ cursor 再利用を CURSOR_INVALID に)
-  const raw = `${params.site_id}|${params.page_url}|${params.heatmap_type}|${params.device_type ?? ''}|${params.start_date ?? ''}|${params.end_date ?? ''}|${params.tile_size}|${params.segment ?? 'all'}|${params.actor ?? 'human'}`
+  // 続125: segment / actor / agent_subtype も hash に含める (切替を跨いだ cursor 再利用を CURSOR_INVALID に)
+  const raw = `${params.site_id}|${params.page_url}|${params.heatmap_type}|${params.device_type ?? ''}|${params.start_date ?? ''}|${params.end_date ?? ''}|${params.tile_size}|${params.segment ?? 'all'}|${params.actor ?? 'human'}${params.agent_subtype && params.agent_subtype !== 'all' ? '|' + params.agent_subtype : ''}`
   const hmac = createHmac('sha256', getCursorSecret()).update(raw).digest('hex')
   return hmac.slice(0, 32)
 }
@@ -176,6 +178,7 @@ export async function GET(request: Request) {
     cursor: url.searchParams.get('cursor') ?? undefined,
     segment: url.searchParams.get('segment') ?? undefined,
     actor: url.searchParams.get('actor') ?? undefined,
+    agent_subtype: url.searchParams.get('agent_subtype') ?? undefined,
   })
 
   if (!parsed.success) {
@@ -268,6 +271,7 @@ export async function GET(request: Request) {
           deviceType: params.device_type,
           segment: params.segment,
           actor: params.actor,
+          agentSubtype: params.agent_subtype,
           yStart: 0,
           yEnd: PAGE_HEIGHT_ESTIMATE,
           startDate: params.start_date,
@@ -336,6 +340,7 @@ export async function GET(request: Request) {
           deviceType: params.device_type,
           segment: params.segment,
           actor: params.actor,
+          agentSubtype: params.agent_subtype,
           yStart,
           yEnd: tileEnd,
           startDate: params.start_date,
@@ -453,6 +458,7 @@ async function fetchRealHeatmapPoints(input: {
   deviceType?: 'desktop' | 'mobile' | 'tablet' | 'unknown'
   segment?: HeatmapSegment
   actor?: 'human' | 'agent' | 'all'
+  agentSubtype?: HeatmapAgentSubtype
   yStart: number
   yEnd: number
   startDate?: string
@@ -473,7 +479,7 @@ async function fetchRealHeatmapPoints(input: {
   // 続125: 行動セグメント絞り込み (定数 SQL 断片 + parameter binding のみ)
   const segmentFilter = segmentFilterSql(input.segment ?? 'all', actor)
   // Task 5: actor ('human' | 'agent' | 'all') 絞り込み
-  const actorFilter = actorFilterSql(actor)
+  const actorFilter = actorFilterSql(actor, input.agentSubtype ?? 'all')
   const dateStart = input.startDate ?? '1970-01-01'
   const dateEnd = input.endDate ?? '2099-12-31'
 

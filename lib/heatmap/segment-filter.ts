@@ -27,20 +27,51 @@ import type { HeatmapSegment } from '@/lib/api/heatmap'
 import { canonicalUrlSql } from '@/lib/heatmap/canonical-url'
 import type { HeatmapActor } from '@/lib/heatmap/types'
 
+export type HeatmapAgentSubtype =
+  | 'all'
+  | 'webdriver'
+  | 'headless'
+  | 'ai_user_agent'
+  | 'heuristic_multi'
+
 /**
- * actor ('human' | 'agent' | 'all') に応じた `is_agent` WHERE 条件の定数 SQL 断片を返す。
- *   - 'human' (既定): `AND is_agent = 0`
- *   - 'agent'       : `AND is_agent = 1`
- *   - 'all'         : `''` (フィルタなし)
+ * agent_subtype ('all' | 'webdriver' | 'headless' | 'ai_user_agent' | 'heuristic_multi') に応じた
+ * 定数 SQL 断片を返す。switch によるコンパイル時定数分岐のみでユーザー入力の連結は一切行わない。
  */
-export function actorFilterSql(actor: HeatmapActor = 'human'): string {
+export function agentSubtypeFilterSql(subtype: HeatmapAgentSubtype = 'all'): string {
+  switch (subtype) {
+    case 'webdriver':
+      return "AND (agent_type = 'webdriver' OR positionCaseInsensitive(agent_signals, 'webdriver') > 0)"
+    case 'headless':
+      return "AND (agent_type = 'headless' OR positionCaseInsensitive(agent_signals, 'headless') > 0)"
+    case 'ai_user_agent':
+      return "AND (agent_type IN ('ChatGPT-User', 'GPTBot', 'ClaudeBot', 'PerplexityBot', 'OAI-SearchBot', 'ai_user_agent') OR positionCaseInsensitive(agent_signals, 'ua_') > 0)"
+    case 'heuristic_multi':
+      return "AND (agent_type = 'heuristic_multi' OR positionCaseInsensitive(agent_signals, 'heuristic') > 0)"
+    case 'all':
+    default:
+      return ''
+  }
+}
+
+/**
+ * actor ('human' | 'agent' | 'all') および任意の agentSubtype に応じた `is_agent` WHERE 条件の定数 SQL 断片を返す。
+ *   - 'human' (既定): `AND is_agent = 0`
+ *   - 'agent'       : `AND is_agent = 1` (+ agentSubtype 指定時は定数サブタイプ条件)
+ *   - 'all'         : `''` (フィルタなし、ただし agentSubtype !== 'all' の場合はサブタイプ条件)
+ */
+export function actorFilterSql(
+  actor: HeatmapActor = 'human',
+  agentSubtype: HeatmapAgentSubtype = 'all',
+): string {
+  const subClause = actor === 'human' ? '' : agentSubtypeFilterSql(agentSubtype)
   switch (actor) {
     case 'human':
       return 'AND is_agent = 0'
     case 'agent':
-      return 'AND is_agent = 1'
+      return subClause ? `AND is_agent = 1 ${subClause}` : 'AND is_agent = 1'
     case 'all':
-      return ''
+      return subClause
   }
 }
 
@@ -87,12 +118,12 @@ export function segmentFilterSql(segment: HeatmapSegment, actor: HeatmapActor = 
       return `AND session_id IN (
         SELECT DISTINCT session_id FROM clickinsight.events
         WHERE tenant_id = {tenant_id:String}
-          AND site_id = {site_id:String}
-          AND ${canonicalUrlSql('url')} = {page_url:String}
-          ${actorClause}
-          AND ((gclid IS NOT NULL AND gclid != '') OR (fbclid IS NOT NULL AND fbclid != ''))
-          AND timestamp >= toDateTime({start:String})
-          AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
+        AND site_id = {site_id:String}
+        AND ${canonicalUrlSql('url')} = {page_url:String}
+        ${actorClause}
+        AND ((gclid IS NOT NULL AND gclid != '') OR (fbclid IS NOT NULL AND fbclid != ''))
+        AND timestamp >= toDateTime({start:String})
+        AND timestamp < toDateTime({end:String}) + INTERVAL 1 DAY
       )`
     case 'deep_read':
     case 'bounce': {
