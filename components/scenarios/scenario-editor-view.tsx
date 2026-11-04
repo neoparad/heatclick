@@ -1,21 +1,12 @@
 'use client'
 
 /**
- * ScenarioEditorView — シナリオ編集 UI (M-Director Stage 2、続 M-9 / 2026-05-28)
+ * ScenarioEditorView — シナリオ編集 UI (M-Director Stage 2 / Phase 2.1)
  *
- * mockup `linkscrawl/docs/fusion/mockups/20_scenarios_editor.html` 踏襲。
- *
- * Stage 2 (続 M-9) で変更:
  *   - useScenarioEditor hook で local edit state を管理
- *   - 編集可能: name / description / status / variant.cta_url / variant.position / variant.traffic_split
- *   - 編集不可 (Stage 4 で edit 化): condition_ast、variant の image_url / html / image_alt
+ *   - 編集可能: name / description / status / condition_ast / variants / frequency_cap / schedule
  *   - 保存ボタン enable + PUT /api/scenarios/[id] + sonner toast
  *   - dirty 状態に応じて Reset ボタン表示
- *
- * 注意:
- *   - Phase 2 では visual builder (Stage 4) と画像 upload (Stage 3) は未配備
- *   - AST と variant 画像は read-only display のまま
- *   - Reset = local state を original に戻す (server-side rollback ではない)
  */
 
 import Link from 'next/link'
@@ -37,6 +28,8 @@ import type { ConditionNode, Scenario, Variant } from '@/lib/scenarios/types'
 import { SCENARIO_STATUSES } from '@/lib/scenarios/types'
 
 import { ConditionVisualBuilder } from './condition-visual-builder'
+import { DryRunPreviewPanel } from './dry-run-preview-panel'
+import { FrequencyScheduleCard } from './frequency-schedule-card'
 import { ScenarioStatsPanel } from './scenario-stats-panel'
 import { useScenarioEditor } from './use-scenario-editor'
 import { VariantPreview } from './variant-preview'
@@ -51,8 +44,6 @@ interface ScenarioEditorViewProps {
 export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewProps) {
   const editor = useScenarioEditor({ scenario })
   const role: ScenarioRole = normalizeRole(viewerRole)
-  // C: エディタ内ビジュアルプレビュー。preview 対象 variant (null = 非表示)。
-  // active variant の管理は VariantSetEditor 内部に委譲し、onPreview で対象を受け取る。
   const [previewVariant, setPreviewVariant] = useState<Variant | null>(null)
 
   return (
@@ -135,7 +126,7 @@ export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewP
 
         {/* 2-col grid */}
         <div className="grid grid-cols-[1.25fr_1fr] gap-4.5">
-          {/* LEFT: condition builder (read-only until Stage 4) */}
+          {/* LEFT: condition builder + dry run + stats */}
           <div>
             <Panel
               title="条件 (誰に発火するか)"
@@ -150,6 +141,13 @@ export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewP
               <div className="bg-slate-900 text-slate-100 px-4 py-3 font-mono text-[11.5px] leading-relaxed overflow-x-auto whitespace-pre">
                 {formatAstForDisplay(editor.draft.condition_ast)}
               </div>
+              <div className="px-4 py-3 border-t border-slate-100 bg-slate-50/50">
+                <DryRunPreviewPanel
+                  conditionAst={editor.draft.condition_ast}
+                  siteId={scenario.site_id}
+                  hasValidationErrors={false}
+                />
+              </div>
             </Panel>
 
             {/* Stats (Stage 7、続 M-12) — scenario_match テーブルから集計 */}
@@ -161,7 +159,7 @@ export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewP
             />
           </div>
 
-          {/* RIGHT: variant editor */}
+          {/* RIGHT: variant editor + frequency/schedule + status */}
           <div>
             <Panel
               title="バリアント (A/B/C 最大 3 つ)"
@@ -175,6 +173,14 @@ export function ScenarioEditorView({ scenario, viewerRole }: ScenarioEditorViewP
                   siteId={scenario.site_id}
                   tenantId={scenario.tenant_id}
                   onPreview={setPreviewVariant}
+                />
+              </div>
+              <div className="px-4 py-3 border-t border-slate-100">
+                <FrequencyScheduleCard
+                  frequencyCap={editor.draft.frequency_cap}
+                  schedule={editor.draft.schedule}
+                  onFrequencyCapChange={editor.setFrequencyCap}
+                  onScheduleChange={editor.setSchedule}
                 />
               </div>
             </Panel>
@@ -284,13 +290,6 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
   )
 }
 
-// SimStat 削除済 (Stage 7、続 M-12): ScenarioStatsPanel に置換。
-
-// ───────────────────────────────────────────────────────────────────────────
-
-// ConditionVisualBuilder は components/scenarios/condition-visual-builder.tsx で
-// editable 版に置換 (Stage 4、続 M-11)。旧 read-only 内部関数は本ファイルから削除済。
-
 function formatAstForDisplay(ast: ConditionNode): string {
   try {
     return JSON.stringify(JSON.parse(canonicalizeAst(ast)), null, 2)
@@ -298,6 +297,3 @@ function formatAstForDisplay(ast: ConditionNode): string {
     return canonicalizeAst(ast)
   }
 }
-
-// VariantEditor / SplitBar は components/scenarios/variant-set-editor.tsx の
-// VariantSetEditor に統合 (F、続)。本ファイルからは削除済。

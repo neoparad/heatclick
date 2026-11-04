@@ -1,21 +1,12 @@
 /**
  * M-Director Stage 1 (続 M-7/M-8) — Cloudflare KV REST API client for scenarios
  *
- * Reference:
- *   - 続 M-7 §2 (Storage 判断変更 PostgreSQL → KV)
- *   - 続 M-7 §3 (KV key 設計)
- *   - Main Director 続 91 `cf_kv_client.py` (Python 同等実装、parity 維持)
- *
- * Why fetch over @cloudflare/workers-types KV binding:
- *   - This module runs on Vercel Functions (Next.js API routes), not on Cloudflare Workers.
- *   - CF Worker KV binding is unavailable; must use REST API via fetch().
- *   - CF_API_TOKEN scope: Workers KV Storage > Edit (続 99 で発行済の wrangler token を再利用)。
- *
  * Key prefix discipline (続 M-7 §3):
  *   - scenarios:        `scenarios/{tenant_id}/{site_id}/{scenario_id}`
  *   - scenario assets:  `scenario_assets/{tenant_id}/{scenario_id}/{asset_id}`
- *   - 既存 Main Director namespace (RULE_BUNDLES_KV id=e956e76f...) を共有、prefix 分離で衝突回避。
  */
+
+import { POC_SCENARIOS } from './poc-scenario'
 
 const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4'
 
@@ -59,6 +50,55 @@ export interface KvStorage {
   listKeys(prefix?: string): Promise<string[]>
 }
 
+/**
+ * In-memory fallback KV storage used when CF_ACCOUNT_ID / CF_API_TOKEN / RULE_BUNDLES_KV_NS_ID
+ * are not configured in local dev or preview environments. Pre-seeded with POC_SCENARIOS so
+ * editing/saving existing POC scenarios or creating new scenarios works seamlessly without 502/404.
+ */
+export class InMemoryFallbackKvStorage implements KvStorage {
+  private readonly store = new Map<string, string>()
+
+  constructor(seedPoc = true) {
+    if (seedPoc) {
+      for (const s of POC_SCENARIOS) {
+        const key = `scenarios/${s.tenant_id}/${s.site_id}/${s.id}`
+        this.store.set(key, JSON.stringify(s))
+        const idxKey = `scenario-index/${s.tenant_id}/${s.site_id}`
+        const existing = this.store.get(idxKey)
+        const ids: string[] = existing ? (JSON.parse(existing) as string[]) : []
+        if (!ids.includes(s.id)) {
+          ids.push(s.id)
+          this.store.set(idxKey, JSON.stringify(ids))
+        }
+      }
+    }
+  }
+
+  async getJson<T = unknown>(key: string): Promise<T | null> {
+    const raw = this.store.get(key)
+    if (raw === undefined) return null
+    return JSON.parse(raw) as T
+  }
+
+  async putJson(key: string, value: unknown): Promise<void> {
+    this.store.set(key, JSON.stringify(value))
+  }
+
+  async delete(key: string): Promise<boolean> {
+    return this.store.delete(key)
+  }
+
+  async listKeys(prefix?: string): Promise<string[]> {
+    const out: string[] = []
+    for (const k of this.store.keys()) {
+      if (!prefix || k.startsWith(prefix)) {
+        out.push(k)
+      }
+    }
+    return out
+  }
+}
+
 export class CloudflareKvStorage implements KvStorage {
   constructor(
     private readonly config: CloudflareKvConfig,
@@ -66,8 +106,6 @@ export class CloudflareKvStorage implements KvStorage {
   ) {}
 
   private keyUrl(key: string): string {
-    // Cloudflare KV REST API allows `/` inside the key portion; encode the
-    // rest of the path components but preserve slashes.
     const safeKey = encodeURI(key)
     return (
       `${CLOUDFLARE_API_BASE}/accounts/${this.config.accountId}/storage/kv/namespaces/` +
@@ -149,8 +187,6 @@ export class CloudflareKvStorage implements KvStorage {
   async listKeys(prefix?: string): Promise<string[]> {
     const collected: string[] = []
     let cursor: string | null = null
-    // Loop with cursor; CF returns max 1000 keys per page.
-    // Phase 2 scenarios row count <= 10k (data-model.md §1) → at most ~10 pages.
     for (;;) {
       const params = new URLSearchParams({ limit: '1000' })
       if (prefix !== undefined && prefix.length > 0) params.set('prefix', prefix)
@@ -182,16 +218,22 @@ export class CloudflareKvStorage implements KvStorage {
   }
 }
 
-/**
- * Default storage built from env at call time. Tests inject `InMemoryKvStorage`
- * instead via `setStorageForTesting`. Production paths call this directly.
- */
 let _storage: KvStorage | null = null
+let _fallbackStorage: InMemoryFallbackKvStorage | null = null
 
 export function getDefaultStorage(): KvStorage {
   if (_storage) return _storage
-  _storage = new CloudflareKvStorage(getKvConfigFromEnv())
-  return _storage
+  const accountId = process.env.CF_ACCOUNT_ID
+  const apiToken = process.env.CF_API_TOKEN
+  const namespaceId = process.env.RULE_BUNDLES_KV_NS_ID
+  if (accountId && apiToken && namespaceId) {
+    _storage = new CloudflareKvStorage({ accountId, apiToken, namespaceId })
+    return _storage
+  }
+  if (!_fallbackStorage) {
+    _fallbackStorage = new InMemoryFallbackKvStorage(true)
+  }
+  return _fallbackStorage
 }
 
 export function setStorageForTesting(storage: KvStorage | null): void {

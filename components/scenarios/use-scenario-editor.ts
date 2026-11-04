@@ -7,25 +7,21 @@
  *   - Edit: name, description, status, condition_ast, variant.cta_url / position / traffic_split
  *   - Image upload (Stage 3): variant.image_url via VariantImageUpload
  *   - Stage 5 (Phase 2.5) で edit 化: variant.image_alt, variant.html (HTML editor)
- *
- * Save flow:
- *   1. local state diff (dirty 検知)
- *   2. PUT /api/scenarios/[id]?tenant_id=...&site_id=...
- *   3. on success: refresh router → server-side re-fetch
- *   4. on error: rollback local state + toast.error
- *
- * Reference:
- *   - lib/scenarios/types.ts (Scenario, Variant schemas)
- *   - lib/scenarios/condition-ast-ops.ts (AST mutation helpers)
- *   - app/api/scenarios/[id]/route.ts (PUT endpoint)
- *   - 続 M-7 §4 #2-3 (Stage 2 配備計画) / 続 M-10 §5 (Stage 4)
+ *   - Phase 2.1: frequency_cap / schedule の編集・PUT保存に対応
  */
 
 import { useRouter } from 'next/navigation'
 import { useCallback, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
-import type { ConditionNode, Scenario, ScenarioStatus, Variant } from '@/lib/scenarios/types'
+import type {
+  ConditionNode,
+  FrequencyCap,
+  Scenario,
+  ScenarioStatus,
+  Schedule,
+  Variant,
+} from '@/lib/scenarios/types'
 
 export interface EditableScenarioFields {
   name: string
@@ -33,6 +29,8 @@ export interface EditableScenarioFields {
   status: ScenarioStatus
   condition_ast: ConditionNode
   variants: Variant[]
+  frequency_cap: FrequencyCap | null
+  schedule: Schedule | null
 }
 
 export interface UseScenarioEditorOptions {
@@ -58,6 +56,8 @@ export interface UseScenarioEditorResult {
   updateVariant: (variantId: string, patch: Partial<Variant>) => void
   /** variants 配列を丸ごと差し替え (content_type 切替・追加・削除など shape 変更を伴う操作用) */
   setVariants: (next: Variant[]) => void
+  setFrequencyCap: (next: FrequencyCap | null) => void
+  setSchedule: (next: Schedule | null) => void
   /** Save 実行 (PUT API call) */
   save: () => Promise<void>
   /** dirty state を original に reset */
@@ -88,6 +88,8 @@ export function useScenarioEditor(opts: UseScenarioEditorOptions): UseScenarioEd
       status: scenario.status,
       condition_ast: scenario.condition_ast,
       variants: [...scenario.variants],
+      frequency_cap: scenario.frequency_cap ?? null,
+      schedule: scenario.schedule ?? null,
     }),
     [scenario],
   )
@@ -102,6 +104,8 @@ export function useScenarioEditor(opts: UseScenarioEditorOptions): UseScenarioEd
     if (draft.status !== initial.status) return true
     if (JSON.stringify(draft.condition_ast) !== JSON.stringify(initial.condition_ast)) return true
     if (JSON.stringify(draft.variants) !== JSON.stringify(initial.variants)) return true
+    if (JSON.stringify(draft.frequency_cap) !== JSON.stringify(initial.frequency_cap)) return true
+    if (JSON.stringify(draft.schedule) !== JSON.stringify(initial.schedule)) return true
     return false
   }, [draft, initial])
 
@@ -125,6 +129,12 @@ export function useScenarioEditor(opts: UseScenarioEditorOptions): UseScenarioEd
   }, [])
   const setVariants = useCallback((next: Variant[]) => {
     setDraft((d) => ({ ...d, variants: next }))
+  }, [])
+  const setFrequencyCap = useCallback((next: FrequencyCap | null) => {
+    setDraft((d) => ({ ...d, frequency_cap: next }))
+  }, [])
+  const setSchedule = useCallback((next: Schedule | null) => {
+    setDraft((d) => ({ ...d, schedule: next }))
   }, [])
 
   const reset = useCallback(() => {
@@ -150,6 +160,8 @@ export function useScenarioEditor(opts: UseScenarioEditorOptions): UseScenarioEd
         status: draft.status,
         condition_ast: draft.condition_ast,
         variants: draft.variants,
+        frequency_cap: draft.frequency_cap,
+        schedule: draft.schedule,
       }
       const url =
         `/api/scenarios/${encodeURIComponent(scenario.id)}` +
@@ -181,7 +193,7 @@ export function useScenarioEditor(opts: UseScenarioEditorOptions): UseScenarioEd
     } finally {
       setIsSaving(false)
     }
-  }, [draft, initial, isDirty, isSaving, scenario, fetchImpl, router])
+  }, [draft, isDirty, isSaving, scenario, fetchImpl, router])
 
   return {
     draft,
@@ -194,6 +206,8 @@ export function useScenarioEditor(opts: UseScenarioEditorOptions): UseScenarioEd
     setConditionAst,
     updateVariant,
     setVariants,
+    setFrequencyCap,
+    setSchedule,
     save,
     reset,
   }

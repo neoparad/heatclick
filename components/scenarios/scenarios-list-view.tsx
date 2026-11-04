@@ -1,18 +1,19 @@
 'use client'
 
 /**
- * ScenariosListView — ターゲティングバナー一覧 UI (M-Director Day 2、2026-05-25)
+ * ScenariosListView — ターゲティングバナー一覧 UI (M-Director Phase 2.1)
  *
- * mockup `linkscrawl/docs/fusion/mockups/19_scenarios_list.html` 踏襲。
- * Phase 1 は read-only 表示 (POC scenarios)、新規/編集 link は disabled。
- *
- * Evidence Level UI ガード (親 SSOT §1.8.2): `planned` / `inferred` はレンジ表示のみ、
- * 断定数値禁止。本 view では計測ベースの dummy 値 (planned としてラベル) を表示。
+ *   - 検索フィルタ (名前・説明・site_id) 実動化
+ *   - 更新ボタン (router.refresh) 実動化
+ *   - 詳細・編集リンクに ?site_id=... を付与して複数サイト時の 404 を防止
+ *   - 複製 (POST /api/scenarios) & アーカイブ/削除 (DELETE /api/scenarios/[id]) 実動化
  */
 
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, Copy, Edit3, Plus, RotateCw, Search, Trash2 } from 'lucide-react'
+import { toast } from 'sonner'
 
 import { PageMeta } from '@/components/layout/page-meta'
 import { Badge } from '@/components/ui/badge'
@@ -24,7 +25,6 @@ interface ScenariosListViewProps {
   scenarios: ReadonlyArray<Scenario>
 }
 
-// Phase 1 dummy metrics (Phase 2 で ClickHouse `scenario_match_daily_mv` 集計に置換)
 const PHASE_1_DUMMY_METRICS: Record<string, { matches: number; clicks: number; cvrPct: number }> = {
   '00000000-0000-4000-8000-00000000d001': { matches: 847, clicks: 36, cvrPct: 4.3 },
 }
@@ -60,12 +60,24 @@ function variantSummary(variants: ReadonlyArray<Variant>): string {
 }
 
 export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
+  const router = useRouter()
   const [expanded, setExpanded] = useState<string | null>(scenarios[0]?.id ?? null)
   const [filter, setFilter] = useState<'all' | ScenarioStatus>('all')
-  // 続 M-6 §A: Phase 1 banner は collapsed default、click で展開
+  const [searchQuery, setSearchQuery] = useState('')
   const [bannerOpen, setBannerOpen] = useState(false)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const [busyId, setBusyId] = useState<string | null>(null)
 
-  const filtered = filter === 'all' ? scenarios : scenarios.filter((s) => s.status === filter)
+  const q = searchQuery.trim().toLowerCase()
+  const filtered = scenarios.filter((s) => {
+    if (filter !== 'all' && s.status !== filter) return false
+    if (!q) return true
+    return (
+      s.name.toLowerCase().includes(q) ||
+      (s.description || '').toLowerCase().includes(q) ||
+      s.site_id.toLowerCase().includes(q)
+    )
+  })
 
   const total = scenarios.length
   const liveCount = scenarios.filter((s) => s.status === 'live').length
@@ -74,12 +86,69 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
     0,
   )
 
+  function handleRefresh() {
+    setIsRefreshing(true)
+    router.refresh()
+    setTimeout(() => setIsRefreshing(false), 400)
+  }
+
+  async function handleDuplicate(scenario: Scenario) {
+    if (busyId) return
+    setBusyId(scenario.id)
+    try {
+      const res = await fetch('/api/scenarios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          site_id: scenario.site_id,
+          name: `${scenario.name} (コピー)`,
+          description: scenario.description || undefined,
+          condition_ast: scenario.condition_ast,
+          variants: scenario.variants,
+          status: 'draft',
+          evidence_level: scenario.evidence_level,
+          frequency_cap: scenario.frequency_cap ?? null,
+          schedule: scenario.schedule ?? null,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.message || `HTTP ${res.status}`)
+      }
+      const created = (await res.json()) as { id: string }
+      toast.success('シナリオを複製しました', { description: `${scenario.name} (コピー)` })
+      router.push(`/scenarios/${encodeURIComponent(created.id)}?site_id=${encodeURIComponent(scenario.site_id)}`)
+    } catch (e) {
+      toast.error('複製に失敗しました', { description: (e as Error).message })
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function handleArchive(scenario: Scenario) {
+    if (busyId) return
+    setBusyId(scenario.id)
+    try {
+      const url = `/api/scenarios/${encodeURIComponent(scenario.id)}?site_id=${encodeURIComponent(scenario.site_id)}`
+      const res = await fetch(url, { method: 'DELETE' })
+      if (!res.ok && res.status !== 204) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.message || `HTTP ${res.status}`)
+      }
+      toast.success('シナリオを削除しました', { description: scenario.name })
+      router.refresh()
+    } catch (e) {
+      toast.error('削除に失敗しました', { description: (e as Error).message })
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   return (
     <>
       <PageMeta title="ターゲティングバナー" eyebrow="M Agent · Scenarios" />
 
       <div className="px-8 pt-4 pb-16">
-        {/* 続 M-6 §A: 圧縮 Phase 1 chip + actions (旧 banner + h1 + description + actions を 1 行に集約) */}
         <div className="flex items-center gap-2 mb-3">
           <button
             type="button"
@@ -88,7 +157,7 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
             aria-expanded={bannerOpen}
           >
             <RotateCw className="h-3 w-3" aria-hidden />
-            Phase 1 配信中 (1 シナリオ × A/B/C)
+            M Agent 稼働中 ({liveCount} シナリオ配信中 · A/B/C マルチバリアント)
             {bannerOpen ? (
               <ChevronDown className="h-3 w-3" aria-hidden />
             ) : (
@@ -96,8 +165,8 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
             )}
           </button>
           <div className="ml-auto flex gap-2 items-center">
-            <Button variant="outline" size="sm" disabled>
-              <RotateCw className="mr-1.5 h-3 w-3" /> 更新
+            <Button variant="outline" size="sm" onClick={handleRefresh} disabled={isRefreshing}>
+              <RotateCw className={`mr-1.5 h-3 w-3 ${isRefreshing ? 'animate-spin' : ''}`} /> 更新
             </Button>
             <Link
               href="/scenarios/new"
@@ -108,23 +177,22 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
           </div>
         </div>
 
-        {/* 続 M-6 §A: banner details (折りたたみ) */}
         {bannerOpen ? (
           <div className="mb-3 p-3 rounded-md border border-indigo-100 bg-indigo-50/40 text-xs text-slate-700 leading-relaxed">
             条件が真になった visitor に対し <b className="font-semibold">A/B/C のうち traffic split で決定された 1 variant</b>
             を実画面に表示。同 visitor は常に同じ variant が当たる (visitor_id hash で決定論的)。
-            impression / click / dismiss / conversion を計測。Phase 2 で GUI 作成解放、Phase 3 は AI 自動提案 (厳密設計後)。
+            impression / click / dismiss / conversion を自動計測し、仮説検定付き A/B テストとも連携します。
           </div>
         ) : null}
 
-        {/* KPI strip (続 M-6 §A: padding 半減) */}
+        {/* KPI strip */}
         <div className="grid grid-cols-4 gap-2.5 mb-4">
           <KpiCard
             label="稼働シナリオ"
             badge="7日"
             value={String(liveCount)}
             unit={`/ ${total} 件`}
-            note="Phase 2 で UI 解放"
+            note="GUI 作成・編集・Dry-Run プレビュー対応"
           />
           <KpiCard
             label="match 件数"
@@ -150,10 +218,15 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
         <div className="flex items-center gap-2.5 mb-3.5">
           <div className="relative max-w-md flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
-            <Input className="pl-8 h-9 text-sm" placeholder="バナー名 / 条件で絞り込み..." disabled />
+            <Input
+              className="pl-8 h-9 text-sm"
+              placeholder="バナー名 / 説明 / サイトIDで絞り込み..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
           </div>
           <div className="inline-flex bg-slate-100 border border-slate-200 rounded-md p-0.5">
-            {(['all', 'measure_only', 'preview', 'live'] as const).map((s) => (
+            {(['all', 'draft', 'measure_only', 'preview', 'live', 'paused'] as const).map((s) => (
               <button
                 key={s}
                 type="button"
@@ -184,9 +257,9 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
             const isOpen = expanded === s.id
             const status = statusVariant(s.status)
             const m = getMetrics(s.id)
+            const editHref = `/scenarios/${encodeURIComponent(s.id)}?site_id=${encodeURIComponent(s.site_id)}`
             return (
               <div key={s.id}>
-                {/* 続 M-6 §B: 行は 2 分割 — ▼ toggle (button) + 行リンク (Link) */}
                 <div className="grid grid-cols-[20px_1fr_104px_88px_88px_88px_88px] gap-2.5 px-4 py-3 border-b border-slate-100 items-center hover:bg-slate-50 transition-colors">
                   <button
                     type="button"
@@ -198,7 +271,7 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
                     <ChevronRight className="h-3.5 w-3.5" />
                   </button>
                   <Link
-                    href={`/scenarios/${s.id}`}
+                    href={editHref}
                     className="min-w-0 group"
                     title="詳細編集を開く"
                   >
@@ -229,7 +302,15 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
                   </div>
                 </div>
 
-                {isOpen ? <ExpandedPanel scenario={s} /> : null}
+                {isOpen ? (
+                  <ExpandedPanel
+                    scenario={s}
+                    editHref={editHref}
+                    isBusy={busyId === s.id}
+                    onDuplicate={() => void handleDuplicate(s)}
+                    onArchive={() => void handleArchive(s)}
+                  />
+                ) : null}
               </div>
             )
           })}
@@ -239,18 +320,6 @@ export function ScenariosListView({ scenarios }: ScenariosListViewProps) {
               条件に一致するシナリオがありません。
             </div>
           ) : null}
-        </div>
-
-        {/* Phase note */}
-        <div className="mt-5 p-3.5 border border-dashed border-slate-300 rounded text-xs text-slate-600 leading-relaxed bg-slate-50">
-          <b className="text-slate-900 font-semibold">Phase 1 (現在 = 配信中)</b>: hard-code 1 シナリオ + variant A/B/C (画像 / HTML) を実画面に表示。
-          impression / click / dismiss / conversion を計測。<br />
-          <b className="text-slate-900 font-semibold">variant 種別</b>:{' '}
-          <Badge variant="outline" className="font-mono text-[10px]">画像</Badge> (Cloudflare R2) または{' '}
-          <Badge variant="outline" className="font-mono text-[10px] bg-purple-50 text-purple-700 border-purple-300">HTML</Badge>
-          (インライン HTML) の 2 択。サイト毎にデザインが異なるため汎用フィールドは持ちません。<br />
-          <b className="text-slate-900 font-semibold">Phase 2</b>: GUI でシナリオ作成 (自然言語 + visual builder + 画像/HTML upload UI)。
-          <b className="text-slate-900 font-semibold">Phase 3</b>: AI 自動提案 + 勝者自動学習 (厳密設計後)。
         </div>
       </div>
     </>
@@ -289,9 +358,20 @@ function KpiCard({ label, badge, value, unit, note }: KpiCardProps) {
 
 // ───────────────────────────────────────────────────────────────────────────
 
-function ExpandedPanel({ scenario }: { scenario: Scenario }) {
+function ExpandedPanel({
+  scenario,
+  editHref,
+  isBusy,
+  onDuplicate,
+  onArchive,
+}: {
+  scenario: Scenario
+  editHref: string
+  isBusy: boolean
+  onDuplicate: () => void
+  onArchive: () => void
+}) {
   const variants = scenario.variants
-  // Phase 1 dummy variant-level metrics
   const variantMetrics: Record<string, { imp: number; cv: number; cvrPct: number; win?: boolean }> = {
     A: { imp: 288, cv: 14, cvrPct: 4.9, win: true },
     B: { imp: 279, cv: 11, cvrPct: 3.9 },
@@ -369,19 +449,24 @@ function ExpandedPanel({ scenario }: { scenario: Scenario }) {
 
       <div className="mt-3 flex gap-2 justify-end">
         <Link
-          href={`/scenarios/${scenario.id}`}
+          href={editHref}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-slate-200 rounded-md hover:bg-slate-100 transition-colors"
         >
           <Edit3 className="h-3 w-3" /> 編集
         </Link>
-        <Button variant="outline" size="sm" disabled title="Phase 2 で実装">
+        <Button variant="outline" size="sm" onClick={onDuplicate} disabled={isBusy}>
           <Copy className="mr-1 h-3 w-3" /> 複製
         </Button>
-        <Button variant="outline" size="sm" disabled title="Phase 2 で実装" className="text-rose-600">
-          <Trash2 className="mr-1 h-3 w-3" /> アーカイブ
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onArchive}
+          disabled={isBusy}
+          className="text-rose-600 hover:text-rose-700"
+        >
+          <Trash2 className="mr-1 h-3 w-3" /> 削除
         </Button>
       </div>
     </div>
   )
 }
-

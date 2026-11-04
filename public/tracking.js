@@ -161,8 +161,15 @@
     let sid = sessionStorage.getItem('ci_sid');
     const la = sessionStorage.getItem('ci_la');
     const now = Date.now();
-    if (!sid || !la || now - parseInt(la) > config.sessionTimeout) {
+    if (!sid || !la || now - parseInt(la, 10) > config.sessionTimeout) {
       sid = _genId(); sessionStorage.setItem('ci_sid', sid);
+      sessionStorage.setItem('ci_sst', now.toString());
+      sessionStorage.setItem('ci_spv', '0');
+      sessionStorage.setItem('ci_scroll_max', '0');
+      sessionStorage.setItem('ci_first_visit', _isFirstVisit ? '1' : '0');
+    } else {
+      if (!sessionStorage.getItem('ci_sst')) sessionStorage.setItem('ci_sst', la || now.toString());
+      if (sessionStorage.getItem('ci_first_visit') === null) sessionStorage.setItem('ci_first_visit', _isFirstVisit ? '1' : '0');
     }
     sessionStorage.setItem('ci_la', now.toString());
     return sid;
@@ -293,6 +300,7 @@
     return { is_agent: is_agent, agent_type: type, agent_signals: JSON.stringify(s) };
   };
   const _agent = _detectAgent();
+  try { window.CLICKINSIGHT_IS_AGENT = _agent.is_agent === 1; } catch {}
 
   // External ID (member/customer ID set by site owner)
   let _externalId = localStorage.getItem('ci_external_id') || null;
@@ -401,7 +409,7 @@
       scrollStopT = setTimeout(() => { if (pageVis) { readY = Math.round(sy + (window.innerHeight/2)); readStart = Date.now(); } }, 500);
     }, 200),
 
-    pageview: () => { queueEvent({ event_type: 'pageview', page_title: document.title, document_height: _docHeight() }); },
+    pageview: () => { _getSession(); try { const pv = (parseInt(sessionStorage.getItem('ci_spv') || '0', 10) || 0) + 1; sessionStorage.setItem('ci_spv', String(pv)); } catch {} queueEvent({ event_type: 'pageview', page_title: document.title, document_height: _docHeight() }); },
 
     pageleave: () => {
       const dh = _docHeight();
