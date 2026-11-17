@@ -189,7 +189,8 @@ async function getAllSites(limit?: number): Promise<SiteForSummary[]> {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'unknown'
     console.error(`[daily-summary] getAllSites failed: ${msg}`)
-    return []
+    // 空配列で握りつぶすと「対象 0 件で成功」に見え、ClickHouse 障害に気づけない。呼出側へ伝える。
+    throw err
   }
 }
 
