@@ -12,7 +12,58 @@
  * api-public) the delivery pipeline OR the security posture breaks. Both are CRITICAL.
  */
 
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { classify } from './middleware'
+
+describe('middleware classify() — Vercel Cron の経路 (定期ジョブが JWT の関所で止まらないこと)', () => {
+  // Vercel Cron は JWT を持たず `Authorization: Bearer <CRON_SECRET>` を送る。api-tenant のままだと
+  // middleware がそれを JWT として検証して 401 を返し、route まで届かない (= 黙って動かない)。
+  const cronPaths: string[] = (
+    JSON.parse(readFileSync(join(__dirname, 'vercel.json'), 'utf-8')) as {
+      crons: Array<{ path: string }>
+    }
+  ).crons.map((c) => c.path)
+
+  it('vercel.json に定期ジョブが登録されている (テストが空振りしていないこと)', () => {
+    expect(cronPaths.length).toBeGreaterThan(0)
+  })
+
+  it.each(cronPaths)('%s は api-public (認証は route 自身が行う)', (path) => {
+    expect(classify(path)).toBe('api-public')
+  })
+
+  it('定期ジョブの一覧が想定どおり (追加時は route 側の認証テストも足すこと)', () => {
+    expect([...cronPaths].sort()).toEqual([
+      '/api/cron/daily-site-summary',
+      '/api/cron/deep-research',
+      '/api/cron/fusion-ingest',
+      '/api/experiments/pool',
+    ])
+  })
+
+  // ── 公開は登録済みの 3 本だけ。/api/cron 配下を丸ごと公開しない (fail-closed) ──
+  it('/api/cron (直下) は api-tenant のまま', () => {
+    expect(classify('/api/cron')).toBe('api-tenant')
+  })
+
+  it('/api/cron/未登録の経路 は api-tenant のまま (新しい経路は明示的に足すまで閉じる)', () => {
+    expect(classify('/api/cron/something-new')).toBe('api-tenant')
+  })
+
+  // ── cron は完全一致のみ公開。子経路・似た名前・末尾スラッシュは公開しない ──
+  it.each([
+    '/api/cron/daily-site-summary/extra',
+    '/api/cron/deep-research/extra',
+    '/api/cron/fusion-ingest/extra',
+    '/api/cron/deep-research-extra',
+    '/api/cron/fusion-ingest/',
+    '/API/cron/fusion-ingest',
+  ])('%s は api-public にならない', (path) => {
+    expect(classify(path)).not.toBe('api-public')
+  })
+})
 
 describe('middleware classify() — scenario route access control (Stage 2)', () => {
   // ── The ONE public route ────────────────────────────────────────────────────
