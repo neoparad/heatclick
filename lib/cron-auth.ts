@@ -1,32 +1,32 @@
 /**
- * Cron エンドポイント共通認証 (続134 ハードニング)。
+ * Cron エンドポイント共通認証 (続134 ハードニング + 2026-11 fail-closed 化)。
  *
- * 背景: 旧実装は `x-vercel-cron: '1'` ヘッダ単体で通していた。Vercel が inbound の
- *   `x-vercel-*` を strip するか保証しきれないため、ヘッダ単体依存はスプーフ耐性が弱く、
- *   不正なジョブ実行 (全テナント処理 / コスト) を許す余地があった。
+ * 背景:
+ *   - 旧実装は `x-vercel-cron: '1'` ヘッダ単体で通していた。このヘッダは外部の誰でも付けられる
+ *     ため、認証の根拠にならない (不正なジョブ実行 = 全テナント処理 / コスト)。
+ *   - cron route は Vercel Cron (JWT なし) から呼ばれるので middleware では公開 (api-public) に
+ *     なっており、**この関数が唯一の関所**。よって secret が無い構成では誰も通さない。
  *
- * 方針:
- *   - `CRON_SECRET` が設定されている (本番推奨) → **secret を必須**にし、スプーフ可能な
- *     `x-vercel-cron` 単体パスは受け付けない。
+ * 方針 (fail-closed):
+ *   - `CRON_SECRET` (trim 後 16 文字以上) が設定されている → secret の一致を必須にする。
  *       受理: `Authorization: Bearer <CRON_SECRET>` (Vercel Cron は secret 設定時にこれを送る)
- *             または `x-cron-secret: <CRON_SECRET>` (手動 invoke 用、後方互換)
- *   - `CRON_SECRET` 未設定 → cron を壊さないため `x-vercel-cron: '1'` に degrade しつつ
- *     warn を出す (Owner に「CRON_SECRET を設定して完全に閉じる」を促す)。
+ *             または `x-cron-secret: <CRON_SECRET>` (手動 invoke 用)
+ *   - `CRON_SECRET` が未設定 / 空 / 16 文字未満 → **すべて拒否**し、サーバーログに理由を残す。
+ *     Vercel の Production / Preview に CRON_SECRET を設定するまで定期ジョブは動かない
+ *     (ローカルで試すときは .env.local に設定する)。
  *
  * 比較は constant-time (timing 漏洩防止)。
  */
 
 import { timingSafeEqual } from 'node:crypto'
 
+/** これ未満の secret は誤設定とみなして使わない (弱い secret で開けさせない)。 */
+const MIN_SECRET_LENGTH = 16
+
 export interface CronAuthResult {
   ok: boolean
   /** observability 用の理由ラベル (secret 値は含めない) */
-  reason:
-    | 'bearer'
-    | 'header-secret'
-    | 'secret-mismatch'
-    | 'vercel-cron-fallback'
-    | 'no-secret-no-cron-header'
+  reason: 'bearer' | 'header-secret' | 'secret-mismatch' | 'secret-not-configured'
 }
 
 /** 長さ差で短絡せず constant-time 比較する (timing 漏洩防止)。 */
@@ -38,36 +38,29 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 /**
- * Cron リクエストを認可する。`CRON_SECRET` 設定時は secret 必須 (header 単体不可)。
+ * Cron リクエストを認可する。一致する `CRON_SECRET` を持つ要求だけを通す。
  */
 export function checkCronAuth(request: Request): CronAuthResult {
-  const secret = process.env.CRON_SECRET
+  const expected = (process.env.CRON_SECRET ?? '').trim()
 
-  if (secret && secret.trim().length >= 16) {
-    const expected = secret.trim()
-    const auth = request.headers.get('authorization') ?? ''
-    if (auth.startsWith('Bearer ') && safeEqual(auth.slice('Bearer '.length), expected)) {
-      return { ok: true, reason: 'bearer' }
-    }
-    const headerSecret = request.headers.get('x-cron-secret') ?? ''
-    if (headerSecret && safeEqual(headerSecret, expected)) {
-      return { ok: true, reason: 'header-secret' }
-    }
-    // secret が設定されている以上、x-vercel-cron 単体は受け付けない (スプーフ遮断)
-    return { ok: false, reason: 'secret-mismatch' }
-  }
-
-  // CRON_SECRET 未設定: cron を壊さないため Vercel ヘッダに degrade (弱い) + 警告
-  if (request.headers.get('x-vercel-cron') === '1') {
+  if (expected.length < MIN_SECRET_LENGTH) {
     // eslint-disable-next-line no-console
-    console.warn(
-      '[cron-auth] CRON_SECRET 未設定のため x-vercel-cron ヘッダを受理しました (弱い認証)。' +
-        '本番では CRON_SECRET を設定してください。',
+    console.error(
+      `[cron-auth] CRON_SECRET が未設定または ${MIN_SECRET_LENGTH} 文字未満のため、` +
+        '定期ジョブの要求を拒否しました。環境変数 CRON_SECRET を設定してください。',
     )
-    return { ok: true, reason: 'vercel-cron-fallback' }
+    return { ok: false, reason: 'secret-not-configured' }
   }
 
-  return { ok: false, reason: 'no-secret-no-cron-header' }
+  const auth = request.headers.get('authorization') ?? ''
+  if (auth.startsWith('Bearer ') && safeEqual(auth.slice('Bearer '.length), expected)) {
+    return { ok: true, reason: 'bearer' }
+  }
+  const headerSecret = request.headers.get('x-cron-secret') ?? ''
+  if (headerSecret && safeEqual(headerSecret, expected)) {
+    return { ok: true, reason: 'header-secret' }
+  }
+  return { ok: false, reason: 'secret-mismatch' }
 }
 
 /** boolean だけ欲しい呼出側向けの薄いラッパ。 */

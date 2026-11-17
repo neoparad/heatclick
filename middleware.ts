@@ -128,6 +128,16 @@ function isStatic(pathname: string): boolean {
  * middleware 非依存) + owner/admin + EXPERIMENTS_POOL_OPERATORS allowlist。応答は件数サマリのみ
  * (inngest / billing/webhook と同型)。⚠️ prefix 一致のため /api/experiments/pool/* も公開になる —
  * **この下に子 route を追加しないこと** (追加するなら exact-match 化が先、Codex LOW 文書化)。
+ *
+ * /api/cron/{daily-site-summary,deep-research,fusion-ingest} は Vercel Cron 起動経路。
+ * Vercel Cron は JWT を持たず `Authorization: Bearer <CRON_SECRET>` を送るため、api-tenant の
+ * ままだと下の JWT 検証がそれを「不正な JWT」として 401 にし、route まで届かない (定期ジョブが
+ * 黙って動かない)。公開し、**認証は各 route 自身が `lib/cron-auth.ts` で行う**。
+ * ⚠️ `/api/cron` を prefix で丸ごと公開しない (fail-closed)。cron は **完全一致** のみ公開
+ *   (API_PUBLIC_EXACT_PATHS)。子経路 (`/api/cron/deep-research/x`) も未登録経路も JWT 必須のまま。
+ *   定期ジョブを足すときは (1) API_PUBLIC_EXACT_PATHS に 1 行追加 (2) route 先頭で
+ *   isCronAuthorized (3) vercel.json — の 3 点セット。middleware.classify.test.ts が
+ *   vercel.json の全 cron 経路が api-public であることを検査する。
  */
 const API_PUBLIC_PATHS: ReadonlyArray<string> = [
   '/api/track',
@@ -137,6 +147,13 @@ const API_PUBLIC_PATHS: ReadonlyArray<string> = [
   '/api/scenarios/runtime',
   '/api/experiments/assign',
   '/api/experiments/pool',
+]
+
+/** 完全一致でのみ公開する経路 (子経路は公開しない)。認証は各 route 自身が行う。 */
+const API_PUBLIC_EXACT_PATHS: ReadonlyArray<string> = [
+  '/api/cron/daily-site-summary',
+  '/api/cron/deep-research',
+  '/api/cron/fusion-ingest',
 ]
 
 /**
@@ -160,6 +177,7 @@ export function classify(pathname: string): MiddlewareRegion {
   for (const p of API_PUBLIC_PATHS) {
     if (pathname === p || pathname.startsWith(p + '/')) return 'api-public'
   }
+  if (API_PUBLIC_EXACT_PATHS.includes(pathname)) return 'api-public'
 
   // auth-public API
   if (pathname.startsWith(AUTH_PUBLIC_API_PREFIX)) return 'auth-public'
