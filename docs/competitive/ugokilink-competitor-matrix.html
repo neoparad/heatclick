@@ -1,0 +1,419 @@
+<title>UGOKI LINK 競合比較</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one column. Summary lists first, then one scrollable matrix per feature group; our column is tinted and pinned next to the feature name. */
+:root {
+  --bg: #f5f7f8; --surface: #ffffff; --ink: #16242b; --muted: #5b6b73; --line: #d8e0e4;
+  --accent: #0f6e7a; --accent-tint: #e3f1f2;
+  --yes: #1d7a4f; --yes-bg: #dff3e8; --part: #8a5a00; --part-bg: #fbeccb;
+  --no: #6a757b; --no-bg: #e9edef; --unk: #6a757b; --unk-bg: transparent;
+  --wait: #9a3d1f; --wait-bg: #fbe4da;
+  --sans: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #10181c; --surface: #172329; --ink: #e6eef1; --muted: #9aacb4; --line: #2b3b43;
+  --accent: #5cc3cf; --accent-tint: #173339;
+  --yes: #6ed3a0; --yes-bg: #173a2a; --part: #f0c060; --part-bg: #3d3113;
+  --no: #9aa7ad; --no-bg: #253238; --unk: #9aa7ad; --unk-bg: transparent;
+  --wait: #f2a283; --wait-bg: #40241a; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #10181c; --surface: #172329; --ink: #e6eef1; --muted: #9aacb4; --line: #2b3b43;
+  --accent: #5cc3cf; --accent-tint: #173339;
+  --yes: #6ed3a0; --yes-bg: #173a2a; --part: #f0c060; --part-bg: #3d3113;
+  --no: #9aa7ad; --no-bg: #253238; --unk: #9aa7ad; --unk-bg: transparent;
+  --wait: #f2a283; --wait-bg: #40241a; color-scheme: dark }
+body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 28px 56px; }
+.wrap { max-width: 1280px; margin: 0 auto; display: flex; flex-direction: column; gap: 28px; }
+h1 { font-size: 26px; font-weight: 700; margin: 0; text-wrap: balance; }
+h2 { font-size: 17px; font-weight: 700; margin: 0; }
+p { margin: 0; }
+.lede { color: var(--muted); max-width: 68ch; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 18px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+header { display: flex; flex-direction: column; gap: 10px; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.box { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.box h2 { font-size: 14px; }
+.box .count { font-family: var(--mono); font-size: 22px; font-weight: 500; }
+.box ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.box.gap .count { color: var(--part); } .box.only .count { color: var(--yes); } .box.wait .count { color: var(--wait); }
+.bar { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; justify-content: space-between; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 12px; color: var(--muted); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { font: inherit; font-size: 13px; padding: 6px 12px; background: var(--surface); color: var(--ink); border: 0; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--surface); }
+.seg button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pill { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.pill.y { color: var(--yes); background: var(--yes-bg); }
+.pill.p { color: var(--part); background: var(--part-bg); }
+.pill.n { color: var(--no); background: var(--no-bg); }
+.pill.u { color: var(--unk); background: var(--unk-bg); border: 1px dashed var(--line); }
+.pill.w { color: var(--wait); background: var(--wait-bg); }
+section.group { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 1120px; table-layout: fixed; }
+th, td { text-align: left; vertical-align: top; padding: 9px 10px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+tr:last-child td { border-bottom: 0; }
+thead th { font-size: 12px; font-weight: 700; color: var(--muted); background: var(--surface); }
+th.feat, td.feat { width: 170px; position: sticky; left: 0; background: var(--surface); z-index: 1; font-weight: 500; font-size: 13px; }
+th.ours, td.ours { width: 200px; background: var(--accent-tint); }
+thead th.ours { color: var(--accent); }
+td .note { display: block; margin-top: 3px; color: var(--ink); }
+td .src { font-family: var(--mono); font-size: 11px; color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+td .tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.empty { color: var(--muted); font-size: 13px; padding: 4px 0; }
+footer { color: var(--muted); font-size: 12.5px; display: flex; flex-direction: column; gap: 6px; max-width: 76ch; }
+@media (max-width: 520px) { th.feat, td.feat { width: 120px; } h1 { font-size: 22px; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>UGOKI LINK 競合比較</h1>
+    <p class="lede">海外のデータ基盤 6 社と、設計書 v2 が実装された場合の UGOKI LINK を並べた表です。UGOKI LINK の列は設計であり、まだ実装していません。競合の列は各社の公式ページで確かめた内容です。</p>
+    <div class="meta"><span id="m-date"></span><span id="m-rows"></span><span>出典: 各社の公式文書・料金ページ</span></div>
+  </header>
+
+  <div class="summary" id="summary"></div>
+
+  <div class="bar">
+    <div class="seg" role="group" aria-label="表示する行">
+      <button type="button" id="f-all" aria-pressed="true">すべての行</button>
+      <button type="button" id="f-gap" aria-pressed="false">まだ並んでいない行</button>
+      <button type="button" id="f-only" aria-pressed="false">こちらだけの行</button>
+    </div>
+    <div class="legend">
+      <span><span class="pill y">あり</span> 提供している</span>
+      <span><span class="pill p">一部</span> 条件つき・限定的</span>
+      <span><span class="pill n">なし</span> 製品の範囲外</span>
+      <span><span class="pill u">不明</span> 公式で確認できず</span>
+      <span><span class="pill w">判断待ち</span> オーナー判断・法務確認の後</span>
+    </div>
+  </div>
+
+  <div id="groups" style="display:flex;flex-direction:column;gap:26px"></div>
+
+  <footer>
+    <p>読み方: 競合の「なし」の多くは「公式文書に見当たらない」ことによる判定で、各社が明言したものではありません。「不明」は確認できなかった項目です。「根拠レベルの表示」と「無作為に出した決定の記録」の 2 行は競合側をまだ調べておらず、「こちらだけ」には数えていません。</p>
+    <p>料金と無料枠は変わりやすい項目です。金額を根拠に何かを決める前に、出典のリンクで取り直してください。</p>
+    <p>更新: このページのデータは 1 か所（ページ内の一覧）にまとまっています。Claude に「競合比較を更新して」と頼むと、各社の公式ページを調べ直して差し替えます。</p>
+  </footer>
+</div>
+
+<script>
+const CHECKED = "2026-11-19";
+const VENDORS = ["Segment", "RudderStack", "Snowplow", "PostHog", "Statsig", "Amplitude"];
+// 各セル: [状態 y|p|n|u, メモ, 出典 URL]。ours: [状態, メモ, 判断待ちの印(任意)]
+const U = ["u", "未調査", ""];
+const DATA = [
+  { group: "収集の入口", rows: [
+    { label: "自動での行動計測（コードなしでクリックなど）", ours: ["y", "クリック・スクロール・フォームを要素単位で自動計測（§4.3）"], v: [
+      ["p", "ページ表示のみ自動。クリックの自動計測はベータ", "https://www.twilio.com/docs/segment/connections/auto-instrumentation"],
+      ["p", "滞在などのみ自動（既定は切）。クリックはコードが要る", "https://www.rudderstack.com/docs/sources/event-streams/sdks/rudderstack-javascript-sdk/autotrack-page-metrics/"],
+      ["p", "ボタン・リンク・フォームは有効化すれば自動（既定は切）", "https://docs.snowplow.io/docs/sources/web-trackers/tracking-events/button-click.md"],
+      ["y", "クリック・ページ表示などを自動計測", "https://posthog.com/docs/product-analytics/autocapture"],
+      ["y", "クリック・フォーム・連打・無反応クリックを自動計測", "https://docs.statsig.com/webanalytics/autocapture"],
+      ["y", "ページ表示・フォームは既定で自動。クリックは設定で有効", "https://amplitude.com/docs/sdks/analytics/browser/browser-sdk-2"]] },
+    { label: "アプリ用の SDK", ours: ["y", "iOS・Android・React Native・Flutter（§11.11 の 5）"], v: [
+      ["y", "iOS・Android・React Native ほか。Flutter は試験段階", "https://www.twilio.com/docs/segment/connections/sources"],
+      ["y", "iOS・Android・React Native・Flutter ほか", "https://www.rudderstack.com/docs/sources/event-streams/sdks/"],
+      ["y", "iOS・Android・React Native・Flutter ほか", "https://docs.snowplow.io/docs/sources/trackers/"],
+      ["y", "iOS・Android・React Native・Flutter ほか", "https://posthog.com/docs/libraries"],
+      ["y", "iOS・Android・React Native・Flutter ほか", "https://docs.statsig.com/sdks/getting-started"],
+      ["y", "iOS・Android・React Native・Flutter ほか", "https://amplitude.com/docs/sdks"]] },
+    { label: "サーバー用の SDK", ours: ["y", "8 言語（Node・Python・Go・Java・Ruby・PHP・.NET・Rust）＋ HTTP API（§11.11 の 9）"], v: [
+      ["y", "8 言語＋ HTTP API", "https://www.twilio.com/docs/segment/connections/sources"],
+      ["y", "8 言語＋ HTTP API", "https://www.rudderstack.com/docs/sources/event-streams/sdks/"],
+      ["y", "11 言語", "https://docs.snowplow.io/docs/sources/trackers/"],
+      ["y", "9 言語", "https://posthog.com/docs/libraries"],
+      ["y", "9 言語（SDK は 30 種以上と記載）", "https://docs.statsig.com/sdks/getting-started"],
+      ["y", "4 言語＋ HTTP API", "https://amplitude.com/docs/sdks"]] },
+    { label: "サーバー・CDN ログの取り込み", ours: ["y", "ログを取り込み、PV と突き合わせる（§7.4）"], v: [
+      ["n", "ログの取り込み元は無い", "https://www.twilio.com/docs/segment/connections/sources"],
+      ["n", "ログの取り込み元は無い", "https://www.rudderstack.com/docs/sources/overview/"],
+      ["y", "CloudFront・Fastly のログを取り込み（有料の追加機能）", "https://docs.snowplow.io/docs/sources/cdn-trackers.md"],
+      ["p", "Vercel のログ転送など一部の経路のみ", "https://posthog.com/docs/web-analytics/sending-http-logs"],
+      ["p", "Cloudflare Workers のログのみ", "https://docs.statsig.com/server/concepts/cloudflare"],
+      ["u", "ログ形式の取り込みは見当たらない", "https://amplitude.com/docs/data/source-catalog/amazon-s3"]] },
+  ]},
+  { group: "互換と定義", rows: [
+    { label: "Segment 形式の受け口", ours: ["y", "6 種の呼び出しをそのまま受ける（§11.11 の 2）", "判断 27"], v: [
+      ["y", "この形式の本家", "https://www.twilio.com/docs/segment/connections/sources/catalog/libraries/server/http-api"],
+      ["y", "HTTP API が Segment と互換", "https://www.rudderstack.com/docs/api/http-api/"],
+      ["n", "手作業で置き換える。group と alias は対応なし", "https://docs.snowplow.io/docs/migration-guides/segment.md"],
+      ["p", "Segment の送り先として受けるのみ", "https://posthog.com/docs/libraries/segment"],
+      ["p", "Segment の送り先として受けるのみ", "https://docs.statsig.com/integrations/data-connectors/segment"],
+      ["p", "Segment の送り先として受けるのみ", "https://amplitude.com/docs/data/source-catalog/segment"]] },
+    { label: "出来事の定義の管理（計測の計画表）", ours: ["y", "型つきの登録と検証。合わない項目は隔離して数える（§4.7、§11.11 の 3）"], v: [
+      ["y", "検証と遮断まで可。上位プランの追加機能", "https://www.twilio.com/docs/segment/protocols"],
+      ["y", "検証と違反の報告。無料は 1 計画 5 種まで", "https://www.rudderstack.com/docs/data-governance/tracking-plans/observability/"],
+      ["y", "定義の登録と検証、コード生成", "https://docs.snowplow.io/docs/get-started/feature-comparison.md"],
+      ["p", "試験段階。受付での拒否は記載なし", "https://posthog.com/docs/product-analytics/schema-management"],
+      ["u", "出来事の定義の登録は見当たらない", "https://docs.statsig.com/dynamic-config/enforce-schema"],
+      ["y", "計画外の出来事を印づけ・拒否できる", "https://amplitude.com/docs/data/configure-schema"]] },
+  ]},
+  { group: "保存と取り出し", rows: [
+    { label: "データ倉庫への書き出し", ours: ["y", "BigQuery・Snowflake・Redshift・Databricks・ファイル。15 分以内（§11.11 の 4）"], v: [
+      ["y", "まとめ書き。無料は 1 日 1 回、上位で毎時", "https://segment.com/docs/connections/storage/warehouses/warehouse-syncs/"],
+      ["y", "主要 4 種ほか 10 以上", "https://www.rudderstack.com/docs/destinations/overview/"],
+      ["y", "主要 4 種ほか。BigQuery などは流し込み", "https://docs.snowplow.io/docs/destinations/"],
+      ["y", "主要 4 種ほか。5 分〜週次", "https://posthog.com/docs/cdp/batch-exports"],
+      ["y", "日次のまとめ書き。Enterprise のみ", "https://docs.statsig.com/integrations/data-exports/overview"],
+      ["y", "主要 4 種。約 1 時間ごと", "https://amplitude.com/docs/data/destination-catalog/snowflake"]] },
+    { label: "顧客側に正本を置く（自社運用・顧客のクラウド）", ours: ["y", "受付と保存を顧客のアカウントで動かす段（§5.12）", "判断 24"], v: [
+      ["p", "自社の S3 への書き出しのみ（新規の受付は停止）", "https://www.twilio.com/docs/segment/connections/storage/data-lakes"],
+      ["y", "受付の本体を自社運用できる。VPC 配備は営業経由", "https://www.rudderstack.com/docs/get-started/rudderstack-open-source/"],
+      ["y", "顧客のクラウドで動かす形が主力", "https://docs.snowplow.io/docs/get-started/deployment-options/"],
+      ["p", "自社運用は可能だが公式サポートなし", "https://posthog.com/docs/self-host"],
+      ["p", "分析を顧客の倉庫で行う形（Enterprise）", "https://docs.statsig.com/statsig-warehouse-native/introduction"],
+      ["p", "倉庫上で動く形は新規の受付を停止", "https://amplitude.com/warehouse-native"]] },
+    { label: "流し続ける送り先（Webhook・Kafka など）", ours: ["y", "Webhook・Pub/Sub・Kafka・Kinesis。1 分以内（§11.11 の 4）"], v: [
+      ["y", "Webhook・Kinesis・Pub/Sub。Kafka はベータ", "https://segment.com/docs/connections/destinations/catalog/actions-kafka/"],
+      ["y", "4 種すべて", "https://www.rudderstack.com/docs/destinations/overview/"],
+      ["y", "4 種すべてと SQS ほか", "https://docs.snowplow.io/docs/destinations/"],
+      ["p", "Webhook・Kinesis・Pub/Sub。Kafka は準備中", "https://posthog.com/docs/cdp/destinations"],
+      ["p", "Webhook のみ", "https://docs.statsig.com/integrations/introduction"],
+      ["y", "4 種。Kafka は Confluent 経由", "https://amplitude.com/docs/data/destination-catalog/webhooks"]] },
+    { label: "外部の道具への送り先の数", ours: ["p", "最初は 50 個＋送り先の関数＋既存の基盤への中継。基準は「顧客が挙げた送り先の 95% がつながる」。部品の数は約束しない。広告やメールの道具へ個人単位で送るのは判断 30 の後（§11.11 の 10）", "判断 30"], v: [
+      ["y", "550〜700 以上（公式ページ内で表記が揺れる）", "https://www.twilio.com/en-us/products/connections/pricing"],
+      ["y", "200 以上", "https://www.rudderstack.com/pricing/"],
+      ["p", "5 つ＋ GTM のタグ", "https://docs.snowplow.io/docs/destinations/forwarding-events/integrations.md"],
+      ["u", "「数十」とのみ記載", "https://posthog.com/docs/cdp/destinations"],
+      ["p", "約 14（数の記載は無く、数えた値）", "https://docs.statsig.com/integrations/introduction"],
+      ["p", "連携 160（取り込み元を含む数）", "https://amplitude.com/integrations"]] },
+    { label: "SQL での問い合わせ", ours: ["y", "テナント専用の読み取り利用者で SQL（§11.11 の 7）"], v: [
+      ["p", "製品内には無い。顧客の倉庫で実行", "https://segment.com/docs/personas/sql-traits/"],
+      ["p", "製品内には無い。顧客の倉庫で実行", "https://www.rudderstack.com/docs/get-started/introduction/"],
+      ["n", "顧客の倉庫で実行する前提", "https://snowplow.io/snowplow-frequently-asked-questions"],
+      ["y", "製品内のどこでも SQL が使える", "https://posthog.com/docs/sql"],
+      ["p", "倉庫型の構成でのみ", "https://docs.statsig.com/statsig-warehouse-native/configuration/metric-sources"],
+      ["y", "製品内で SQL のグラフを作れる", "https://amplitude.com/docs/analytics/charts/other-charts/other-charts-amplitude-sql"]] },
+  ]},
+  { group: "分析と再生", rows: [
+    { label: "経路・ファネルの分析", ours: ["y", "経路・ファネル・セグメント比較を API で返す（手順 12）。画面は持たない"], v: [
+      ["n", "分析は送り先の道具に任せる", "https://www.twilio.com/docs/segment/connections/destinations"],
+      ["u", "標準の機能は見当たらない", "https://www.rudderstack.com/docs/activate/lookout/"],
+      ["p", "倉庫上のデータモデルで行う", "https://snowplow.io/funnel-builder-data-app"],
+      ["y", "ファネルと経路を内蔵", "https://posthog.com/docs/product-analytics/funnels"],
+      ["y", "ファネルと経路を内蔵", "https://docs.statsig.com/product-analytics/funnels"],
+      ["y", "ファネルと経路を内蔵", "https://amplitude.com/docs/analytics/charts/journeys/journeys-understand-visualizations"]] },
+    { label: "ヒートマップ（クリック・スクロール）", ours: ["y", "区画の注視時間と要素内のクリック位置（§4.3）。クローラーの描画に重ねる"], v: [
+      ["n", "製品の範囲外", "https://www.twilio.com/docs/segment/connections/destinations"],
+      ["n", "製品の範囲外", "https://www.rudderstack.com/docs/get-started/introduction/"],
+      ["n", "製品の範囲外", "https://docs.snowplow.io/llms.txt"],
+      ["y", "クリック・無反応クリック・スクロール", "https://posthog.com/docs/toolbar/heatmaps"],
+      ["u", "ヒートマップの画面は見当たらない", "https://docs.statsig.com/webanalytics/autocapture"],
+      ["y", "クリックとスクロール。有料プランから", "https://amplitude.com/docs/heatmaps/map-types"]] },
+    { label: "画面つきのセッション再生", ours: ["y", "ページ構造の変化を記録して再生（§11.11 の 8）", "判断 26"], v: [
+      ["n", "製品の範囲外", "https://www.twilio.com/docs/segment/connections/destinations"],
+      ["n", "製品の範囲外", "https://www.rudderstack.com/docs/get-started/introduction/"],
+      ["n", "製品の範囲外", "https://docs.snowplow.io/llms.txt"],
+      ["y", "Web とアプリ", "https://posthog.com/docs/session-replay/privacy"],
+      ["y", "Web", "https://docs.statsig.com/session-replay/configure"],
+      ["y", "Web とアプリ", "https://amplitude.com/pricing"]] },
+    { label: "再生の既定の隠し方", ours: ["y", "文字・入力・画像をすべて隠すのが既定（§11.11 の 8）", "判断 26"], v: [
+      ["n", "再生の機能が無い", "https://www.twilio.com/docs/segment/connections/auto-instrumentation"],
+      ["n", "再生の機能が無い", "https://www.rudderstack.com/docs/get-started/introduction/"],
+      ["n", "再生の機能が無い", "https://docs.snowplow.io/llms.txt"],
+      ["p", "Web は入力欄のみ隠す。文字は隠さない", "https://posthog.com/docs/session-replay/privacy"],
+      ["p", "パスワード欄のみ隠す", "https://docs.statsig.com/session-replay/privacy"],
+      ["p", "入力欄を隠す。全部隠す設定は選べる", "https://amplitude.com/docs/session-replay/manage-privacy-settings-for-session-replay"]] },
+  ]},
+  { group: "実験と配信", rows: [
+    { label: "A/B テストと統計", ours: ["y", "割り当ての一元管理と統計（§9）。文言・価格の実験は判断の後", "判断 7"], v: [
+      ["n", "他社の道具と連携する", "https://segment.com/docs/connections/destinations/catalog/actions-optimizely-feature-experimentation-cloud"],
+      ["n", "製品の範囲外", "https://www.rudderstack.com/docs/get-started/introduction/"],
+      ["n", "他社の道具の計測のみ", "https://docs.snowplow.io/docs/sources/web-trackers/tracking-events/optimizely.md"],
+      ["y", "ベイズ統計の実験機能", "https://posthog.com/docs/experiments/statistics-bayesian"],
+      ["y", "主力の機能", "https://www.statsig.com/pricing"],
+      ["y", "A/B/n は上位プラン", "https://amplitude.com/pricing"]] },
+    { label: "機能フラグ", ours: ["y", "割り当ての仕組みをフラグとして出す（§11.11 の 6）"], v: [
+      ["n", "他社の道具と連携する", "https://www.twilio.com/docs/segment/connections/destinations/catalog/actions-launchdarkly"],
+      ["n", "製品の範囲外", "https://www.rudderstack.com/docs/get-started/introduction/"],
+      ["n", "他社の道具への転送のみ", "https://docs.snowplow.io/docs/destinations/"],
+      ["y", "月 100 万回まで無料", "https://posthog.com/pricing"],
+      ["y", "評価の回数は無制限", "https://www.statsig.com/pricing"],
+      ["y", "全プランで無制限", "https://amplitude.com/pricing"]] },
+    { label: "自動配分（バンディット）", ours: ["y", "案への配分を自動で調整（§8.3）", "判断 7"], v: [
+      ["n", "実験の機能が無い", "https://www.twilio.com/docs/segment/connections/destinations"],
+      ["n", "製品の範囲外", "https://www.rudderstack.com/docs/get-started/introduction/"],
+      ["u", "記載が見当たらない", ""],
+      ["u", "公式ページの間で記載が食い違う", "https://posthog.com/docs/experiments/traffic-allocation"],
+      ["y", "自動配分と、文脈つきの版がある", "https://docs.statsig.com/autotune/overview"],
+      ["y", "トンプソン抽出。毎時〜毎週で再配分", "https://amplitude.com/docs/feature-experiment/workflow/multi-armed-bandit-experiments"]] },
+    { label: "推薦・個別最適化", ours: ["y", "記事向け（§8.5）と物販 EC 向け（§8.13）"], v: [
+      ["p", "おすすめ対象者の抽出のみ。個別の推薦 API ではない", "https://segment.com/docs/engage/audiences/recommendation-audiences/"],
+      ["p", "属性を返す API のみ（ベータ）", "https://www.rudderstack.com/docs/profiles/activation-api/"],
+      ["p", "属性と規則のみ。推薦エンジンは無い", "https://docs.snowplow.io/docs/signals/introduction.md"],
+      ["u", "推薦の機能は見当たらない", ""],
+      ["p", "案の出し分けのみ。商品・記事の推薦は無い", "https://docs.statsig.com/autotune/overview"],
+      ["y", "商品の順位づけ。有料の追加機能", "https://amplitude.com/docs/data/audiences/recommendations"]] },
+    { label: "往復なしの手元評価（エッジ・サーバー）", ours: ["y", "署名つきの設定束で手元評価（§10、§11.11 の 6）"], v: [
+      ["n", "判定の仕組みが無い", ""],
+      ["n", "属性の取得は通信が要る", "https://www.rudderstack.com/docs/profiles/activation-api/"],
+      ["u", "記載が見当たらない", "https://docs.snowplow.io/docs/signals/introduction.md"],
+      ["p", "サーバーは可。エッジは制約あり", "https://posthog.com/docs/feature-flags/local-evaluation"],
+      ["y", "サーバーで手元評価。エッジ用の連携あり", "https://docs.statsig.com/sdks/client-vs-server"],
+      ["y", "サーバーで手元評価。エッジは要問い合わせ", "https://amplitude.com/docs/feature-experiment/local-evaluation"]] },
+  ]},
+  { group: "AI とボット", rows: [
+    { label: "AI クローラー・AI エージェントの判別", ours: ["y", "署名・IP・行動で判別し、ブラウザ操作型も扱う（§7）"], v: [
+      ["n", "公式に「標準の機能なし」", "https://www.twilio.com/docs/segment/guides/ignore-bots"],
+      ["y", "名乗りによる分類のひな形（AI エージェント・AI クローラーなど）", "https://www.rudderstack.com/agent-detection/"],
+      ["y", "運営者と目的を付与。有料の追加機能", "https://docs.snowplow.io/docs/events/agent-intelligence.md"],
+      ["y", "名乗りと IP で分類。JS を動かさない相手はログが要る", "https://posthog.com/docs/web-analytics/bot-detection"],
+      ["p", "除外するだけで、中身は見られない", "https://docs.statsig.com/experiments/monitoring/bots"],
+      ["u", "AI チャットからの流入は見られる。判別は記載なし", "https://amplitude.com/docs/amplitude-ai/ai-visibility"]] },
+    { label: "ボットの扱い", ours: ["y", "登録簿と検証で判別し、捨てずに別に数える（§7）"], v: [
+      ["n", "公式に「標準の機能なし」。課金にも数えられる", "https://www.twilio.com/docs/segment/guides/ignore-bots"],
+      ["y", "名乗りによる。除外は上位プラン", "https://www.rudderstack.com/docs/data-governance/bot-management/"],
+      ["y", "複数の判定を付与し、倉庫で除外", "https://docs.snowplow.io/docs/events/filtering-bot-events.md"],
+      ["y", "既知のボットを既定で遮断", "https://posthog.com/docs/web-analytics/faq"],
+      ["y", "実験の分析から除外", "https://docs.statsig.com/experiments/monitoring/bots"],
+      ["y", "名乗りによる。除外した分は復元できない", "https://amplitude.com/docs/data/block-bot-traffic"]] },
+  ]},
+  { group: "ML・LLM", rows: [
+    { label: "ML による見込み（成約・離脱など）", ours: ["y", "見込みを根拠レベルつきで返す（§8）"], v: [
+      ["y", "購入・離脱の見込みなど。上位プランのみ", "https://www.twilio.com/docs/segment/unify/traits/predictions"],
+      ["y", "倉庫の上で見込みを計算", "https://www.rudderstack.com/docs/profiles/data-apps/"],
+      ["y", "0〜1 の見込みを返す", "https://docs.snowplow.io/docs/signals/predictive-attributes.md"],
+      ["u", "見込みの機能は見当たらない", ""],
+      ["u", "見込みの機能は見当たらない", ""],
+      ["y", "上位プランのみ", "https://amplitude.com/docs/analytics/predictive/predictions-use"]] },
+    { label: "自然な言葉で聞ける AI", ours: ["y", "文で聞くと、答えと使った問い合わせを返す口（API と MCP）。根拠レベルと欠けの注記つき（§11.11 の 11）"], v: [
+      ["p", "対象者の条件づくりのみ", "https://segment.com/docs/engage/audiences/generative-audiences/"],
+      ["y", "倉庫のデータに質問できる（ベータ）", "https://www.rudderstack.com/docs/ai-features/"],
+      ["p", "設定の管理のみ。データへの質問は不可", "https://docs.snowplow.io/docs/ai/console-agent.md"],
+      ["y", "質問・SQL 作成・グラフ作成", "https://posthog.com/docs/posthog-ai"],
+      ["p", "実験の要約など", "https://www.statsig.com/blog/statsig-ai-features"],
+      ["y", "全ページで質問でき、グラフも作る", "https://amplitude.com/docs/amplitude-ai/global-agent-overview"]] },
+    { label: "MCP サーバー", ours: ["y", "全機能を MCP の道具として出す（§11.7）"], v: [
+      ["p", "文書の検索のみ。データには触れない", "https://www.twilio.com/docs/ai/mcp"],
+      ["y", "公式の MCP。設定の読み書き", "https://www.rudderstack.com/docs/ai-features/rudderstack-mcp/"],
+      ["y", "公式の MCP", "https://docs.snowplow.io/docs/ai/snowplow-mcp.md"],
+      ["y", "公式の MCP。無料", "https://posthog.com/docs/model-context-protocol"],
+      ["y", "公式の MCP。道具 18 個", "https://docs.statsig.com/integrations/mcp/overview"],
+      ["y", "公式の MCP", "https://amplitude.com/docs/amplitude-ai/amplitude-mcp"]] },
+  ]},
+  { group: "UGOKI LINK の核", rows: [
+    { label: "ページ構造（クローラー）との突合", ours: ["y", "区画・要素の単位で行動と結ぶ（§6）"], v: [
+      ["n", "クローラーも構造の診断も無い", ""],
+      ["n", "クローラーも構造の診断も無い", "https://www.rudderstack.com/docs/sources/overview/"],
+      ["u", "要素の計測はある。クローラーとの突合は見当たらない", "https://docs.snowplow.io/docs/events/ootb-data/page-elements.md"],
+      ["u", "見当たらない", ""],
+      ["u", "見当たらない", ""],
+      ["u", "AI 向けのページ診断はある。行動との突合は記載なし", "https://amplitude.com/docs/amplitude-ai/ai-visibility"]] },
+    { label: "欠けたデータの明示", ours: ["y", "11 種類の損失を数え、全回答に付ける（§4.4）"], v: [
+      ["p", "サーバー側の配送の失敗と除外のみ", "https://www.twilio.com/docs/segment/connections/delivery-overview"],
+      ["p", "遮断・ボット・違反の件数。全体の損失は出ない", "https://www.rudderstack.com/docs/dashboard-guides/event-metrics/sources/"],
+      ["p", "不正な出来事は数える。ブラウザで遮断された分は出ない", "https://docs.snowplow.io/docs/event-studio/tracking-plans/data-quality.md"],
+      ["p", "取り込みの警告のみ", "https://posthog.com/docs/data/ingestion-warnings"],
+      ["p", "SDK の警告と実験の健全性のみ", "https://docs.statsig.com/messages/healthhub"],
+      ["p", "取り込みの成否と制限のみ", "https://amplitude.com/docs/analytics/debug-analytics"]] },
+    { label: "根拠レベルの表示（推定か実証か）", ours: ["y", "全回答に 4 段階の根拠レベル（§11.5）"], v: [U, U, U, U, U, U] },
+    { label: "無作為に出した決定の記録（学習用）", ours: ["y", "出した内容と確率を最初の 1 件から記録（§8.2）"], v: [U, U, U, U, U, U] },
+  ]},
+  { group: "価格と導入", rows: [
+    { label: "無料枠", ours: ["p", "目標は 6 社の最大と同等以上（月 200 万件相当、再生 5 万本）。目標は下げず、原価の実測の後に構成を確定（§11.11 の 7）", "判断 27"], v: [
+      ["y", "月 1,000 訪問者、取り込み元 2 つ", "https://www.twilio.com/en-us/products/connections/pricing"],
+      ["y", "月 25 万件", "https://www.rudderstack.com/pricing/"],
+      ["p", "14 日の試用のみ", "https://snowplow.io/pricing"],
+      ["y", "月 100 万件、再生 5,000 本、フラグ 100 万回", "https://posthog.com/pricing"],
+      ["y", "月 200 万件、再生 5 万本、フラグ無制限", "https://www.statsig.com/pricing"],
+      ["y", "月 200 万件、再生 1 万本、フラグ無制限", "https://amplitude.com/pricing"]] },
+    { label: "料金の公開", ours: ["y", "全項目の単価と無料枠を公開。「見積もりのみ」の段を置かない。金額は未定（§11.11 の 7）", "判断 27"], v: [
+      ["p", "月 120 ドル（1 万訪問者）から。上位は見積もり", "https://www.twilio.com/en-us/products/connections/pricing"],
+      ["y", "月 265 ドル（100 万件）から", "https://www.rudderstack.com/pricing/"],
+      ["n", "すべて見積もり", "https://snowplow.io/pricing"],
+      ["y", "100 万件を超えた分は 1 件 0.00005 ドル", "https://posthog.com/pricing"],
+      ["y", "月 150 ドル（500 万件込み）。超過は 1,000 件 0.05 ドル", "https://www.statsig.com/pricing"],
+      ["p", "200 万件まで無料。単価は非公開", "https://amplitude.com/pricing"]] },
+    { label: "申し込みから利用までの自動化", ours: ["y", "申し込みから確認訪問のデータまで 10 分以内（§11.11 の 1・7）"], v: [
+      ["y", "無料と Team は自分で始められる", "https://www.twilio.com/en-us/products/connections/pricing"],
+      ["y", "無料プランは自分で始められる", "https://www.rudderstack.com/docs/user-guides/migration-guides/segment-rudderstack-migration/prerequisites/"],
+      ["p", "試用は自分で。本番は見積もり", "https://docs.snowplow.io/docs/get-started/"],
+      ["y", "カード登録なしで始められる", "https://posthog.com/pricing"],
+      ["y", "カード登録なしで始められる", "https://www.statsig.com/pricing"],
+      ["y", "無料と Plus は自分で始められる", "https://amplitude.com/plus"]] },
+    { label: "ソースの公開", ours: ["y", "SDK・受付の本体・送り先の部品・再生の隠し方を公開。モデルとボット判別の規則は非公開（§11.11 の 12）", "判断 28"], v: [
+      ["p", "SDK のみ", "https://www.twilio.com/docs/segment/connections/sources/catalog/libraries/website/javascript"],
+      ["y", "受付の本体と SDK を公開", "https://www.rudderstack.com/docs/get-started/rudderstack-open-source/"],
+      ["p", "SDK は公開。本体は本番利用不可のライセンス", "https://docs.snowplow.io/docs/licensing/"],
+      ["y", "本体も MIT（一部を除く）", "https://github.com/PostHog/posthog/blob/master/LICENSE"],
+      ["p", "SDK のみ", "https://github.com/statsig-io/js-client-monorepo"],
+      ["p", "SDK のみ", "https://github.com/amplitude/Amplitude-TypeScript"]] },
+  ]},
+  { group: "プライバシー", rows: [
+    { label: "端末に保存しない計測", ours: ["y", "何も保存しないモードを標準で持つ（§4.5）"], v: [
+      ["p", "設定で可。ページをまたぐ識別は失う", "https://segment.com/docs/connections/sources/catalog/libraries/website/javascript/persistence/"],
+      ["y", "保存なしのモード", "https://www.rudderstack.com/docs/data-governance/cookieless-tracking/"],
+      ["y", "匿名の計測と保存なしの設定", "https://docs.snowplow.io/docs/events/anonymous-tracking.md"],
+      ["y", "保存なしのモード。日替わりのハッシュで数える", "https://posthog.com/docs/privacy/data-collection"],
+      ["y", "Cookie は既定で使わない。保存を切る設定あり", "https://docs.statsig.com/client/javascript-sdk"],
+      ["y", "保存なしの設定", "https://amplitude.com/docs/sdks/analytics/browser/cookies-and-consent-management"]] },
+    { label: "同意の管理", ours: ["y", "5 つのモードと目的。開示の掲載まで検証する（§4.5）"], v: [
+      ["p", "同意ツールの結果で送り先を制御。上位プランのみ", "https://www.twilio.com/docs/segment/privacy/consent-management"],
+      ["y", "主要な同意ツールと連携", "https://www.rudderstack.com/docs/sources/event-streams/sdks/rudderstack-javascript-sdk/consent-management/"],
+      ["p", "同意の記録はできる。同意ツールとの連携は自分で作る", "https://docs.snowplow.io/docs/sources/web-trackers/tracking-events/consent-gdpr.md"],
+      ["p", "許可・拒否の API のみ。連携は自分で作る", "https://posthog.com/docs/privacy/data-collection"],
+      ["p", "同意後に有効化する書き方のみ", "https://docs.statsig.com/client/javascript-sdk"],
+      ["p", "標準の連携は無い。自分で作る", "https://amplitude.com/docs/data/privacy-and-consent-implementation"]] },
+    { label: "データの置き場所（地域）", ours: ["y", "最初の地域は日本。テナントごとに地域を契約に書く。今の保存先で保証できるかは未確認（§11.11 の 13）", "判断 29"], v: [
+      ["p", "米国と EU（上位プランのみ）。日本は無い", "https://www.twilio.com/docs/segment/guides/regional-segment"],
+      ["y", "米国・EU・インド。日本は無い", "https://www.rudderstack.com/docs/destinations/warehouse-destinations/faq/"],
+      ["p", "地域の一覧は非公開。顧客のクラウドなら任意", "https://snowplow.io/deployment-options"],
+      ["p", "米国と EU。日本は無い", "https://posthog.com/docs/privacy/data-storage"],
+      ["p", "EU ありと記載（詳細は不明）", "https://www.statsig.com/pricing"],
+      ["y", "米国と EU。日本は無い", "https://amplitude.com/docs/get-started/create-a-new-account"]] },
+  ]},
+];
+
+const LABEL = { y: "あり", p: "一部", n: "なし", u: "不明" };
+const OURS_LABEL = { y: "設計あり", p: "一部", u: "未定" };
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const allRows = DATA.flatMap(g => g.rows.map(r => ({ ...r, group: g.group })));
+const isGap = r => r.ours[0] !== "y" && r.v.some(c => c[0] === "y");
+// 全社が未調査の行は「こちらだけ」に数えない（調べていないだけなので）
+const isOnly = r => r.ours[0] === "y" && !r.v.some(c => c[0] === "y") && r.v.some(c => c[0] !== "u");
+
+function cell(c) {
+  const src = c[2] ? ` <a class="src" href="${esc(c[2])}" target="_blank" rel="noopener">出典</a>` : "";
+  return `<td><span class="pill ${c[0]}">${LABEL[c[0]]}</span><span class="note">${esc(c[1])}${src}</span></td>`;
+}
+function oursCell(o) {
+  const wait = o[2] ? `<span class="pill w">${esc(o[2])}待ち</span>` : "";
+  return `<td class="ours"><span class="tags"><span class="pill ${o[0]}">${OURS_LABEL[o[0]]}</span>${wait}</span><span class="note">${esc(o[1])}</span></td>`;
+}
+function render(filter) {
+  const keep = filter === "gap" ? isGap : filter === "only" ? isOnly : () => true;
+  const html = DATA.map(g => {
+    const rows = g.rows.filter(keep);
+    if (!rows.length) return "";
+    return `<section class="group"><h2>${esc(g.group)}</h2><div class="scroll"><table><thead><tr><th class="feat">項目</th><th class="ours">UGOKI LINK（実装後）</th>${VENDORS.map(v => `<th>${v}</th>`).join("")}</tr></thead><tbody>${rows.map(r => `<tr><td class="feat">${esc(r.label)}</td>${oursCell(r.ours)}${r.v.map(cell).join("")}</tr>`).join("")}</tbody></table></div></section>`;
+  }).join("");
+  document.getElementById("groups").innerHTML = html || `<p class="empty">当てはまる行はありません。</p>`;
+}
+function summary() {
+  const gaps = allRows.filter(isGap), only = allRows.filter(isOnly), wait = allRows.filter(r => r.ours[2]);
+  const box = (cls, title, rows, fmt) => `<div class="box ${cls}"><h2>${title}</h2><span class="count">${rows.length} 項目</span><ul>${rows.map(r => `<li>${fmt(r)}</li>`).join("")}</ul></div>`;
+  document.getElementById("summary").innerHTML =
+    box("gap", "まだ並んでいない（競合にあり、設計は一部か未定）", gaps, r => esc(r.label)) +
+    box("only", "こちらだけ（どの競合にも「あり」が無い）", only, r => esc(r.label)) +
+    box("wait", "判断待ち（決まるまで出せない）", wait, r => `${esc(r.label)} <span class="pill w">${esc(r.ours[2])}</span>`);
+  document.getElementById("m-date").textContent = "最終確認日: " + CHECKED;
+  document.getElementById("m-rows").textContent = `${allRows.length} 項目 × ${VENDORS.length} 社`;
+}
+const btn = { all: document.getElementById("f-all"), gap: document.getElementById("f-gap"), only: document.getElementById("f-only") };
+function setFilter(f) {
+  Object.entries(btn).forEach(([k, b]) => b.setAttribute("aria-pressed", String(k === f)));
+  render(f);
+  try { localStorage.setItem("cmp-filter", f); } catch (e) {}
+}
+Object.entries(btn).forEach(([k, b]) => b.addEventListener("click", () => setFilter(k)));
+summary();
+let saved = "all";
+try { saved = localStorage.getItem("cmp-filter") || "all"; } catch (e) {}
+setFilter(btn[saved] ? saved : "all");
+</script>
