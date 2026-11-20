@@ -125,3 +125,7 @@
 - [ ] **[5-B 本番接続] 強整合制御ストア（Cloudflare Durable Objects / 直列化 Postgres）接続**: `workers/link-decision` および `app/api/v1/decisions/route.ts` の制御ストアを本番強整合ストアへ接続（KV は物理禁止）。
 - [ ] **[5-B A3 隔離オリジン & iOS 実機事前検査]**: A3 表現向け別オリジン隔離ドメイン・CSP・Ed25519 バンドル承認鍵配備、および `runStratifiedPreflight` の iOS 実機 2 段階プローブ接続。
 - [ ] **[5-A / 5-C 実測ゲート] `tel.G16` SDK 重さ同等性（各群 30,000 INP PV）および D-07R 較正（≥3 サイト・≥30 解決済介入・Clopper-Pearson 95% 下限 ≥0.70）**: 実測達成後に段階解禁。
+
+### 波 4-I / 6-B 追加タスク
+- [ ] **[4-I 本番結線 (§11.12)]**: `app/api/v1/sites/[siteId]/heatmap-image/route.ts` を本番の永続画像ストア・`AuthorizationGateway`・ClickHouse 確定集計リーダへ結線する。
+- [ ] **[6-B 判断 18 (`D-18`) & 計器 B 運用]**: 有償同意人間パネル（閾値決め ≥300 人、試験 ≥1,000 人、支援技術・入力方式・広告ブロック含む）と同意文を承認してローカル AI モデル証明書の実パネル数値を確定し、計器 B 検査走行のデスクトップ実行機＋エッジ受け皿差し替え運用手順を確定する。
