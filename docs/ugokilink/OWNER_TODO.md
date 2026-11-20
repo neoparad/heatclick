@@ -49,3 +49,8 @@
 ## 4. 自社5サイトでの作業
 - [ ] **サーバー・CDN生ログの保全設定**: 5媒体（`wakegai.jp`, `bihadashop.jp`, `bousuikouji.info`, `nvrseen.com`, `link-th.co.jp`）のアクセスログ・WP改訂履歴・アフィリエイト報告を消さずに残す設定。
 - [ ] **新スニペット貼付・開示文面掲載**（手順 11 準備完了後）。
+
+### 波 0-D / 波 1 追加タスク
+- [ ] **[1-A 法務確認] プライバシー開示文面＆14日削除計画の法務提出**: `packages/contract/schema` の `generatePrivacyDisclosure()` / `generateDeletionPlan()` 出力を法務確認へ提出し、日本の法域行 (`JP`) 署名および `legalRecipientName`・R2 セグメント書換削除条項を確定する。
+- [ ] **[0-D 本番配備] AI事業者IP・RFC 9421鍵スナップショット日次 Cron 設定**: `ActorEvidenceClock.captureAll()` を毎晩（波0: `nightly_wave0`）実行し追記専用 R2 へ保存＋鍵期限（7日以内、OpenAI鍵は 2026-11-25 期限見込）・20%超プレフィックス変動アラート接続。手順10までに `production_poll`（IP 8h / SAIL 20m / JWKS Cache-Control）へ切替。
+- [ ] **[1-C / 1-D CI連携] Playwright 3エンジン実機検証 ＆ CRAWL 側 `urlkey/2` スイートハッシュ同期**: 220 固定ページフィクスチャの Chromium / WebKit / Firefox 実機一致検証および 360 URLキーベクトルのハッシュ照合を両リポジトリ CI に組み込む。
