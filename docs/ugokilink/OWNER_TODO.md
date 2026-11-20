@@ -129,3 +129,7 @@
 ### 波 4-I / 6-B 追加タスク
 - [ ] **[4-I 本番結線 (§11.12)]**: `app/api/v1/sites/[siteId]/heatmap-image/route.ts` を本番の永続画像ストア・`AuthorizationGateway`・ClickHouse 確定集計リーダへ結線する。
 - [ ] **[6-B 判断 18 (`D-18`) & 計器 B 運用]**: 有償同意人間パネル（閾値決め ≥300 人、試験 ≥1,000 人、支援技術・入力方式・広告ブロック含む）と同意文を承認してローカル AI モデル証明書の実パネル数値を確定し、計器 B 検査走行のデスクトップ実行機＋エッジ受け皿差し替え運用手順を確定する。
+
+### 波 6-A / 6-F / 6-D 追加タスク
+- [ ] **[6-D 本番結線 (`POST /v1/recommend`)]**: `setRecommendRuntimeConfig()` に本番 `RecommendCatalogProvider` / `EcMemberSummaryStore` と `EC_SERVER_PROOF_SECRET` を設定し、`RECOMMEND_MCP_TOOL_DEF` を本番 MCP 登録簿へ連携。
+- [ ] **[6-A / 6-F / 6-D 判断 8(b) & 実データ挑戦者昇格]**: 判断 8(b)（30 日超の集計リプレイ）および識別子なし `k>=50` 長期系列層の法務署名を記録。アシスタント段 3 はサイトごと人ラベル質問 ≥200 件の Clopper-Pearson 95% 下限確認＋A3 束ハッシュ承認後に開放。全 ML 上位段は実データ蓄積まで挑戦者（`challenger`）維持。
