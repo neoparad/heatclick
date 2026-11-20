@@ -79,3 +79,8 @@
   - 本番 ClickHouse に `generatePerTenantIdentityDdl()`（テナント別 RO ユーザー・`readonly=1 CONST`・PERMISSIVE+RESTRICTIVE 行ポリシー対）を適用し、5分見張り番の 30 日連続無事故ランインを開始（`surf.G2`, `store.G-9`）。
   - Postgres 鍵レジストリ配備および全オーナー/管理者の WebAuthn パスキー登録（`surf.identity_plane`, D-06）。
   - 自社 5 サイトに `_ugokilink.<host>` DNS TXT（TTL ≤300s）を設置し、ペアリング経路＋R5 パスキー承認で `LinkGrant` を有効化（`surf.link_grant_active`）。
+
+### 波 2-B 追加タスク
+- [ ] **[2-B 判断 5 / 専用 8 GiB ClickHouse 配備]**: 専用 8 GiB RAM ClickHouse LTS >= 26.3 ノードを確保し、`max_server_memory_usage = 7730941132`（7.2 GiB）・`users_without_row_policies_can_read_rows = 0` を設定。ロール `ugk_admin` / `ugk_loader` / `ugk_builder` / `ugk_eraser` / `ugk_ro_<tenant_id>` を作成。
+- [ ] **[2-B 本番 DDL 適用]**: 手順 0-C 本番記録取得後、`migrations/link/README.md` に従い `migrations/link/001_clickhouse_v2.sql` および `migrations/link/002_postgres_v2.sql` を本番へ適用し、越境ゼロカナリア確認を実施。
+- [ ] **[2-B 判断 14 / 判断 29]**: 本番バックアップ入替周期 ≤8 日・10 日目 `overdue` 削除アラート・R2/CH/PG 地域マッピング（既定 `jp`）と §5.12 段 2/3 提供条件を確定。

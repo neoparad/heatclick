@@ -1,0 +1,415 @@
+/**
+ * UGOKI LINK v2 — Storage Abstraction Layer (§5.12 Tiers 1/2/3 & Decision 29 Region Tagging)
+ *
+ * Isolates all WAL/quarantine object storage behind a single region-pinned
+ * adapter boundary so tenants can select:
+ * - Tier 1: LINK-hosted R2 WAL + ClickHouse (`tier1_link_managed`)
+ * - Tier 2: LINK-hosted primary + continuous export sink (`tier2_link_plus_export`)
+ * - Tier 3: Customer-hosted System of Record (`tier3_customer_sor`)
+ */
+
+import {
+  VALID_DATA_REGIONS,
+  type DataRegion,
+  type R2BucketLike,
+  type R2ListResult,
+  type R2ObjectLike,
+  type R2PutOptions,
+  type StorageTier,
+} from './types';
+
+export interface ExportNotificationReceipt {
+  readonly exportBatchId: string;
+  readonly sinkId: string;
+  readonly region: DataRegion;
+  readonly walKey: string;
+  readonly tenantIds: readonly string[];
+  readonly deletionEpoch: number;
+  readonly exportedAtMs: number;
+}
+
+export interface ExportSinkPort {
+  readonly sinkId: string;
+  readonly region: DataRegion;
+  writeExportBatch(args: {
+    readonly walKey: string;
+    readonly body: string;
+    readonly tenantIds: readonly string[];
+    readonly deletionEpoch: number;
+    readonly exportedAtMs: number;
+  }): Promise<ExportNotificationReceipt>;
+}
+
+export interface StorageAdapterDescriptor {
+  readonly tier: StorageTier;
+  readonly region: DataRegion;
+  readonly linkRetainsPrimaryCopy: boolean;
+  readonly continuousExportSinkId: string | null;
+  readonly customerSorBucketId: string | null;
+}
+
+export interface WalPutOutcome {
+  readonly key: string;
+  readonly written: boolean;
+  readonly deduped: boolean;
+  readonly region: DataRegion;
+  readonly tier: StorageTier;
+  readonly exportReceipt: ExportNotificationReceipt | null;
+}
+
+export interface StorageTierAdapter {
+  readonly descriptor: StorageAdapterDescriptor;
+  putWalImmutable(args: {
+    readonly key: string;
+    readonly body: string;
+    readonly tenantIds: readonly string[];
+    readonly deletionEpoch: number;
+    readonly nowMs: number;
+    readonly customMetadata?: Readonly<Record<string, string>>;
+  }): Promise<WalPutOutcome>;
+  putQuarantineObject(
+    key: string,
+    body: string,
+    customMetadata?: Readonly<Record<string, string>>
+  ): Promise<R2ObjectLike | null>;
+  getObject(key: string): Promise<R2ObjectLike | null>;
+  listObjects(prefix: string, limit?: number): Promise<R2ListResult>;
+  deleteObjects(keys: string | readonly string[]): Promise<void>;
+}
+
+export function isValidDataRegion(value: unknown): value is DataRegion {
+  return (
+    typeof value === 'string' &&
+    (VALID_DATA_REGIONS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Decision 29 (D-29) residency boundary check.
+ * Rejects any cross-region write attempt before bytes touch storage.
+ */
+export function assertRegionPinned(
+  expectedRegion: DataRegion,
+  actualRegion: unknown
+): asserts actualRegion is DataRegion {
+  if (!isValidDataRegion(actualRegion)) {
+    throw new Error(`Invalid storage_region "${String(actualRegion)}" (expected one of ${VALID_DATA_REGIONS.join(', ')})`);
+  }
+  if (actualRegion !== expectedRegion) {
+    throw new Error(
+      `Data residency violation (D-29): writer pinned to region "${expectedRegion}" cannot accept "${actualRegion}"`
+    );
+  }
+}
+
+export function formatUtcMinuteBucket(timestampMs: number): string {
+  const d = new Date(timestampMs);
+  const yyyy = d.getUTCFullYear().toString().padStart(4, '0');
+  const mm = (d.getUTCMonth() + 1).toString().padStart(2, '0');
+  const dd = d.getUTCDate().toString().padStart(2, '0');
+  const hh = d.getUTCHours().toString().padStart(2, '0');
+  const min = d.getUTCMinutes().toString().padStart(2, '0');
+  return `${yyyy}${mm}${dd}T${hh}${min}Z`;
+}
+
+export function formatUtcDayBucket(timestampMs: number): string {
+  const d = new Date(timestampMs);
+  const yyyy = d.getUTCFullYear().toString().padStart(4, '0');
+  const mm = (d.getUTCMonth() + 1).toString().padStart(2, '0');
+  const dd = d.getUTCDate().toString().padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+export function formatWalObjectKey(
+  region: DataRegion,
+  shardId: number,
+  minuteUtc: string,
+  sha256: string
+): string {
+  const shardPadded = Math.max(0, Math.floor(shardId)).toString().padStart(4, '0');
+  return `wal/${region}/${shardPadded}/${minuteUtc}/${sha256}.json`;
+}
+
+export function formatQuarantineObjectKey(
+  region: DataRegion,
+  tenantId: string,
+  siteId: string,
+  dayUtc: string,
+  sha256: string
+): string {
+  return `quarantine/${region}/${tenantId}/${siteId}/${dayUtc}/${sha256}.json`;
+}
+
+/**
+ * Tier 1: LINK-managed primary R2 bucket in the pinned region.
+ */
+export class LinkManagedStorageAdapter implements StorageTierAdapter {
+  public readonly descriptor: StorageAdapterDescriptor;
+
+  public constructor(
+    private readonly bucket: R2BucketLike,
+    region: DataRegion
+  ) {
+    this.descriptor = {
+      tier: 'tier1_link_managed',
+      region,
+      linkRetainsPrimaryCopy: true,
+      continuousExportSinkId: null,
+      customerSorBucketId: null,
+    };
+  }
+
+  public async putWalImmutable(args: {
+    readonly key: string;
+    readonly body: string;
+    readonly tenantIds: readonly string[];
+    readonly deletionEpoch: number;
+    readonly nowMs: number;
+    readonly customMetadata?: Readonly<Record<string, string>>;
+  }): Promise<WalPutOutcome> {
+    const putOpts: R2PutOptions = {
+      onlyIf: { etagDoesNotMatch: '*' },
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: {
+        ...args.customMetadata,
+        storage_region: this.descriptor.region,
+        storage_tier: this.descriptor.tier,
+        deletion_epoch: String(args.deletionEpoch),
+      },
+    };
+    const obj = await this.bucket.put(args.key, args.body, putOpts);
+    return {
+      key: args.key,
+      written: obj !== null,
+      deduped: obj === null,
+      region: this.descriptor.region,
+      tier: this.descriptor.tier,
+      exportReceipt: null,
+    };
+  }
+
+  public async putQuarantineObject(
+    key: string,
+    body: string,
+    customMetadata?: Readonly<Record<string, string>>
+  ): Promise<R2ObjectLike | null> {
+    return this.bucket.put(key, body, {
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: {
+        ...customMetadata,
+        storage_region: this.descriptor.region,
+        storage_tier: this.descriptor.tier,
+      },
+    });
+  }
+
+  public async getObject(key: string): Promise<R2ObjectLike | null> {
+    return this.bucket.get(key);
+  }
+
+  public async listObjects(prefix: string, limit = 1000): Promise<R2ListResult> {
+    return this.bucket.list({ prefix, limit });
+  }
+
+  public async deleteObjects(keys: string | readonly string[]): Promise<void> {
+    await this.bucket.delete(keys);
+  }
+}
+
+/**
+ * Tier 2: LINK-managed primary + continuous export to customer sink (§5.12).
+ */
+export class LinkPlusExportStorageAdapter implements StorageTierAdapter {
+  public readonly descriptor: StorageAdapterDescriptor;
+  private readonly primary: LinkManagedStorageAdapter;
+
+  public constructor(
+    primaryBucket: R2BucketLike,
+    private readonly exportSink: ExportSinkPort,
+    region: DataRegion
+  ) {
+    assertRegionPinned(region, exportSink.region);
+    this.primary = new LinkManagedStorageAdapter(primaryBucket, region);
+    this.descriptor = {
+      tier: 'tier2_link_plus_export',
+      region,
+      linkRetainsPrimaryCopy: true,
+      continuousExportSinkId: exportSink.sinkId,
+      customerSorBucketId: null,
+    };
+  }
+
+  public async putWalImmutable(args: {
+    readonly key: string;
+    readonly body: string;
+    readonly tenantIds: readonly string[];
+    readonly deletionEpoch: number;
+    readonly nowMs: number;
+    readonly customMetadata?: Readonly<Record<string, string>>;
+  }): Promise<WalPutOutcome> {
+    const primaryRes = await this.primary.putWalImmutable({
+      ...args,
+      customMetadata: {
+        ...args.customMetadata,
+        storage_tier: this.descriptor.tier,
+        export_sink_id: this.exportSink.sinkId,
+      },
+    });
+
+    let exportReceipt: ExportNotificationReceipt | null = null;
+    if (primaryRes.written) {
+      exportReceipt = await this.exportSink.writeExportBatch({
+        walKey: args.key,
+        body: args.body,
+        tenantIds: args.tenantIds,
+        deletionEpoch: args.deletionEpoch,
+        exportedAtMs: args.nowMs,
+      });
+    }
+
+    return {
+      ...primaryRes,
+      tier: this.descriptor.tier,
+      exportReceipt,
+    };
+  }
+
+  public async putQuarantineObject(
+    key: string,
+    body: string,
+    customMetadata?: Readonly<Record<string, string>>
+  ): Promise<R2ObjectLike | null> {
+    return this.primary.putQuarantineObject(key, body, {
+      ...customMetadata,
+      storage_tier: this.descriptor.tier,
+    });
+  }
+
+  public async getObject(key: string): Promise<R2ObjectLike | null> {
+    return this.primary.getObject(key);
+  }
+
+  public async listObjects(prefix: string, limit = 1000): Promise<R2ListResult> {
+    return this.primary.listObjects(prefix, limit);
+  }
+
+  public async deleteObjects(keys: string | readonly string[]): Promise<void> {
+    await this.primary.deleteObjects(keys);
+  }
+}
+
+/**
+ * Tier 3: Customer-hosted storage as System of Record (§5.12).
+ * Primary WAL objects are written directly into the customer's region-pinned
+ * bucket; LINK retains zero long-term primary copy.
+ */
+export class CustomerSorStorageAdapter implements StorageTierAdapter {
+  public readonly descriptor: StorageAdapterDescriptor;
+
+  public constructor(
+    private readonly customerBucket: R2BucketLike,
+    customerSorBucketId: string,
+    region: DataRegion
+  ) {
+    this.descriptor = {
+      tier: 'tier3_customer_sor',
+      region,
+      linkRetainsPrimaryCopy: false,
+      continuousExportSinkId: null,
+      customerSorBucketId,
+    };
+  }
+
+  public async putWalImmutable(args: {
+    readonly key: string;
+    readonly body: string;
+    readonly tenantIds: readonly string[];
+    readonly deletionEpoch: number;
+    readonly nowMs: number;
+    readonly customMetadata?: Readonly<Record<string, string>>;
+  }): Promise<WalPutOutcome> {
+    const obj = await this.customerBucket.put(args.key, args.body, {
+      onlyIf: { etagDoesNotMatch: '*' },
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: {
+        ...args.customMetadata,
+        storage_region: this.descriptor.region,
+        storage_tier: this.descriptor.tier,
+        customer_sor_bucket_id: this.descriptor.customerSorBucketId ?? '',
+        deletion_epoch: String(args.deletionEpoch),
+      },
+    });
+    return {
+      key: args.key,
+      written: obj !== null,
+      deduped: obj === null,
+      region: this.descriptor.region,
+      tier: this.descriptor.tier,
+      exportReceipt: null,
+    };
+  }
+
+  public async putQuarantineObject(
+    key: string,
+    body: string,
+    customMetadata?: Readonly<Record<string, string>>
+  ): Promise<R2ObjectLike | null> {
+    return this.customerBucket.put(key, body, {
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: {
+        ...customMetadata,
+        storage_region: this.descriptor.region,
+        storage_tier: this.descriptor.tier,
+      },
+    });
+  }
+
+  public async getObject(key: string): Promise<R2ObjectLike | null> {
+    return this.customerBucket.get(key);
+  }
+
+  public async listObjects(prefix: string, limit = 1000): Promise<R2ListResult> {
+    return this.customerBucket.list({ prefix, limit });
+  }
+
+  public async deleteObjects(keys: string | readonly string[]): Promise<void> {
+    await this.customerBucket.delete(keys);
+  }
+}
+
+/**
+ * In-memory ExportSinkPort helper for Tier 2 testing and dry-run verification.
+ */
+export class InMemoryExportSink implements ExportSinkPort {
+  public readonly receipts: ExportNotificationReceipt[] = [];
+  public readonly payloads = new Map<string, string>();
+  private seq = 0;
+
+  public constructor(
+    public readonly sinkId: string,
+    public readonly region: DataRegion
+  ) {}
+
+  public async writeExportBatch(args: {
+    readonly walKey: string;
+    readonly body: string;
+    readonly tenantIds: readonly string[];
+    readonly deletionEpoch: number;
+    readonly exportedAtMs: number;
+  }): Promise<ExportNotificationReceipt> {
+    this.seq += 1;
+    const exportBatchId = `${this.sinkId}-batch-${this.seq}`;
+    this.payloads.set(args.walKey, args.body);
+    const receipt: ExportNotificationReceipt = {
+      exportBatchId,
+      sinkId: this.sinkId,
+      region: this.region,
+      walKey: args.walKey,
+      tenantIds: [...args.tenantIds],
+      deletionEpoch: args.deletionEpoch,
+      exportedAtMs: args.exportedAtMs,
+    };
+    this.receipts.push(receipt);
+    return receipt;
+  }
+}
