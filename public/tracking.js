@@ -222,8 +222,33 @@
 
   const _throttle = (fn, d) => { let last = 0; return function(...a) { const n = Date.now(); if (n - last >= d) { last = n; return fn.apply(this, a); } }; };
 
-  // Extensible utils — extensions can add sanitizePII, sanitizeUrl, getCookie, setCookie
-  const _utils = { getElementPath: _elPath, getCssSelector: _cssSelector, getNearestSectionSelector: _nearestSectionSelector, getDocumentHeight: _docHeight, throttle: _throttle };
+  const _SENSITIVE_QUERY_KEYS = new Set(['email','mail','e-mail','token','access_token','auth_token','id_token','reset_token','refresh_token','password','passwd','pwd','secret','api_key','apikey','key','ssn','card','credit_card','tel','phone']);
+  const _coreSanitizePII = (text) => {
+    if (!text || typeof text !== 'string') return '';
+    return text
+      .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[EMAIL]')
+      .replace(/\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g, '[CARD]')
+      .replace(/\b0\d{1,4}[\s-]?\d{1,4}[\s-]?\d{3,4}\b/g, '[PHONE]')
+      .replace(/\b\d{3}-\d{4}\b/g, '[ZIP]');
+  };
+  const _coreSanitizeUrl = (rawUrl) => {
+    if (!rawUrl || typeof rawUrl !== 'string') return '';
+    try {
+      const base = (typeof window !== 'undefined' && window.location && window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'https://placeholder.local';
+      const u = new URL(rawUrl, base);
+      let changed = false;
+      const keys = [];
+      u.searchParams.forEach((_, k) => { if (_SENSITIVE_QUERY_KEYS.has(String(k).toLowerCase())) keys.push(k); });
+      for (let i = 0; i < keys.length; i++) { u.searchParams.set(keys[i], '[REDACTED]'); changed = true; }
+      if (!changed) return rawUrl;
+      return /^https?:\/\//i.test(rawUrl) ? u.toString() : (u.pathname + u.search + u.hash);
+    } catch {
+      return _coreSanitizePII(rawUrl);
+    }
+  };
+
+  // Extensible utils — core includes synchronous sanitizePII/sanitizeUrl so first-tick events are always protected
+  const _utils = { getElementPath: _elPath, getCssSelector: _cssSelector, getNearestSectionSelector: _nearestSectionSelector, getDocumentHeight: _docHeight, throttle: _throttle, sanitizePII: _coreSanitizePII, sanitizeUrl: _coreSanitizeUrl };
 
   // GA4 client_id (for BigQuery demographic join)
   const _gaClientId = (document.cookie.match(/_ga=GA\d+\.\d+\.(\d+\.\d+)/)||[])[1] || '';
@@ -313,6 +338,8 @@
 
   const queueEvent = (ev) => {
     _seqCounter++;
+    const rawUrl = (ev && typeof ev.url === 'string' && ev.url) ? ev.url : window.location.href;
+    const rawRef = (ev && typeof ev.referrer === 'string') ? ev.referrer : document.referrer;
     const d = {
       ...ev,
       id: _genId(),
@@ -325,8 +352,8 @@
       external_id: _externalId || null,
       ga_client_id: _gaClientId,
       timestamp: new Date().toISOString(),
-      url: window.location.href,
-      referrer: document.referrer,
+      url: _utils.sanitizeUrl(rawUrl),
+      referrer: _utils.sanitizeUrl(rawRef),
       user_agent: navigator.userAgent,
       viewport_width: _vp().width,
       viewport_height: _vp().height,
@@ -339,6 +366,8 @@
       agent_signals: _agent.agent_signals,
       ..._utm,
     };
+    if (typeof d.previous_url === 'string' && d.previous_url) d.previous_url = _utils.sanitizeUrl(d.previous_url);
+    if (typeof d.page_title === 'string' && d.page_title) d.page_title = _utils.sanitizePII(d.page_title);
     if (!d.site_id || d.site_id.trim() === '') return;
     _q.push(d);
     if (_q.length >= config.batchSize) sendBatch(); else if (!_bt) _bt = setTimeout(sendBatch, config.batchInterval);

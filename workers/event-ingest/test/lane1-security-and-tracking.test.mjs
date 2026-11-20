@@ -277,8 +277,12 @@ function runTrackingJsInVm({
   siteIdAttr = 'CIP_demo_site',
   webglAvailable = true,
   phantomGlobals = {},
+  scriptPath = TRACKING_JS_PATH,
+  locationHref = 'https://www.example.com/products?utm_source=google',
+  referrer = 'https://www.google.com/',
+  imgElements = [],
 } = {}) {
-  const code = fs.readFileSync(TRACKING_JS_PATH, 'utf8');
+  const code = fs.readFileSync(scriptPath, 'utf8');
   const beacons = [];
   const listeners = {};
 
@@ -315,7 +319,7 @@ function runTrackingJsInVm({
     currentScript: scriptEl,
     readyState: 'complete',
     title: 'Test Page',
-    referrer: 'https://www.google.com/',
+    referrer,
     hidden: false,
     get cookie() { return cookieStr; },
     set cookie(val) {
@@ -326,7 +330,11 @@ function runTrackingJsInVm({
     documentElement: { clientWidth: innerWidth, clientHeight: innerHeight, scrollHeight },
     body: { scrollHeight },
     head: { appendChild() {} },
-    querySelectorAll() { return [scriptEl]; },
+    querySelectorAll(sel) {
+      if (sel === 'img') return imgElements;
+      if (typeof sel === 'string' && sel.startsWith('h1')) return [];
+      return [scriptEl];
+    },
     querySelector() { return scriptEl; },
     addEventListener(type, fn) { listeners[type] = fn; },
     createElement(tag) {
@@ -345,8 +353,9 @@ function runTrackingJsInVm({
     },
   };
 
+  const parsedLoc = new URL(locationHref);
   const win = {
-    location: { href: 'https://www.example.com/products?utm_source=google', search: '?utm_source=google', protocol: 'https:', hostname: 'www.example.com' },
+    location: { href: locationHref, search: parsedLoc.search, origin: parsedLoc.origin, protocol: parsedLoc.protocol, hostname: parsedLoc.hostname },
     innerWidth,
     innerHeight,
     scrollY: 120,
@@ -493,4 +502,68 @@ test('Task 3: Click tracker sends document_height, element_selector, section_sel
   assert.equal(clickEv.element_class_name, 'svg-btn-class');
   assert.match(clickEv.element_selector, /#pricing-table>button/);
   assert.equal(clickEv.section_selector, '#pricing-table');
+});
+
+// ── Security Hygiene Hotfix Verification ──────────────────────────────
+
+test('Hygiene 1 & 2: Both tracking.js and v2/tracking.js synchronously redact PII query params in url & referrer without locking img.alt setter', () => {
+  const v2Path = path.resolve(__dirname, '../../../public/v2/tracking.js');
+  for (const sp of [TRACKING_JS_PATH, v2Path]) {
+    const imgEl = {
+      tagName: 'IMG',
+      alt: 'initial-alt',
+      getAttribute(attr) { return attr === 'alt' ? this.alt : 'https://www.example.com/hero.jpg?token=imgsecret'; },
+    };
+    const ctx = runTrackingJsInVm({
+      scriptPath: sp,
+      locationHref: 'https://www.example.com/thanks?email=taro%40example.com&token=abc123secret&utm_source=google&id=42',
+      referrer: 'https://partner.example.org/auth?reset_token=xyz999&camp=spring',
+      imgElements: [imgEl],
+    });
+
+    const pv = ctx.parsedEvents.find((e) => e.event_type === 'pageview');
+    assert.ok(pv, `pageview emitted for ${sp}`);
+    assert.doesNotMatch(pv.url, /taro|abc123secret/, 'sensitive query values must be redacted from page url');
+    assert.match(pv.url, /utm_source=google/, 'UTM params must remain intact');
+    assert.match(pv.url, /id=42/, 'non-sensitive query params must remain intact');
+    assert.doesNotMatch(pv.referrer, /xyz999/, 'sensitive query values must be redacted from referrer');
+    assert.match(pv.referrer, /camp=spring/, 'non-sensitive referrer params must remain intact');
+
+    // Verify host site JS can still dynamically mutate img.alt (no noop setter lock)
+    imgEl.alt = 'updated-by-host-carousel';
+    assert.equal(imgEl.alt, 'updated-by-host-carousel', `img.alt setter must remain mutable for ${sp}`);
+  }
+});
+
+test('Hygiene 3: Unused public/recording.js and public/track.js are removed from public directory', () => {
+  assert.equal(fs.existsSync(path.resolve(__dirname, '../../../public/recording.js')), false);
+  assert.equal(fs.existsSync(path.resolve(__dirname, '../../../public/track.js')), false);
+});
+
+test('Hygiene 4A: Worker rejects headerless curl POST (missing Origin, Referer, and Sec-Fetch-Site) against registered site host', async () => {
+  const { ctx, flush } = makeCtx();
+  const req = new Request('https://ugokimap-event-ingest.linkth.workers.dev/api/track', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      events: [
+        {
+          site_id: SITE_VALID.site,
+          tenant_id: SITE_VALID.tenant,
+          event_type: 'pageview',
+          url: 'https://www.example.com/',
+        },
+      ],
+    }),
+  });
+  const res = await worker.fetch(req, ENV, ctx);
+  await flush();
+  assert.equal(res.status, 403);
+  const body = await res.json();
+  assert.equal(body.error, 'origin_mismatch');
+});
+
+test('Hygiene 4B: lib/llm/hybrid-query.ts has zero unparameterized pageUrl SQL string literals', () => {
+  const hqSource = fs.readFileSync(path.resolve(__dirname, '../../../lib/llm/hybrid-query.ts'), 'utf8');
+  assert.doesNotMatch(hqSource, /'\$\{params\.pageUrl\}'/, 'params.pageUrl must never be interpolated as a SQL string literal');
 });

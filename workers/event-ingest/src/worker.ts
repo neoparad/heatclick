@@ -160,6 +160,8 @@ function verifyRequestOriginAndHost(
   const allowLocalDev = request.headers.get('x-ugoki-dev-localhost') === '1';
   const originHeader = request.headers.get('origin');
   const refererHeader = request.headers.get('referer');
+  const secFetchSiteHeader = request.headers.get('sec-fetch-site');
+  const xForwardedHost = request.headers.get('x-forwarded-host');
 
   // 1. Origin ヘッダが存在する場合の検証
   if (originHeader) {
@@ -188,13 +190,18 @@ function verifyRequestOriginAndHost(
         detail: `Referer host '${refererHost ?? refererHeader}' does not match registered host '${registeredHost}'`,
       };
     }
+  } else if (!secFetchSiteHeader) {
+    // 3. Origin / Referer / Sec-Fetch-Site のいずれも存在しない非ブラウザ直叩き POST (curl 等) を遮断
+    return {
+      ok: false,
+      reason: 'origin_mismatch',
+      detail: `Missing Origin, Referer, and Sec-Fetch-Site headers against registered host '${registeredHost}'`,
+    };
   }
 
-  // 3. ペイロード内の event.url (または page_url) のホスト検証
-  // Origin または Referer ヘッダが存在する場合（実際のブラウザ送信）に限り、event.url のホストも検証する。
-  // Origin も Referer も存在しないリクエストでは、既存テストハーネス（event() ヘルパーの既定 url）との
-  // 後方互換を維持するため event.url 単独での 403 拒否は行わない。
-  if (originHeader || refererHeader) {
+  // 4. ペイロード内の event.url (または page_url) のホスト検証
+  // Origin または Referer ヘッダが存在する場合、および X-Forwarded-Host 非経由の直接送信時は必ず検証する。
+  if (originHeader || refererHeader || !xForwardedHost) {
     for (const ev of events) {
       const rawEvUrl = typeof ev.url === 'string' && ev.url ? ev.url : (typeof ev.page_url === 'string' ? ev.page_url : '');
       if (!rawEvUrl) continue;

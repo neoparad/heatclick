@@ -1689,7 +1689,7 @@ export async function executeFrustrationQuery(params: {
   // Query 1: events テーブルから dead_click / rage_click + sessions per page
   // timestamp 列使用 (events テーブル)、is_agent=0 で bot 除外
   const eventsGroupBy = params.pageUrl ? '' : 'GROUP BY url'
-  const eventsSelectUrl = params.pageUrl ? `'${params.pageUrl}' AS page_url` : 'url AS page_url'
+  const eventsSelectUrl = params.pageUrl ? '{page_url:String} AS page_url' : 'url AS page_url'
 
   const eventsSql = `
 SELECT
@@ -1713,7 +1713,7 @@ SETTINGS max_execution_time = 30
   // Query 2: behavior_signals テーブルから frustration signals per page
   // created_at 列使用 (behavior_signals テーブル、NOT timestamp)
   const bsGroupBy = params.pageUrl ? '' : 'GROUP BY page_url'
-  const bsSelectUrl = params.pageUrl ? `'${params.pageUrl}' AS page_url` : 'page_url'
+  const bsSelectUrl = params.pageUrl ? '{page_url:String} AS page_url' : 'page_url'
 
   const bsQueryParams: Record<string, string> = { ...eventsQueryParams }
 
@@ -2082,7 +2082,7 @@ export async function executeCtaFunnelQuery(params: {
   // created_at 列使用 (element_visibility_v2 テーブル)
   const visGroupBy = params.pageUrl ? 'element_selector' : 'element_selector, page_url'
   const visSelectUrl = params.pageUrl
-    ? `'${params.pageUrl}' AS page_url, element_selector`
+    ? '{cta_page_url:String} AS page_url, element_selector'
     : 'page_url, element_selector'
 
   const visSql = `
@@ -2106,7 +2106,7 @@ SETTINGS max_execution_time = 30
   // element_selector 列は events テーブルに存在 (ALTER TABLE で追加済)
   const evGroupBy = params.pageUrl ? 'element_selector' : 'element_selector, url'
   const evSelectUrl = params.pageUrl
-    ? `'${params.pageUrl}' AS page_url, element_selector`
+    ? '{cta_page_url:String} AS page_url, element_selector'
     : 'url AS page_url, element_selector'
 
   const evSql = `

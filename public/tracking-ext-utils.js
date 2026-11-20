@@ -28,12 +28,17 @@
     },
 
     sanitizeUrl: (url) => {
-      if (!url) return '';
+      if (!url || typeof url !== 'string') return '';
       try {
-        const u = new URL(url);
-        const sensitive = ['email','mail','token','password','pwd','secret','key','ssn','card'];
-        for (const p of sensitive) { if (u.searchParams.has(p)) u.searchParams.set(p, '[REDACTED]'); }
-        return u.toString();
+        const base = (typeof window !== 'undefined' && window.location && window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'https://placeholder.local';
+        const u = new URL(url, base);
+        const sensitive = new Set(['email','mail','e-mail','token','access_token','auth_token','id_token','reset_token','refresh_token','password','passwd','pwd','secret','api_key','apikey','key','ssn','card','credit_card','tel','phone']);
+        let changed = false;
+        const keys = [];
+        u.searchParams.forEach((_, k) => { if (sensitive.has(String(k).toLowerCase())) keys.push(k); });
+        for (let i = 0; i < keys.length; i++) { u.searchParams.set(keys[i], '[REDACTED]'); changed = true; }
+        if (!changed) return url;
+        return /^https?:\/\//i.test(url) ? u.toString() : (u.pathname + u.search + u.hash);
       } catch { return url; }
     },
 
