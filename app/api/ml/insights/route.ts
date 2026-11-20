@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { requireActiveTenantSite } from '@/lib/aiseo/active-site'
-import { buildPragmaticMlInsightsForUrl } from '@/lib/ml/pragmatic-ml-engine'
+import { buildPragmaticMlInsightsForUrl } from '@/lib/ml/pragmatic-ml-server'
 
 export const dynamic = 'force-dynamic'
 

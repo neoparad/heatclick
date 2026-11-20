@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { recommendSemanticInternalLinks, type InternalLinkCandidatePage, type SemanticLinkRecommendation } from '@/lib/ml/pragmatic-ml-engine'
+import { recommendSemanticInternalLinks, type InternalLinkCandidatePage, type SemanticLinkRecommendation } from '@/lib/ml/semantic-internal-links'
 
 interface HubPage {
   url: string

@@ -1,11 +1,11 @@
 import {
-  buildPragmaticMlInsightsForUrl,
   computeKaplanMeierScrollSurvival,
   computeShapBottleneckAttribution,
   getScenarioUpliftPresets,
   recommendSemanticInternalLinks,
   scoreSessionFrustrationAndUplift,
 } from './pragmatic-ml-engine'
+import { buildPragmaticMlInsightsForUrl } from './pragmatic-ml-server'
 import { validateConditionAst } from '@/lib/scenarios/types'
 
 describe('Pragmatic ML & Statistical Engines (4 High-ROI Engines)', () => {

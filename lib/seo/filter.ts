@@ -1,8 +1,7 @@
 /**
  * Pure filter / aggregation helpers for the SEO Access page (ported from aiseo/web/src/app/seo/access/filter.js).
- * Uses canonical URL normalizer from @/lib/url/normalize-url for consistent pathname & directory extraction.
+ * Browser-safe pathname normalization (avoids importing node:crypto into client bundles).
  */
-import { normalizeUrlFull } from '@/lib/url/normalize-url'
 
 export interface SeoPageRow {
   page: string
@@ -49,14 +48,22 @@ export interface SeoDirRow {
 }
 
 export function pathnameOf(u: string): string {
+  const raw = String(u || '').trim()
+  if (!raw) return ''
   try {
-    return normalizeUrlFull(u).pathname
-  } catch {
-    try {
-      return new URL(u).pathname
-    } catch {
-      return String(u || '')
+    const withScheme = /^https?:\/\//i.test(raw)
+      ? raw
+      : raw.startsWith('/')
+      ? `https://example.invalid${raw}`
+      : `https://${raw}`
+    const parsed = new URL(withScheme)
+    const collapsed = parsed.pathname.replace(/\/{2,}/g, '/')
+    if (collapsed.length > 1 && collapsed.endsWith('/')) {
+      return collapsed.slice(0, -1)
     }
+    return collapsed || '/'
+  } catch {
+    return raw
   }
 }
 

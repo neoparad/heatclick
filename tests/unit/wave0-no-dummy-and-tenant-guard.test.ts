@@ -42,9 +42,11 @@ import { queryClickHouseAiTraffic } from '@/lib/aiseo/ga4-ai-traffic'
 import { loadInternalLinkProposals } from '@/lib/aiseo/internal-link-loader'
 import {
   buildAgentHybridInsights,
+} from '@/lib/heatmap/agent-heatmap-client'
+import {
   fetchAgentBehaviorSummary,
   fetchAgentHeatmapPoints,
-} from '@/lib/heatmap/agent-heatmap-client'
+} from '@/lib/heatmap/agent-heatmap-server'
 import { buildHeatmapViewModel } from '@/lib/heatmap/view-model'
 import { resolveHeatmapDisplayState } from '@/lib/heatmap/display-state'
 import { MOCKUP_VIEW_MODEL } from '@/lib/fixtures/heatmap-mockup'

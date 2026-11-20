@@ -10,10 +10,12 @@ import { NextResponse } from 'next/server'
 import { requireActiveTenantSite } from '@/lib/aiseo/active-site'
 import {
   buildAgentHybridInsights,
-  fetchAgentBehaviorSummary,
-  fetchAgentHeatmapPoints,
   parseAgentSubtype,
 } from '@/lib/heatmap/agent-heatmap-client'
+import {
+  fetchAgentBehaviorSummary,
+  fetchAgentHeatmapPoints,
+} from '@/lib/heatmap/agent-heatmap-server'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
