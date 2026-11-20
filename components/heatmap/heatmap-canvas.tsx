@@ -768,7 +768,17 @@ export function HeatmapCanvas({
                 data-testid="heatmap-empty-state"
                 className="mx-auto mb-3 max-w-md rounded-lg border border-[var(--ug-border)] bg-white/95 px-5 py-4 text-center shadow-sm backdrop-blur"
               >
-                {actor === 'agent' ? (
+                {meta?.data_source === 'not_collected' ? (
+                  <>
+                    <p className="text-sm font-semibold text-[var(--ug-text-1)]">
+                      ヒートマップデータは未収集です (not_collected)
+                    </p>
+                    <p className="mt-1.5 text-xs leading-relaxed text-[var(--ug-text-2)]">
+                      {meta.reason ||
+                        '計測データベースへ接続できないか、対象ページの実測データがまだ収集されていません。見本データは表示しません。'}
+                    </p>
+                  </>
+                ) : actor === 'agent' ? (
                   <>
                     <p className="text-sm font-semibold text-[var(--ug-text-1)]">
                       このURLではブラウザ実行型AIエージェントのDOM操作イベントはまだ記録されていません（HTTPフェッチ型AIクローラはAIアクセス分析・サイトドックのAI意味監査を参照）

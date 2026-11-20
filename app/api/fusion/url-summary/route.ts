@@ -1,10 +1,19 @@
+/**
+ * GET /api/fusion/url-summary
+ *
+ * Wave 0 (束 0-A 止血):
+ *   - ClickHouse クエリに `tenant_id = {tenant_id:String}` を必須バインド。
+ *   - 固定見本データ (`demo-calibrated` / `buildFusionDatasetForUrl`) を本番経路から完全除去。
+ *   - 各平面で未収集のものは `not_collected` とし、全平面未収集時は `status: 'not_collected'` + 空データを返す。
+ */
+
 import { NextRequest, NextResponse } from 'next/server'
 import { requireActiveTenantSite } from '@/lib/aiseo/active-site'
 import { collectorConfigured, collectorGet, rangeQuery } from '@/lib/aiseo/collector'
 import type { UrlStat } from '@/lib/aiseo/risk'
 import { getClickHouseClient } from '@/lib/clickhouse'
 import {
-  buildFusionDatasetForUrl,
+  createEmptyFusionDatasetForUrl,
   diagnoseBehaviorAndStructure,
 } from '@/lib/fusion/behavior-structure'
 
@@ -23,20 +32,21 @@ export async function GET(req: NextRequest) {
   const tenantId = ctx.tenant_id
 
   const sp = req.nextUrl.searchParams
+  const defaultHost = site.canonicalHost || 'link-th.com'
   const rawUrl =
-    sp.get('url') || 'https://link-th.com/entry/internal-link-optimization'
+    sp.get('url') || `https://${defaultHost}/entry/internal-link-optimization`
   const days = Math.min(90, Math.max(7, Number(sp.get('days') || 30)))
 
-  const baseDataset = buildFusionDatasetForUrl(rawUrl, site.siteId)
+  const baseDataset = createEmptyFusionDatasetForUrl(rawUrl, site.siteId, defaultHost)
   const sources: Record<string, string> = {
-    behavior: 'demo-calibrated',
-    structure: 'demo-calibrated',
-    seo: 'demo-calibrated',
-    ai: 'demo-calibrated',
+    behavior: 'not_collected',
+    structure: 'not_collected',
+    seo: 'not_collected',
+    ai: 'not_collected',
   }
 
-  // 1. Optional live ClickHouse enrichment (human behavior & structure tables)
-  if (process.env.CLICKHOUSE_URL && process.env.CLICKHOUSE_PASSWORD && sp.get('mock') !== '1') {
+  // 1. Live ClickHouse enrichment (tenant_id 必須バインド)
+  if (process.env.CLICKHOUSE_URL && process.env.CLICKHOUSE_PASSWORD) {
     try {
       const ch = getClickHouseClient('analytics_reader')
       const res = await ch.query({
@@ -49,11 +59,13 @@ export async function GET(req: NextRequest) {
             countIf(event_type = 'rage_click') AS rage_clicks,
             avgIf(scroll_percentage, scroll_percentage > 0) AS avg_scroll
           FROM clickinsight.events
-          WHERE site_id = {site_id:String}
+          WHERE tenant_id = {tenant_id:String}
+            AND site_id = {site_id:String}
             AND url = {url:String}
             AND timestamp >= now() - INTERVAL {days:UInt32} DAY
         `,
         query_params: {
+          tenant_id: tenantId,
           site_id: site.siteId,
           url: baseDataset.canonicalUrl,
           days,
@@ -81,29 +93,29 @@ export async function GET(req: NextRequest) {
         sources.behavior = 'clickhouse'
       }
     } catch {
-      // Keep calibrated fallback dataset when ClickHouse is unreachable in local/dev
+      // Keep behavior plane as not_collected (no fabricated fallback)
     }
   }
 
-  // 2. Optional live AIreceipt collector enrichment
+  // 2. Live AIreceipt collector enrichment
   const collectorOpts = {
     siteId: site.aireceiptSiteId ?? site.siteId,
     installId: site.aireceiptInstallId ?? undefined,
   }
-  if (collectorConfigured(collectorOpts) && sp.get('mock') !== '1') {
+  if (collectorConfigured(collectorOpts)) {
     try {
       const { q } = rangeQuery(days)
       const aiRes = await collectorGet<{ urls: UrlStat[] }>(
         '/v0/analytics/urls',
         q,
-        collectorOpts
+        collectorOpts,
       )
       if (aiRes && Array.isArray(aiRes.urls)) {
         const match = aiRes.urls.find(
           (u) =>
             u.url &&
             (u.url.includes(baseDataset.urlMatchKey) ||
-              baseDataset.canonicalUrl.endsWith(u.url))
+              baseDataset.canonicalUrl.endsWith(u.url)),
         )
         if (match && Number(match.hits) > 0) {
           baseDataset.ai.totalVisits = Number(match.hits)
@@ -111,14 +123,20 @@ export async function GET(req: NextRequest) {
         }
       }
     } catch {
-      // Keep calibrated fallback dataset
+      // Keep ai plane as not_collected (no fabricated fallback)
     }
   }
 
-  const diagnoses = diagnoseBehaviorAndStructure(baseDataset)
+  const hasAnyLiveSource = Object.values(sources).some((s) => s !== 'not_collected')
+  const status = hasAnyLiveSource ? 'ok' : 'not_collected'
+  const diagnoses = hasAnyLiveSource ? diagnoseBehaviorAndStructure(baseDataset) : []
 
   return NextResponse.json({
     ok: true,
+    status,
+    reason: hasAnyLiveSource
+      ? undefined
+      : 'ClickHouse / LINKTH CRAWL / GSC / AIreceipt の実測データが未収集です (not_collected)',
     tenantId,
     site: {
       siteId: site.siteId,

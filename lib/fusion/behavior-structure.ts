@@ -845,6 +845,7 @@ import {
   getUrlFusionMl,
 } from '@/lib/linkscrawl/client'
 import type {
+  CollectionStatus,
   CvrPredictionResult,
   PerformanceFusionResponse,
   ScrollSurvivalAnalysis,
@@ -853,7 +854,100 @@ import type {
   UrlFusionMlResponse,
 } from '@/lib/linkscrawl/types'
 
+/**
+ * 本番経路用: 実データ未収集 (not_collected) 状態の空4平面データセットを構築する。
+ * 作り物の数値やデモURL・固定セクションを一切含まない。
+ */
+export function createEmptyFusionDatasetForUrl(
+  rawUrl: string,
+  siteId = 'default',
+  defaultHost = 'link-th.com',
+): UrlFusionInput & {
+  siteId: string
+  canonicalUrl: string
+  urlMatchKey: string
+  urlHash16: string
+  availableUrls: Array<{ url: string; label: string; badge: string }>
+} {
+  let normalizedUrl = rawUrl || `https://${defaultHost}/`
+  let urlMatchKey = ''
+  let urlHash16 = ''
+  try {
+    const candidate = normalizedUrl.startsWith('/')
+      ? `https://${defaultHost}${normalizedUrl}`
+      : normalizedUrl
+    const norm = normalizeUrlFull(candidate)
+    normalizedUrl = norm.normalizedUrl
+    urlMatchKey = norm.matchKey
+    urlHash16 = norm.urlHash
+  } catch {
+    const fallback = normalizeUrlFull(`https://${defaultHost}/`)
+    normalizedUrl = fallback.normalizedUrl
+    urlMatchKey = fallback.matchKey
+    urlHash16 = fallback.urlHash
+  }
+
+  return {
+    siteId,
+    url: normalizedUrl,
+    canonicalUrl: normalizedUrl,
+    urlMatchKey,
+    urlHash16,
+    availableUrls: [],
+    behavior: {
+      sessions: 0,
+      pageviews: 0,
+      avgDwellMs: 0,
+      medianDwellMs: 0,
+      avgScrollDepthPct: 0,
+      bounceRate: 0,
+      preRenderExitRate: 0,
+      totalClicks: 0,
+      deadClicks: 0,
+      rageClicks: 0,
+      cvRate: 0,
+    },
+    structure: {
+      title: '',
+      wordCount: 0,
+      inboundLinks: 0,
+      outboundLinks: 0,
+      clickDepth: 0,
+      pageRank: 0,
+      lcpMs: 0,
+      ttfbMs: 0,
+      cls: 0,
+      inpMs: 0,
+      speedScore: 0,
+      totalTransferKb: 0,
+      unoptimizedImagesCount: 0,
+      missingImageDimensionsCount: 0,
+    },
+    gsc: {
+      clicks: 0,
+      impressions: 0,
+      ctr: 0,
+      position: 0,
+      indexVerdict: 'NEUTRAL',
+      coverageState: 'not_collected',
+      topQueries: [],
+    },
+    ai: {
+      totalVisits: 0,
+      searchReferrals: 0,
+      citationFetches: 0,
+      trainingCrawls: 0,
+      topAgents: [],
+    },
+    sections: [],
+    images: [],
+    directoryMatrix: [],
+  }
+}
+
 export interface EnrichedFusionIntelligence {
+  status: CollectionStatus
+  reason?: string
   siteId: string
   canonicalUrl: string
   urlMatchKey: string
@@ -868,28 +962,42 @@ export interface EnrichedFusionIntelligence {
 }
 
 /**
- * URLに対する4平面行動×構造診断に加えて、LINKTH CRAWL v1 の418項目監査・
- * 7本柱 Teacher Verdict・Kaplan-Meier スクロール生存曲線・80+特徴量 CVR予測を一括結合する。
+ * URLに対する4平面行動×構造診断と LINKTH CRAWL 監査を結合する。
+ * Wave 0 (束 0-A 止血): 実測データ未収集時は見本データを生成せず `status: 'not_collected'` を返す。
  */
 export async function buildEnrichedFusionIntelligenceForUrl(params: {
   url: string
   siteId?: string
+  observedDataset?: UrlFusionInput
 }): Promise<EnrichedFusionIntelligence> {
   const siteId = params.siteId || 'default'
-  const baseDataset = buildFusionDatasetForUrl(params.url, siteId)
-  const crossDiagnoses = diagnoseBehaviorAndStructure(baseDataset)
+  const emptyBase = createEmptyFusionDatasetForUrl(params.url, siteId)
 
   const [siteDoc418, performance90, urlFusionMl] = await Promise.all([
-    getSiteDocAudit({ siteId, url: baseDataset.canonicalUrl }),
-    getPerformanceFusion({ siteId, url: baseDataset.canonicalUrl }),
-    getUrlFusionMl({ siteId, url: baseDataset.canonicalUrl }),
+    getSiteDocAudit({ siteId, url: emptyBase.canonicalUrl }),
+    getPerformanceFusion({ siteId, url: emptyBase.canonicalUrl }),
+    getUrlFusionMl({ siteId, url: emptyBase.canonicalUrl }),
   ])
 
+  const hasLiveData =
+    Boolean(params.observedDataset) ||
+    siteDoc418.source === 'live' ||
+    performance90.source === 'live' ||
+    urlFusionMl.source === 'live'
+
+  const crossDiagnoses = params.observedDataset
+    ? diagnoseBehaviorAndStructure(params.observedDataset)
+    : []
+
   return {
+    status: hasLiveData ? 'ok' : 'not_collected',
+    reason: hasLiveData
+      ? undefined
+      : '行動・構造・LINKTH CRAWL の実測データが未収集です (not_collected)',
     siteId,
-    canonicalUrl: baseDataset.canonicalUrl,
-    urlMatchKey: baseDataset.urlMatchKey,
-    urlHash16: baseDataset.urlHash16,
+    canonicalUrl: emptyBase.canonicalUrl,
+    urlMatchKey: emptyBase.urlMatchKey,
+    urlHash16: emptyBase.urlHash16,
     crossDiagnoses,
     siteDoc418,
     performance90,

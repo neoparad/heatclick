@@ -69,23 +69,27 @@ export async function POST(req: NextRequest) {
 
   const aiTrafficResult = await queryClickHouseAiTraffic({
     clickhouse: ch,
+    tenantId: ctx.tenant_id,
     siteId: site.siteId,
     host: defaultHost,
     days: 30,
   })
-  const topAiRow = aiTrafficResult.report.bySource[0]
+  const topAiRow = aiTrafficResult.report.bySource.find((r) => r.sessions > 0)
 
   const engineResult = await runFusionAnswerEngine({
     siteId: site.siteId,
     url: targetUrl,
     message,
-    aiTrafficContext: {
-      totalAiSessions: aiTrafficResult.report.totalAiSessions,
-      totalAiConversions: aiTrafficResult.report.totalAiConversions,
-      aiCvr: aiTrafficResult.report.aiCvr,
-      organicCvrMultiplier: aiTrafficResult.report.aiVsOrganicCvrMultiplier,
-      topSource: topAiRow?.source || 'ChatGPT',
-    },
+    aiTrafficContext:
+      aiTrafficResult.source === 'live'
+        ? {
+            totalAiSessions: aiTrafficResult.report.totalAiSessions,
+            totalAiConversions: aiTrafficResult.report.totalAiConversions,
+            aiCvr: aiTrafficResult.report.aiCvr,
+            organicCvrMultiplier: aiTrafficResult.report.aiVsOrganicCvrMultiplier,
+            topSource: topAiRow?.source || '',
+          }
+        : undefined,
   })
 
   return NextResponse.json({

@@ -58,6 +58,8 @@ export type EvidenceLevel = z.infer<typeof EvidenceLevelSchema>
  * loader 戻り型: proposals + meta (生成時刻 / source path / Evidence Level)
  */
 export interface InternalLinkProposalsBatch {
+  status?: 'ok' | 'not_collected' | 'insufficient_data'
+  reason?: string
   tenant_id: string
   site_id: string
   proposals: InternalLinkProposal[]

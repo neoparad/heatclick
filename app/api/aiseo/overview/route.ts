@@ -32,13 +32,12 @@ export async function GET(req: NextRequest) {
   const days = Math.min(90, Math.max(7, Number(sp.get('days') || 30)))
 
   const ch =
-    process.env.CLICKHOUSE_URL &&
-    process.env.CLICKHOUSE_PASSWORD &&
-    sp.get('mock') !== '1'
+    process.env.CLICKHOUSE_URL && process.env.CLICKHOUSE_PASSWORD
       ? getClickHouseClient('analytics_reader')
       : null
 
   const overview = await getAiseoOverview({
+    tenantId: ctx.tenant_id,
     siteId: site.siteId,
     url: rawUrl,
     host: defaultHost,

@@ -1,11 +1,13 @@
+import type { ClickHouseClient } from '@clickhouse/client'
 import {
   aggregateAiTrafficRows,
   classifyAiTrafficSource,
   getAiseoOverview,
+  queryClickHouseAiTraffic,
   type RawTrafficEventRow,
 } from './ga4-ai-traffic'
 
-describe('lib/aiseo/ga4-ai-traffic (GA4 AI Referral Traffic × AIO Citation Diff × 16-Item Semantic Audit)', () => {
+describe('lib/aiseo/ga4-ai-traffic (AI Referral Traffic × AIO Citation Diff × Semantic Audit)', () => {
   it('accurately classifies ChatGPT, Perplexity, Gemini, Claude, Microsoft Copilot, Google AI Overview / SGE, and Organic Search', () => {
     expect(
       classifyAiTrafficSource({ referrer: 'https://chatgpt.com/c/1234' }).aiSource,
@@ -41,7 +43,7 @@ describe('lib/aiseo/ga4-ai-traffic (GA4 AI Referral Traffic × AIO Citation Diff
     ).toBe('organic_search')
   })
 
-  it('aggregates AI source sessions and computes CVR multiplier vs. human organic search', () => {
+  it('aggregates AI source sessions and computes CVR multiplier vs. human organic search without fabricating unmeasured fields', () => {
     const sampleRows: RawTrafficEventRow[] = [
       {
         url: 'https://example.com/entry/a',
@@ -75,35 +77,71 @@ describe('lib/aiseo/ga4-ai-traffic (GA4 AI Referral Traffic × AIO Citation Diff
     expect(activeSources.length).toBeGreaterThanOrEqual(2)
     expect(result.bySource[0].source).toBe('ChatGPT')
     expect(result.bySource[0].sessions).toBe(200)
+    // Unmeasured fields must remain null rather than fabricated from index
+    expect(result.topLandingUrls[0].semanticScore).toBeNull()
+    expect(result.topLandingUrls[0].aioCitedCount).toBeNull()
   })
 
-  it('builds complete AiseoOverviewResponse joining GA4 AI traffic, AIO citation diff, and 16-item semantic audit', async () => {
+  it('binds tenant_id in ClickHouse SQL and fails closed to not_collected when tenantId is missing', async () => {
+    const queryMock = jest.fn().mockResolvedValue({
+      json: async () => [
+        {
+          url: 'https://example.com/entry/a',
+          referrer: 'https://chatgpt.com/',
+          sessions: 12,
+          conversions: 2,
+        },
+      ],
+    })
+    const fakeCh = { query: queryMock } as unknown as ClickHouseClient
+
+    const blocked = await queryClickHouseAiTraffic({
+      clickhouse: fakeCh,
+      siteId: 'site-1',
+      days: 30,
+    })
+    expect(blocked.status).toBe('not_collected')
+    expect(blocked.source).toBe('not_collected')
+    expect(queryMock).not.toHaveBeenCalled()
+
+    const live = await queryClickHouseAiTraffic({
+      clickhouse: fakeCh,
+      tenantId: 'tenant-alpha',
+      siteId: 'site-1',
+      days: 30,
+    })
+    expect(live.status).toBe('ok')
+    expect(live.source).toBe('live')
+    expect(live.report.totalAiSessions).toBe(12)
+    expect(queryMock).toHaveBeenCalledTimes(1)
+    const callArg = queryMock.mock.calls[0][0] as {
+      query: string
+      query_params: Record<string, unknown>
+    }
+    expect(callArg.query).toContain('tenant_id = {tenant_id:String}')
+    expect(callArg.query_params.tenant_id).toBe('tenant-alpha')
+  })
+
+  it('returns not_collected with zeroed metrics (no synthesized AI traffic rows) when ClickHouse and LINKTH CRAWL are unavailable', async () => {
     const report = await getAiseoOverview({
+      tenantId: 'tenant-1',
       siteId: 'site-1',
       host: 'link-th.com',
       url: 'https://link-th.com/entry/internal-link-optimization',
       days: 30,
     })
 
+    expect(report.status).toBe('not_collected')
+    expect(report.source).toBe('not_collected')
+    expect(report.reason).toBeTruthy()
     expect(report.siteId).toBe('site-1')
-    expect(report.aiTraffic.totalAiSessions).toBeGreaterThan(0)
-    expect(report.aiTraffic.aiCvr).toBeGreaterThan(report.aiTraffic.organicSearchCvr)
-    expect(report.aiTraffic.aiVsOrganicCvrMultiplier).toBeGreaterThan(1.5)
-
-    // AI sources include ChatGPT, Perplexity, Gemini, Claude, Microsoft Copilot, Google AI Overview / SGE
-    const sources = report.aiTraffic.bySource.map((s) => s.source)
-    expect(sources).toContain('ChatGPT')
-    expect(sources).toContain('Perplexity')
-    expect(sources).toContain('Gemini')
-    expect(sources).toContain('Claude')
-    expect(sources).toContain('Microsoft Copilot')
-    expect(sources).toContain('Google AI Overview / SGE')
-
-    // Top landing URLs & AIO citation diff & 16-item semantic audit
-    expect(report.aiTraffic.topLandingUrls.length).toBeGreaterThanOrEqual(3)
-    expect(report.aioCitationDiff.diffs.length).toBeGreaterThanOrEqual(2)
-    expect(report.aioCitationDiff.competitorGapCount).toBeGreaterThanOrEqual(1)
-    expect(report.semanticAudit.items).toHaveLength(16)
-    expect(report.confidence.level).toBe('confirmed')
+    expect(report.aiTraffic.totalAiSessions).toBe(0)
+    expect(report.aiTraffic.totalAiConversions).toBe(0)
+    expect(report.aiTraffic.organicSearchSessions).toBe(0)
+    expect(report.aiTraffic.topLandingUrls).toEqual([])
+    expect(report.aioCitationDiff.diffs).toEqual([])
+    expect(report.aioCitationDiff.competitorGapCount).toBe(0)
+    expect(report.semanticAudit.items).toEqual([])
+    expect(report.confidence.level).toBe('insufficient')
   })
 })

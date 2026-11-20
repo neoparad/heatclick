@@ -1,7 +1,14 @@
+/**
+ * GET /api/seo/sitemap — GSC URL Inspection キャッシュ読み取り
+ *
+ * Wave 0 (束 0-A 止血):
+ *   - DB 未接続・target 未登録・エラー時のモック返却 (`generateSitemapMock`) を完全廃止。
+ *   - 未収集時は `status: 'not_collected'`, `source: 'not_collected'` + 空データを返す。
+ */
+
 import { NextRequest, NextResponse } from 'next/server'
 import { requireActiveTenantSite } from '@/lib/aiseo/active-site'
 import { authQuery, isAuthDbConfigured } from '@/lib/db/postgres'
-import { generateSitemapMock } from '@/lib/seo/mock'
 
 export const dynamic = 'force-dynamic'
 
@@ -22,6 +29,31 @@ const LABEL_MAP: Record<string, [string, string]> = {
   'URL is unknown to Google': ['Google に認識されていない URL', '内部リンク追加・インデックス登録リクエスト'],
 }
 
+function buildNotCollectedSitemap(
+  siteLabel: string,
+  sitemapUrl: string,
+  reason: string,
+) {
+  return {
+    status: 'not_collected' as const,
+    reason,
+    source: 'not_collected' as const,
+    site: siteLabel,
+    summary: {
+      sitemapUrl,
+      sitemapSubmitted: 0,
+      inspectedTotal: 0,
+      indexed: 0,
+      excluded: 0,
+      errors: 0,
+      lastFetched: null as string | null,
+    },
+    breakdown: [],
+    dailyCoverage: [],
+    pages: [],
+  }
+}
+
 export async function GET(req: NextRequest) {
   let active
   try {
@@ -33,10 +65,17 @@ export async function GET(req: NextRequest) {
   }
   const { ctx, site } = active
   const tenantId = ctx.tenant_id
+  const siteLabel = site.gscProperty || site.canonicalHost || site.siteId
+  const sitemapUrl = site.gscSitemapUrl || ''
 
-  const sp = req.nextUrl.searchParams
-  if (!isAuthDbConfigured() || sp.get('mock') === '1') {
-    return NextResponse.json(generateSitemapMock())
+  if (!isAuthDbConfigured()) {
+    return NextResponse.json(
+      buildNotCollectedSitemap(
+        siteLabel,
+        sitemapUrl,
+        'Auth/GSC DB が未設定のためサイトマップ検査データは未収集です (not_collected)',
+      ),
+    )
   }
 
   try {
@@ -51,13 +90,16 @@ export async function GET(req: NextRequest) {
         WHERE tenant_id = $1 AND site_id = $2
         ORDER BY created_at ASC
         LIMIT 1`,
-      [tenantId, site.siteId]
+      [tenantId, site.siteId],
     )
 
     if (targets.length === 0) {
       return NextResponse.json({
-        ...generateSitemapMock(),
-        source: 'mock-no-target',
+        ...buildNotCollectedSitemap(
+          siteLabel,
+          sitemapUrl,
+          'gsc_targets 未登録のため未収集です。/api/seo/sitemap/inspect を先に実行してください (not_collected)',
+        ),
         note: 'No gsc_targets row yet; run /api/seo/sitemap/inspect first.',
       })
     }
@@ -87,7 +129,7 @@ export async function GET(req: NextRequest) {
           WHERE tenant_id = $1 AND target_id = $2
           ORDER BY inspected_at DESC
           LIMIT 5000`,
-        [tenantId, target.id]
+        [tenantId, target.id],
       ),
       authQuery<{
         day: string
@@ -103,7 +145,7 @@ export async function GET(req: NextRequest) {
           WHERE tenant_id = $1 AND target_id = $2
           ORDER BY day ASC
           LIMIT 90`,
-        [tenantId, target.id]
+        [tenantId, target.id],
       ),
     ])
 
@@ -171,6 +213,7 @@ export async function GET(req: NextRequest) {
     })
 
     return NextResponse.json({
+      status: 'ok',
       source: 'postgres',
       site: target.property,
       summary: {
@@ -187,10 +230,14 @@ export async function GET(req: NextRequest) {
       pages,
     })
   } catch (err) {
+    const errMsg = (err as Error)?.message || String(err)
     return NextResponse.json({
-      ...generateSitemapMock(),
-      source: 'mock-fallback',
-      error: (err as Error)?.message || String(err),
+      ...buildNotCollectedSitemap(
+        siteLabel,
+        sitemapUrl,
+        `GSC サイトマップ検査データ取得失敗のため未収集です (not_collected): ${errMsg}`,
+      ),
+      error: errMsg,
     })
   }
 }

@@ -1,13 +1,15 @@
 /**
  * GET /api/visit-risk — collector の観測からリスクフラグを導出して返す。
- * 未接続時は 200 (source: "mock") を返し、フロント側で一貫して表示可能にする。
+ *
+ * Wave 0 (束 0-A 止血):
+ *   - collector 未接続時のモック返却 (`generateMockVisitRisk`) を完全廃止。
+ *   - 未設定時は `status: 'not_collected'`, `source: 'not_collected'` と空データを返す。
  */
 
 import { NextResponse } from 'next/server'
 import { requireActiveTenantSite } from '@/lib/aiseo/active-site'
 import { collectorConfigured, collectorGet, rangeQuery } from '@/lib/aiseo/collector'
 import { deriveRisk, type AgentStat, type ObsEvent, type UrlStat } from '@/lib/aiseo/risk'
-import { generateMockVisitRisk } from '@/lib/aiseo/mock'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -23,18 +25,35 @@ export async function GET(request: Request) {
   }
 
   const { site } = active
+  const days = Number(new URL(request.url).searchParams.get('days')) || 30
+  const { from, to, q } = rangeQuery(days)
   const collectorOpts = {
     siteId: site.aireceiptSiteId ?? undefined,
     installId: site.aireceiptInstallId ?? undefined,
   }
 
   if (!collectorConfigured(collectorOpts)) {
-    return NextResponse.json(generateMockVisitRisk(`${site.siteName} (mock)`))
+    return NextResponse.json({
+      status: 'not_collected',
+      reason: 'AIreceipt collector が未設定のためリスク観測データは未収集です (not_collected)',
+      updatedAt: new Date().toISOString(),
+      site_label: site.siteName,
+      source: 'not_collected',
+      range: { from, to },
+      summary: {
+        total_hits: 0,
+        unknown_hits: 0,
+        spoof_count: 0,
+        overcollection_count: 0,
+        robots_count: 0,
+      },
+      flags: [],
+      agents: [],
+      unknown_events: [],
+    })
   }
 
   try {
-    const days = Number(new URL(request.url).searchParams.get('days')) || 30
-    const { from, to, q } = rangeQuery(days)
     const [urls, agents, events] = await Promise.all([
       collectorGet<{ urls?: UrlStat[] }>('/v0/analytics/urls', q, collectorOpts),
       collectorGet<{ site_label?: string; agents?: AgentStat[] }>(
@@ -51,6 +70,7 @@ export async function GET(request: Request) {
     const { summary, flags } = deriveRisk(agents.agents || [], urls.urls || [])
     const unknown_events = (events.events || []).filter((e) => e.category === 'unknown')
     return NextResponse.json({
+      status: 'ok',
       updatedAt: new Date().toISOString(),
       site_label: agents.site_label || site.siteName,
       source: 'live',

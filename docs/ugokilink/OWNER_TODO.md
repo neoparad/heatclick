@@ -58,3 +58,7 @@
 ### 波 0-B / 0-C / 1-B 追加タスク
 - [ ] **[0-C 実行コマンド] 本番記録スクリプトの実行**: `node scripts/link/inspect-prod-baseline.mjs --dry-run` で事前確認後、`CLICKHOUSE_URL=... CLICKHOUSE_RO_USERNAME=... CLICKHOUSE_RO_PASSWORD=... node scripts/link/inspect-prod-baseline.mjs --out baseline-prod-2026-11-20.json` を許可ネットワークから実行しオフライン保管。
 - [ ] **[0-B ハードニング] `/api/experiments/pool` の cron 認証統一**: 他の `/api/cron/*` と同様に `lib/cron-auth.ts` 必須化および `middleware.ts` exact-match 化を検討。
+
+### 波 0-A 追加タスク
+- [ ] **[0-A 環境変数整理] 旧ダミー切替 env 削除**: Vercel 上に `HEATMAP_DUMMY_ONLY` / `CV_JOURNEY_DUMMY_ONLY` / `LINKSCRAWL_FORCE_FALLBACK` が残っていれば削除し、本番接続先（`CLICKHOUSE_*`, `LINKSCRAWL_API_URL`, `AIRECEIPT_*`, `GSC_SA_KEY_JSON`）を確認する。
+- [ ] **[0-A DB確認] `clickinsight.ai_crawler_logs` の `tenant_id` 列確認**: 手順 0-C 本番 DDL 採取で `ai_crawler_logs` の存在および `tenant_id` 列有無を確認する。

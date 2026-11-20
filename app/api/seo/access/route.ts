@@ -1,7 +1,14 @@
+/**
+ * GET /api/seo/access — Google Search Console Search Analytics
+ *
+ * Wave 0 (束 0-A 止血):
+ *   - GSC 未設定・エラー時のモック返却 (`generateSeoAccessMock`) および `?mock=1` バイパスを完全廃止。
+ *   - 未設定・取得失敗時は `status: 'not_collected'`, `source: 'not_collected'` + 空データを返す。
+ */
+
 import { NextRequest, NextResponse } from 'next/server'
 import { requireActiveTenantSite } from '@/lib/aiseo/active-site'
 import { dateStr, isGscConfigured, querySearchAnalytics, type GscRow } from '@/lib/seo/gsc'
-import { generateSeoAccessMock } from '@/lib/seo/mock'
 
 export const dynamic = 'force-dynamic'
 
@@ -24,6 +31,37 @@ function sumTotals(rows: GscRow[]) {
   return { clicks, impressions, ctr, position }
 }
 
+function buildNotCollectedSeoAccess(
+  gscSite: string,
+  startDate: string,
+  endDate: string,
+  days: number,
+  reason: string,
+) {
+  return {
+    status: 'not_collected' as const,
+    reason,
+    source: 'not_collected' as const,
+    site: gscSite,
+    range: { startDate, endDate, days },
+    totals: {
+      clicks: 0,
+      impressions: 0,
+      ctr: 0,
+      position: 0,
+      clicksDelta: null,
+      impressionsDelta: null,
+      ctrDelta: null,
+      positionDelta: null,
+    },
+    daily: [],
+    queries: [],
+    pages: [],
+    pairs: [],
+    devices: [],
+  }
+}
+
 export async function GET(req: NextRequest) {
   let active
   try {
@@ -42,15 +80,23 @@ export async function GET(req: NextRequest) {
     process.env.GSC_SITE_URL ||
     `sc-domain:${site.canonicalHost || 'link-th.com'}`
 
-  if (!isGscConfigured() || sp.get('mock') === '1') {
-    return NextResponse.json(generateSeoAccessMock(days, gscSite))
-  }
-
   // GSC data has ~2-3 day lag; shift window back 3 days.
   const endDate = dateStr(3)
   const startDate = dateStr(3 + days - 1)
   const prevEnd = dateStr(3 + days)
   const prevStart = dateStr(3 + days * 2 - 1)
+
+  if (!isGscConfigured()) {
+    return NextResponse.json(
+      buildNotCollectedSeoAccess(
+        gscSite,
+        startDate,
+        endDate,
+        days,
+        'Google Search Console 認証情報が未設定のため検索データは未収集です (not_collected)',
+      ),
+    )
+  }
 
   try {
     const [dailyRows, prevDailyRows, queryRows, prevQueryRows, pageRows, prevPageRows, pairRows, deviceRows] =
@@ -149,6 +195,7 @@ export async function GET(req: NextRequest) {
     }))
 
     return NextResponse.json({
+      status: 'ok',
       source: 'gsc',
       site: gscSite,
       range: { startDate, endDate, days },
@@ -166,11 +213,16 @@ export async function GET(req: NextRequest) {
       devices,
     })
   } catch (err) {
-    const fallback = generateSeoAccessMock(days, gscSite)
+    const errMsg = (err as Error)?.message || String(err)
     return NextResponse.json({
-      ...fallback,
-      source: 'mock-fallback',
-      error: (err as Error)?.message || String(err),
+      ...buildNotCollectedSeoAccess(
+        gscSite,
+        startDate,
+        endDate,
+        days,
+        `GSC Search Analytics 取得失敗のため未収集です (not_collected): ${errMsg}`,
+      ),
+      error: errMsg,
     })
   }
 }

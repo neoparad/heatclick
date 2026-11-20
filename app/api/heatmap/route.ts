@@ -5,9 +5,9 @@
  *
  * 続 82 Sprint 4 W1 Phase 2 (Frontend, Infra 続 82 配備完了 unblock):
  *   - default: 実 ClickHouse query (`fetchRealHeatmapPoints`)
- *   - ClickHouse 接続不可 / column 不在 / timeout 時は dummy LCG に自動 fallback
+ *   - ClickHouse 接続不可 / column 不在 / timeout 時はダミー退避せず status: 'not_collected' を返す (Wave 0 止血)
  *   - 緊急 rollback: env `HEATMAP_DUMMY_ONLY='1'` で常時 dummy mode
- *   - meta.data_source ('clickhouse_events' | 'dummy_lcg') を UI 側が banner 表示判定に使用
+ *   - meta.data_source ('clickhouse_events' | 'not_collected') を UI 側が表示判定に使用
  *   - cursor / HMAC 契約は不変、Frontend hook / UI は無変更
  *
  * Failure modes (production verification は GTM 上流解消後、続 82 Infra §6 root cause):
@@ -126,13 +126,7 @@ function tenantHasSite(headerSiteIds: string | null, siteId: string): boolean {
   return headerSiteIds.split(',').map((s) => s.trim()).includes(siteId)
 }
 
-/**
- * 続 82 Phase 2: 実 query が default。緊急 rollback (Hetzner CH 障害 / 全 query 崩壊時)
- * のためだけに `HEATMAP_DUMMY_ONLY=1` で常時 dummy mode に強制切替可能。
- */
-function isDummyOnly(): boolean {
-  return process.env.HEATMAP_DUMMY_ONLY === '1'
-}
+// Wave 0 (束 0-A 止血): 本番経路での dummy_lcg / HEATMAP_DUMMY_ONLY 退避を完全廃止
 
 // ── P0 計測 (docs/heatmap/SONNET_PROMPT_P0_instrumentation_2026-07-19.md §3) ──
 // 挙動変更ゼロ (絶対条件1): 以下 3 helper は計測専用で、レスポンス body/status を
@@ -260,7 +254,7 @@ export async function GET(request: Request) {
   //    新: per-band top-500 を LIMIT BY で 1 クエリに集約 → tiles[] を全 band 分返し
   //    next_cursor=null (hook の eager loop は 1 周で完了)。失敗時は従来の per-band 経路へ
   //    fall-through (dummy fallback 含む契約は不変)。cursor 継続リクエストも従来経路のまま。
-  if (isPxLayer && yStart === 0 && !isDummyOnly()) {
+  if (isPxLayer && yStart === 0) {
     try {
       const allPoints = await t.span('ch', async () =>
         fetchRealHeatmapPoints({
@@ -290,6 +284,7 @@ export async function GET(request: Request) {
         t,
         {
           success: true,
+          status: 'ok' as const,
           data: {
             tiles,
             next_cursor: null,
@@ -301,6 +296,7 @@ export async function GET(request: Request) {
             cache_ttl_sec: 7200,
             query_hash: queryHash,
             data_source: 'clickhouse_events' as const,
+            status: 'ok' as const,
             heatmap_type: params.heatmap_type,
             actor: params.actor,
           },
@@ -312,7 +308,7 @@ export async function GET(request: Request) {
       console.error(
         `[heatmap] all-bands query failed query_hash=${queryHash.slice(0, 8)}, falling back to per-band path: ${message}`,
       )
-      // fall through: 従来の per-band (dummy fallback 含む) 経路
+      // fall through: per-band path (失敗時は not_collected、ダミー退避なし)
     }
   }
 
@@ -321,44 +317,41 @@ export async function GET(request: Request) {
     : Math.min(yStart + params.tile_size, PAGE_HEIGHT_ESTIMATE + params.tile_size)
   const isLast = isSingleTileLayer || tileEnd >= PAGE_HEIGHT_ESTIMATE
 
-  // 続 82 Phase 2: default = 実 ClickHouse query。失敗時のみ dummy fallback。
-  // 緊急 rollback は HEATMAP_DUMMY_ONLY=1 で常時 dummy mode。
+  // Wave 0 (束 0-A 止血): ClickHouse 失敗・未接続時はダミー退避せず status: 'not_collected' を返す。
   let points: Array<{ x: number; y: number; count: number; sessions: number }>
-  let dataSource: 'dummy_lcg' | 'clickhouse_events'
+  let dataSource: 'clickhouse_events' | 'not_collected'
+  let notCollectedReason: string | undefined
 
-  if (isDummyOnly()) {
-    points = generateDummyPoints(params.site_id, params.page_url, yStart, tileEnd, params.heatmap_type)
-    dataSource = 'dummy_lcg'
-  } else {
-    try {
-      points = await t.span('ch-fallback', async () =>
-        fetchRealHeatmapPoints({
-          tenantId,
-          siteId: params.site_id,
-          pageUrl: params.page_url,
-          heatmapType: params.heatmap_type,
-          deviceType: params.device_type,
-          segment: params.segment,
-          actor: params.actor,
-          agentSubtype: params.agent_subtype,
-          yStart,
-          yEnd: tileEnd,
-          startDate: params.start_date,
-          endDate: params.end_date,
-          perfRoute: 'heatmap',
-          perfSpan: 'ch-fallback',
-          perfReqId: reqId,
-        }),
-      )
-      dataSource = 'clickhouse_events'
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'unknown'
-      console.error(
-        `[heatmap] real query failed query_hash=${queryHash.slice(0, 8)}, fallback to dummy: ${message}`,
-      )
-      points = generateDummyPoints(params.site_id, params.page_url, yStart, tileEnd, params.heatmap_type)
-      dataSource = 'dummy_lcg'
-    }
+  try {
+    points = await t.span('ch-fallback', async () =>
+      fetchRealHeatmapPoints({
+        tenantId,
+        siteId: params.site_id,
+        pageUrl: params.page_url,
+        heatmapType: params.heatmap_type,
+        deviceType: params.device_type,
+        segment: params.segment,
+        actor: params.actor,
+        agentSubtype: params.agent_subtype,
+        yStart,
+        yEnd: tileEnd,
+        startDate: params.start_date,
+        endDate: params.end_date,
+        perfRoute: 'heatmap',
+        perfSpan: 'ch-fallback',
+        perfReqId: reqId,
+      }),
+    )
+    dataSource = 'clickhouse_events'
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'unknown'
+    console.error(
+      `[heatmap] real query failed query_hash=${queryHash.slice(0, 8)}, returning not_collected: ${message}`,
+    )
+    points = []
+    dataSource = 'not_collected'
+    notCollectedReason =
+      'ClickHouse クエリ取得不可のためヒートマップデータは未収集です (not_collected)'
   }
 
   const tile = {
@@ -368,18 +361,22 @@ export async function GET(request: Request) {
     truncated: false,
   }
 
-  const next_cursor = isLast
-    ? null
-    : encodeCursor({
-        y_start: tileEnd,
-        query_hash: queryHash,
-        exp: Math.floor(Date.now() / 1000) + 600,
-      })
+  const status = dataSource === 'clickhouse_events' ? ('ok' as const) : ('not_collected' as const)
+  const next_cursor =
+    isLast || dataSource === 'not_collected'
+      ? null
+      : encodeCursor({
+          y_start: tileEnd,
+          query_hash: queryHash,
+          exp: Math.floor(Date.now() / 1000) + 600,
+        })
 
   return jsonWithTiming(
     t,
     {
       success: true,
+      status,
+      ...(notCollectedReason ? { reason: notCollectedReason } : {}),
       data: {
         tiles: [tile],
         next_cursor,
@@ -388,16 +385,18 @@ export async function GET(request: Request) {
         tile_size: params.tile_size,
         page_height_estimate: PAGE_HEIGHT_ESTIMATE,
         cached: false,
-        cache_ttl_sec: 7200,
+        cache_ttl_sec: dataSource === 'clickhouse_events' ? 7200 : 0,
         query_hash: queryHash,
         data_source: dataSource,
+        status,
+        ...(notCollectedReason ? { reason: notCollectedReason } : {}),
         heatmap_type: params.heatmap_type,
         actor: params.actor,
       },
     },
     dataSource === 'clickhouse_events'
       ? { headers: { 'Cache-Control': 'private, max-age=60' } }
-      : {},
+      : { headers: { 'Cache-Control': 'no-store' } },
   )
 }
 
@@ -658,33 +657,4 @@ async function fetchRealHeatmapPoints(input: {
     sessions: number
   }>
   return rows
-}
-
-function generateDummyPoints(
-  siteId: string,
-  pageUrl: string,
-  yStart: number,
-  yEnd: number,
-  layer: string,
-): Array<{ x: number; y: number; count: number; sessions: number }> {
-  let seed = 0
-  for (const s of [siteId, pageUrl, layer, String(yStart)].join('|')) {
-    seed = (seed * 31 + s.charCodeAt(0)) | 0
-  }
-  function rand(): number {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff
-    return seed / 0x7fffffff
-  }
-
-  const tileHeight = yEnd - yStart
-  // 20 - 40 hotspots per tile
-  const count = 20 + Math.floor(rand() * 20)
-  const points: Array<{ x: number; y: number; count: number; sessions: number }> = []
-  for (let i = 0; i < count; i++) {
-    const x = Math.floor(rand() * 1280)
-    const y = yStart + Math.floor(rand() * tileHeight)
-    const c = 3 + Math.floor(rand() * 60)
-    points.push({ x, y, count: c, sessions: Math.max(1, Math.floor(c * 0.6)) })
-  }
-  return points
 }

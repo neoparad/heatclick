@@ -173,70 +173,8 @@ function buildAiAttentionBands(input: {
     })
   }
 
-  // 2) ClickHouse の is_agent=1 イベントや page_content_sections が少ないページでも、
-  //    要素シグナル・画像alt・構造issueから「AIエージェントの到達・抽出ホットスポット帯」を導出
-  const bands: AiAttentionBandDto[] = []
-  const hasA11yIssue = input.issueRows.some(
-    (r) => r.issue_category.toLowerCase().includes('a11y') || r.issue_type.toLowerCase().includes('alt'),
-  )
-
-  const defaultBlueprint = [
-    {
-      id: 'ai-band-hero',
-      label: 'ファーストビュー・主題定義 (H1 / Lead)',
-      headingTag: 'H1',
-      yStartPct: 0,
-      yEndPct: 20,
-      baseScore: 0.92,
-      note: 'AIエージェント最優先抽出ゾーン (タイトル・要約・構造化データ)',
-    },
-    {
-      id: 'ai-band-spec',
-      label: '主要比較・仕様セクション (H2 / Table・List)',
-      headingTag: 'H2',
-      yStartPct: 20,
-      yEndPct: 50,
-      baseScore: 0.84,
-      note: '構造化リスト・比較要素のAI引用ホットスポット',
-    },
-    {
-      id: 'ai-band-proof',
-      label: '根拠・レビュー・FAQ構造 (H2 /H3)',
-      headingTag: 'H2',
-      yStartPct: 50,
-      yEndPct: 80,
-      baseScore: hasA11yIssue ? 0.58 : 0.76,
-      note: hasA11yIssue
-        ? '画像alt欠落・構造issueによりAI抽出効率が低下 (改善推奨)'
-        : 'FAQ・ユーザー評価のセマンティック抽出帯',
-    },
-    {
-      id: 'ai-band-cta',
-      label: 'アクション・フッターナビゲーション帯',
-      headingTag: 'NAV',
-      yStartPct: 80,
-      yEndPct: 100,
-      baseScore: 0.64,
-      note: 'ブラウザ実行型AIエージェントの遷移・CTA探索ゾーン',
-    },
-  ]
-
-  for (const bp of defaultBlueprint) {
-    bands.push({
-      id: bp.id,
-      label: bp.label,
-      headingTag: bp.headingTag,
-      yStartPct: bp.yStartPct,
-      yEndPct: bp.yEndPct,
-      yPx: null,
-      extractabilityScore: bp.baseScore,
-      confidence: input.elementRows.length > 0 || input.issueRows.length > 0 ? 0.78 : 0.65,
-      evidenceLevel: 'inferred',
-      note: bp.note,
-    })
-  }
-
-  return bands
+  // 2) Wave 0 (束 0-A 止血): page_content_sections が未収集/空のときに固定帯を合成しない
+  return []
 }
 
 // ── P0 計測 (docs/heatmap/SONNET_PROMPT_P0_instrumentation_2026-07-19.md §3) ──
@@ -631,6 +569,12 @@ export async function GET(request: Request) {
           })),
           actor: params.actor,
           ai_attention_bands: aiAttentionBands,
+          ai_attention_bands_status:
+            params.actor === 'agent' || params.actor === 'all'
+              ? aiAttentionBands.length > 0
+                ? 'ok'
+                : 'not_collected'
+              : 'not_applicable',
           // 続135 (P0 可視化): enhancement の失敗/空を UI と実機 Network で区別可能にする診断。
           //   imagesError != null = image_visibility クエリ自体が失敗 (overlay 欠落の真因)。
           //   imagesError == null かつ images=[] = 当該条件で実データ 0 件 (正常な空)。

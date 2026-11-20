@@ -23,7 +23,7 @@ function request(extraQuery = ''): Request {
   return new Request(`https://app.example.com/api/cv-journey?site_id=CIP_test${extraQuery}`)
 }
 
-describe('GET /api/cv-journey dummy fallback observability', () => {
+describe('GET /api/cv-journey Wave 0 not_collected contract', () => {
   let errorSpy: jest.SpyInstance
 
   beforeEach(() => {
@@ -57,30 +57,36 @@ describe('GET /api/cv-journey dummy fallback observability', () => {
     }
   })
 
-  it('records a fallback only when the ClickHouse query path throws', async () => {
+  it('returns status=not_collected with empty funnel data (never dummy) when ClickHouse throws', async () => {
     mockBuildFunnelData.mockRejectedValue(new Error('ClickHouse unavailable'))
 
     const response = await GET(request())
     const body = await response.json()
 
     expect(response.status).toBe(200)
-    expect(body.meta.dataSource).toBe('dummy')
+    expect(body.status).toBe('not_collected')
+    expect(body.meta.dataSource).toBe('not_collected')
+    expect(body.data.steps).toEqual([])
+    expect(body.data.sources).toEqual([])
+    expect(body.data.totals.totalSessions).toBe(0)
     expect(mockRecordDummyFallback).toHaveBeenCalledWith('cv-journey')
   })
 
-  it('does not record an intentionally forced dummy response', async () => {
+  it('ignores CV_JOURNEY_DUMMY_ONLY=1 in production route and queries ClickHouse instead of returning dummy data', async () => {
     process.env.CV_JOURNEY_DUMMY_ONLY = '1'
+    mockBuildFunnelData.mockRejectedValue(new Error('ClickHouse unavailable'))
 
     const response = await GET(request())
     const body = await response.json()
 
     expect(response.status).toBe(200)
-    expect(body.meta.dataSource).toBe('dummy')
-    expect(mockBuildFunnelData).not.toHaveBeenCalled()
-    expect(mockRecordDummyFallback).not.toHaveBeenCalled()
+    expect(body.status).toBe('not_collected')
+    expect(body.meta.dataSource).toBe('not_collected')
+    expect(body.data.steps).toEqual([])
+    expect(mockBuildFunnelData).toHaveBeenCalled()
   })
 
-  // ── 期間正規化: クエリ条件と meta.periodDays の一致 (旧: 未指定で全履歴 + periodDays=7 の不一致) ──
+  // ── 期間正規化: クエリ条件と meta.periodDays の一致 ──
 
   it('日付未指定は 7 日ウィンドウへ正規化してクエリし、meta.periodDays と一致する', async () => {
     mockBuildFunnelData.mockResolvedValue({ data: buildDummyData(DEFAULT_FUNNEL), warnings: [] })
@@ -89,6 +95,7 @@ describe('GET /api/cv-journey dummy fallback observability', () => {
     const body = await response.json()
 
     expect(response.status).toBe(200)
+    expect(body.status).toBe('ok')
     expect(body.meta.dataSource).toBe('clickhouse_events')
     expect(body.meta.periodDays).toBe(7)
 

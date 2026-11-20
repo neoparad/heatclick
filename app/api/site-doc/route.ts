@@ -47,11 +47,7 @@ export async function GET(req: NextRequest) {
   }
 
   let behaviorOverride: BehaviorOverrideStats | undefined
-  if (
-    process.env.CLICKHOUSE_URL &&
-    process.env.CLICKHOUSE_PASSWORD &&
-    sp.get('mock') !== '1'
-  ) {
+  if (process.env.CLICKHOUSE_URL && process.env.CLICKHOUSE_PASSWORD) {
     try {
       const ch = getClickHouseClient('analytics_reader')
       const res = await ch.query({
@@ -63,11 +59,13 @@ export async function GET(req: NextRequest) {
             countIf(event_type = 'rage_click') AS rage_clicks,
             avgIf(scroll_percentage, scroll_percentage > 0) AS avg_scroll
           FROM clickinsight.events
-          WHERE site_id = {site_id:String}
+          WHERE tenant_id = {tenant_id:String}
+            AND site_id = {site_id:String}
             AND url = {url:String}
             AND timestamp >= now() - INTERVAL {days:UInt32} DAY
         `,
         query_params: {
+          tenant_id: ctx.tenant_id,
           site_id: site.siteId,
           url: canonicalUrl,
           days,
@@ -95,7 +93,7 @@ export async function GET(req: NextRequest) {
         }
       }
     } catch {
-      // Graceful degradation to synthesized behavior baseline
+      // Behavior plane remains not_collected (no fabricated fallback)
     }
   }
 
@@ -112,8 +110,13 @@ export async function GET(req: NextRequest) {
     }),
   ])
 
+  const status = audit.status ?? (audit.source === 'live' ? 'ok' : 'not_collected')
+
   return NextResponse.json({
     ok: true,
+    status,
+    reason: audit.reason,
+    behaviorStatus: behaviorOverride ? 'ok' : 'not_collected',
     tenantId: ctx.tenant_id,
     site: {
       siteId: site.siteId,

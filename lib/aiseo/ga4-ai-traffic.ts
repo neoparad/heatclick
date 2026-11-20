@@ -19,10 +19,12 @@ import {
 } from '@/lib/linkscrawl/client'
 import type {
   AioCitationDiffItem,
+  CollectionStatus,
   DataSourceMode,
   LinkscrawlConfidenceMeta,
   SemanticCascadeAudit,
 } from '@/lib/linkscrawl/types'
+import type { ConfidenceSignal } from '@/lib/aiseo/confidence'
 import { normalizeUrlFull } from '@/lib/url/normalize-url'
 
 export type AiTrafficSourceKey =
@@ -76,8 +78,8 @@ export interface AiLandingUrlRankingRow {
   aiCvr: number // 0..1
   topAiSource: AiTrafficSourceKey
   sourceBreakdown: Partial<Record<AiTrafficSourceKey, number>>
-  semanticScore: number // 0..100
-  aioCitedCount: number
+  semanticScore: number | null // null when unmeasured (not_collected)
+  aioCitedCount: number | null // null when unmeasured (not_collected)
 }
 
 export interface Ga4AiTrafficReport {
@@ -94,6 +96,8 @@ export interface Ga4AiTrafficReport {
 }
 
 export interface AiseoOverviewResponse {
+  status: CollectionStatus
+  reason?: string
   source: DataSourceMode
   siteId: string
   targetUrl: string
@@ -102,6 +106,8 @@ export interface AiseoOverviewResponse {
   generatedAt: string
   aiTraffic: Ga4AiTrafficReport
   aioCitationDiff: {
+    status: CollectionStatus
+    reason?: string
     source: DataSourceMode
     totalTrackedQueries: number
     aioAppearanceRate: number
@@ -338,7 +344,7 @@ export function aggregateAiTrafficRows(
     const sessions = Math.max(0, Number(row.sessions ?? 1))
     const conversions = Math.max(0, Number(row.conversions ?? 0))
     const bounces = Math.max(0, Number(row.bounceCount ?? 0))
-    const dwellMs = Math.max(0, Number(row.totalDwellMs ?? sessions * 72_000))
+    const dwellMs = Math.max(0, Number(row.totalDwellMs ?? 0))
 
     const classified = classifyAiTrafficSource({
       referrer: row.referrer,
@@ -394,13 +400,13 @@ export function aggregateAiTrafficRows(
 
   if (organicSessions === 0 && options.fallbackOrganicSessions) {
     organicSessions = options.fallbackOrganicSessions
-    organicConversions = options.fallbackOrganicConversions ?? Math.round(organicSessions * 0.016)
+    organicConversions = options.fallbackOrganicConversions ?? 0
   }
 
   const organicSearchCvr =
     organicSessions > 0
       ? Number((organicConversions / organicSessions).toFixed(4))
-      : 0.016
+      : 0
 
   let totalAiSessions = 0
   let totalAiConversions = 0
@@ -453,7 +459,7 @@ export function aggregateAiTrafficRows(
 
   const topLandingUrls: AiLandingUrlRankingRow[] = Array.from(urlMap.values())
     .sort((a, b) => b.sessions - a.sessions)
-    .map((u, idx) => {
+    .map((u) => {
       let topAiSource: AiTrafficSourceKey = 'ChatGPT'
       let maxCount = -1
       for (const s of AI_TRAFFIC_SOURCES_ORDER) {
@@ -473,8 +479,8 @@ export function aggregateAiTrafficRows(
         aiCvr: aiUrlCvr,
         topAiSource,
         sourceBreakdown: u.bySource,
-        semanticScore: Math.max(62, 86 - idx * 5),
-        aioCitedCount: u.pathname.includes('aio') ? 4 : Math.max(1, 3 - idx),
+        semanticScore: null,
+        aioCitedCount: null,
       }
     })
 
@@ -499,170 +505,118 @@ export function aggregateAiTrafficRows(
 }
 
 /**
- * Generates deterministic, realistic fallback AI traffic rows for a site when ClickHouse has no AI events yet.
- */
-export function buildDefaultSynthesizedAiTrafficRows(host = 'link-th.com'): RawTrafficEventRow[] {
-  const baseHost = host || 'link-th.com'
-  return [
-    // ChatGPT
-    {
-      url: `https://${baseHost}/entry/internal-link-optimization`,
-      referrer: 'https://chatgpt.com/',
-      utmSource: 'chatgpt.com',
-      sessions: 164,
-      conversions: 8,
-      bounceCount: 52,
-      totalDwellMs: 164 * 96_000,
-    },
-    {
-      url: `https://${baseHost}/entry/aio-llmo-guide`,
-      referrer: 'https://chat.openai.com/',
-      utmSource: 'chatgpt.com',
-      sessions: 118,
-      conversions: 6,
-      bounceCount: 38,
-      totalDwellMs: 118 * 104_000,
-    },
-    // Perplexity
-    {
-      url: `https://${baseHost}/entry/aio-llmo-guide`,
-      referrer: 'https://www.perplexity.ai/search/aio-seo-architecture',
-      sessions: 96,
-      conversions: 5,
-      bounceCount: 29,
-      totalDwellMs: 96 * 112_000,
-    },
-    {
-      url: `https://${baseHost}/entry/internal-link-optimization`,
-      referrer: 'https://www.perplexity.ai/',
-      sessions: 62,
-      conversions: 3,
-      bounceCount: 21,
-      totalDwellMs: 62 * 89_000,
-    },
-    // Gemini
-    {
-      url: `https://${baseHost}/column/eeat-checklist-2026`,
-      referrer: 'https://gemini.google.com/',
-      sessions: 78,
-      conversions: 3,
-      bounceCount: 28,
-      totalDwellMs: 78 * 82_000,
-    },
-    // Google AI Overview / SGE
-    {
-      url: `https://${baseHost}/entry/internal-link-optimization?utm_source=google_aio&utm_medium=ai_overview`,
-      referrer: 'https://www.google.com/',
-      utmSource: 'google_aio',
-      utmMedium: 'ai_overview',
-      sessions: 84,
-      conversions: 3,
-      bounceCount: 31,
-      totalDwellMs: 84 * 78_000,
-    },
-    // Claude
-    {
-      url: `https://${baseHost}/entry/sitemap-index-troubleshooting`,
-      referrer: 'https://claude.ai/chat',
-      sessions: 49,
-      conversions: 2,
-      bounceCount: 14,
-      totalDwellMs: 49 * 118_000,
-    },
-    // Microsoft Copilot
-    {
-      url: `https://${baseHost}/column/eeat-checklist-2026`,
-      referrer: 'https://copilot.microsoft.com/',
-      sessions: 34,
-      conversions: 1,
-      bounceCount: 13,
-      totalDwellMs: 34 * 74_000,
-    },
-    // Standard Organic Search baseline
-    {
-      url: `https://${baseHost}/entry/internal-link-optimization`,
-      referrer: 'https://www.google.com/',
-      utmSource: 'google',
-      utmMedium: 'organic',
-      sessions: 8420,
-      conversions: 142,
-      bounceCount: 4540,
-      totalDwellMs: 8420 * 54_000,
-    },
-  ]
-}
-
-/**
- * Queries ClickHouse `clickinsight.events` for AI referrer / UTM traffic over the given period,
- * falling back deterministically if ClickHouse is unavailable or returns 0 AI rows.
+ * Queries ClickHouse `clickinsight.events` for AI referrer / UTM traffic over the given period.
+ * Wave 0 (束 0-A 止血):
+ *   - 必ず `tenant_id = {tenant_id:String}` をバインドする（未指定時は fail-closed でクエリ非実行）。
+ *   - ClickHouse 未接続・エラー・0件時に合成行を返さず `status: 'not_collected'` + 空集計を返す。
  */
 export async function queryClickHouseAiTraffic(params: {
   clickhouse?: ClickHouseClient | null
+  tenantId?: string
   siteId: string
   host?: string | null
   days?: number
-}): Promise<{ source: DataSourceMode; report: Ga4AiTrafficReport }> {
+}): Promise<{
+  status: CollectionStatus
+  reason?: string
+  source: DataSourceMode
+  report: Ga4AiTrafficReport
+}> {
   const days = Math.min(90, Math.max(7, Number(params.days || 30)))
-  if (params.clickhouse) {
-    try {
-      const res = await params.clickhouse.query({
-        query: `
-          SELECT
-            url,
-            referrer,
-            countDistinct(session_id) AS sessions,
-            countIf(event_type = 'conversion' OR conversion_type != '') AS conversions
-          FROM clickinsight.events
-          WHERE site_id = {site_id:String}
-            AND timestamp >= now() - INTERVAL {days:UInt32} DAY
-          GROUP BY url, referrer
-          ORDER BY sessions DESC
-          LIMIT 500
-        `,
-        query_params: {
-          site_id: params.siteId,
-          days,
-        },
-        format: 'JSONEachRow',
-      })
-      const dbRows = await res.json<{
-        url: string
-        referrer: string
-        sessions: number
-        conversions: number
-      }>()
+  const emptyReport = aggregateAiTrafficRows([])
 
-      if (Array.isArray(dbRows) && dbRows.length > 0) {
-        const mapped: RawTrafficEventRow[] = dbRows.map((r) => ({
-          url: r.url,
-          referrer: r.referrer,
-          sessions: Number(r.sessions) || 0,
-          conversions: Number(r.conversions) || 0,
-        }))
-        const report = aggregateAiTrafficRows(mapped)
-        if (report.totalAiSessions > 0) {
-          return { source: 'live', report }
-        }
-      }
-    } catch {
-      // Fall back to synthesized calibrated dataset
+  if (!params.clickhouse) {
+    return {
+      status: 'not_collected',
+      reason: 'ClickHouse 未接続のためAI検索流入データは未収集です (not_collected)',
+      source: 'not_collected',
+      report: emptyReport,
     }
   }
 
-  const synthRows = buildDefaultSynthesizedAiTrafficRows(params.host || 'link-th.com')
-  return {
-    source: 'fallback_synthesized',
-    report: aggregateAiTrafficRows(synthRows),
+  const tenantId = (params.tenantId || '').trim()
+  if (!tenantId) {
+    return {
+      status: 'not_collected',
+      reason: 'tenant_id が未指定のためクエリを実行できません (fail-closed)',
+      source: 'not_collected',
+      report: emptyReport,
+    }
+  }
+
+  try {
+    const res = await params.clickhouse.query({
+      query: `
+        SELECT
+          url,
+          referrer,
+          countDistinct(session_id) AS sessions,
+          countIf(event_type = 'conversion' OR conversion_type != '') AS conversions
+        FROM clickinsight.events
+        WHERE tenant_id = {tenant_id:String}
+          AND site_id = {site_id:String}
+          AND timestamp >= now() - INTERVAL {days:UInt32} DAY
+        GROUP BY url, referrer
+        ORDER BY sessions DESC
+        LIMIT 500
+      `,
+      query_params: {
+        tenant_id: tenantId,
+        site_id: params.siteId,
+        days,
+      },
+      format: 'JSONEachRow',
+    })
+    const dbRows = await res.json<{
+      url: string
+      referrer: string
+      sessions: number
+      conversions: number
+    }>()
+
+    if (Array.isArray(dbRows) && dbRows.length > 0) {
+      const mapped: RawTrafficEventRow[] = dbRows.map((r) => ({
+        url: r.url,
+        referrer: r.referrer,
+        sessions: Number(r.sessions) || 0,
+        conversions: Number(r.conversions) || 0,
+      }))
+      const report = aggregateAiTrafficRows(mapped)
+      if (report.totalAiSessions > 0) {
+        return { status: 'ok', source: 'live', report }
+      }
+      return {
+        status: 'not_collected',
+        reason: '対象期間にAI検索リファラー流入イベントが観測されていません (not_collected)',
+        source: 'not_collected',
+        report,
+      }
+    }
+
+    return {
+      status: 'not_collected',
+      reason: '対象期間のイベントデータが0件です (not_collected)',
+      source: 'not_collected',
+      report: emptyReport,
+    }
+  } catch {
+    return {
+      status: 'not_collected',
+      reason: 'ClickHouse クエリ取得失敗のためAI検索流入データは未収集です (not_collected)',
+      source: 'not_collected',
+      report: emptyReport,
+    }
   }
 }
 
 /**
  * Full AISEO Overview aggregator combining:
- *   1. GA4 / ClickHouse AI Search Inflow Analytics (6 AI engines + CVR vs Organic)
+ *   1. ClickHouse AI Search Inflow Analytics (6 AI engines + CVR vs Organic)
  *   2. SERP AI Overview (`aio_citation_diff`) competitor citation gap
  *   3. 16-Item x 7-Pillar Semantic AI Audit (`semanticAudit`)
  */
 export async function getAiseoOverview(params: {
+  tenantId?: string
   siteId: string
   url?: string
   host?: string | null
@@ -682,6 +636,7 @@ export async function getAiseoOverview(params: {
   const [trafficResult, aioDiff, siteDoc] = await Promise.all([
     queryClickHouseAiTraffic({
       clickhouse: params.clickhouse,
+      tenantId: params.tenantId,
       siteId: params.siteId,
       host: params.host,
       days,
@@ -695,24 +650,40 @@ export async function getAiseoOverview(params: {
     aioDiff.source === 'live' ||
     siteDoc.source === 'live'
       ? 'live'
-      : 'fallback_synthesized'
+      : 'not_collected'
 
-  const confidence = buildConfidenceMeta([
-    {
+  const status: CollectionStatus = overallSource === 'live' ? 'ok' : 'not_collected'
+  const reasons = [
+    trafficResult.source !== 'live' ? trafficResult.reason : undefined,
+    aioDiff.source !== 'live' ? aioDiff.reason : undefined,
+    siteDoc.source !== 'live' ? siteDoc.reason : undefined,
+  ].filter((r): r is string => Boolean(r))
+
+  const signals: ConfidenceSignal[] = []
+  if (trafficResult.source === 'live') {
+    signals.push({
       kind: 'identity',
       label: `AI検索6大エンジン流入分類 (計${trafficResult.report.totalAiSessions}セッション, オーガニック比CVR ${trafficResult.report.aiVsOrganicCvrMultiplier}倍)`,
-    },
-    {
+    })
+  }
+  if (siteDoc.source === 'live') {
+    signals.push({
       kind: 'structure_dom',
-      label: `16項目×7要素 AI意味監査スコア ${siteDoc.semanticAudit.overallSemanticScore}点 & 装飾<h>検知`,
-    },
-    {
+      label: `16項目×7要素 AI意味監査スコア ${siteDoc.semanticAudit.overallSemanticScore}点`,
+    })
+  }
+  if (aioDiff.source === 'live') {
+    signals.push({
       kind: 'behavior_target',
       label: `SERP AI Overview 引用競合差分 (${aioDiff.totalTrackedQueries}クエリ中 未引用ギャップ ${aioDiff.competitorGapCount}件)`,
-    },
-  ])
+    })
+  }
+
+  const confidence = buildConfidenceMeta(signals)
 
   return {
+    status,
+    reason: status === 'not_collected' ? (reasons[0] || 'AISEO 実測データが未収集です (not_collected)') : undefined,
     source: overallSource,
     siteId: params.siteId,
     targetUrl: rawUrl,

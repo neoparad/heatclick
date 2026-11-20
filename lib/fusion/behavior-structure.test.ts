@@ -43,17 +43,22 @@ describe('lib/fusion/behavior-structure', () => {
     expect(deadClickDiag?.confidence.level).toBe('suspected')
   })
 
-  it('builds enriched fusion intelligence uniting 4-plane diagnoses with LINKTH CRAWL 418-item audit, 7-pillar Teacher Verdict, Kaplan-Meier survival, and 80+ feature CVR prediction', async () => {
+  it('returns not_collected (no fabricated 418-rule / 90-rule / 80-feature values) when live upstream data is unavailable', async () => {
     const enriched = await buildEnrichedFusionIntelligenceForUrl({
       url: 'https://link-th.com/entry/internal-link-optimization',
       siteId: 'site-1',
     })
 
-    expect(enriched.siteDoc418.totalDetectionRules).toBe(418)
-    expect(enriched.performance90.totalSpeedRulesChecked).toBe(90)
-    expect(enriched.teacherVerdict.pillars).toHaveLength(7)
-    expect(enriched.scrollSurvival.medianDropoffYpx).toBeGreaterThan(0)
-    expect(enriched.cvrPrediction.featureCountUsed).toBeGreaterThanOrEqual(80)
+    expect(enriched.status).toBe('not_collected')
+    expect(enriched.reason).toBeTruthy()
+    expect(enriched.crossDiagnoses).toEqual([])
+    expect(enriched.siteDoc418.source).toBe('not_collected')
+    expect(enriched.siteDoc418.totalDetectionRules).toBe(0)
+    expect(enriched.performance90.source).toBe('not_collected')
+    expect(enriched.performance90.totalSpeedRulesChecked).toBe(0)
+    expect(enriched.teacherVerdict.pillars).toEqual([])
+    expect(enriched.scrollSurvival.medianDropoffYpx).toBe(0)
+    expect(enriched.cvrPrediction.featureCountUsed).toBe(0)
   })
 })
 

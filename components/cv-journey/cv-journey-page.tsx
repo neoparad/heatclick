@@ -105,7 +105,11 @@ export function CvJourneyPage({ siteId }: CvJourneyPageProps) {
   return (
     <div className="space-y-4">
       {/* dummy バナー */}
-      {meta?.dataSource === 'dummy' ? (
+      {meta?.dataSource === 'not_collected' ? (
+        <div className="rounded-md border border-slate-300 bg-slate-50 px-4 py-2 text-xs text-slate-700">
+          CV 経路データは未収集です (not_collected): {meta.reason || 'ClickHouse 未接続または実測データが取得できませんでした。見本データは表示しません。'}
+        </div>
+      ) : meta?.dataSource === 'dummy' ? (
         <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-xs text-amber-800 dark:text-amber-300">
           ダミーデータを表示中です（ClickHouse 未接続）。実データ接続後に自動で実測値へ切り替わります。
         </div>

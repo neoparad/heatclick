@@ -1,18 +1,10 @@
 /**
  * AISEO Phase 1: 内部リンク提案 loader
  *
- * AISEO-Director SSOT: linkscrawl/docs/fusion/team/aiseo-director/integration-map.md §2 (Phase 1)
- *
- * Phase 1: 既存 linkscrawl 出力 JSON を直読み (read-only)。
- *   - LINKSCRAWL_DATA_ROOT 設定済 + proposals_*.json 存在 → 実 JSON parse
- *   - それ以外 (env 未設定 / file 不在) → fixture stub を返す
- *
- * Phase 2 (data-model.md §3 Phase 2): ClickHouse `aiseo_internal_link_proposals` table に
- *   linkscrawl/scripts/_etl/upload_to_clickhouse.py が INSERT し、本 loader を
- *   ClickHouse query 版に差し替え予定 (UI 側は無変更)。
- *
- * tenant_id / site_id は parameter binding 必須 (CLAUDE.md §7、Phase 3 multi-tenant 用)。
- * Phase 1 では tenant_id=linkth_internal / site_id=wakegai のみ実 data 想定。
+ * Wave 0 (束 0-A 止血):
+ *   - 本番経路での fixture stub 自動フォールバックを完全廃止。
+ *   - `LINKSCRAWL_DATA_ROOT` 未設定・ファイル不在・パース失敗時は
+ *     `status: 'not_collected'`, `source: 'not_collected'`, `proposals: []` を返す。
  */
 
 import { promises as fs } from 'node:fs'
@@ -23,25 +15,24 @@ import {
   type InternalLinkProposalsBatch,
   InternalLinkProposalSchema,
 } from './types'
-import { FIXTURE_INTERNAL_LINK_PROPOSALS } from './fixtures/internal-link-proposals'
 
 interface LoadOptions {
   tenantId: string
   siteId: string
-  /** 強制 fixture mode (test 用)。default = env で自動判定 */
-  forceFixture?: boolean
 }
 
-const FIXTURE_SOURCE = 'fixture://lib/aiseo/fixtures/internal-link-proposals.ts'
-
-function buildFixtureBatch(tenantId: string, siteId: string): InternalLinkProposalsBatch {
+function buildNotCollectedBatch(
+  tenantId: string,
+  siteId: string,
+  reason: string,
+): InternalLinkProposalsBatch {
   return {
+    status: 'not_collected',
+    reason,
     tenant_id: tenantId,
     site_id: siteId,
-    proposals: FIXTURE_INTERNAL_LINK_PROPOSALS.filter(
-      (p) => p.tenant_id === tenantId && p.site_id === siteId,
-    ),
-    source: FIXTURE_SOURCE,
+    proposals: [],
+    source: 'not_collected',
     evidence_level: 'inferred',
     loaded_at: new Date().toISOString(),
   }
@@ -64,39 +55,38 @@ async function resolveLatestProposalsFile(
   }
 }
 
-/**
- * 内部リンク提案 batch を取得 (Phase 1 read-only)。
- *
- * - 実 JSON が読み取れた場合: file path を source に、proposals を Zod 検証してから返す
- * - 検証失敗 / file 不在 / env 未設定 → fixture batch を返す (warn を console.error に記録、
- *   production では Sentry に送る運用を Phase 2 で配備予定)
- *
- * tenant_id / site_id mismatch の proposal は無視 (cross-tenant 防止)。
- */
 export async function loadInternalLinkProposals(
   options: LoadOptions,
 ): Promise<InternalLinkProposalsBatch> {
-  const { tenantId, siteId, forceFixture = false } = options
-
-  if (forceFixture) {
-    return buildFixtureBatch(tenantId, siteId)
-  }
+  const { tenantId, siteId } = options
 
   const dataRoot = process.env.LINKSCRAWL_DATA_ROOT
   if (!dataRoot) {
-    return buildFixtureBatch(tenantId, siteId)
+    return buildNotCollectedBatch(
+      tenantId,
+      siteId,
+      'LINKSCRAWL_DATA_ROOT が未設定のため内部リンク提案は未収集です (not_collected)',
+    )
   }
 
   const filePath = await resolveLatestProposalsFile(dataRoot, siteId)
   if (!filePath) {
-    return buildFixtureBatch(tenantId, siteId)
+    return buildNotCollectedBatch(
+      tenantId,
+      siteId,
+      '対象サイトの proposals_*.json が未生成のため内部リンク提案は未収集です (not_collected)',
+    )
   }
 
   try {
     const raw = await fs.readFile(filePath, 'utf-8')
     const parsed: unknown = JSON.parse(raw)
     if (!Array.isArray(parsed)) {
-      return buildFixtureBatch(tenantId, siteId)
+      return buildNotCollectedBatch(
+        tenantId,
+        siteId,
+        'proposals ファイル形式不正のため内部リンク提案は未収集です (not_collected)',
+      )
     }
     const validated: InternalLinkProposal[] = []
     for (const item of parsed) {
@@ -106,6 +96,11 @@ export async function loadInternalLinkProposals(
       }
     }
     return {
+      status: validated.length > 0 ? 'ok' : 'not_collected',
+      reason:
+        validated.length > 0
+          ? undefined
+          : '対象テナント・サイトの有効な提案レコードが0件です (not_collected)',
       tenant_id: tenantId,
       site_id: siteId,
       proposals: validated,
@@ -114,6 +109,10 @@ export async function loadInternalLinkProposals(
       loaded_at: new Date().toISOString(),
     }
   } catch {
-    return buildFixtureBatch(tenantId, siteId)
+    return buildNotCollectedBatch(
+      tenantId,
+      siteId,
+      'proposals ファイル読込失敗のため内部リンク提案は未収集です (not_collected)',
+    )
   }
 }

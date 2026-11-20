@@ -739,6 +739,11 @@ function buildScaledAiAttentionBands(
 }
 
 export function buildHeatmapViewModel(opts: BuildOptions): HeatmapViewModel {
+  // Wave 0 (束 0-A 止血): 本番経路が data_source='not_collected' を返した場合は
+  // 絶対に MOCKUP_VIEW_MODEL にフォールバックせず空 state を返す。
+  if (opts.meta?.data_source === 'not_collected' && !opts.forceFixture) {
+    return emptyViewModel()
+  }
   // 「real」とみなすのは meta.data_source が明示的に 'clickhouse_events' の時のみ。
   // 未定義 (legacy deploy) や 'dummy_lcg' は fixture parity に倒す。
   // (lib/api/heatmap.ts HeatmapTileMeta コメント + heatmap-canvas.tsx isDummySource 判定と整合、

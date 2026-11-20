@@ -1,15 +1,14 @@
 /**
  * GET /api/analytics — AIreceipt collector read API のプロキシ（AIアクセス解析用）。
  *
- * 認証・テナント分離:
- *   - `requireActiveTenantSite` で JWT 検証 + サイト台帳 (`FusionSiteRecord`) 解決
- *   - collector が未設定の環境では 200 (source: "mock") に安全フォールバック
+ * Wave 0 (束 0-A 止血):
+ *   - collector 未設定時のモック返却 (`generateMockAnalytics`) を完全廃止。
+ *   - 未設定時は `status: 'not_collected'`, `source: 'not_collected'` と空配列を返す。
  */
 
 import { NextResponse } from 'next/server'
 import { requireActiveTenantSite } from '@/lib/aiseo/active-site'
 import { collectorConfigured, collectorGet, rangeQuery } from '@/lib/aiseo/collector'
-import { generateMockAnalytics } from '@/lib/aiseo/mock'
 import type { AgentStat, UrlStat } from '@/lib/aiseo/risk'
 
 export const runtime = 'nodejs'
@@ -32,7 +31,15 @@ export async function GET(request: Request) {
   }
 
   if (!collectorConfigured(collectorOpts)) {
-    return NextResponse.json(generateMockAnalytics(`${site.siteName} (mock)`))
+    return NextResponse.json({
+      status: 'not_collected',
+      reason: 'AIreceipt collector が未設定のため AI アクセス解析データは未収集です (not_collected)',
+      source: 'not_collected',
+      site_label: site.siteName,
+      urls: { period: { dates: [] }, ruleset_version: '', total: 0, urls: [] as UrlStat[] },
+      agents: { period: { dates: [] }, ruleset_version: '', total: 0, agents: [] as AgentStat[] },
+      fetched_at: new Date().toISOString(),
+    })
   }
 
   try {
@@ -51,6 +58,7 @@ export async function GET(request: Request) {
       ),
     ])
     return NextResponse.json({
+      status: 'ok',
       source: 'live',
       site_label: site.siteName,
       urls,

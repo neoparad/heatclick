@@ -129,6 +129,16 @@ export function AgentHeatmapPanel({
         </div>
       </div>
 
+      {/* Not Collected Banner */}
+      {insights.status === 'not_collected' && (
+        <div
+          data-testid="agent-panel-not-collected"
+          className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"
+        >
+          {insights.reason || 'ブラウザ操作型AIエージェントの実測データは未収集です (not_collected)。'}
+        </div>
+      )}
+
       {/* KPI Strip */}
       <div className="mt-3 grid grid-cols-2 gap-2.5 md:grid-cols-4">
         <div className="rounded-md border border-violet-200 bg-white px-3 py-2">
@@ -169,7 +179,7 @@ export function AgentHeatmapPanel({
             {summary.avgScrollDepthPct}%
           </div>
           <div className="text-[10.5px] text-slate-500">
-            上位: {summary.topAgentTypes[0]?.name.split(' ')[0] || 'Playwright'}
+            上位: {summary.topAgentTypes[0]?.name.split(' ')[0] || '未収集'}
           </div>
         </div>
 

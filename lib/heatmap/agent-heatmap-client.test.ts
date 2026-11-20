@@ -28,96 +28,70 @@ describe('lib/heatmap/agent-heatmap-client', () => {
     })
   })
 
-  describe('buildAgentHybridInsights', () => {
-    it('returns full summary, frictionHotspots, and crawlerSectionOverlays for /pricing', () => {
+  describe('buildAgentHybridInsights (Wave 0: no fabricated fallback synthesis)', () => {
+    it('returns not_collected with zeroed summary and empty arrays when no live ClickHouse data exists', () => {
       const insights = buildAgentHybridInsights({
         siteId: 'ugokimap-demo',
         pageUrl: 'https://ugokimap.jp/pricing',
         agentSubtype: 'all',
       })
 
+      expect(insights.status).toBe('not_collected')
+      expect(insights.reason).toBeTruthy()
       expect(insights.siteId).toBe('ugokimap-demo')
       expect(insights.agentSubtype).toBe('all')
-      expect(insights.summary.totalAgentSessions).toBeGreaterThan(0)
-      expect(insights.summary.totalAgentClicks).toBeGreaterThan(0)
-      expect(insights.summary.totalDeadClicks).toBeGreaterThan(0)
-      expect(insights.summary.avgScrollDepthPct).toBeGreaterThan(0)
-      expect(insights.summary.avgScrollDepthPct).toBeLessThanOrEqual(100)
-      expect(insights.summary.targetedCtas.length).toBeGreaterThan(0)
-
-      // Friction hotspots
-      expect(insights.frictionHotspots.length).toBeGreaterThan(0)
-      for (const h of insights.frictionHotspots) {
-        expect(h.label).toBeTruthy()
-        expect(h.selector).toBeTruthy()
-        expect(h.deadClickCount).toBeGreaterThan(0)
-        expect(h.fixRecommendation).toBeTruthy()
-      }
-
-      // HTTP crawler section overlays
-      expect(insights.crawlerSectionOverlays.length).toBeGreaterThan(0)
-      const statuses = insights.crawlerSectionOverlays.map((s) => s.httpCrawlerStatus)
-      expect(statuses).toContain('extracted')
-      expect(statuses).toContain('csr_blind_spot')
-
-      // Subtype counts
-      expect(insights.subtypeCounts.all).toBe(insights.summary.totalAgentSessions)
-      expect(insights.subtypeCounts.webdriver).toBeGreaterThan(0)
-      expect(insights.subtypeCounts.headless).toBeGreaterThan(0)
-      expect(insights.subtypeCounts.ai_user_agent).toBeGreaterThan(0)
+      expect(insights.summary.dataSource).toBe('not_collected')
+      expect(insights.summary.totalAgentSessions).toBe(0)
+      expect(insights.summary.totalAgentClicks).toBe(0)
+      expect(insights.summary.totalDeadClicks).toBe(0)
+      expect(insights.summary.totalRageClicks).toBe(0)
+      expect(insights.summary.avgScrollDepthPct).toBe(0)
+      expect(insights.summary.targetedCtas).toEqual([])
+      expect(insights.summary.topAgentTypes).toEqual([])
+      expect(insights.frictionHotspots).toEqual([])
+      expect(insights.crawlerSectionOverlays).toEqual([])
+      expect(insights.subtypeCounts).toEqual({
+        all: 0,
+        webdriver: 0,
+        headless: 0,
+        ai_user_agent: 0,
+        heuristic_multi: 0,
+      })
     })
 
-    it('filters frictionHotspots and adjusts session counts when agentSubtype is specified', () => {
-      const allInsights = buildAgentHybridInsights({
-        siteId: 'ugokimap-demo',
-        pageUrl: '/pricing',
-        agentSubtype: 'all',
-      })
-      const webdriverInsights = buildAgentHybridInsights({
-        siteId: 'ugokimap-demo',
-        pageUrl: '/pricing',
-        agentSubtype: 'webdriver',
-      })
-      const aiUaInsights = buildAgentHybridInsights({
-        siteId: 'ugokimap-demo',
-        pageUrl: '/pricing',
-        agentSubtype: 'ai_user_agent',
-      })
-
-      expect(webdriverInsights.summary.totalAgentSessions).toBeLessThan(
-        allInsights.summary.totalAgentSessions,
-      )
-      expect(
-        webdriverInsights.frictionHotspots.every((h) =>
-          h.agentTypes.some((a) => a.includes('Playwright')),
-        ),
-      ).toBe(true)
-      expect(
-        aiUaInsights.frictionHotspots.every((h) =>
-          h.agentTypes.some((a) => a.includes('ChatGPT') || a.includes('Perplexity')),
-        ),
-      ).toBe(true)
-    })
-
-    it('merges rawPoints when live dead_click points are provided', () => {
+    it('builds live insights strictly from observed rawPoints and rawSummary without fabricated hotspots or overlays', () => {
       const withLive = buildAgentHybridInsights({
         siteId: 'ugokimap-demo',
         pageUrl: '/features',
-        agentSubtype: 'all',
+        agentSubtype: 'webdriver',
+        rawSummary: {
+          totalAgentSessions: 14,
+          totalAgentClicks: 31,
+          totalDeadClicks: 7,
+          totalRageClicks: 2,
+          avgScrollDepthPct: 62,
+          dataSource: 'clickhouse_live',
+        },
         rawPoints: [
           {
             x: 420,
             y: 800,
-            value: 150,
-            count: 150,
+            count: 7,
+            sessions: 5,
             selector: 'div.live-custom-toggle',
             eventType: 'dead_click',
           },
         ],
       })
 
+      expect(withLive.status).toBe('ok')
+      expect(withLive.summary.dataSource).toBe('clickhouse_live')
+      expect(withLive.summary.totalAgentSessions).toBe(14)
+      expect(withLive.frictionHotspots).toHaveLength(1)
       expect(withLive.frictionHotspots[0]?.selector).toBe('div.live-custom-toggle')
-      expect(withLive.frictionHotspots[0]?.deadClickCount).toBeGreaterThanOrEqual(150)
+      expect(withLive.frictionHotspots[0]?.deadClickCount).toBe(7)
+      expect(withLive.crawlerSectionOverlays).toEqual([])
+      expect(withLive.subtypeCounts.webdriver).toBe(14)
     })
   })
 })

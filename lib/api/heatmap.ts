@@ -105,7 +105,11 @@ export interface HeatmapTileMeta {
    * UI 側はこの値で Sprint 1 banner / Sprint 4 W1 banner を切替表示する。
    * 未定義 (旧 deploy) の場合は 'dummy_lcg' 互換扱い。
    */
-  data_source?: 'dummy_lcg' | 'clickhouse_events'
+  data_source?: 'clickhouse_events' | 'not_collected' | 'dummy_lcg'
+  /** Wave 0 共通ステータス ('ok' | 'not_collected' | 'insufficient_data') */
+  status?: 'ok' | 'not_collected' | 'insufficient_data'
+  /** 未収集・データ不足時の理由 */
+  reason?: string
   /**
    * 取得した heatmap_type (click | read | scroll | exit)。
    * view-model builder がレイヤーごとに正しい描画モードを選択するために使う。
@@ -115,6 +119,8 @@ export interface HeatmapTileMeta {
 }
 
 export interface HeatmapTileSuccess {
+  status?: 'ok' | 'not_collected' | 'insufficient_data'
+  reason?: string
   success: true
   data: {
     tiles: HeatmapTile[]

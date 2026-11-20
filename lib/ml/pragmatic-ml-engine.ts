@@ -18,13 +18,14 @@
 
 import { analyzeCrawlerPageAcquisition } from '@/lib/aiseo/crawler-acquisition'
 import { normalCdf } from '@/lib/experiments/hypothesis-testing'
-import { buildFusionDatasetForUrl } from '@/lib/fusion/behavior-structure'
+import { createEmptyFusionDatasetForUrl } from '@/lib/fusion/behavior-structure'
 import {
   getPerformanceFusion,
   getSiteDocAudit,
   getUrlFusionMl,
   type LinkscrawlClientConfig,
 } from '@/lib/linkscrawl/client'
+import type { CollectionStatus, DataSourceMode } from '@/lib/linkscrawl/types'
 import type { ConditionNode, LeafComparison } from '@/lib/scenarios/types'
 
 // ============================================================================
@@ -1089,6 +1090,7 @@ export function getLinksCrawlClient(config?: LinkscrawlClientConfig) {
         getSiteDocAudit({ siteId, url, config }),
       ])
       return {
+        isLive: ml.source === 'live' && doc.source === 'live',
         frictionHotspots: ml.frictionHotspots,
         contentMap: ml.contentMap,
         scrollSurvival: ml.scrollSurvival,
@@ -1100,115 +1102,115 @@ export function getLinksCrawlClient(config?: LinkscrawlClientConfig) {
 }
 
 export interface PragmaticMlInsightsPayload {
+  status: CollectionStatus
+  source: DataSourceMode
+  reason?: string
   siteId: string
   targetUrl: string
-  bottleneckAttribution: BottleneckAttributionResult
-  scrollSurvival: KaplanMeierScrollSurvivalResult
-  sampleSessionScoring: SessionFrustrationUpliftResult
+  bottleneckAttribution: BottleneckAttributionResult | null
+  scrollSurvival: KaplanMeierScrollSurvivalResult | null
+  sampleSessionScoring: SessionFrustrationUpliftResult | null
   upliftPresets: ScenarioUpliftPreset[]
   semanticLinks: SemanticLinkRecommendation[]
   methodologyNote: string
 }
 
 export async function buildPragmaticMlInsightsForUrl(params: {
+  tenantId?: string
   siteId: string
   url: string
   config?: LinkscrawlClientConfig
 }): Promise<PragmaticMlInsightsPayload> {
   const client = getLinksCrawlClient(params.config)
-  const fusionBase = buildFusionDatasetForUrl(params.url, params.siteId)
+  const emptyBase = createEmptyFusionDatasetForUrl(params.url, params.siteId)
 
-  const [cvrPred, speedLoss, frictionData, acqReport] = await Promise.all([
-    client.getCvrPrediction(params.siteId, fusionBase.canonicalUrl),
-    client.getSpeedLoss(params.siteId, fusionBase.canonicalUrl),
-    client.getFrictionHotspots(params.siteId, fusionBase.canonicalUrl),
-    analyzeCrawlerPageAcquisition({ siteId: params.siteId, url: fusionBase.canonicalUrl }).catch(() => null),
+  const [urlMl, speedLoss, frictionData, acqReport] = await Promise.all([
+    getUrlFusionMl({ siteId: params.siteId, url: emptyBase.canonicalUrl, config: params.config }),
+    client.getSpeedLoss(params.siteId, emptyBase.canonicalUrl),
+    client.getFrictionHotspots(params.siteId, emptyBase.canonicalUrl),
+    analyzeCrawlerPageAcquisition({
+      tenantId: params.tenantId,
+      siteId: params.siteId,
+      url: emptyBase.canonicalUrl,
+    }).catch(() => null),
   ])
 
+  const hasLiveData =
+    urlMl.source === 'live' &&
+    speedLoss.source === 'live' &&
+    frictionData.isLive &&
+    speedLoss.behaviorCvLossFusion.monthlyTotalSessions > 0 &&
+    frictionData.contentMap.length > 0
+
+  if (!hasLiveData) {
+    const reason =
+      'ClickHouse 行動実測または LINKTH CRAWL 構造・ML 推論データが未収集のため推論結果を生成しません (not_collected)'
+    return {
+      status: 'not_collected',
+      source: 'not_collected',
+      reason,
+      siteId: params.siteId,
+      targetUrl: emptyBase.canonicalUrl,
+      bottleneckAttribution: null,
+      scrollSurvival: null,
+      sampleSessionScoring: null,
+      upliftPresets: [],
+      semanticLinks: [],
+      methodologyNote: reason,
+    }
+  }
+
+  const cvrPred = urlMl.cvrPrediction
   const firstCtaSec = frictionData.contentMap.find((s) => s.hasCta)
-  const ctaFirstYPx = firstCtaSec ? firstCtaSec.yStartPx : 2740
-  const totalSessions = Math.max(1, fusionBase.behavior.sessions)
-  const rageAndDeadRate =
-    (fusionBase.behavior.deadClicks + fusionBase.behavior.rageClicks) /
-    totalSessions
+  const ctaFirstYPx = firstCtaSec ? firstCtaSec.yStartPx : 0
+  const totalSessions = speedLoss.behaviorCvLossFusion.monthlyTotalSessions
+  const totalDead = frictionData.contentMap.reduce((s, sec) => s + sec.deadClickCount, 0)
+  const totalRage = frictionData.contentMap.reduce((s, sec) => s + sec.rageClickCount, 0)
+  const rageAndDeadRate = totalSessions > 0 ? (totalDead + totalRage) / totalSessions : 0
 
   const bottleneckAttribution = computeShapBottleneckAttribution({
-    baselineCvr: cvrPred.currentObservedCvr || fusionBase.behavior.cvRate,
+    baselineCvr: cvrPred.currentObservedCvr,
     lcpMs: speedLoss.cwvP75.lcpMs,
     clsScore: speedLoss.cwvP75.cls,
     ctaFirstYPx,
-    formFieldCount: 7,
+    formFieldCount: 0,
     rageAndDeadClickRate: rageAndDeadRate,
-    headingSemanticBreaks:
-      frictionData.semanticAudit.headingDecorativeAbuse.abusedCount || 5,
-    ssrVisibilityRatio: acqReport ? acqReport.ssrVisibilityScore / 100 : 0.68,
+    headingSemanticBreaks: frictionData.semanticAudit.headingDecorativeAbuse.abusedCount,
+    ssrVisibilityRatio: acqReport && acqReport.status === 'ok' ? acqReport.ssrVisibilityScore / 100 : 1,
     mobileTapTargetViolations:
       frictionData.designAudit.defects.find(
         (d) => d.code === 'tap_target_too_small',
-      )?.count ?? 4,
+      )?.count ?? 0,
     sessions: totalSessions,
   })
 
-  // Build section-aligned Kaplan-Meier steps from LINKTH CRAWL contentMap & scrollSurvival
-  const kmSteps: ScrollCohortStepInput[] = [
-    {
-      yPx: 0,
-      depthPct: 0,
-      sectionLabel: 'FV / H1 導入 (0px)',
-      converterSurvivalRate: 1.0,
-      nonConverterSurvivalRate: 1.0,
-    },
-    ...frictionData.contentMap.map((sec, idx) => {
-      const cvRates = [0.96, 0.89, 0.81, 0.75, 0.71]
-      const nonCvRates = [0.85, 0.53, 0.34, 0.21, 0.13]
-      return {
-        yPx: sec.yEndPx,
-        depthPct: Math.min(
-          100,
-          Math.round(
-            (sec.yEndPx /
-              Math.max(1, frictionData.scrollSurvival.pageTotalHeightPx)) *
-              100,
-          ),
-        ),
-        sectionLabel: `${sec.headingText} (${sec.yEndPx}px)`,
-        converterSurvivalRate: cvRates[idx] ?? Math.max(0.55, 0.9 - idx * 0.08),
-        nonConverterSurvivalRate:
-          nonCvRates[idx] ?? Math.max(0.08, sec.reachRate * 0.75),
-      }
-    }),
-  ]
+  const kmSteps: ScrollCohortStepInput[] = frictionData.scrollSurvival.curve.map((pt) => ({
+    yPx: pt.yPx,
+    depthPct: pt.scrollPct,
+    sectionLabel: pt.nearestHeading ? `${pt.nearestHeading} (${pt.yPx}px)` : `${pt.yPx}px`,
+    converterSurvivalRate: pt.convertersSurvival,
+    nonConverterSurvivalRate: pt.nonConvertersSurvival,
+  }))
 
-  const scrollSurvival = computeKaplanMeierScrollSurvival(kmSteps, {
-    initialConverters: Math.max(30, Math.round(totalSessions * bottleneckAttribution.baselineCvr)),
-    initialNonConverters: Math.max(200, totalSessions),
-  })
-
-  const sampleSessionScoring = scoreSessionFrustrationAndUplift({
-    rageClicks: 1,
-    deadClicks: 2,
-    scrollReversals: 3,
-    formHesitationSec: 11,
-    dwellTimeSec: 52,
-    scrollDepthPct: 64,
-    isPricingOrCartPage: false,
-  })
-
-  const upliftPresets = getScenarioUpliftPresets()
-  const semanticLinks = recommendSemanticInternalLinks(DEFAULT_CANDIDATE_PAGES, {
-    maxRecommendations: 6,
-    focusUrl: fusionBase.canonicalUrl,
-  })
+  const scrollSurvival =
+    kmSteps.length >= 2
+      ? computeKaplanMeierScrollSurvival(kmSteps, {
+          initialConverters: Math.max(1, Math.round(totalSessions * bottleneckAttribution.baselineCvr)),
+          initialNonConverters: Math.max(1, totalSessions),
+        })
+      : null
 
   return {
+    status: 'ok',
+    source: 'live',
     siteId: params.siteId,
-    targetUrl: fusionBase.canonicalUrl,
+    targetUrl: emptyBase.canonicalUrl,
     bottleneckAttribution,
     scrollSurvival,
-    sampleSessionScoring,
-    upliftPresets,
-    semanticLinks,
+    sampleSessionScoring: null,
+    upliftPresets: getScenarioUpliftPresets(),
+    semanticLinks: [],
     methodologyNote:
-      'SHAP構造×行動ボトルネック帰属（84特徴量）・Kaplan-Meier非パラメトリック生存分析（Log-Rank検定）・Causal Uplift 4象限スコアリング・SBERT意味ベクトル×PageRank内部リンク推薦の4エンジンによる説明可能ML推論結果です。',
+      'LINKTH CRAWL live 構造データおよび実測行動セッションに基づく説明可能ML推論結果です。',
   }
 }

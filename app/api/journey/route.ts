@@ -1,12 +1,14 @@
 /**
  * GET /api/journey — collector の個別イベント（時系列）＋エージェント一覧を返す。
- * セッション化はクライアント側（lib/aiseo/journey.ts）で行う。
+ *
+ * Wave 0 (束 0-A 止血):
+ *   - collector 未接続時のモック返却 (`generateMockJourney`) を完全廃止。
+ *   - 未設定時は `status: 'not_collected'`, `source: 'not_collected'` と空配列を返す。
  */
 
 import { NextResponse } from 'next/server'
 import { requireActiveTenantSite } from '@/lib/aiseo/active-site'
 import { collectorConfigured, collectorGet, rangeQuery } from '@/lib/aiseo/collector'
-import { generateMockJourney } from '@/lib/aiseo/mock'
 import type { AgentStat, ObsEvent } from '@/lib/aiseo/risk'
 
 export const runtime = 'nodejs'
@@ -23,18 +25,28 @@ export async function GET(request: Request) {
   }
 
   const { site } = active
+  const days = Number(new URL(request.url).searchParams.get('days')) || 30
+  const { from, to, q } = rangeQuery(days)
   const collectorOpts = {
     siteId: site.aireceiptSiteId ?? undefined,
     installId: site.aireceiptInstallId ?? undefined,
   }
 
   if (!collectorConfigured(collectorOpts)) {
-    return NextResponse.json(generateMockJourney(`${site.siteName} (mock)`))
+    return NextResponse.json({
+      status: 'not_collected',
+      reason: 'AIreceipt collector が未設定のためエージェント・ジャーニーは未収集です (not_collected)',
+      updatedAt: new Date().toISOString(),
+      site_label: site.siteName,
+      source: 'not_collected',
+      range: { from, to },
+      agents: [],
+      events: [],
+      truncated: false,
+    })
   }
 
   try {
-    const days = Number(new URL(request.url).searchParams.get('days')) || 30
-    const { from, to, q } = rangeQuery(days)
     const [events, agents] = await Promise.all([
       collectorGet<{ total?: number; events?: ObsEvent[] }>(
         '/v0/analytics/events',
@@ -49,6 +61,7 @@ export async function GET(request: Request) {
     ])
     const evs = events.events || []
     return NextResponse.json({
+      status: 'ok',
       updatedAt: new Date().toISOString(),
       site_label: agents.site_label || site.siteName,
       source: 'live',

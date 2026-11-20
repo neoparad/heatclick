@@ -8,13 +8,10 @@
  *   - session.user.site_ids に site_id が含まれるか（cross-tenant 拒否）→ TENANT_FORBIDDEN
  *   - 全クエリで tenant_id を binding（§3.8.1）
  *
- * フォールバック（heatmap と同思想）:
- *   - ClickHouse 失敗 / 接続不可 → ダミーデータ（meta.dataSource='dummy'）
- *   - env CV_JOURNEY_DUMMY_ONLY='1' で常時ダミー
- *
- * 期間: 日付未指定の境界は resolvePeriod (lib/cv-journey/period.ts) で確定させ、
- * クエリ条件と meta.periodDays を常に一致させる（旧実装は未指定時に全履歴を集計
- * しながら periodDays=7 を返す不一致があった）。
+ * Wave 0 (束 0-A 止血):
+ *   - 本番経路でのダミーデータ退避 (`buildDummyData` / `CV_JOURNEY_DUMMY_ONLY`) を完全廃止。
+ *   - ClickHouse 接続不可 / クエリ失敗時は `status: 'not_collected'`,
+ *     `meta.dataSource: 'not_collected'` と空のファネル構造を返す。
  */
 
 import { NextResponse } from 'next/server'
@@ -26,16 +23,25 @@ import { createCvDefinitionRepository } from '@/lib/conversions/repository'
 import { DEFAULT_FUNNEL } from '@/lib/cv-journey/funnel-config'
 import { resolvePeriod } from '@/lib/cv-journey/period'
 import { buildFunnelData } from '@/lib/cv-journey/query'
-import { buildDummyData } from '@/lib/cv-journey/fixtures'
 import { recordDummyFallback } from '@/lib/monitoring/dummy-fallback-counter'
-import type { CvJourneyError, CvJourneySuccess } from '@/lib/api/cv-journey'
+import type { CvJourneyData, CvJourneyError, CvJourneySuccess } from '@/lib/api/cv-journey'
 
-/**
- * C2 (docs/cv/CV_DEFINITIONS_DESIGN.md §7): サイトの有効なCV定義を取得する。
- * CV定義は Cloudflare KV (ClickHouseとは別インフラ) に保存されており、その障害で
- * cv-journey 全体 (既存のCH失敗ダミーフォールバックとは別経路) を巻き込まないよう、
- * 取得失敗はログのみで空配列にfallbackする (完全後方互換の生conversion_type判定になる)。
- */
+function buildEmptyCvJourneyData(): CvJourneyData {
+  return {
+    steps: [],
+    sources: [],
+    nodes: [],
+    links: [],
+    totals: {
+      totalSessions: 0,
+      cvSessions: 0,
+      cvrPct: 0,
+      cvrDenominator: 'all_sessions',
+      biggestBottleneck: null,
+    },
+  }
+}
+
 async function fetchEnabledCvDefinitions(tenantId: string, siteId: string) {
   try {
     const repo = createCvDefinitionRepository()
@@ -84,15 +90,6 @@ export async function GET(request: Request) {
   // 期間の正規化: 未指定境界を確定させ、クエリと meta.periodDays を一致させる
   const period = resolvePeriod(q.start_date, q.end_date)
 
-  // 強制ダミー
-  if (process.env.CV_JOURNEY_DUMMY_ONLY === '1') {
-    return NextResponse.json<CvJourneySuccess>({
-      success: true,
-      data: buildDummyData(DEFAULT_FUNNEL),
-      meta: { dataSource: 'dummy', windowSec: DEFAULT_FUNNEL.windowSec, periodDays: period.days, warnings: [] },
-    })
-  }
-
   try {
     const client = getClickHouseClient('analytics_reader')
     const cvDefinitions = await fetchEnabledCvDefinitions(session.tenant_id, q.site_id)
@@ -110,22 +107,33 @@ export async function GET(request: Request) {
 
     return NextResponse.json<CvJourneySuccess>({
       success: true,
+      status: 'ok',
       data,
-      meta: { dataSource: 'clickhouse_events', windowSec: DEFAULT_FUNNEL.windowSec, periodDays: period.days, warnings },
-    })
-  } catch (e: unknown) {
-    // ClickHouse 接続不可 / 列不在 / timeout → ダミーにフォールバック（heatmap と同思想）
-    const msg = e instanceof Error ? e.message : 'unknown'
-    console.error(`[cv-journey] query failed, falling back to dummy: ${msg}`)
-    await recordDummyFallback('cv-journey')
-    return NextResponse.json<CvJourneySuccess>({
-      success: true,
-      data: buildDummyData(DEFAULT_FUNNEL),
       meta: {
-        dataSource: 'dummy',
+        dataSource: 'clickhouse_events',
+        status: 'ok',
         windowSec: DEFAULT_FUNNEL.windowSec,
         periodDays: period.days,
-        warnings: ['ClickHouse 接続不可のためダミーデータを表示しています'],
+        warnings,
+      },
+    })
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'unknown'
+    console.error(`[cv-journey] query failed, returning not_collected: ${msg}`)
+    await recordDummyFallback('cv-journey')
+    const reason = 'ClickHouse 接続不可のため CV 経路データは未収集です (not_collected)'
+    return NextResponse.json<CvJourneySuccess>({
+      success: true,
+      status: 'not_collected',
+      reason,
+      data: buildEmptyCvJourneyData(),
+      meta: {
+        dataSource: 'not_collected',
+        status: 'not_collected',
+        reason,
+        windowSec: DEFAULT_FUNNEL.windowSec,
+        periodDays: period.days,
+        warnings: [reason],
       },
     })
   }

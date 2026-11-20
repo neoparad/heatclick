@@ -74,7 +74,9 @@ export interface CvTotals {
 
 export interface CvJourneyMeta {
   /** heatmap と同じく実データ / ダミー切替を UI バナーで示す */
-  dataSource: 'clickhouse_events' | 'dummy'
+  dataSource: 'clickhouse_events' | 'not_collected' | 'dummy'
+  status?: 'ok' | 'not_collected' | 'insufficient_data'
+  reason?: string
   windowSec: number
   periodDays: number
   /** funnel-config の未対応ステップ等の警告 */
@@ -90,6 +92,8 @@ export interface CvJourneyData {
 }
 
 export interface CvJourneySuccess {
+  status?: 'ok' | 'not_collected' | 'insufficient_data'
+  reason?: string
   success: true
   data: CvJourneyData
   meta: CvJourneyMeta

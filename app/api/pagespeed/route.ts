@@ -82,7 +82,8 @@ export async function GET(request: NextRequest) {
       return badRequest('Missing required parameter: url')
     }
 
-    const cacheKey = `pagespeed:${url}:${device}`
+    const tenantScope = request.headers.get('x-tenant-id') || auth.userId
+    const cacheKey = `pagespeed:${tenantScope}:${url}:${device}`
 
     // キャッシュから取得を試みる
     let cached = false

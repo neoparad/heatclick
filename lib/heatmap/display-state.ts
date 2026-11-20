@@ -63,7 +63,8 @@ export function resolveHeatmapDisplayState(
   if (input.error) return 'error'
   if (input.loading && input.tileCount === 0) return 'loading'
 
-  const isRealSource = input.dataSource === 'clickhouse_events'
+  const isRealSource =
+    input.dataSource === 'clickhouse_events' || input.dataSource === 'not_collected'
   if (
     isRealSource &&
     input.blobCount === 0 &&

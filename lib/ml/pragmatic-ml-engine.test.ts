@@ -177,16 +177,21 @@ describe('Pragmatic ML & Statistical Engines (4 High-ROI Engines)', () => {
   })
 
   describe('End-to-End Orchestrator: buildPragmaticMlInsightsForUrl', () => {
-    it('builds unified ML insights payload with LINKTH CRAWL fallback client', async () => {
+    it('returns not_collected with null/empty ML fields (no fabricated fallback outputs) when live data is unavailable', async () => {
       const payload = await buildPragmaticMlInsightsForUrl({
-        siteId: 'default',
+        tenantId: 'tenant-1',
+        siteId: 'site-1',
         url: 'https://link-th.com/entry/internal-link-optimization',
       })
 
-      expect(payload.bottleneckAttribution.factors.length).toBe(8)
-      expect(payload.scrollSurvival.convertersCurve.length).toBeGreaterThan(2)
-      expect(payload.upliftPresets.length).toBe(3)
-      expect(payload.semanticLinks.length).toBeGreaterThan(0)
+      expect(payload.status).toBe('not_collected')
+      expect(payload.source).toBe('not_collected')
+      expect(payload.reason).toBeTruthy()
+      expect(payload.bottleneckAttribution).toBeNull()
+      expect(payload.scrollSurvival).toBeNull()
+      expect(payload.sampleSessionScoring).toBeNull()
+      expect(payload.upliftPresets).toEqual([])
+      expect(payload.semanticLinks).toEqual([])
     })
   })
 })

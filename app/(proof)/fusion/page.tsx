@@ -195,9 +195,18 @@ function FusionViewInner() {
       fetch(`/api/ml/insights?url=${encodeURIComponent(urlParam)}`).then((r) => r.json()),
     ])
       .then(([fusionJson, mlJson]) => {
-        setData(fusionJson)
-        if (mlJson?.ok && mlJson.data) {
+        if (fusionJson && fusionJson.ok !== false && fusionJson.behavior && fusionJson.structure) {
+          setData(fusionJson)
+        }
+        if (
+          mlJson?.ok &&
+          mlJson.status === 'ok' &&
+          mlJson.data?.bottleneckAttribution &&
+          mlJson.data?.scrollSurvival
+        ) {
           setMlInsights(mlJson.data)
+        } else {
+          setMlInsights(null)
         }
         setLoading(false)
       })

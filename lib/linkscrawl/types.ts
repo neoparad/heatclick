@@ -5,7 +5,8 @@
 
 import type { ConfidenceLevel, ConfidenceSignal } from '@/lib/aiseo/confidence'
 
-export type DataSourceMode = 'live' | 'fallback_synthesized'
+export type DataSourceMode = 'live' | 'not_collected' | 'insufficient_data'
+export type CollectionStatus = 'ok' | 'not_collected' | 'insufficient_data'
 
 export interface LinkscrawlConfidenceMeta {
   level: ConfidenceLevel
@@ -214,15 +215,17 @@ export interface FixPatchItem {
 }
 
 export interface SiteDocAuditResponse {
+  status?: CollectionStatus
+  reason?: string
   source: DataSourceMode
   siteId: string
   targetUrl: string
   canonicalUrl: string
   urlMatchKey: string
   auditedAt: string
-  totalDetectionRules: number // 418
+  totalDetectionRules: number // 418 (0 when not_collected)
   overallHealthScore: number // 0..100
-  grade: 'S' | 'A' | 'B' | 'C' | 'D'
+  grade: 'S' | 'A' | 'B' | 'C' | 'D' | 'N/A'
   confidence: LinkscrawlConfidenceMeta
   registrySummary: {
     totalCategories: number // 15
@@ -351,6 +354,8 @@ export interface BehaviorCvLossFusion {
 }
 
 export interface PerformanceFusionResponse {
+  status?: CollectionStatus
+  reason?: string
   source: DataSourceMode
   siteId: string
   targetUrl: string
@@ -448,7 +453,7 @@ export interface CvrPredictionResult {
   potentialOptimizedCvr: number // 0..1
   upliftMultiplier: number
   sessionQualityScore: number // 0..100
-  sessionQualityGrade: 'A' | 'B' | 'C' | 'D' | 'E' | 'F'
+  sessionQualityGrade: 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'N/A'
   personaDistribution: Array<{
     personaId: string
     label: string
@@ -461,7 +466,7 @@ export interface CvrPredictionResult {
 
 export interface TeacherVerdictCarte {
   overallScore: number // 0..100
-  grade: 'S' | 'A' | 'B' | 'C' | 'D'
+  grade: 'S' | 'A' | 'B' | 'C' | 'D' | 'N/A'
   headlineVerdict: string
   executiveSummary: string
   pillars: ContentAssetPillarScore[]
@@ -475,6 +480,8 @@ export interface TeacherVerdictCarte {
 }
 
 export interface UrlFusionMlResponse {
+  status?: CollectionStatus
+  reason?: string
   source: DataSourceMode
   siteId: string
   targetUrl: string
@@ -525,12 +532,14 @@ export interface AnswerEngineCitation {
 export interface AnswerEngineToolExecution {
   toolName: string
   category: 'rag_retrieval' | 'structure_audit' | 'speed_fusion' | 'behavior_ml' | 'serp_aio' | 'ai_traffic'
-  status: 'executed' | 'synthesized'
+  status: 'executed' | 'not_collected'
   durationMs: number
   summary: string
 }
 
 export interface FusionAnswerEngineResponse {
+  status?: CollectionStatus
+  reason?: string
   source: DataSourceMode
   siteId: string
   targetUrl: string

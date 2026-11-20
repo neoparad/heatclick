@@ -258,6 +258,15 @@ export function CrawlerAcquisitionDrawer({
 
           {!loading && !error && report && (
             <div className="space-y-5">
+              {report.status === 'not_collected' && (
+                <div
+                  data-testid="inspector-not-collected-banner"
+                  className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700"
+                >
+                  <b>未収集 (not_collected):</b>{' '}
+                  {report.reason || '対象URLのAIクローラー実測データは未収集です。見本データは表示しません。'}
+                </div>
+              )}
               {/* TAB 1: Bot別取得ステータス */}
               {tab === 'bots' && (
                 <div className="space-y-4" data-testid="inspector-section-bots">
