@@ -120,3 +120,8 @@
 - [ ] **[7-E 最優先 Phase 0]**: `app.inngest.com` の旧外部アプリ `heatmap-clickinsight` (`I-5`) を即座に Pause / Delete（コードベース依存 0・ClickHouse OOM リスク即時軽減）。
 - [ ] **[7-A / 7-D 判断 15 / 17 / 28 / 29]**: D-15（OEM アドオン＋法務）・D-17（外部テナント個別最適化法務）・D-28（OSS 公開ライセンス選定＋法務）・D-29（11 保存役割すべての契約上 JP 所在固定確認、`location_hint_only` 排除）を確定。
 - [ ] **[7-E 本番カットオーバー実行 (`docs/ugokilink/CUTOVER_RUNBOOK.md`)]**: 並行稼働 ±5% (`tel.G18`) → 直接 R2 影書込 30 日 (`store.G-14`) → 社内 5 画面 `/v1` 切替 → R2 コールドスナップショット採取＋旧データ橋渡し (`store.G-17`) → 30 日無事故ランイン (`store.G-20`) → 旧タグ/旧 Worker/旧 Cron/旧 ClickHouse 段階停止。外部テナント受入前に見張り 2 テナント 30 日連続 0 漏洩・レプリカ条件③・30 日課金台帳突合を完了。
+
+### 波 5 追加タスク（配信・実験基盤の本番接続＆実測ゲート）
+- [ ] **[5-B 本番接続] 強整合制御ストア（Cloudflare Durable Objects / 直列化 Postgres）接続**: `workers/link-decision` および `app/api/v1/decisions/route.ts` の制御ストアを本番強整合ストアへ接続（KV は物理禁止）。
+- [ ] **[5-B A3 隔離オリジン & iOS 実機事前検査]**: A3 表現向け別オリジン隔離ドメイン・CSP・Ed25519 バンドル承認鍵配備、および `runStratifiedPreflight` の iOS 実機 2 段階プローブ接続。
+- [ ] **[5-A / 5-C 実測ゲート] `tel.G16` SDK 重さ同等性（各群 30,000 INP PV）および D-07R 較正（≥3 サイト・≥30 解決済介入・Clopper-Pearson 95% 下限 ≥0.70）**: 実測達成後に段階解禁。
