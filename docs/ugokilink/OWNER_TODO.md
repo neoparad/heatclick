@@ -84,3 +84,7 @@
 - [ ] **[2-B 判断 5 / 専用 8 GiB ClickHouse 配備]**: 専用 8 GiB RAM ClickHouse LTS >= 26.3 ノードを確保し、`max_server_memory_usage = 7730941132`（7.2 GiB）・`users_without_row_policies_can_read_rows = 0` を設定。ロール `ugk_admin` / `ugk_loader` / `ugk_builder` / `ugk_eraser` / `ugk_ro_<tenant_id>` を作成。
 - [ ] **[2-B 本番 DDL 適用]**: 手順 0-C 本番記録取得後、`migrations/link/README.md` に従い `migrations/link/001_clickhouse_v2.sql` および `migrations/link/002_postgres_v2.sql` を本番へ適用し、越境ゼロカナリア確認を実施。
 - [ ] **[2-B 判断 14 / 判断 29]**: 本番バックアップ入替周期 ≤8 日・10 日目 `overdue` 削除アラート・R2/CH/PG 地域マッピング（既定 `jp`）と §5.12 段 2/3 提供条件を確定。
+
+### 波 3-D 追加タスク
+- [ ] **[3-D 判断 12 / act.G32]**: サーバー側 IP 証跡保持（既定 E/T 類 30 日公開鍵封印）および任意 opt-in P 類（72 時間封印）の法務署名を完了し、台帳 `D-12` (`legalSignedOff`) と Class P 認可フラグを開放（それまで `not_entitled`）。
+- [ ] **[3-D 運用 / act.G31 / act.G5]**: `DailySealingKeyVault` の本番 KMS/HSM 鍵破棄接続＋四半期復元不能ドリル、月次偽装 `X-Forwarded-For` オリジンプローブ接続、Origin Kit 4 形式スモーク検証および `UGK_EDGE_SECRET` 配布を整備。
