@@ -213,6 +213,20 @@ const DATA = [
       ["y", "Web とアプリ", "https://posthog.com/docs/session-replay/privacy"],
       ["y", "Web", "https://docs.statsig.com/session-replay/configure"],
       ["y", "Web とアプリ", "https://amplitude.com/pricing"]] },
+    { label: "ヒートマップ（クリック・スクロール）", ours: ["y", "要素と区画の単位。人と AI を並べて比べられる。版が合わない時は模式図で返す（§11.12）"], v: [
+      ["n", "自社では持たない。外部のヒートマップの道具へ送る", "https://segment.com/recipes/optimizing-page-performance-using-heatmaps/"],
+      ["n", "自社では持たない。外部の道具（Mouseflow など）への送り先のみ", "https://www.rudderstack.com/integration/heatmap-recording/"],
+      ["n", "公式の文書に見当たらない", "https://snowplow.io/blog/ultimate-guide-product-analytics"],
+      ["y", "クリック・スクロールなど。画面の上に重ねて表示", "https://posthog.com/docs/toolbar/heatmaps"],
+      ["n", "公式の文書に見当たらない（個別の再生のみ）", "https://docs.statsig.com/session-replay/watch"],
+      ["y", "クリック・要素・スクロールの 3 種。再生つきの上位プランのみ", "https://amplitude.com/docs/heatmaps/map-types"]] },
+    { label: "ヒートマップを API や AI から絵で取れる", ours: ["y", "ページを指定すると、画像の URL と元の数字が返る。REST と MCP（§11.12）"], v: [
+      ["n", "ヒートマップが無い", "https://segment.com/recipes/optimizing-page-performance-using-heatmaps/"],
+      ["n", "ヒートマップが無い", "https://www.rudderstack.com/integration/heatmap-recording/"],
+      ["n", "ヒートマップが無い", "https://snowplow.io/blog/ultimate-guide-product-analytics"],
+      ["y", "保存したヒートマップの画像を返す API。MCP は作成と作り直しまで", "https://posthog.com/docs/api/heatmap-screenshots"],
+      ["n", "ヒートマップが無い", "https://docs.statsig.com/session-replay/watch"],
+      U] },
     { label: "再生の既定の隠し方", ours: ["y", "文字・入力・画像をすべて隠すのが既定（§11.11 の 8）", "判断 26"], v: [
       ["n", "再生の機能が無い", "https://www.twilio.com/docs/segment/connections/auto-instrumentation"],
       ["n", "再生の機能が無い", "https://www.rudderstack.com/docs/get-started/introduction/"],
