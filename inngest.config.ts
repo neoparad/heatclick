@@ -1,63 +1,51 @@
 /**
- * Inngest config (durable jobs + cron)
+ * Inngest configuration — UGOKI LINK v2 ML training & orchestration control plane.
  *
- * 親 SSOT §3.7.1 / §6.3 S0-10 / §4.6 Data Quality Monitoring (毎時 cron)
- * Sprint 0 S0-10 skeleton。Sprint 1+ で job 追加。
+ * Wave 0-B audit (2026-11-20, Master Architecture v2 §12.4 / §13.2 Step 0):
+ *   - Legacy registered jobs in this repository: 0 (confirmed `functions = []`).
+ *   - Legacy commented stubs (`dataQualityCheck`, `dailyBackup`, `executeDeleteRequest`)
+ *     have been removed because their responsibilities moved out of Inngest:
+ *       * Data-quality & liveness checks -> independent Worker cron watchdog + Store Agent
+ *         reconciliation closures 1-5 (Step 4 / Step 9; never co-located on Vercel).
+ *       * ClickHouse backups             -> Store Agent inside the private database network
+ *         (Step 4, `store.G-4`; never via SSH from Vercel).
+ *       * Privacy deletion & purge       -> Store Agent deletion plan (`store.G-10`,
+ *         mask <= 24h, physical purge <= 5d, certificate <= 14d).
+ *   - Legacy external app `heatmap-clickinsight` (`warm-heatmap-cache`, etc.) on
+ *     `app.inngest.com` is tracked for immediate owner Pause/Delete in `OWNER_TODO.md`.
+ *
+ * Future scope (Wave 4-F / Step 17, Master Architecture v2 §8.10 / §8.14):
+ *   - Inngest serves exclusively as the durable control plane for per-tenant ML training
+ *     concurrency, fan-out, and completion reconciliation.
+ *   - Heavy training / resampling jobs execute on external compute (Cloud Run Jobs / Modal),
+ *     never inside Vercel functions or on the CRAWL host.
+ *
+ * See `docs/ugokilink/CRON_INVENTORY.md` for the full cron & job inventory.
  */
 
 import { Inngest } from 'inngest'
 
+export const INNGEST_ORCHESTRATION_POLICY = {
+  role: 'ml_training_control_plane_only',
+  targetWave: '4-F',
+  targetStep: 'Q-17',
+  legacyRegisteredJobs: 0,
+  disallowedWorkloads: [
+    'liveness_monitoring',
+    'clickhouse_ssh_backup',
+    'privacy_hard_delete_worker',
+    'heatmap_cache_warming',
+  ],
+} as const
+
 export const inngest = new Inngest({
   id: 'ugokimap-saas',
-  name: 'UGOKI MAP SaaS',
+  name: 'UGOKI LINK v2 ML Orchestrator',
   eventKey: process.env.INNGEST_EVENT_KEY,
 })
 
-// ===== Sprint 1+ で追加予定の jobs =====
-
 /**
- * 毎時 Data Quality Gate チェック (§4.6.1)
- * TODO Sprint 2: 9 メトリクス監視 + 閾値違反時 Slack 通知 (lib/notify/incident.ts 経由)
+ * Registered Inngest functions.
+ * Intentionally empty (0 legacy jobs) until Wave 4-F ML training orchestrators are added.
  */
-// export const dataQualityCheck = inngest.createFunction(
-//   { id: 'data-quality-check' },
-//   { cron: '0 * * * *' },
-//   async ({ event, step }) => {
-//     // ...
-//   },
-// )
-
-/**
- * 毎日 03:00 JST ClickHouse バックアップ (§3.7.5 / §3.2.4)
- * TODO Sprint 0 後半 〜 Sprint 1: Hetzner SSH 経由で clickhouse-backup 実行
- */
-// export const dailyBackup = inngest.createFunction(
-//   { id: 'daily-backup' },
-//   { cron: '0 18 * * *' }, // UTC 18:00 = JST 03:00
-//   async ({ event, step }) => {
-//     // ...
-//   },
-// )
-
-/**
- * 削除請求 14 日後の HARD DELETE 実行 (§3.8.3)
- * TODO Sprint 3 S3-06: 削除請求テーブル監視 + ClickHouse 全テーブル削除
- */
-// export const executeDeleteRequest = inngest.createFunction(
-//   { id: 'execute-delete-request' },
-//   { event: 'delete-request/scheduled' },
-//   async ({ event, step }) => {
-//     // ...
-//   },
-// )
-
-/**
- * 日次 ML 学習 (Sprint 2+)
- * TODO: persona_classifier / cvr_predictor 等
- */
-
-export const functions: ReturnType<typeof inngest.createFunction>[] = [
-  // dataQualityCheck,
-  // dailyBackup,
-  // executeDeleteRequest,
-]
+export const functions: ReturnType<typeof inngest.createFunction>[] = []

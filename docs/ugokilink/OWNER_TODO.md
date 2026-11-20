@@ -54,3 +54,7 @@
 - [ ] **[1-A 法務確認] プライバシー開示文面＆14日削除計画の法務提出**: `packages/contract/schema` の `generatePrivacyDisclosure()` / `generateDeletionPlan()` 出力を法務確認へ提出し、日本の法域行 (`JP`) 署名および `legalRecipientName`・R2 セグメント書換削除条項を確定する。
 - [ ] **[0-D 本番配備] AI事業者IP・RFC 9421鍵スナップショット日次 Cron 設定**: `ActorEvidenceClock.captureAll()` を毎晩（波0: `nightly_wave0`）実行し追記専用 R2 へ保存＋鍵期限（7日以内、OpenAI鍵は 2026-11-25 期限見込）・20%超プレフィックス変動アラート接続。手順10までに `production_poll`（IP 8h / SAIL 20m / JWKS Cache-Control）へ切替。
 - [ ] **[1-C / 1-D CI連携] Playwright 3エンジン実機検証 ＆ CRAWL 側 `urlkey/2` スイートハッシュ同期**: 220 固定ページフィクスチャの Chromium / WebKit / Firefox 実機一致検証および 360 URLキーベクトルのハッシュ照合を両リポジトリ CI に組み込む。
+
+### 波 0-B / 0-C / 1-B 追加タスク
+- [ ] **[0-C 実行コマンド] 本番記録スクリプトの実行**: `node scripts/link/inspect-prod-baseline.mjs --dry-run` で事前確認後、`CLICKHOUSE_URL=... CLICKHOUSE_RO_USERNAME=... CLICKHOUSE_RO_PASSWORD=... node scripts/link/inspect-prod-baseline.mjs --out baseline-prod-2026-11-20.json` を許可ネットワークから実行しオフライン保管。
+- [ ] **[0-B ハードニング] `/api/experiments/pool` の cron 認証統一**: 他の `/api/cron/*` と同様に `lib/cron-auth.ts` 必須化および `middleware.ts` exact-match 化を検討。
