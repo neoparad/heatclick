@@ -93,3 +93,8 @@
 - [ ] **[3-A 実機・3エンジン検証 (`tel.G3` / `tel.G7`)]**: Chromium / WebKit / Firefox 3エンジン＋実機離脱行列（LINE・Yahoo! JAPAN・Google アプリ内ブラウザ含む）で `tel.G7` 非干渉・`tel:`/`mailto:` 捕捉率 ≥95%・端末離脱時損失を実測。
 - [ ] **[3-A 判断 8 (`D-08`)]**: リプレイ階層 1/2（整数限定時系列）のオーナー裁定と法務署名を記録（記録まで `packages/sdk-browser` は `timeline_chunk` のブラウザ外送出を `not_entitled` で物理遮断。計測開始から 30 日以内に条項 `(b)` を決定）。
 - [ ] **[3-B 判断 27 / 3-A・3-C 本番配備]**: Segment 互換口・顧客定義イベントの許可 `traits` 方針確定、Cloudflare Worker `workers/link-collector`・Queue・R2 バケット（`spill`/`hold`/`quarantine`）・環境変数（`CONTINUITY_TOKEN_SECRET`, `LAB_MARKER_SECRET`, テナント別 `tenantMemberHashKey`）の配備および 5 分導入 `install_probe` 疎通確認。
+
+### 波 4-A / 4-C 追加タスク
+- [ ] **[4-C 8言語SDK CI実機ランタイム検証]**: CI コンテナにて Go / Java / Ruby / PHP / .NET / Rust の実ランタイムで `packages/sdk-server` 4 領域適合試験をライブ実行し、Node/Python 同様に 0 食い違いを確認してからパッケージ公開。
+- [ ] **[4-A 本番接続・社内5画面切替]**: `app/api/v1/**` の `setSurfaceRuntimeContext()` に本番 ClickHouse / Postgres Repository（`TenantScopedQueryBuilder` 経由）を接続し、社内 5 画面の `useV1Surface` フィーチャーフラグを段階切替。
+- [ ] **[4-C `POST /v1/ask` 実モデル再評価]**: Wave 4-G 自前生成モデル（Muse Glimmer 30B / Gemma 4）接続後に `runPreregistered1000Eval()` を実モデルで再実行し、結果と判定日を公開（`surf.ask_accuracy`, D-31a/D-31c）。
