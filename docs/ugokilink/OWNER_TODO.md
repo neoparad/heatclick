@@ -62,3 +62,8 @@
 ### 波 0-A 追加タスク
 - [ ] **[0-A 環境変数整理] 旧ダミー切替 env 削除**: Vercel 上に `HEATMAP_DUMMY_ONLY` / `CV_JOURNEY_DUMMY_ONLY` / `LINKSCRAWL_FORCE_FALLBACK` が残っていれば削除し、本番接続先（`CLICKHOUSE_*`, `LINKSCRAWL_API_URL`, `AIRECEIPT_*`, `GSC_SA_KEY_JSON`）を確認する。
 - [ ] **[0-A DB確認] `clickinsight.ai_crawler_logs` の `tenant_id` 列確認**: 手順 0-C 本番 DDL 採取で `ai_crawler_logs` の存在および `tenant_id` 列有無を確認する。
+
+### 波 2-C 追加タスク
+- [ ] **[2-C インフラ配備] LINK 第 2 描画ワーカー（Playwright + CJK フォント）配備と 1 日描画能力実測**: `surf.capacity`（5 階級累積 ≥ 2x）と実ブラウザ 3 エンジン突合を実測。
+- [ ] **[2-C CRAWL 切替] CRAWL 本線配備後に `createHttpCrawlContractClient` へ切替**: 固定ページで `surf.second_executor` / `surf.crawl_federation_ready` を確認。
+- [ ] **[2-C オーナー確認] 検査環境向け robots.txt 許可または `robots_override` 承認登録**: 自社 5 サイトの初回変更前ベースラインスナップショットを取得。
