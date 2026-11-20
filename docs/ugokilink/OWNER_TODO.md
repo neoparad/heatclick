@@ -67,3 +67,8 @@
 - [ ] **[2-C インフラ配備] LINK 第 2 描画ワーカー（Playwright + CJK フォント）配備と 1 日描画能力実測**: `surf.capacity`（5 階級累積 ≥ 2x）と実ブラウザ 3 エンジン突合を実測。
 - [ ] **[2-C CRAWL 切替] CRAWL 本線配備後に `createHttpCrawlContractClient` へ切替**: 固定ページで `surf.second_executor` / `surf.crawl_federation_ready` を確認。
 - [ ] **[2-C オーナー確認] 検査環境向け robots.txt 許可または `robots_override` 承認登録**: 自社 5 サイトの初回変更前ベースラインスナップショットを取得。
+
+### 波 2-D 追加タスク
+- [ ] **[2-D 鍵儀式・判断 22] オフライン配布署名鍵（Ed25519）生成・2人目の鍵担当者指名・パスキー登録**: 公開鍵を `packages/sdk-snippet`・`workers/link-zone`・`packages/wp-plugin` に固定し、プライバシー緩和承認用パスキーを登録する。
+- [ ] **[2-D 判断 2 確定] Stage B 計測タグ重量比較の `full` 群分割方式決定**: `all_verify_only`（約6週）か `half_verify_half_deliver`（推奨：約12週・1/6 PV並行配信可）を選択する。
+- [ ] **[2-D 判断 3 / 4 配備] 自社5サイト Cloudflare ゾーンへの `workers/link-zone` 配備（`/_ugk/selftest` 確認）および WordPress サイトへの `ugokilink-companion.php` 設置・`ugk_owner_local_policy` 設定**。
