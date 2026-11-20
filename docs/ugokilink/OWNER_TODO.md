@@ -98,3 +98,7 @@
 - [ ] **[4-C 8言語SDK CI実機ランタイム検証]**: CI コンテナにて Go / Java / Ruby / PHP / .NET / Rust の実ランタイムで `packages/sdk-server` 4 領域適合試験をライブ実行し、Node/Python 同様に 0 食い違いを確認してからパッケージ公開。
 - [ ] **[4-A 本番接続・社内5画面切替]**: `app/api/v1/**` の `setSurfaceRuntimeContext()` に本番 ClickHouse / Postgres Repository（`TenantScopedQueryBuilder` 経由）を接続し、社内 5 画面の `useV1Surface` フィーチャーフラグを段階切替。
 - [ ] **[4-C `POST /v1/ask` 実モデル再評価]**: Wave 4-G 自前生成モデル（Muse Glimmer 30B / Gemma 4）接続後に `runPreregistered1000Eval()` を実モデルで再実行し、結果と判定日を公開（`surf.ask_accuracy`, D-31a/D-31c）。
+
+### 波 3-E / 4-B 追加タスク
+- [ ] **[3-E 手順 11 自社5サイト並行稼働 & 旧データ橋渡し]**: 自社 5 サイトへ 3 分割スニペット（`v2_only`/`v3_only`/`both` + 13% `audit_2s`）を貼り付け、`evaluateCalibrationGate`（`tel.G18` ±5%）＆`tel.G17` が全区分で収束するまで稼働。手順 0-C 本番 DDL 採取後に `runLegacyBridge` 厳密順序で旧データ移行を実行。
+- [ ] **[4-B 判断 24 / 27 / 30 & インフラ配備]**: D-24（§5.12 段 3 顧客正本・法務）・D-27（無料枠 200万件/5万本・公開料金表）・D-30（(ii)/(iii) 外部送り先＋承認済み例外台帳・法務）を決定。`SiteLiveDurableObject`（地域ピン固定）および ClickHouse 公開ビュー（`PUBLIC_SQL_VIEWS`）を配備。
