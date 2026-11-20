@@ -72,3 +72,10 @@
 - [ ] **[2-D 鍵儀式・判断 22] オフライン配布署名鍵（Ed25519）生成・2人目の鍵担当者指名・パスキー登録**: 公開鍵を `packages/sdk-snippet`・`workers/link-zone`・`packages/wp-plugin` に固定し、プライバシー緩和承認用パスキーを登録する。
 - [ ] **[2-D 判断 2 確定] Stage B 計測タグ重量比較の `full` 群分割方式決定**: `all_verify_only`（約6週）か `half_verify_half_deliver`（推奨：約12週・1/6 PV並行配信可）を選択する。
 - [ ] **[2-D 判断 3 / 4 配備] 自社5サイト Cloudflare ゾーンへの `workers/link-zone` 配備（`/_ugk/selftest` 確認）および WordPress サイトへの `ugokilink-companion.php` 設置・`ugk_owner_local_policy` 設定**。
+
+### 波 2-A 追加タスク
+- [ ] **[2-A 本番適用 G1–G4 / identity_plane] ClickHouse 2層分離 & 鍵レジストリ配備**:
+  - 本番 ClickHouse にて CRAWL 用資格情報をローテーションし、`generateCrawlZeroGrantDdl()` で行動テーブル全権限剥奪を適用（`surf.G1`）。
+  - 本番 ClickHouse に `generatePerTenantIdentityDdl()`（テナント別 RO ユーザー・`readonly=1 CONST`・PERMISSIVE+RESTRICTIVE 行ポリシー対）を適用し、5分見張り番の 30 日連続無事故ランインを開始（`surf.G2`, `store.G-9`）。
+  - Postgres 鍵レジストリ配備および全オーナー/管理者の WebAuthn パスキー登録（`surf.identity_plane`, D-06）。
+  - 自社 5 サイトに `_ugokilink.<host>` DNS TXT（TTL ≤300s）を設置し、ペアリング経路＋R5 パスキー承認で `LinkGrant` を有効化（`surf.link_grant_active`）。
