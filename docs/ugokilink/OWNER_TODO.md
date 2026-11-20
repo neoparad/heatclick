@@ -88,3 +88,8 @@
 ### 波 3-D 追加タスク
 - [ ] **[3-D 判断 12 / act.G32]**: サーバー側 IP 証跡保持（既定 E/T 類 30 日公開鍵封印）および任意 opt-in P 類（72 時間封印）の法務署名を完了し、台帳 `D-12` (`legalSignedOff`) と Class P 認可フラグを開放（それまで `not_entitled`）。
 - [ ] **[3-D 運用 / act.G31 / act.G5]**: `DailySealingKeyVault` の本番 KMS/HSM 鍵破棄接続＋四半期復元不能ドリル、月次偽装 `X-Forwarded-For` オリジンプローブ接続、Origin Kit 4 形式スモーク検証および `UGK_EDGE_SECRET` 配布を整備。
+
+### 波 3-A / 3-B / 3-C 追加タスク
+- [ ] **[3-A 実機・3エンジン検証 (`tel.G3` / `tel.G7`)]**: Chromium / WebKit / Firefox 3エンジン＋実機離脱行列（LINE・Yahoo! JAPAN・Google アプリ内ブラウザ含む）で `tel.G7` 非干渉・`tel:`/`mailto:` 捕捉率 ≥95%・端末離脱時損失を実測。
+- [ ] **[3-A 判断 8 (`D-08`)]**: リプレイ階層 1/2（整数限定時系列）のオーナー裁定と法務署名を記録（記録まで `packages/sdk-browser` は `timeline_chunk` のブラウザ外送出を `not_entitled` で物理遮断。計測開始から 30 日以内に条項 `(b)` を決定）。
+- [ ] **[3-B 判断 27 / 3-A・3-C 本番配備]**: Segment 互換口・顧客定義イベントの許可 `traits` 方針確定、Cloudflare Worker `workers/link-collector`・Queue・R2 バケット（`spill`/`hold`/`quarantine`）・環境変数（`CONTINUITY_TOKEN_SECRET`, `LAB_MARKER_SECRET`, テナント別 `tenantMemberHashKey`）の配備および 5 分導入 `install_probe` 疎通確認。
