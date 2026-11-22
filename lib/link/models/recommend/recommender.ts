@@ -223,30 +223,166 @@ export interface PlackettLuceRankedEntry<T> {
   readonly weight: number;
   /** Exact conditional probability `P(chosen at step r | prior steps)` under Plackett-Luce. */
   readonly step_propensity: number;
+  /** Alias for `step_propensity`: conditional step probability `P(item chosen at slot r | slots 1..r-1)`. */
+  readonly slot_cond_prob: number;
   /** Marginal probability of appearing at position 1 (`w_i / sum_w`). */
   readonly top1_propensity: number;
+  /**
+   * True marginal top-`K` inclusion probability `P(item i shown in top K)` across ALL Plackett-Luce
+   * permutations (`[M-13]`), satisfying `sum_i display_prob_i === min(K, N)` for unbiased IPS/DR OPE.
+   */
+  readonly display_prob: number;
+}
+
+function hashSeedToUint32(seedKey: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < seedKey.length; i += 1) {
+    h ^= seedKey.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function mulberry32Pl(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 /**
- * Full-set Plackett-Luce sequential sampling without replacement (§8.5 & §8.13-4):
+ * Computes true marginal inclusion probability $P(\text{item } i \in \text{Top-}K)$ under
+ * Plackett-Luce sequential sampling without replacement (`[M-13]`):
+ * - Exact Subset Dynamic Programming over bitmasks when $K \le 5$ and $N \le 16$
+ *   (machine-precision exact, $\sum_i P(i \in \text{Top-}K) = K$).
+ * - High-precision seeded Gumbel-Top-$K$ Monte Carlo ($M = 4,096$ permutations, equivalent to
+ *   Plackett-Luce by Yellott's theorem) for larger $N$ or $K$.
+ */
+export function computePlackettLuceMarginalInclusionProbs(
+  weights: readonly number[],
+  topK: number,
+  seedKey = 'pl_marginal_default',
+  mcSamples = 4096
+): readonly number[] {
+  const n = weights.length;
+  if (n === 0) return [];
+  const kEff = Math.max(0, Math.min(n, Math.trunc(topK)));
+  if (kEff === 0) return new Array<number>(n).fill(0);
+  if (kEff === n) return new Array<number>(n).fill(1);
+
+  const posWeights = weights.map((w) => (Number.isFinite(w) && w > 0 ? w : 1e-6));
+  const totalW = posWeights.reduce((s, w) => s + w, 0);
+  if (kEff === 1) {
+    return posWeights.map((w) => w / totalW);
+  }
+
+  // Exact bitmask Subset DP for K <= 5 and N <= 16 (at most C(16, <=5) = 6,885 states -> < 1 ms!)
+  if (kEff <= 5 && n <= 16) {
+    let currentLayer = new Map<number, number>([[0, 1.0]]);
+    for (let step = 0; step < kEff; step += 1) {
+      const nextLayer = new Map<number, number>();
+      for (const [mask, prob] of currentLayer.entries()) {
+        if (prob <= 0) continue;
+        let usedWeight = 0;
+        for (let j = 0; j < n; j += 1) {
+          if ((mask & (1 << j)) !== 0) {
+            usedWeight += posWeights[j];
+          }
+        }
+        const remWeight = Math.max(1e-15, totalW - usedWeight);
+        for (let j = 0; j < n; j += 1) {
+          const bit = 1 << j;
+          if ((mask & bit) !== 0) continue;
+          const nextMask = mask | bit;
+          const transProb = prob * (posWeights[j] / remWeight);
+          nextLayer.set(nextMask, (nextLayer.get(nextMask) ?? 0) + transProb);
+        }
+      }
+      currentLayer = nextLayer;
+    }
+
+    const marginals = new Array<number>(n).fill(0);
+    for (const [mask, prob] of currentLayer.entries()) {
+      for (let j = 0; j < n; j += 1) {
+        if ((mask & (1 << j)) !== 0) {
+          marginals[j] += prob;
+        }
+      }
+    }
+    return marginals.map((p) => Math.max(0, Math.min(1, p)));
+  }
+
+  // High-precision Gumbel-Top-K Monte Carlo for larger candidate pools (e.g. N=50)
+  const m = Math.max(512, mcSamples);
+  const logWeights = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) {
+    logWeights[i] = Math.log(posWeights[i]);
+  }
+  const hitCounts = new Uint32Array(n);
+  const topScores = new Float64Array(kEff);
+  const topIndices = new Int32Array(kEff);
+  const rng = mulberry32Pl(hashSeedToUint32(`ugk:pl_mc:${seedKey}:${n}:${kEff}`));
+
+  for (let s = 0; s < m; s += 1) {
+    topScores.fill(-Infinity);
+    topIndices.fill(-1);
+
+    for (let i = 0; i < n; i += 1) {
+      const u = Math.max(1e-12, Math.min(1 - 1e-12, rng()));
+      const gumbelScore = logWeights[i] - Math.log(-Math.log(u));
+      if (gumbelScore > topScores[kEff - 1]) {
+        let pos = kEff - 1;
+        while (pos > 0 && gumbelScore > topScores[pos - 1]) {
+          topScores[pos] = topScores[pos - 1];
+          topIndices[pos] = topIndices[pos - 1];
+          pos -= 1;
+        }
+        topScores[pos] = gumbelScore;
+        topIndices[pos] = i;
+      }
+    }
+
+    for (let r = 0; r < kEff; r += 1) {
+      const idx = topIndices[r];
+      if (idx >= 0) hitCounts[idx] += 1;
+    }
+  }
+
+  return Array.from(hitCounts, (c) => c / m);
+}
+
+/**
+ * Full-set Plackett-Luce sequential sampling without replacement (§8.5, §8.13-4, `[M-13]`):
  * - Samples a COMPLETE permutation over ALL `N` candidates with weights `w_i > 0`
  *   (strictly positive exploration floor guarantees non-zero propensity for OPE!).
- * - Because the ENTIRE candidate set is ordered, dropping any subset of items independently
- *   (e.g. last-second sold-out removal) preserves the EXACT Plackett-Luce distribution over
- *   all remaining items (zero truncation bias!).
+ * - Computes BOTH conditional step probability `slot_cond_prob` (`step_propensity`) AND
+ *   true marginal top-`K` inclusion probability `display_prob` across permutations.
  */
 export function sampleFullPlackettLuceOrdering<T extends { readonly id: string; readonly weight: number }>(
   items: readonly T[],
   seedKey: string,
-  temperature = 1.0
+  temperature = 1.0,
+  topK?: number
 ): readonly PlackettLuceRankedEntry<T>[] {
   const temp = Math.max(0.05, temperature);
-  const remaining = items.map((item) => ({
+  const initialPool = items.map((item, origIdx) => ({
     item,
+    origIdx,
     // Temperature-scaled positive weight with strict exploration floor >= 1e-4
     effWeight: Math.max(1e-4, Math.pow(Math.max(1e-6, item.weight), 1 / temp)),
   }));
 
+  const effectiveTopK = topK !== undefined ? topK : items.length;
+  const marginalProbs = computePlackettLuceMarginalInclusionProbs(
+    initialPool.map((p) => p.effWeight),
+    effectiveTopK,
+    seedKey
+  );
+
+  const remaining = [...initialPool];
   const totalInitialWeight = remaining.reduce((s, r) => s + r.effWeight, 0);
   const ordered: PlackettLuceRankedEntry<T>[] = [];
 
@@ -263,12 +399,15 @@ export function sampleFullPlackettLuceOrdering<T extends { readonly id: string; 
       }
     }
     const [picked] = remaining.splice(chosenIdx, 1);
+    const condProb = Number((picked.effWeight / sumRem).toFixed(6));
     ordered.push({
       item: picked.item,
       rank: step + 1,
       weight: Number(picked.effWeight.toFixed(6)),
-      step_propensity: Number((picked.effWeight / sumRem).toFixed(6)),
+      step_propensity: condProb,
+      slot_cond_prob: condProb,
       top1_propensity: Number((picked.effWeight / totalInitialWeight).toFixed(6)),
+      display_prob: Number((marginalProbs[picked.origIdx] ?? 0).toFixed(6)),
     });
   }
 
@@ -296,7 +435,12 @@ export function rerankCandidatesInBrowser(params: {
     const boost = item.is_new_item ? 1.25 : 1.0;
     return { id: item.item_id, weight: sim * boost, item };
   });
-  const full = sampleFullPlackettLuceOrdering(weighted, params.seedKey, params.temperature ?? 1.0);
+  const full = sampleFullPlackettLuceOrdering(
+    weighted,
+    params.seedKey,
+    params.temperature ?? 1.0,
+    params.topK
+  );
   return {
     shown: full.slice(0, Math.max(0, params.topK)),
     full_ordering_count: full.length,

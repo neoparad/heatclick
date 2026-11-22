@@ -232,18 +232,51 @@ const FORBIDDEN_VISITOR_KEYS: ReadonlySet<string> = new Set([
   'email',
 ]);
 
-function scanObjectForVisitorKeys(obj: unknown, found: Set<string>, depth = 0): void {
-  if (depth > 6 || obj === null || obj === undefined || typeof obj !== 'object') return;
-  if (Array.isArray(obj)) {
-    for (const item of obj) scanObjectForVisitorKeys(item, found, depth + 1);
-    return;
-  }
-  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-    if (FORBIDDEN_VISITOR_KEYS.has(k) && v !== undefined && v !== null) {
-      found.add(k);
+const MAX_PROVIDER_SCAN_NODES = 100_000;
+
+/**
+ * [M-18] Explicit stack-based iterative visitor-key & prohibited-provenance scanner
+ * (`WeakSet` cycle protection + fail-closed if node count > 100,000).
+ */
+function scanObjectForVisitorKeys(root: unknown, found: Set<string>): void {
+  if (root === null || root === undefined || typeof root !== 'object') return;
+  const visited = new WeakSet<object>();
+  const stack: unknown[] = [root];
+  let scannedNodes = 0;
+
+  while (stack.length > 0) {
+    const curr = stack.pop();
+    if (curr === null || curr === undefined || typeof curr !== 'object') {
+      continue;
     }
-    if (typeof v === 'object' && v !== null) {
-      scanObjectForVisitorKeys(v, found, depth + 1);
+    if (visited.has(curr)) {
+      continue;
+    }
+    visited.add(curr);
+    scannedNodes += 1;
+    if (scannedNodes > MAX_PROVIDER_SCAN_NODES) {
+      found.add('__payload_node_limit_exceeded_100000__');
+      return;
+    }
+
+    if (Array.isArray(curr)) {
+      for (let i = curr.length - 1; i >= 0; i -= 1) {
+        stack.push(curr[i]);
+      }
+      continue;
+    }
+
+    const rec = curr as Record<string, unknown>;
+    for (const k of Object.keys(rec)) {
+      const v = rec[k];
+      if (v !== undefined && v !== null) {
+        if (FORBIDDEN_VISITOR_KEYS.has(k)) {
+          found.add(k);
+        }
+        if (typeof v === 'object') {
+          stack.push(v);
+        }
+      }
     }
   }
 }

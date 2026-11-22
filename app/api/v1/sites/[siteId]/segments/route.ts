@@ -16,10 +16,9 @@ export async function POST(
   req: NextRequest,
   context: { params: { siteId: string } }
 ) {
-  const mode = req.nextUrl.searchParams.get('mode');
   return handleV1RestRoute({
     req,
-    operationId: mode === 'compare' ? 'compareSegments' : 'createSegment',
+    operationId: 'createSegment',
     siteId: context.params.siteId,
     parseBody: true,
   });

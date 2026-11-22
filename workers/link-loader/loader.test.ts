@@ -798,4 +798,107 @@ describe('workers/link-loader', () => {
     expect(todayLagged.totals).toBeNull();
     expect(todayLagged.quality.builderLagMs).toBe(125 * 60_000);
   });
+
+  test('Wave 8 Regressions (H-19, H-21): excludes lab_run_id / lab_exclusion PVs from human rollups, advances Today seam across quiet 0-PV hours, and blocks deleted subject resurrection on WAL replay', async () => {
+    const bucket = new InMemoryR2Bucket();
+    const writer = new WalWriter({ region: 'jp', bucket });
+    const loader = new ShardLoader({ region: 'jp', shardId: 0, bucket });
+    const builder = new SealedRollupBuilder();
+
+    const dayStart = Date.UTC(2026, 10, 21, 0, 0, 0);
+    const pvHuman = 'a0000000000000000000000000000001';
+    const pvLab = 'b0000000000000000000000000000002';
+    const pvDeleted = 'c0000000000000000000000000000003';
+
+    const humanFrame = buildFrameFromStep(
+      GROUND_TRUTH_STEPS[1]!,
+      0,
+      [GROUND_TRUTH_STEPS[1]!.newLogItem!],
+      pvHuman,
+      '501',
+      dayStart + 5 * 60_000
+    );
+    const labBase = {
+      ...buildFrameFromStep(
+        GROUND_TRUTH_STEPS[2]!,
+        0,
+        [GROUND_TRUTH_STEPS[2]!.newLogItem!],
+        pvLab,
+        '501',
+        dayStart + 10 * 60_000
+      ),
+      lab_run_id: 'lab_synthetic_001',
+    };
+    const { chk: _oldChk, ...labWithoutChk } = labBase;
+    const labFrame: TelemetryFrame = {
+      ...labWithoutChk,
+      chk: computeFrameChecksum(labWithoutChk),
+    };
+    const deletedFrame = buildFrameFromStep(
+      GROUND_TRUTH_STEPS[1]!,
+      0,
+      [GROUND_TRUTH_STEPS[1]!.newLogItem!],
+      pvDeleted,
+      '502',
+      dayStart + 15 * 60_000
+    );
+
+    await writer.consumeBatch(
+      [
+        {
+          tenant_id: 't-quiet',
+          site_id: 's-quiet',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: dayStart + 5 * 60_000,
+          raw_frame: humanFrame,
+        },
+        {
+          tenant_id: 't-quiet',
+          site_id: 's-quiet',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: dayStart + 10 * 60_000,
+          lab_exclusion: true,
+          raw_frame: labFrame,
+        },
+        {
+          tenant_id: 't-quiet',
+          site_id: 's-quiet',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: dayStart + 15 * 60_000,
+          raw_frame: deletedFrame,
+        },
+      ],
+      dayStart + 20 * 60_000
+    );
+
+    await loader.loadPendingWalObjects(dayStart + 25 * 60_000);
+    loader.deletePvs('t-quiet', 's-quiet', [pvDeleted], dayStart + 30 * 60_000);
+    builder.sealEligibleHours(loader, dayStart + 4 * HOUR_MS + 35 * 60_000);
+
+    expect(builder.getCurrentSiteHourRollup('t-quiet', 's-quiet', dayStart)?.pvCount).toBe(1);
+
+    const todayQuiet = builder.queryTodayWithSeam(loader, {
+      tenantId: 't-quiet',
+      siteId: 's-quiet',
+      windowStartMs: dayStart,
+      nowMs: dayStart + 4 * HOUR_MS + 40 * 60_000,
+    });
+    expect(todayQuiet.status).toBe('ok');
+    expect(todayQuiet.quality.seamHourMs).toBe(dayStart + 4 * HOUR_MS);
+    expect(todayQuiet.totals?.pvCount).toBe(1);
+
+    const replay = await replayAllFromWal({
+      region: 'jp',
+      shardId: 0,
+      walBucket: bucket,
+      nowMs: dayStart + 5 * HOUR_MS,
+      deletionTombstones: [{ tenantId: 't-quiet', siteId: 's-quiet', pvIds: [pvDeleted] }],
+    });
+    const replayedPvIds = replay.loader.getAllPvIndexRows().map((r) => r.pvId);
+    expect(replayedPvIds).not.toContain(pvDeleted);
+    expect(replayedPvIds).toContain(pvHuman);
+  });
 });

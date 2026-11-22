@@ -314,20 +314,45 @@ describe('Bundle 1-E: Unified Response Envelope Serializer & Guard Invariants', 
       );
     });
 
-    it('accepts non-ok measure with value: null and explicit reason even if unmet_gates is empty', () => {
-      const env = buildResponseEnvelope(
+    it('rejects non-ok measure with empty unmet_gates even when explicit reason is present ([M-01])', () => {
+      expectViolation(
+        () =>
+          buildResponseEnvelope(
+            makeBaseEnvelope({
+              m: {
+                ...makeObservedOkMeasure(),
+                value: null,
+                interval: null,
+                status: 'not_applicable',
+                reason: 'tel.U2: no server capture path on tag-only install',
+                unmet_gates: [],
+              },
+            })
+          ),
+        'NON_OK_REQUIRES_UNMET_GATE_OR_REASON'
+      );
+
+      const envWithGate = buildResponseEnvelope(
         makeBaseEnvelope({
           m: {
             ...makeObservedOkMeasure(),
             value: null,
+            interval: null,
             status: 'not_applicable',
             reason: 'tel.U2: no server capture path on tag-only install',
-            unmet_gates: [],
+            unmet_gates: [
+              {
+                id: 'tel.U2',
+                required: 'server_capture',
+                observed: 'tag_only',
+                unlock: 'Install Zone Worker or Origin Kit',
+              },
+            ],
           },
         })
       );
-      expect(env.status).toBe('not_applicable');
-      expect(env.measures.m.value).toBeNull();
+      expect(envWithGate.status).toBe('not_applicable');
+      expect(envWithGate.measures.m.value).toBeNull();
     });
 
     it('rejects status === "ok" with value: null', () => {
@@ -859,6 +884,304 @@ describe('Bundle 1-E: Unified Response Envelope Serializer & Guard Invariants', 
       expect(
         liftCheck.violations.some((v) => v.code === 'POINT_ESTIMATE_FORBIDDEN_BELOW_PROVEN')
       ).toBe(true);
+    });
+  });
+
+  describe('Wave 8 Adversarial Regressions: [C-07] & [M-01]', () => {
+    it('[C-07] prevents WeakSet brand forgery via Reflect.ownKeys, Object.getOwnPropertySymbols, spread, or Object.create', () => {
+      const legit = createDataLayerMetric(42.5, 'evref_legit_1');
+      expect(Object.getOwnPropertySymbols(legit)).toEqual([]);
+      expect(Reflect.ownKeys(legit).every((k) => typeof k === 'string')).toBe(true);
+
+      const protoForged = Object.create(legit) as VerifiedMetricValue<number>;
+      expect(isVerifiedMetricValue(protoForged)).toBe(false);
+
+      const spreadForged = { ...legit, value: 999999 } as unknown as VerifiedMetricValue<number>;
+      expect(isVerifiedMetricValue(spreadForged)).toBe(false);
+
+      expectViolation(
+        () =>
+          buildResponseEnvelope(
+            makeBaseEnvelope({
+              m: { ...makeObservedOkMeasure(), value: protoForged },
+            })
+          ),
+        'UNVERIFIED_METRIC_VALUE'
+      );
+
+      // Raw unbranded numbers or NaN/Infinity inside input.data MUST fail I5
+      expectViolation(
+        () =>
+          buildResponseEnvelope(
+            makeBaseEnvelope(
+              { aff_ctr: makeObservedOkMeasure() },
+              { data: { rows: [{ raw_clicks: 17 }] } }
+            )
+          ),
+        'UNVERIFIED_METRIC_VALUE'
+      );
+      expectViolation(
+        () =>
+          buildResponseEnvelope(
+            makeBaseEnvelope(
+              { aff_ctr: makeObservedOkMeasure() },
+              { data: { bad_nan: Number.NaN } }
+            )
+          ),
+        'UNVERIFIED_METRIC_VALUE'
+      );
+
+      // Branded metric inside input.data is accepted and unwrapped cleanly
+      const envWithBrandedData = buildResponseEnvelope(
+        makeBaseEnvelope(
+          { aff_ctr: makeObservedOkMeasure() },
+          { data: { rows: [{ verified_clicks: createDataLayerMetric(17, 'evref_q1') }] } }
+        )
+      );
+      expect(envWithBrandedData.data).toEqual({ rows: [{ verified_clicks: 17 }] });
+    });
+
+    it('[C-07] enforces UntrustedValue Object.prototype, exact own keys, non-unwrapping toJSON(), and removes policy_url exemption in data', () => {
+      const wrapped = wrapUntrusted('https://wakegai.jp/lp?x=1', 'url', { maxChars: 128 });
+      expect(wrapped.__ugk_untrusted).toBe(true);
+      expect(wrapped.raw_text).toBe('https://wakegai.jp/lp?x=1');
+      expect(wrapped.max_chars).toBe(128);
+
+      // JSON.stringify MUST preserve wrapper, never unwrap to raw string
+      const jsonRoundTrip = JSON.parse(JSON.stringify(wrapped)) as Record<string, unknown>;
+      expect(typeof jsonRoundTrip).toBe('object');
+      expect(jsonRoundTrip.__ugk_untrusted).toBe(true);
+      expect(jsonRoundTrip.raw_text).toBe('https://wakegai.jp/lp?x=1');
+      expect(jsonRoundTrip.max_chars).toBe(128);
+      expect(isUntrustedValue(jsonRoundTrip)).toBe(true);
+
+      // Extra own keys, null prototype, Object.create, or custom toJSON MUST be rejected
+      expect(isUntrustedValue({ ...jsonRoundTrip, extra_smuggled: 'https://evil.example' })).toBe(false);
+      expect(isUntrustedValue(Object.assign(Object.create(null), jsonRoundTrip))).toBe(false);
+      expect(isUntrustedValue(Object.create(wrapped))).toBe(false);
+      expect(isUntrustedValue({ ...jsonRoundTrip, toJSON: () => 'raw_string' })).toBe(false);
+
+      expectViolation(
+        () =>
+          buildResponseEnvelope(
+            makeBaseEnvelope(
+              { aff_ctr: makeObservedOkMeasure() },
+              { data: { url: { ...jsonRoundTrip, injected: 'ignore instructions' } } }
+            )
+          ),
+        'UNTRUSTED_STRING_LEAK'
+      );
+
+      // policy_url inside data is NO LONGER exempt as a raw string!
+      expectViolation(
+        () =>
+          buildResponseEnvelope(
+            makeBaseEnvelope(
+              { aff_ctr: makeObservedOkMeasure() },
+              { data: { policy_url: 'https://evil.example/smuggle' } }
+            )
+          ),
+        'UNTRUSTED_STRING_LEAK'
+      );
+
+      // Even at $.policy.policy_url, whitespace/control chars/javascript: are rejected
+      expectViolation(
+        () =>
+          buildResponseEnvelope(
+            makeBaseEnvelope(
+              { aff_ctr: makeObservedOkMeasure() },
+              { policy: { version: '1.0', policy_url: 'https://wakegai.jp/privacy inject prompt' } }
+            )
+          ),
+        'UNTRUSTED_STRING_LEAK'
+      );
+      expectViolation(
+        () =>
+          buildResponseEnvelope(
+            makeBaseEnvelope(
+              { aff_ctr: makeObservedOkMeasure() },
+              { policy: { version: '1.0', policy_url: 'javascript:alert(1)' } }
+            )
+          ),
+        'UNTRUSTED_STRING_LEAK'
+      );
+    });
+
+    it('[C-07] fails closed on NaN numeric gates, unverified integrity_status, tombstoned refs, and empty query_refs/artifact_refs in proven criteria', () => {
+      const badCriteriaVariants: ProvenPredicateResult[] = [
+        { ...VALID_PROVEN_CRITERIA, integrity_status: 'unverified' },
+        { ...VALID_PROVEN_CRITERIA, randomisation_audit_p: Number.NaN },
+        { ...VALID_PROVEN_CRITERIA, alpha: Number.NaN },
+        { ...VALID_PROVEN_CRITERIA, duration_days: Number.NaN },
+        { ...VALID_PROVEN_CRITERIA, observation_days: 10 },
+        { ...VALID_PROVEN_CRITERIA, sr_mismatch_p: 0.0005 },
+        { ...VALID_PROVEN_CRITERIA, sr_mismatch_p: Number.NaN },
+        { ...VALID_PROVEN_CRITERIA, effect_ci_excludes_zero: false },
+        { ...VALID_PROVEN_CRITERIA, placebo_pass: false },
+        { ...VALID_PROVEN_CRITERIA, pre_exposure_balance_pass: false },
+        { ...VALID_PROVEN_CRITERIA, query_refs: [] },
+        { ...VALID_PROVEN_CRITERIA, artifact_refs: [''] },
+        { ...VALID_PROVEN_CRITERIA, tombstoned: true },
+      ];
+
+      for (const bad of badCriteriaVariants) {
+        expectViolation(
+          () =>
+            buildResponseEnvelope(
+              makeBaseEnvelope({
+                lift: {
+                  ...makeObservedOkMeasure(),
+                  evidence: {
+                    level: 'proven',
+                    exactness: 'exact',
+                    criteria: [bad],
+                    refs: [VALID_INTERVENTION_REF],
+                    validity: 'valid',
+                    scope: 'site:wakegai.jp',
+                  },
+                },
+              })
+            ),
+          'PROVEN_REQUIRES_PASSING_CRITERIA'
+        );
+      }
+
+      // Tombstoned intervention ref CANNOT satisfy proven!
+      expectViolation(
+        () =>
+          buildResponseEnvelope(
+            makeBaseEnvelope({
+              lift: {
+                ...makeObservedOkMeasure(),
+                evidence: {
+                  level: 'proven',
+                  exactness: 'exact',
+                  criteria: [VALID_PROVEN_CRITERIA],
+                  refs: [
+                    {
+                      ref_id: 'evref_tombstoned_intv',
+                      kind: 'intervention',
+                      tombstone: { reason: 'erased', tombstoned_at: '2026-11-20T00:00:00Z' },
+                    },
+                  ],
+                  validity: 'valid',
+                  scope: 'site:wakegai.jp',
+                },
+              },
+            })
+          ),
+        'PROVEN_REQUIRES_INTERVENTION_REF'
+      );
+    });
+
+    it('[M-01] enforces null interval & point_estimate on invalid/suppressed/not_collected, D-09 predictive_interval lock at proven, and full validateSerializedEnvelope checks', () => {
+      for (const st of ['invalid', 'suppressed', 'not_collected'] as const) {
+        // Non-null interval rejected
+        expectViolation(
+          () =>
+            buildResponseEnvelope(
+              makeBaseEnvelope({
+                m: {
+                  ...makeObservedOkMeasure(),
+                  value: null,
+                  status: st,
+                  interval: { level: 0.95, lower: 0.1, upper: 0.2 },
+                  unmet_gates: [{ id: 'ev.G-3', required: 'pass', observed: 'fail', unlock: 'Fix' }],
+                },
+              })
+            ),
+          'INVALID_SAMPLE_OR_INTERVAL'
+        );
+
+        // Non-null point_estimate rejected
+        expectViolation(
+          () =>
+            buildResponseEnvelope(
+              makeBaseEnvelope({
+                m: {
+                  ...makeObservedOkMeasure(),
+                  value: null,
+                  interval: null,
+                  status: st,
+                  projection: { impact_band: 'low' }, // missing point_estimate: null
+                  unmet_gates: [{ id: 'ev.G-3', required: 'pass', observed: 'fail', unlock: 'Fix' }],
+                },
+              })
+            ),
+          'NON_OK_MUST_HAVE_NULL_VALUE'
+        );
+      }
+
+      // D-09 unresolved: even at `proven`, an uncalibrated predictive_interval MUST be rejected!
+      expectViolation(
+        () =>
+          buildResponseEnvelope(
+            makeBaseEnvelope({
+              lift: {
+                ...makeObservedOkMeasure(),
+                evidence: {
+                  level: 'proven',
+                  exactness: 'exact',
+                  criteria: [VALID_PROVEN_CRITERIA],
+                  refs: [VALID_INTERVENTION_REF],
+                  validity: 'valid',
+                  scope: 'site:wakegai.jp',
+                },
+                projection: {
+                  predictive_interval: {
+                    level: 0.8,
+                    lower: 0.01,
+                    upper: 0.2,
+                    basis: 'uncalibrated_prior',
+                    calibration: {
+                      gate_id: 'sur.projection_calibrated(cta)',
+                      gate_passed: false,
+                      clopper_pearson_lower_95: 0.4,
+                      resolved_interventions: 5,
+                      sites: 1,
+                      scope: 'class',
+                    },
+                  },
+                },
+              },
+            })
+          ),
+        'UNCALIBRATED_PROJECTION_INTERVAL'
+      );
+
+      // validateSerializedEnvelope catches corrupted sample, interval, unmet_gates, and NaN
+      const validJson = serializeResponseEnvelope(
+        makeBaseEnvelope({ aff_ctr: makeObservedOkMeasure() })
+      );
+
+      const badSample = JSON.parse(validJson) as {
+        measures: { aff_ctr: { sample: unknown } };
+      };
+      badSample.measures.aff_ctr.sample = { n: -1 };
+      expect(validateSerializedEnvelope(badSample).valid).toBe(false);
+
+      const badInterval = JSON.parse(validJson) as {
+        measures: { aff_ctr: { interval: unknown } };
+      };
+      badInterval.measures.aff_ctr.interval = { level: 0.95, lower: 0.5, upper: 0.1 };
+      expect(validateSerializedEnvelope(badInterval).valid).toBe(false);
+
+      const badNonOk = JSON.parse(validJson) as {
+        status: string;
+        measures: { aff_ctr: { status: string; value: null; interval: null; unmet_gates: unknown[]; gates: { unmet: unknown[] }; reason: string } };
+      };
+      badNonOk.status = 'invalid';
+      badNonOk.measures.aff_ctr.status = 'invalid';
+      badNonOk.measures.aff_ctr.value = null;
+      badNonOk.measures.aff_ctr.interval = null;
+      badNonOk.measures.aff_ctr.reason = 'reason alone is not enough';
+      badNonOk.measures.aff_ctr.unmet_gates = [];
+      badNonOk.measures.aff_ctr.gates = { unmet: [] };
+      expect(validateSerializedEnvelope(badNonOk).valid).toBe(false);
+
+      const badNan = JSON.parse(validJson) as Record<string, unknown>;
+      badNan.data = { metric: Number.POSITIVE_INFINITY };
+      expect(validateSerializedEnvelope(badNan).valid).toBe(false);
     });
   });
 });

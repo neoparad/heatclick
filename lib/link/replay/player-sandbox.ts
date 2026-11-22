@@ -65,7 +65,25 @@ const ALLOWED_RENDER_TAGS = new Set([
   'th',
 ]);
 
+const HARD_BLOCKED_RENDER_TAGS = new Set([
+  'script',
+  'style',
+  'noscript',
+  'template',
+  'foreignobject',
+  'iframe',
+  'object',
+  'embed',
+  'applet',
+  'form',
+]);
+
 function renderNodeToSafeHtml(node: MaskedReplayNode): string {
+  const rawTag = node.tagName.toLowerCase();
+  if (!node.boxOnlyPlaceholder && HARD_BLOCKED_RENDER_TAGS.has(rawTag)) {
+    return '';
+  }
+
   if (node.boxOnlyPlaceholder) {
     const label = escapeHtml(`[${node.boxOnlyPlaceholder.toUpperCase()}_PLACEHOLDER]`);
     return `<div data-placeholder="${escapeHtml(node.boxOnlyPlaceholder)}" style="width:${Math.max(0, Math.round(node.rect.width))}px;height:${Math.max(0, Math.round(node.rect.height))}px;background-color:#e5e7eb;border:1px dashed #6b7280">${label}</div>`;
@@ -79,7 +97,6 @@ function renderNodeToSafeHtml(node: MaskedReplayNode): string {
     return escapeHtml(node.textBlock ?? '');
   }
 
-  const rawTag = node.tagName.toLowerCase();
   const safeTag = ALLOWED_RENDER_TAGS.has(rawTag) ? rawTag : 'div';
   const styleAttr = node.safeStyle ? ` style="${escapeHtml(node.safeStyle)}"` : '';
   const innerText = node.textBlock ? escapeHtml(node.textBlock) : '';
@@ -135,14 +152,14 @@ export function verifySandboxFrameSafety(bundle: IsolatedReplayRenderBundle): {
   if (!bundle.cspHeader.includes("script-src 'none'") || !bundle.cspHeader.includes("connect-src 'none'")) {
     violations.push('CSP must enforce script-src none and connect-src none');
   }
-  if (/<script\b/i.test(bundle.srcDocHtml)) {
-    violations.push('Detected forbidden <script> tag in replay HTML');
+  if (/<script\b|<style\b|<noscript\b|<template\b|<foreignobject\b/i.test(bundle.srcDocHtml)) {
+    violations.push('Detected forbidden <script>/<style>/<noscript>/<template>/<foreignObject> tag in replay HTML');
   }
-  if (/\son[a-z]+\s*=/i.test(bundle.srcDocHtml)) {
-    violations.push('Detected forbidden inline event handler attribute (on*=)');
+  if (/\son[a-z]+\s*=|\ssrcdoc\s*=/i.test(bundle.srcDocHtml)) {
+    violations.push('Detected forbidden inline event handler or srcdoc attribute');
   }
-  if (/javascript:|data:text\/html/i.test(bundle.srcDocHtml)) {
-    violations.push('Detected forbidden javascript: or data:text/html URI');
+  if (/javascript:|vbscript:|data:text\/html/i.test(bundle.srcDocHtml)) {
+    violations.push('Detected forbidden javascript:, vbscript:, or data:text/html URI');
   }
   if (/<form\b|<iframe\b|<object\b|<embed\b/i.test(bundle.srcDocHtml)) {
     violations.push('Detected forbidden interactive/embedded element (<form>/<iframe>/<object>)');

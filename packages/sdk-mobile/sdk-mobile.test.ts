@@ -127,4 +127,99 @@ describe('packages/sdk-mobile — 4-Platform Mobile SDKs (iOS/Android/RN/Flutter
       expect(osGate.passed).toBe(true);
     }
   });
+
+  test('[C-09] & [H-16] verifies non-stub 4-platform generated SDKs (Swift JSON-safe bounds, HTTP POST, retry/backoff, 4xx drop, persistence wipe) and lifecycle pre-enqueue trait drop + consent downgrade queue re-filtering', () => {
+    // 1. [C-09] Generated SDK code verification across Swift, Kotlin, React Native TS, and Flutter Dart
+    const { artifacts } = generateAll4MobileSdks();
+    for (const platform of MOBILE_PLATFORMS) {
+      const code = artifacts[platform].files[0].content;
+      expect(code).not.toMatch(/flushIfOnline\s*\([^)]*\)\s*(?::\s*[^{]+)?\{\s*\}/);
+      expect(code).not.toMatch(/_flushIfOnline\s*\(\s*\)\s*\{\s*\}/);
+      expect(code).toContain('track');
+      expect(code).toContain('setConsent');
+      expect(code).toContain('optOut');
+      expect(code).toContain('flushIfOnline');
+      expect(code).toContain('x-ugk-key');
+      expect(code).toContain('429');
+    }
+    const swiftCode = artifacts.ios.files[0].content;
+    expect(swiftCode).not.toContain('bounds: (Double, Double, Double, Double)');
+    expect(swiftCode).toContain('UgokiRectBounds: Codable');
+    expect(swiftCode).toContain('bounds.asArray');
+
+    // 2. [H-16] Pre-enqueue unapproved `traits` drop + `setConsent` downgrade queue re-filtering
+    const persistedSnapshots: string[] = [];
+    let diskClearedCount = 0;
+    const rt = new MobileSdkSessionRuntime({
+      platform: 'android',
+      tenantId: 'tenant_a',
+      siteId: 'app_android_1',
+      consentMode: 'full',
+      consentPurposes: ['member_link', 'screen_replay', 'page_content'],
+      allowedTraitKeys: ['plan'],
+      online: false,
+      persistence: {
+        save(events) {
+          persistedSnapshots.push(JSON.stringify(events));
+        },
+        clear() {
+          diskClearedCount += 1;
+          persistedSnapshots.length = 0;
+        },
+      },
+    });
+
+    // Enqueue identify with approved `plan` AND unapproved `email`/`phone` PII traits + track with vid/sid
+    const idEv = rt.recordSegmentCall(
+      'identify',
+      {
+        userId: 'u_999',
+        vid: 'vid_secret_1',
+        sid: 'sid_secret_1',
+        traits: { plan: 'enterprise', email: 'secret@example.jp', phone: '090-1234-5678' },
+      },
+      1000
+    );
+    expect(idEv).not.toBeNull();
+    // Unapproved traits MUST NEVER be stored in memory or disk queue!
+    const rawMemoryJson = JSON.stringify(rt.getQueuedEvents());
+    expect(rawMemoryJson).not.toContain('secret@example.jp');
+    expect(rawMemoryJson).not.toContain('090-1234-5678');
+    expect(persistedSnapshots[persistedSnapshots.length - 1]).not.toContain('secret@example.jp');
+    expect(idEv?.payload.traits).toEqual({ plan: 'enterprise' });
+
+    rt.recordSegmentCall(
+      'track',
+      {
+        event: 'ViewItem',
+        vid: 'vid_secret_1',
+        sid: 'sid_secret_1',
+        anonymousId: 'anon_secret_1',
+        traits: { plan: 'enterprise', rawSecret: 'drop_me' },
+      },
+      2000
+    );
+    expect(rt.getQueueLength()).toBe(2);
+
+    // Downgrade `full` -> `cookieless`:
+    // - `identify` event MUST be purged from waiting queue!
+    // - Surviving `track` event MUST have `vid`, `sid`, `anonymousId`, `traits` stripped AND disk cleared!
+    const downgrade = rt.setConsent('cookieless', ['page_content']);
+    expect(downgrade.purgedCount).toBe(1);
+    expect(downgrade.remainingCount).toBe(1);
+    const remaining = rt.getQueuedEvents()[0];
+    expect(remaining.callType).toBe('track');
+    expect(remaining.consentMode).toBe('cookieless');
+    expect(JSON.stringify(remaining)).not.toContain('vid_secret_1');
+    expect(JSON.stringify(remaining)).not.toContain('sid_secret_1');
+    expect(JSON.stringify(remaining)).not.toContain('anon_secret_1');
+    expect(JSON.stringify(remaining)).not.toContain('enterprise');
+    expect(diskClearedCount).toBeGreaterThanOrEqual(1);
+
+    // Downgrade to `off` wipes 100% of remaining queue!
+    const offRes = rt.setConsent('off', []);
+    expect(offRes.purgedCount).toBe(1);
+    expect(offRes.remainingCount).toBe(0);
+    expect(rt.getQueueLength()).toBe(0);
+  });
 });

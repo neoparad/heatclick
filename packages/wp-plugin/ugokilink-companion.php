@@ -6,15 +6,22 @@
  * Requires PHP: 8.1
  * License: Proprietary
  *
- * Security invariants (§10.9, §12.1 #3, D-24, DEL M9 / App. H):
- * 1. Offline-pinned Ed25519 release keys verify EVERY incoming command before any read/write.
- * 2. Site owner local policy (`ugk_owner_local_policy`, wp-admin only) CANNOT be exceeded by any UGOKI key.
- * 3. Atomic compare-and-swap apply refuses if `wp_check_post_lock()` reports an active editor lock,
- *    verifies BOTH `expected_content_sha256` and `expected_modified_gmt`, splices bytes inside the
- *    addressed block with `wp_kses_post` filtering ALWAYS ON, saves immutable pre-image by hash, and purges caches.
- * 4. Restore swaps the stored pre-image back ONLY when current content SHA-256 equals post-image SHA-256;
+ * Security invariants (§10.9, §12.1 #3, D-24, DEL M9 / App. H, [C-17], [H-08]):
+ * 1. Offline-pinned Ed25519 release keys verify EVERY incoming command over `payload_canonical_json`
+ *    with strict `SODIUM_CRYPTO_SIGN_BYTES` length check and `try/catch (\Throwable $e)` -> 401.
+ * 2. Site binding (`tenant_id`, `site_id`, normalized `home_url`) is verified BEFORE checking or
+ *    advancing `ugk_last_command_seq` (preventing cross-site replay DoS).
+ * 3. True 2-key site owner local policy (`ugk_owner_local_policy` + `ugokilink_local_approvals` in `wp_options`,
+ *    writable ONLY via local WP-Admin `manage_options` + WP nonce `ugokilink_local_approve`):
+ *    cloud payloads can NEVER self-assert admin confirmation; any command exceeding `allowed_auto_classes`
+ *    or touching `require_admin_confirmation_classes` / indexable SEO / outbound hosts requires an
+ *    unconsumed local approval digest `hash('sha256', site_id . '|' . post_id . '|' . before_sha256 . '|' . after_sha256 . '|' . command_seq)`
+ *    within TTL, consumed atomically on apply.
+ * 4. Enforces `daily_apply_cap` per UTC day (`ugk_daily_apply_counter`), refuses active editor locks,
+ *    tracks `$acquiredLock` so `finally` ONLY releases `_edit_lock` if acquired by THIS request,
+ *    verifies BOTH `expected_content_sha256` and `expected_modified_gmt`, and sanitizes via `wp_kses_post`.
+ * 5. Restore swaps the stored pre-image back ONLY when current content SHA-256 equals post-image SHA-256;
  *    otherwise returns 409 `rollback_conflict` with three-way merge payload.
- * 5. `publish_post` emits signed `content.changed` to UGOKI LINK only (never directly to CRAWL).
  */
 
 declare(strict_types=1);
@@ -27,9 +34,14 @@ final class UgokiLink_Companion_Plugin
 {
     public const PLUGIN_VERSION = '2.0.0';
     public const OPTION_LOCAL_POLICY = 'ugk_owner_local_policy';
+    public const OPTION_LOCAL_APPROVALS = 'ugokilink_local_approvals';
+    public const OPTION_DAILY_APPLY_COUNTER = 'ugk_daily_apply_counter';
+    public const OPTION_BOUND_TENANT_ID = 'ugk_bound_tenant_id';
+    public const OPTION_BOUND_SITE_ID = 'ugk_bound_site_id';
     public const OPTION_LAST_SEQ = 'ugk_last_command_seq';
     public const OPTION_MANIFEST_JSON = 'ugk_inline_manifest_json';
     public const OPTION_FILTER_PATCHES = 'ugk_render_filter_patches';
+    public const NONCE_ACTION_LOCAL_APPROVE = 'ugokilink_local_approve';
     public const META_PREIMAGE_PREFIX = '_ugk_preimage_';
     public const EMPTY_FILE_SRI = 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=';
 
@@ -47,6 +59,7 @@ final class UgokiLink_Companion_Plugin
     {
         add_action('wp_head', [self::class, 'emitPinnedSnippetAndManifest'], 1);
         add_action('rest_api_init', [self::class, 'registerRestRoutes']);
+        add_action('admin_post_ugokilink_local_approve', [self::class, 'handleLocalAdminApprovalPost']);
         add_action('transition_post_status', [self::class, 'onPostPublished'], 10, 3);
         add_filter('the_content', [self::class, 'applyRenderFilterPatches'], 20);
     }
@@ -68,13 +81,166 @@ final class UgokiLink_Companion_Plugin
             'local_stop' => false,
             'allowed_auto_classes' => [], // Default: ZERO auto-apply classes until owner opts in
             'daily_apply_cap' => 10,
-            'require_admin_confirmation_classes' => ['indexable_major', 'price', 'offer'],
+            'require_admin_confirmation_classes' => [
+                'indexable_major',
+                'touch_indexable_seo',
+                'change_outbound_hosts',
+                'price',
+                'offer',
+            ],
         ];
         $stored = get_option(self::OPTION_LOCAL_POLICY, []);
         if (!is_array($stored)) {
             return $defaults;
         }
         return array_merge($defaults, $stored);
+    }
+
+    /**
+     * Normalizes `home_url` identically across PHP and TypeScript (`[H-08]`).
+     */
+    public static function normalizeHomeUrl(string $rawUrl): string
+    {
+        $trimmed = trim($rawUrl);
+        if ($trimmed === '') {
+            return '';
+        }
+        $parts = wp_parse_url($trimmed);
+        if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
+            return '';
+        }
+        $scheme = strtolower((string) $parts['scheme']);
+        if ($scheme !== 'https' && $scheme !== 'http') {
+            return '';
+        }
+        $host = strtolower((string) $parts['host']);
+        $port = isset($parts['port']) ? (int) $parts['port'] : null;
+        $portPart = '';
+        if ($port !== null && !(($scheme === 'https' && $port === 443) || ($scheme === 'http' && $port === 80))) {
+            $portPart = ':' . $port;
+        }
+        $path = isset($parts['path']) ? rtrim((string) $parts['path'], '/') : '';
+        return $scheme . '://' . $host . $portPart . $path;
+    }
+
+    /**
+     * Produces deterministic canonical JSON matching `workers/link-signer` (`[H-08]`).
+     */
+    public static function canonicalizeJsonValue(mixed $value): string
+    {
+        if ($value === null || is_bool($value) || is_int($value) || is_float($value) || is_string($value)) {
+            return (string) wp_json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        }
+        if (is_array($value)) {
+            if (array_is_list($value)) {
+                $items = array_map([self::class, 'canonicalizeJsonValue'], $value);
+                return '[' . implode(',', $items) . ']';
+            }
+            $keys = array_keys($value);
+            sort($keys, SORT_STRING);
+            $pairs = [];
+            foreach ($keys as $k) {
+                $keyJson = (string) wp_json_encode((string) $k, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+                $pairs[] = $keyJson . ':' . self::canonicalizeJsonValue($value[$k]);
+            }
+            return '{' . implode(',', $pairs) . '}';
+        }
+        return 'null';
+    }
+
+    /**
+     * Computes 2-key local approval digest (`[C-17]`):
+     * `hash('sha256', site_id . '|' . post_id . '|' . before_sha256 . '|' . after_sha256 . '|' . command_seq)`
+     */
+    public static function computeLocalApprovalDigest(
+        string $siteId,
+        int $postId,
+        string $beforeSha256,
+        string $afterSha256,
+        int $commandSeq
+    ): string {
+        return hash(
+            'sha256',
+            $siteId . '|' . $postId . '|' . $beforeSha256 . '|' . $afterSha256 . '|' . $commandSeq
+        );
+    }
+
+    /**
+     * Local WP-Admin ONLY handler (`manage_options` + WP nonce `ugokilink_local_approve`, `[C-17]`).
+     * Never reachable via signed cloud commands.
+     */
+    public static function handleLocalAdminApprovalPost(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die('Forbidden: manage_options required', 'Forbidden', ['response' => 403]);
+        }
+        check_admin_referer(self::NONCE_ACTION_LOCAL_APPROVE, '_ugk_nonce');
+
+        $siteId = (string) get_option(self::OPTION_BOUND_SITE_ID, '');
+        $postId = isset($_POST['post_id']) ? (int) $_POST['post_id'] : 0;
+        $beforeSha = isset($_POST['before_sha256']) ? sanitize_text_field(wp_unslash((string) $_POST['before_sha256'])) : '';
+        $afterSha = isset($_POST['after_sha256']) ? sanitize_text_field(wp_unslash((string) $_POST['after_sha256'])) : '';
+        $commandSeq = isset($_POST['command_seq']) ? (int) $_POST['command_seq'] : 0;
+        $ttlSeconds = isset($_POST['ttl_seconds']) ? (int) $_POST['ttl_seconds'] : 900;
+        $boundedTtl = max(60, min(86400, $ttlSeconds));
+
+        if ($siteId === '' || $postId <= 0 || strlen($beforeSha) !== 64 || strlen($afterSha) !== 64 || $commandSeq <= 0) {
+            wp_die('Invalid local approval parameters', 'Bad Request', ['response' => 400]);
+        }
+
+        $digest = self::computeLocalApprovalDigest($siteId, $postId, $beforeSha, $afterSha, $commandSeq);
+        $stored = get_option(self::OPTION_LOCAL_APPROVALS, []);
+        if (!is_array($stored)) {
+            $stored = [];
+        }
+        $nowUnix = time();
+        // Prune expired or consumed records
+        foreach ($stored as $k => $rec) {
+            if (!is_array($rec) || !empty($rec['consumed']) || (int) ($rec['expires_at_unix'] ?? 0) <= $nowUnix) {
+                unset($stored[$k]);
+            }
+        }
+
+        $stored[$digest] = [
+            'digest' => $digest,
+            'site_id' => $siteId,
+            'post_id' => $postId,
+            'before_sha256' => $beforeSha,
+            'after_sha256' => $afterSha,
+            'command_seq' => $commandSeq,
+            'approved_by_user_id' => get_current_user_id(),
+            'approved_at_unix' => $nowUnix,
+            'expires_at_unix' => $nowUnix + $boundedTtl,
+            'consumed' => false,
+        ];
+        update_option(self::OPTION_LOCAL_APPROVALS, $stored, false);
+        wp_safe_redirect(admin_url('options-general.php?page=ugokilink-companion&approved=1'));
+        exit;
+    }
+
+    /**
+     * Verifies and single-use consumes a local WP-Admin approval record (`[C-17]`).
+     */
+    private static function consumeLocalWpAdminApproval(string $expectedDigest): bool
+    {
+        $stored = get_option(self::OPTION_LOCAL_APPROVALS, []);
+        if (!is_array($stored) || !isset($stored[$expectedDigest]) || !is_array($stored[$expectedDigest])) {
+            return false;
+        }
+        $rec = $stored[$expectedDigest];
+        $nowUnix = time();
+        $recDigest = isset($rec['digest']) && is_string($rec['digest']) ? $rec['digest'] : '';
+        $expiresAt = isset($rec['expires_at_unix']) ? (int) $rec['expires_at_unix'] : 0;
+        $alreadyConsumed = !empty($rec['consumed']);
+
+        if ($alreadyConsumed || $expiresAt <= $nowUnix || !hash_equals($expectedDigest, $recDigest)) {
+            return false;
+        }
+
+        $stored[$expectedDigest]['consumed'] = true;
+        $stored[$expectedDigest]['consumed_at_unix'] = $nowUnix;
+        update_option(self::OPTION_LOCAL_APPROVALS, $stored, false);
+        return true;
     }
 
     /**
@@ -105,10 +271,11 @@ final class UgokiLink_Companion_Plugin
     }
 
     /**
-     * Verifies Ed25519 detached signature, monotonic seq, and not_after expiry.
+     * Verifies Ed25519 detached signature, canonical JSON byte parity, site/home_url binding
+     * (BEFORE seq check!), not_after expiry, and monotonic seq (`[H-08]`).
      *
      * @param array<string, mixed> $envelope
-     * @return array{ok: bool, error?: string, status?: int}
+     * @return array{ok: bool, error?: string, status?: int, payload?: array<string, mixed>}
      */
     private static function verifySignedEnvelope(array $envelope): array
     {
@@ -122,23 +289,60 @@ final class UgokiLink_Companion_Plugin
             ? $envelope['payload_canonical_json']
             : '';
 
-        if (!isset(self::PINNED_ED25519_PUBKEYS[$kid])) {
+        if ($payloadCanonical === '' || !isset(self::PINNED_ED25519_PUBKEYS[$kid])) {
             return ['ok' => false, 'error' => 'unknown_key_id', 'status' => 401];
         }
 
         $pubKey = base64_decode(self::PINNED_ED25519_PUBKEYS[$kid], true);
         $sig = base64_decode($sigB64, true);
-        if (!is_string($pubKey) || !is_string($sig) || strlen($pubKey) !== SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES) {
+        if (
+            !is_string($pubKey)
+            || !is_string($sig)
+            || strlen($pubKey) !== SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES
+            || strlen($sig) !== SODIUM_CRYPTO_SIGN_BYTES
+        ) {
             return ['ok' => false, 'error' => 'malformed_signature', 'status' => 401];
         }
 
-        if (!sodium_crypto_sign_verify_detached($sig, $payloadCanonical, $pubKey)) {
+        try {
+            $sigValid = sodium_crypto_sign_verify_detached($sig, $payloadCanonical, $pubKey);
+        } catch (\Throwable $e) {
+            return ['ok' => false, 'error' => 'invalid_signature', 'status' => 401];
+        }
+        if (!$sigValid) {
             return ['ok' => false, 'error' => 'invalid_signature', 'status' => 401];
         }
 
         $payload = json_decode($payloadCanonical, true);
         if (!is_array($payload)) {
             return ['ok' => false, 'error' => 'invalid_payload_json', 'status' => 400];
+        }
+
+        // Verify canonical JSON byte parity so duplicate keys or non-canonical JSON are rejected
+        if (!hash_equals(self::canonicalizeJsonValue($payload), $payloadCanonical)) {
+            return ['ok' => false, 'error' => 'non_canonical_payload_json', 'status' => 400];
+        }
+
+        // [H-08]: Verify tenant_id + site_id + normalized home_url BEFORE checking/advancing command_seq!
+        $boundTenantId = (string) get_option(self::OPTION_BOUND_TENANT_ID, '');
+        $boundSiteId = (string) get_option(self::OPTION_BOUND_SITE_ID, '');
+        $boundHomeUrl = self::normalizeHomeUrl((string) home_url());
+
+        $payloadTenantId = isset($payload['tenant_id']) && is_string($payload['tenant_id']) ? $payload['tenant_id'] : '';
+        $payloadSiteId = isset($payload['site_id']) && is_string($payload['site_id']) ? $payload['site_id'] : '';
+        $payloadHomeUrl = isset($payload['home_url']) && is_string($payload['home_url'])
+            ? self::normalizeHomeUrl($payload['home_url'])
+            : '';
+
+        if ($boundTenantId === '' || $boundSiteId === '' || $boundHomeUrl === '' || $payloadTenantId === '' || $payloadSiteId === '' || $payloadHomeUrl === '') {
+            return ['ok' => false, 'error' => 'missing_site_binding', 'status' => 401];
+        }
+        if (
+            !hash_equals($boundTenantId, $payloadTenantId)
+            || !hash_equals($boundSiteId, $payloadSiteId)
+            || !hash_equals($boundHomeUrl, $payloadHomeUrl)
+        ) {
+            return ['ok' => false, 'error' => 'site_binding_mismatch', 'status' => 403];
         }
 
         $notAfter = isset($payload['not_after']) && is_string($payload['not_after']) ? strtotime($payload['not_after']) : false;
@@ -153,7 +357,7 @@ final class UgokiLink_Companion_Plugin
         }
 
         update_option(self::OPTION_LAST_SEQ, $seq, false);
-        return ['ok' => true];
+        return ['ok' => true, 'payload' => $payload];
     }
 
     public static function handleSignedCommand(\WP_REST_Request $request): \WP_REST_Response
@@ -168,7 +372,7 @@ final class UgokiLink_Companion_Plugin
             return new \WP_REST_Response(['error' => $auth['error'] ?? 'unauthorized'], $auth['status'] ?? 401);
         }
 
-        $payload = json_decode((string) $envelope['payload_canonical_json'], true);
+        $payload = $auth['payload'] ?? [];
         $command = isset($payload['command']) && is_string($payload['command']) ? $payload['command'] : '';
 
         return match ($command) {
@@ -199,7 +403,29 @@ final class UgokiLink_Companion_Plugin
     }
 
     /**
-     * Atomic compare-and-swap apply inside a single PHP request (§10.9 / DEL App. H).
+     * Extracts external `http(s)://` hostnames from an HTML fragment (`[C-17]`).
+     *
+     * @return array<int, string>
+     */
+    private static function extractExternalHosts(string $html): array
+    {
+        $hosts = [];
+        if (preg_match_all('/https?:\/\/([a-z0-9.-]+)/i', $html, $matches)) {
+            $homeHost = strtolower((string) wp_parse_url((string) home_url(), PHP_URL_HOST));
+            foreach ($matches[1] as $rawHost) {
+                $h = strtolower($rawHost);
+                if ($h !== '' && $h !== $homeHost) {
+                    $hosts[$h] = true;
+                }
+            }
+        }
+        $list = array_keys($hosts);
+        sort($list, SORT_STRING);
+        return $list;
+    }
+
+    /**
+     * Atomic compare-and-swap apply inside a single PHP request (§10.9 / DEL App. H / [C-17] / [H-08]).
      *
      * @param array<string, mixed> $payload
      */
@@ -210,14 +436,20 @@ final class UgokiLink_Companion_Plugin
             return new \WP_REST_Response(['error' => 'owner_local_stop_active'], 403);
         }
 
-        $changeClass = isset($payload['change_class']) && is_string($payload['change_class']) ? $payload['change_class'] : '';
-        if (in_array($changeClass, $policy['require_admin_confirmation_classes'], true) && empty($payload['owner_wp_admin_confirmed'])) {
-            return new \WP_REST_Response(['error' => 'owner_local_policy_requires_admin_confirmation'], 403);
+        // [H-08]: Enforce per-UTC-day daily_apply_cap BEFORE mutating post
+        $utcDay = gmdate('Y-m-d');
+        $dailyCounters = get_option(self::OPTION_DAILY_APPLY_COUNTER, []);
+        if (!is_array($dailyCounters)) {
+            $dailyCounters = [];
         }
-        if (!in_array($changeClass, $policy['allowed_auto_classes'], true) && empty($payload['owner_wp_admin_confirmed'])) {
-            return new \WP_REST_Response(['error' => 'change_class_not_in_owner_local_policy'], 403);
+        $usedToday = isset($dailyCounters[$utcDay]) ? (int) $dailyCounters[$utcDay] : 0;
+        if ($usedToday >= (int) $policy['daily_apply_cap']) {
+            return new \WP_REST_Response(['error' => 'owner_daily_apply_cap_exceeded'], 429);
         }
 
+        $siteId = (string) ($payload['site_id'] ?? '');
+        $seq = (int) ($payload['seq'] ?? 0);
+        $changeClass = isset($payload['change_class']) && is_string($payload['change_class']) ? $payload['change_class'] : '';
         $postId = (int) ($payload['post_id'] ?? 0);
         $promotionId = (string) ($payload['promotion_id'] ?? '');
         $expectedHash = (string) ($payload['expected_content_sha256'] ?? '');
@@ -231,10 +463,11 @@ final class UgokiLink_Companion_Plugin
             return new \WP_REST_Response(['error' => 'post_not_found'], 404);
         }
 
-        // 1. Refuse immediately when another editor holds the post edit lock
+        // 1. Refuse immediately when another editor holds the post edit lock ([H-08] lock ownership guard)
         if (!function_exists('wp_check_post_lock')) {
             require_once ABSPATH . 'wp-admin/includes/post.php';
         }
+        $acquiredLock = false;
         $lockUserId = wp_check_post_lock($postId);
         if ($lockUserId !== false) {
             return new \WP_REST_Response([
@@ -244,6 +477,7 @@ final class UgokiLink_Companion_Plugin
         }
 
         wp_set_post_lock($postId);
+        $acquiredLock = true;
 
         try {
             $currentContent = (string) $post->post_content;
@@ -268,13 +502,51 @@ final class UgokiLink_Companion_Plugin
             }
 
             // 3. Enforce content filtering regardless of user role (NEVER allow script injection)
+            $oldSlice = substr($currentContent, $byteStart, $byteEnd - $byteStart);
             $sanitizedFragment = wp_kses_post($replacementRaw);
             $newContent = substr($currentContent, 0, $byteStart)
                 . $sanitizedFragment
                 . substr($currentContent, $byteEnd);
             $postImageHash = hash('sha256', $newContent);
 
-            // 4. Persist immutable pre-image keyed by promotion_id BEFORE mutating post
+            // 4. [C-17]: True 2-key local WP-Admin approval verification!
+            // Cloud payload fields are NEVER trusted to waive local policy; approval MUST come
+            // from `ugokilink_local_approvals` in local `wp_options` matching exact before/after SHA-256 + seq.
+            $seoTagRe = '/<\s*\/?\s*(?:title|h1)\b|<\s*link\b[^>]*rel\s*=\s*["\']?canonical|<\s*meta\b[^>]*name\s*=\s*["\']?robots/i';
+            $touchesIndexableSeo =
+                $changeClass === 'touch_indexable_seo'
+                || $changeClass === 'indexable_major'
+                || preg_match($seoTagRe, $oldSlice) === 1
+                || preg_match($seoTagRe, $sanitizedFragment) === 1;
+
+            $changesOutboundHosts =
+                $changeClass === 'change_outbound_hosts'
+                || self::extractExternalHosts($oldSlice) !== self::extractExternalHosts($sanitizedFragment);
+
+            $requiresAdminConfirm =
+                in_array($changeClass, $policy['require_admin_confirmation_classes'], true)
+                || $touchesIndexableSeo
+                || $changesOutboundHosts;
+
+            $inAllowedAuto = in_array($changeClass, $policy['allowed_auto_classes'], true);
+
+            if ($requiresAdminConfirm || !$inAllowedAuto) {
+                $expectedApprovalDigest = self::computeLocalApprovalDigest(
+                    $siteId,
+                    $postId,
+                    $currentHash,
+                    $postImageHash,
+                    $seq
+                );
+                if (!self::consumeLocalWpAdminApproval($expectedApprovalDigest)) {
+                    $errCode = $requiresAdminConfirm
+                        ? 'owner_local_policy_requires_admin_confirmation'
+                        : 'change_class_not_in_owner_local_policy';
+                    return new \WP_REST_Response(['error' => $errCode], 403);
+                }
+            }
+
+            // 5. Persist immutable pre-image keyed by promotion_id BEFORE mutating post
             update_post_meta($postId, self::META_PREIMAGE_PREFIX . sanitize_key($promotionId), wp_json_encode([
                 'promotion_id' => $promotionId,
                 'pre_image_sha256' => $currentHash,
@@ -292,6 +564,10 @@ final class UgokiLink_Companion_Plugin
                 return new \WP_REST_Response(['error' => 'wp_update_post_failed'], 500);
             }
 
+            // Increment per-UTC-day apply counter (pruning stale days)
+            $dailyCounters = [$utcDay => $usedToday + 1];
+            update_option(self::OPTION_DAILY_APPLY_COUNTER, $dailyCounters, false);
+
             $purged = self::purgeKnownCaches($postId);
 
             return new \WP_REST_Response([
@@ -302,7 +578,9 @@ final class UgokiLink_Companion_Plugin
                 'purged_caches' => $purged,
             ], 200);
         } finally {
-            delete_post_meta($postId, '_edit_lock');
+            if ($acquiredLock) {
+                delete_post_meta($postId, '_edit_lock');
+            }
         }
     }
 

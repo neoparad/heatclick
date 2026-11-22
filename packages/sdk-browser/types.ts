@@ -6,17 +6,92 @@
 
 import type {
   ActivationKind,
+  BlockRegisterPayload,
+  CanonicalConversionRuleSpec,
+  CollectionLane,
   ConsentMode,
   ConsentPurpose,
   DomState,
+  FieldRegisterPayload,
+  FormRegisterPayload,
+  MediaRegisterPayload,
   NavType,
+  SectionRegisterPayload,
   TelemetryFrame,
+  TelemetryLogItem,
 } from '../contract/schema';
-import type { UrlKeyV2Rules } from '../contract/urlkey';
+import type { UrlKeyV2Result, UrlKeyV2Rules } from '../contract/urlkey';
 
-export type MeasurementLane = 'standard' | 'custom_event' | 'screen_replay';
+export interface BrowserSectionRegisterPayload extends SectionRegisterPayload {
+  readonly gap_ms: readonly [number, number, number, number];
+  readonly vel_ms: readonly [number, number, number, number];
+}
 
-export type RegionClass = 'JP' | 'UK' | 'FR' | 'EU_EEA' | 'US_OPTOUT' | 'UNKNOWN';
+export interface BrowserBlockRegisterPayload extends BlockRegisterPayload {
+  readonly always_watch: boolean;
+  readonly sample_pi: number;
+}
+
+export interface BrowserFieldRegisterPayload extends FieldRegisterPayload {
+  readonly form_fp: string;
+  readonly is_sensitive: boolean;
+  readonly order_idx: number;
+  readonly focus_n: number;
+  readonly first_input_latency_ms: number | null;
+  readonly refocus_n: number;
+  readonly edit_bursts: number;
+  readonly correction_bursts: number;
+  readonly composition_inputs: number;
+  readonly total_inputs: number;
+  readonly validation_observable: boolean;
+  readonly filled_ever: boolean;
+}
+
+export interface BrowserFormRegisterPayload extends FormRegisterPayload {
+  readonly started: boolean;
+  readonly t_first_ms: number;
+  readonly blocked_submits: number;
+  readonly last_field_fp: string | null;
+}
+
+export interface BrowserMediaRegisterPayload extends MediaRegisterPayload {
+  readonly plays: number;
+  readonly completed: boolean;
+}
+
+export interface BrowserTelemetryLogItem extends TelemetryLogItem {
+  readonly x_permille?: number;
+  readonly y_permille?: number;
+  readonly click_count?: number;
+  readonly min_interval_ms?: number;
+  readonly spread_px?: number;
+  readonly rage_click?: boolean;
+  readonly dead_click?: boolean;
+  readonly effect_bits?: number;
+  readonly time_to_first_effect_bin?: 0 | 1 | 2 | 3;
+  readonly section_tokens?: readonly string[];
+}
+
+export type BrowserPageStatePayload = TelemetryFrame['state'] & {
+  readonly error_hashes?: readonly string[];
+  readonly section_tokens?: readonly string[];
+};
+
+export interface BrowserTelemetryFrame extends TelemetryFrame {
+  readonly state: BrowserPageStatePayload;
+  readonly sections: readonly BrowserSectionRegisterPayload[];
+  readonly blocks?: readonly BrowserBlockRegisterPayload[];
+  readonly fields?: readonly BrowserFieldRegisterPayload[];
+  readonly forms?: readonly BrowserFormRegisterPayload[];
+  readonly media?: readonly BrowserMediaRegisterPayload[];
+  readonly log_items: readonly BrowserTelemetryLogItem[];
+}
+
+export type MeasurementLane = CollectionLane;
+export type MeasurementLaneInput = CollectionLane | 'custom_event';
+
+export type RegionClass = 'JP' | 'GB' | 'FR' | 'EU_EEA' | 'US_OPTOUT' | 'UNKNOWN';
+export type RegionClassInput = RegionClass | 'UK';
 
 export type DisclosureStatus = 'verified' | 'declared' | 'missing';
 
@@ -56,7 +131,7 @@ export interface CookieJarLike {
 }
 
 export interface JurisdictionRowPolicy {
-  readonly region: RegionClass;
+  readonly region: RegionClassInput;
   readonly defaultMode: ConsentMode;
   readonly legalSignedOff: boolean;
   readonly signedOffMode?: ConsentMode;
@@ -66,10 +141,10 @@ export interface JurisdictionRowPolicy {
 export interface ConsentResolutionInput {
   /** Signed site default from Release/Config bundle. */
   readonly siteDefaultMode: ConsentMode;
-  /** Region class echoed by customer's origin (or null if tag-only). */
-  readonly originRegionClass?: RegionClass | null;
-  /** Region class returned by online loader data (can ONLY tighten, never raise). */
-  readonly loaderRegionClass?: RegionClass | null;
+  /** Region class echoed by customer's origin (or null if tag-only). Accepts `'UK'` -> `'GB'`. */
+  readonly originRegionClass?: RegionClassInput | null;
+  /** Region class returned by online loader data (can ONLY tighten, never raise). Accepts `'UK'` -> `'GB'`. */
+  readonly loaderRegionClass?: RegionClassInput | null;
   /** Explicit consent override via `ugk.consent()` or CMP adapter (`'unknown'` -> `off`). */
   readonly explicitConsentMode?: ConsentMode | 'unknown' | null;
   /** Explicit consent purposes granted by CMP/site API. */
@@ -80,14 +155,14 @@ export interface ConsentResolutionInput {
   readonly minorsSite?: boolean;
   /** Disclosure verification status at declared policy URL (§4.5 / tel.G12). */
   readonly disclosureStatus: DisclosureStatus;
-  /** Whether site is subject to JP external transmission regulation (default true). */
+  /** Whether site is subject to JP external transmission regulation (default true when JP). */
   readonly jpExternalTransmissionSubject?: boolean;
   /** Whether owner/site opt-out is currently active. */
   readonly optedOut?: boolean;
   /** Durability of opt-out marker (script-only Safari 7d caps consent 1 tier lower). */
   readonly optOutDurability?: OptOutDurability;
-  /** Legal sign-off status per jurisdiction row (TEL A4). */
-  readonly jurisdictionPolicies?: Readonly<Partial<Record<RegionClass, JurisdictionRowPolicy>>>;
+  /** Legal sign-off status per jurisdiction row (TEL A4). Accepts `'UK'` or `'GB'`. */
+  readonly jurisdictionPolicies?: Readonly<Partial<Record<RegionClassInput, JurisdictionRowPolicy>>>;
 }
 
 export interface ConsentResolutionResult {
@@ -102,12 +177,34 @@ export interface ConsentResolutionResult {
   readonly cappedReason: string | null;
 }
 
-export interface ConversionRuleSpec {
+export type ConversionPredicateKind =
+  | 'id'
+  | 'class'
+  | 'selector'
+  | 'text'
+  | 'href'
+  | 'href_prefix'
+  | 'el_fp'
+  | 'el_fp_set';
+
+export interface PredicateConversionRuleSpec {
   readonly cv_key: string;
-  readonly rule_ver: number;
-  readonly predicate_kind: 'id' | 'class' | 'selector' | 'text' | 'href' | 'el_fp_set';
-  readonly predicate_value: string;
+  readonly rule_ver?: number;
+  readonly predicate_kind: ConversionPredicateKind;
+  readonly predicate_value: string | readonly string[];
 }
+
+export interface MatchAliasConversionRuleSpec {
+  readonly cv_key: string;
+  readonly rule_ver?: number;
+  readonly match_kind: ConversionPredicateKind;
+  readonly match_value: string | readonly string[];
+}
+
+export type ConversionRuleSpec =
+  | CanonicalConversionRuleSpec
+  | PredicateConversionRuleSpec
+  | MatchAliasConversionRuleSpec;
 
 export interface SectionGeometryInput {
   readonly sec_fp: string;
@@ -220,8 +317,25 @@ export interface TransportHooks {
     endpoint: string,
     payload: Uint8Array,
     frame: TelemetryFrame,
-    activateAfterMs: number
+    activateAfterMs: number,
+    signal?: AbortSignal
   ) => { readonly activated: boolean; abort: () => void };
+}
+
+export interface PageFingerprintSnapshot {
+  readonly skelFp: string;
+  readonly cssFp?: string | null;
+  readonly headFp?: string | null;
+  readonly domState?: DomState;
+}
+
+export interface SoftNavigationOptions {
+  readonly html?: string;
+  readonly skelFp?: string;
+  readonly cssFp?: string | null;
+  readonly headFp?: string | null;
+  readonly domState?: DomState;
+  readonly navType?: NavType;
 }
 
 export interface BrowserSdkConfig {
@@ -256,6 +370,11 @@ export interface BrowserSdkConfig {
   readonly sessionStorage?: StorageLike;
   readonly localStorage?: StorageLike;
   readonly transport: TransportHooks;
+  readonly getDocumentHtml?: () => string | null;
+  readonly computePageFingerprints?: (
+    url: string,
+    urlInfo: UrlKeyV2Result
+  ) => PageFingerprintSnapshot;
   readonly nowMonoMs?: () => number;
   readonly nowWallMs?: () => number;
   readonly randomBytes?: (len: number) => Uint8Array;
@@ -267,6 +386,7 @@ export interface ReadOnlySdkStateSnapshot {
   readonly purposes: readonly ConsentPurpose[];
   readonly url_id: string;
   readonly page_url_key: string;
+  readonly skel_fp: string;
   readonly scroll_max_px: number;
   readonly vis_ms: number;
   readonly degrade_level: DegradeLevel;

@@ -4,16 +4,17 @@
  * 親 SSOT §3.6.1 / §3.8.1 / §6.3 S0-09 + Sprint 1 S1-09 (Infra 続 24)
  *
  * S1-09 変更点 (続 23 §6 計画起票、続 24 実装):
- *   1. classify(pathname) で 5 region 分類 (static / api-public / auth-public / api-tenant / tenant-protected)
+ *   1. classify(pathname) で 6 region 分類 (static / api-public / auth-public / api-v1-link / api-tenant / tenant-protected)
  *   2. audit_events emit を全 non-static region に追加 (fire-and-forget fetch、Phase 5 で waitUntil 化)
  *   3. x-user-email header 注入を撤去 (PII 縮小、API 側で `getServerSession()` 経由 lookup)
  *   4. cross-tenant / 認証失敗の全シグナルを audit に記録 (Reviewer 観点: observability)
  *
  * 動作概要:
- *   - static     → pass through (audit なし)
- *   - api-public → pass through + audit (`request.api-public`)
- *   - auth-public → pass through + audit (`request.auth-public`、sign-in 試行追跡)
- *   - api-tenant → JWT verify → 401 / 403 / pass + tenant header inject + audit
+ *   - static       → pass through (audit なし)
+ *   - api-public   → pass through + audit (`request.api-public`)
+ *   - auth-public  → pass through + audit (`request.auth-public`、sign-in 試行追跡)
+ *   - api-v1-link  → 偽装内部ヘッダを除去して UGOKI LINK v2 `SurfacePipeline` 認証へ委譲 + audit (`request.api-v1-link`)
+ *   - api-tenant   → JWT verify → 401 / 403 / pass + tenant header inject + audit
  *   - tenant-protected → JWT verify → redirect / route group ACL + audit
  */
 
@@ -85,13 +86,14 @@ export function shouldRefreshSession(
   return remaining > 0 && remaining < thresholdSec
 }
 
-// ── classify(): 5 region 分類 (S1-09 中核、pure function、unit test 対象) ─
+// ── classify(): 6 region 分類 (S1-09 中核、pure function、unit test 対象) ─
 
 export type MiddlewareRegion =
   | 'static'           // _next, favicon, *.js/css/png/svg/ico/webp/woff2 等
   | 'api-public'       // /api/track, /api/health, /api/inngest, /api/billing/webhook
   | 'auth-public'      // /, /auth/*, /onboarding/install, /legal/*, /api/auth/*, /api/install/verify
-  | 'api-tenant'       // /api/* (上記 api-public / auth-public 以外)、要 JWT
+  | 'api-v1-link'      // /api/v1/** — UGOKI LINK v2 SurfacePipeline authentication (ugk_sec/pub/oauth/oem)
+  | 'api-tenant'       // /api/* (上記 api-public / auth-public / api-v1-link 以外)、要 JWT
   | 'tenant-protected' // /dashboard, /heatmap, /agency/*, /account/*, /personas 等、要 JWT
 
 const STATIC_EXT_REGEX = /\.(js|css|png|svg|ico|webp|woff2?|map|jpg|jpeg|gif|txt|xml|json)$/
@@ -170,6 +172,11 @@ const AUTH_PUBLIC_PAGE_PREFIXES: ReadonlyArray<string> = [
 ]
 
 export function classify(pathname: string): MiddlewareRegion {
+  // UGOKI LINK v2 `/api/v1/**` routes authenticate via `SurfacePipeline` + `IdentityKeyRegistry`
+  // (`ugk_sec_*`, `ugk_pub_*`, OAuth DPoP, OEM exchanged tokens) — checked BEFORE `isStatic`
+  // so `/api/v1/openapi.json` or `.png` endpoints also strip spoofed internal headers (C-01).
+  if (pathname === '/api/v1' || pathname.startsWith('/api/v1/')) return 'api-v1-link'
+
   if (isStatic(pathname)) return 'static'
 
   // api-public 判定が auth-public より先 (api/track は auth-public 経路に該当しないため安全だが、
@@ -196,6 +203,8 @@ export function classify(pathname: string): MiddlewareRegion {
   if (pathname.startsWith('/api/')) return 'api-tenant'
   return 'tenant-protected'
 }
+
+export const classifyPath = classify
 
 // ── Route group access control (tenant-protected 内で) ───────────────
 
@@ -455,6 +464,18 @@ function redirectToSignIn(request: NextRequest, reason: BounceReason): NextRespo
   return NextResponse.redirect(signInUrl)
 }
 
+const STRIPPED_V2_SPOOFING_HEADERS: ReadonlyArray<string> = [
+  'x-ugk-principal-id',
+  'x-ugk-tenant-id',
+  'x-ugk-scopes',
+  'x-ugk-allowed-sites',
+  'x-ugk-revocation-epoch',
+  'x-ugk-audience',
+  'x-user-id',
+  'x-plan',
+  'x-site-ids',
+]
+
 // ── Middleware entry ────────────────────────────────────────────────
 
 export async function middleware(request: NextRequest) {
@@ -476,6 +497,24 @@ export async function middleware(request: NextRequest) {
       response_status: 0,
     })
     return NextResponse.next()
+  }
+
+  // ── api-v1-link: strip spoofed internal identity headers and delegate auth to v2 SurfacePipeline (C-01) ──
+  if (region === 'api-v1-link') {
+    const requestHeaders = new Headers(request.headers)
+    for (const h of STRIPPED_V2_SPOOFING_HEADERS) {
+      requestHeaders.delete(h)
+    }
+    // Note: caller-supplied `x-tenant-id` is intentionally NOT stripped so `SurfacePipeline`
+    // can detect cross-tenant probe attempts and return 404 + audit log.
+    fireAuditAsync({
+      ...baseAudit,
+      action: 'request.api-v1-link',
+      tenant_id: '__v2_surface__',
+      user_id: '',
+      response_status: 0,
+    })
+    return NextResponse.next({ request: { headers: requestHeaders } })
   }
 
   // ── api-tenant: 要 JWT、401 / 403 / pass + tenant header inject ──

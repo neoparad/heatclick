@@ -120,14 +120,79 @@ export function formatUtcDayBucket(timestampMs: number): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+export class CrossTenantWalViolationError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = 'CrossTenantWalViolationError';
+  }
+}
+
+export function assertSingleTenantWalBatch(
+  walKey: string,
+  body: string,
+  tenantIds: readonly string[],
+  boundScope?: { readonly tenantId: string; readonly siteId?: string }
+): void {
+  if (tenantIds.length !== 1) {
+    throw new CrossTenantWalViolationError(
+      `Cross-tenant WAL batch rejected on "${walKey}": expected exactly 1 tenantId, got [${tenantIds.join(', ')}] (C-15)`
+    );
+  }
+  const expectedTenant = boundScope?.tenantId ?? tenantIds[0]!;
+  if (tenantIds[0] !== expectedTenant) {
+    throw new CrossTenantWalViolationError(
+      `Tenant mismatch on WAL write "${walKey}": adapter bound to "${expectedTenant}", got "${tenantIds[0]}" (C-15)`
+    );
+  }
+
+  let parsed: {
+    readonly tenant_id?: string;
+    readonly site_id?: string;
+    readonly records?: ReadonlyArray<{ readonly tenant_id?: string; readonly site_id?: string }>;
+  };
+  try {
+    parsed = JSON.parse(body) as typeof parsed;
+  } catch {
+    throw new CrossTenantWalViolationError(`Malformed WAL JSON body on "${walKey}"`);
+  }
+
+  if (parsed.tenant_id !== undefined && parsed.tenant_id !== expectedTenant) {
+    throw new CrossTenantWalViolationError(
+      `WAL object header tenant_id "${parsed.tenant_id}" mismatches expected "${expectedTenant}" on "${walKey}"`
+    );
+  }
+  if (boundScope?.siteId && parsed.site_id !== undefined && parsed.site_id !== boundScope.siteId) {
+    throw new CrossTenantWalViolationError(
+      `WAL object header site_id "${parsed.site_id}" mismatches bound site "${boundScope.siteId}" on "${walKey}"`
+    );
+  }
+
+  if (Array.isArray(parsed.records)) {
+    for (const rec of parsed.records) {
+      if (rec.tenant_id !== expectedTenant) {
+        throw new CrossTenantWalViolationError(
+          `Mixed-tenant record ("${String(rec.tenant_id)}" !== "${expectedTenant}") blocked in WAL "${walKey}" (C-15)`
+        );
+      }
+      if (boundScope?.siteId && rec.site_id !== boundScope.siteId) {
+        throw new CrossTenantWalViolationError(
+          `Mixed-site record ("${String(rec.site_id)}" !== "${boundScope.siteId}") blocked in WAL "${walKey}" (C-15)`
+        );
+      }
+    }
+  }
+}
+
 export function formatWalObjectKey(
   region: DataRegion,
   shardId: number,
+  tenantId: string,
+  siteId: string,
   minuteUtc: string,
   sha256: string
 ): string {
   const shardPadded = Math.max(0, Math.floor(shardId)).toString().padStart(4, '0');
-  return `wal/${region}/${shardPadded}/${minuteUtc}/${sha256}.json`;
+  return `wal/${region}/${shardPadded}/${tenantId}/${siteId}/${minuteUtc}/${sha256}.json`;
 }
 
 export function formatQuarantineObjectKey(
@@ -226,7 +291,8 @@ export class LinkPlusExportStorageAdapter implements StorageTierAdapter {
   public constructor(
     primaryBucket: R2BucketLike,
     private readonly exportSink: ExportSinkPort,
-    region: DataRegion
+    region: DataRegion,
+    private readonly boundScope?: { readonly tenantId: string; readonly siteId?: string }
   ) {
     assertRegionPinned(region, exportSink.region);
     this.primary = new LinkManagedStorageAdapter(primaryBucket, region);
@@ -247,6 +313,7 @@ export class LinkPlusExportStorageAdapter implements StorageTierAdapter {
     readonly nowMs: number;
     readonly customMetadata?: Readonly<Record<string, string>>;
   }): Promise<WalPutOutcome> {
+    assertSingleTenantWalBatch(args.key, args.body, args.tenantIds, this.boundScope);
     const primaryRes = await this.primary.putWalImmutable({
       ...args,
       customMetadata: {
@@ -309,7 +376,8 @@ export class CustomerSorStorageAdapter implements StorageTierAdapter {
   public constructor(
     private readonly customerBucket: R2BucketLike,
     customerSorBucketId: string,
-    region: DataRegion
+    region: DataRegion,
+    private readonly boundScope?: { readonly tenantId: string; readonly siteId?: string }
   ) {
     this.descriptor = {
       tier: 'tier3_customer_sor',
@@ -328,6 +396,7 @@ export class CustomerSorStorageAdapter implements StorageTierAdapter {
     readonly nowMs: number;
     readonly customMetadata?: Readonly<Record<string, string>>;
   }): Promise<WalPutOutcome> {
+    assertSingleTenantWalBatch(args.key, args.body, args.tenantIds, this.boundScope);
     const obj = await this.customerBucket.put(args.key, args.body, {
       onlyIf: { etagDoesNotMatch: '*' },
       httpMetadata: { contentType: 'application/json' },

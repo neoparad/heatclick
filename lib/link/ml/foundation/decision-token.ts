@@ -13,6 +13,7 @@
  *   exact same schema as shown treatment arms (§8.2).
  */
 
+import crypto from 'node:crypto';
 import { hmacSha256Hex } from '../../allocator/hmac';
 
 export interface DecisionTokenClaims {
@@ -71,9 +72,16 @@ export function verifyDecisionToken(
   signed: SignedDecisionToken,
   secret: string
 ): boolean {
-  if (!signed.token || !signed.token.startsWith('dtk1.')) return false;
+  if (!signed || typeof signed.token !== 'string' || !signed.token.startsWith('dtk1.')) {
+    return false;
+  }
   const expected = `dtk1.${hmacSha256Hex(secret, canonicalTokenInput(signed.claims)).slice(0, 32)}`;
-  return signed.token === expected;
+  const actualBuf = Buffer.from(signed.token, 'utf8');
+  const expectedBuf = Buffer.from(expected, 'utf8');
+  if (actualBuf.byteLength !== expectedBuf.byteLength) {
+    return false;
+  }
+  return crypto.timingSafeEqual(actualBuf, expectedBuf);
 }
 
 export interface DecisionOutcomeRow {

@@ -519,7 +519,15 @@ export function evaluateRobotsTxt(
 // Render Job Types, Geometry, Computed Styles & Screenshot Metadata
 // ---------------------------------------------------------------------------
 
-export type RenderJobClass = 'id_only' | 'full'
+export type RenderJobClass = 'id_only' | 'identity_render' | 'full' | 'full_render'
+
+export function isFullRenderJobClass(jobClass: RenderJobClass | string): boolean {
+  return jobClass === 'full' || jobClass === 'full_render'
+}
+
+export function isIdentityOnlyJobClass(jobClass: RenderJobClass | string): boolean {
+  return jobClass === 'id_only' || jobClass === 'identity_render'
+}
 
 export type LabRenderTerminalStatus =
   | 'ok'
@@ -779,7 +787,7 @@ export function createPlaywrightRenderDriver(
         const doc = parseHtmlToDom(html)
         const finalUrl = response?.url() ?? request.url
 
-        if (request.job_class === 'id_only') {
+        if (isIdentityOnlyJobClass(request.job_class)) {
           return {
             status: 'ok',
             final_url: finalUrl,
@@ -965,7 +973,7 @@ export class DeterministicHtmlRenderDriver implements RenderDriver {
     }
     walkResourceUrls(doc)
 
-    if (request.job_class === 'id_only') {
+    if (isIdentityOnlyJobClass(request.job_class)) {
       return {
         status: 'ok',
         final_url: fixture.final_url ?? request.url,
@@ -1214,7 +1222,7 @@ function extractInteractiveDomNodes(
     let pointerEventsNone: boolean | null = null
     let computedStyle: ComputedCtaStyle | null = null
 
-    if (jobClass === 'full') {
+    if (isFullRenderJobClass(jobClass)) {
       const styleAttr = matchedDom?.getAttribute('style') ?? null
       const displayVal = parseInlineStyleProp(styleAttr, 'display')
       const pointerVal = parseInlineStyleProp(styleAttr, 'pointer-events')
@@ -1683,17 +1691,18 @@ export class SecondaryLabRenderer {
       ...request.segment_options,
     })
 
+    const isFull = isFullRenderJobClass(request.job_class)
     const elementDetails = extractInteractiveDomNodes(
       captured.document,
       segOut,
       request.job_class,
-      request.job_class === 'full' ? captured.element_geometry_by_el_fp : null,
+      isFull ? captured.element_geometry_by_el_fp : null,
       blocklist,
     )
 
-    // 5. Screenshot metadata (full render only; strictly null for id_only)
+    // 5. Screenshot metadata (full render only; strictly null for id_only / identity_render)
     let screenshot: ScreenshotMeta | null = null
-    if (request.job_class === 'full' && captured.doc_h_px !== null && captured.screenshot_bytes_digest) {
+    if (isFull && captured.doc_h_px !== null && captured.screenshot_bytes_digest) {
       const tileHeight = request.profile.viewport.height
       const tileCount = Math.max(1, Math.ceil(captured.doc_h_px / tileHeight))
       const storageKey = `screenshots/${request.tenant_id}/${request.site_id}/${urlKeyResult.url_id_hex}/${request.profile.profile_id}/v_${variantSetKey}/${captured.screenshot_bytes_digest.slice(0, 16)}.png`
@@ -1724,8 +1733,8 @@ export class SecondaryLabRenderer {
       segmenter_hash: segOut.segmenter_hash,
       rule_revisions: segOut.rule_revisions,
       segmenter_output: segOut,
-      doc_h_px: request.job_class === 'full' ? captured.doc_h_px : null,
-      section_geometries: request.job_class === 'full' ? captured.section_geometries : null,
+      doc_h_px: isFull ? captured.doc_h_px : null,
+      section_geometries: isFull ? captured.section_geometries : null,
       element_details: elementDetails,
       screenshot,
       render_duration_ms: captured.duration_ms,

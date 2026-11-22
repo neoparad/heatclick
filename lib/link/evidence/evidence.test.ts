@@ -2,6 +2,7 @@ import { validateSerializedEnvelope } from '@/packages/contract/response';
 import {
   DualExperimentLedger,
   buildProvenVerdictEnvelope,
+  evaluateAlwaysValidMsprt,
   evaluateCupedVarianceReduction,
   evaluateD07RCalibration,
   evaluateInterimLook,
@@ -224,5 +225,112 @@ describe('lib/link/evidence — Wave 5-C: Prereg Lock, Alpha Split, CUPED, ev.G-
       bodyFingerprintChanged: false,
     });
     expect(harmRemoval.deploymentCadence).toBe('immediate_harm_removal');
+  });
+
+  test('[H-05] LORD++ DualExperimentLedger rewards first discovery with (alpha - W_0), retains ALL subsequent discovery times, and satisfies sum(alpha_t) <= max(1, R)*alpha', () => {
+    const alpha = 0.1;
+    const w0 = 0.05;
+    const ledger = new DualExperimentLedger(alpha, w0);
+    const gamma = (m: number) => 6 / (Math.PI * Math.PI * m * m);
+
+    // t=1: discovery tau_1 = 1
+    const r1 = ledger.recordAutonomyExperiment({ experimentId: 'e1', pValue: 0.0001 });
+    expect(r1.rejectedNull).toBe(true);
+    expect(r1.thresholdAlpha).toBeCloseTo(gamma(1) * w0, 12);
+
+    // t=2: MUST earn (alpha - w0) * gamma(1), NOT alpha * gamma(1)!
+    const r2 = ledger.recordAutonomyExperiment({ experimentId: 'e2', pValue: 0.0001 });
+    expect(r2.rejectedNull).toBe(true);
+    const expectedAlpha2 = gamma(2) * w0 + (alpha - w0) * gamma(1);
+    expect(r2.thresholdAlpha).toBeCloseTo(expectedAlpha2, 12);
+
+    // t=3: MUST sum BOTH tau_1=1 (with alpha - w0) AND tau_2=2 (with alpha)!
+    const r3 = ledger.recordAutonomyExperiment({ experimentId: 'e3', pValue: 0.5 });
+    expect(r3.rejectedNull).toBe(false);
+    const expectedAlpha3 = gamma(3) * w0 + (alpha - w0) * gamma(2) + alpha * gamma(1);
+    expect(r3.thresholdAlpha).toBeCloseTo(expectedAlpha3, 12);
+    expect(ledger.getRegisters().autonomyDiscoveryTimes).toEqual([1, 2]);
+
+    // Supermartingale invariant across 200 steps: sum_{t=1}^200 alpha_t <= max(1, R) * alpha
+    for (let t = 4; t <= 200; t += 1) {
+      ledger.recordAutonomyExperiment({
+        experimentId: `e${t}`,
+        pValue: t === 25 || t === 80 ? 1e-6 : 0.9,
+      });
+    }
+    const reg = ledger.getRegisters();
+    expect(reg.autonomyDiscoveryTimes).toEqual([1, 2, 25, 80]);
+    const totalSpentAlpha = reg.autonomy.reduce((s, e) => s + e.thresholdAlpha, 0);
+    expect(totalSpentAlpha).toBeLessThanOrEqual(reg.autonomyDiscoveryTimes.length * alpha + 1e-12);
+  });
+
+  test('[H-06] Johari et al. (2017) always-valid mSPRT keeps continuous-peeking null Type I error <= alpha across 2,000 sequential trajectories', () => {
+    // Seeded Box-Muller PRNG for reproducible Monte Carlo null simulation
+    let seed = 20261121 >>> 0;
+    const rand = () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const randNorm = () => {
+      const u1 = Math.max(1e-12, rand());
+      const u2 = rand();
+      return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    };
+
+    const alpha = 0.05;
+    const tauSq = 0.04;
+    const trajectories = 2000;
+    const looksPerTrajectory = 40;
+    const batchN = 25; // unit-variance increments -> after k looks, n = 25*k, V_t = 1/n
+    let falsePositiveTrajectories = 0;
+
+    for (let tr = 0; tr < trajectories; tr += 1) {
+      let cumSum = 0;
+      let runningMaxLambda = 0;
+      let everCrossed = false;
+
+      for (let look = 1; look <= looksPerTrajectory; look += 1) {
+        // Sum of 25 N(0,1) ~ N(0, 25)
+        cumSum += Math.sqrt(batchN) * randNorm();
+        const nTotal = look * batchN;
+        const thetaHat = cumSum / nTotal;
+        const vT = 1 / nTotal;
+
+        const res = evaluateAlwaysValidMsprt({
+          effectEstimate: thetaHat,
+          sampleVariance: vT,
+          mixingVarianceTauSq: tauSq,
+          alpha,
+          priorMaxLambda: runningMaxLambda,
+        });
+        runningMaxLambda = res.runningMaxLambda;
+        if (res.crossesBoundary) {
+          everCrossed = true;
+          // Anytime-valid CI excludes 0 iff boundary crossed
+          expect(res.ciLower > 0 || res.ciUpper < 0).toBe(true);
+          break;
+        }
+      }
+      if (everCrossed) {
+        falsePositiveTrajectories += 1;
+      }
+    }
+
+    const empiricalTypeI = falsePositiveTrajectories / trajectories;
+    // Ville's inequality guarantees theoretical Type I <= alpha = 0.05 (allow small MC SE margin <= 0.055, typically ~0.015-0.030)
+    expect(empiricalTypeI).toBeLessThanOrEqual(alpha);
+
+    // Also verify evaluateInterimLook(stage: 'always_valid') uses mSPRT (much more conservative than fixed-horizon z=2.6 at V_t=0.01)
+    const lookAlwaysValid = evaluateInterimLook({
+      totalAlpha: 0.05, // stageAlpha = 0.005
+      stage: 'always_valid',
+      zStatistic: 2.85, // fixed-horizon p ≈ 0.0044 < 0.005, BUT mSPRT p > 0.005!
+      sampleVariance: 0.01,
+      mixingVarianceTauSq: 0.04,
+    });
+    expect(lookAlwaysValid.msprtLambda).toBeDefined();
+    expect(lookAlwaysValid.crossesBoundary).toBe(false);
   });
 });

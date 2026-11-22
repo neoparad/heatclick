@@ -405,19 +405,55 @@ export function evaluateCanaryCompliance(params: {
 // 5. Two-Sided Citation Bracketing, Referrerless Traffic Lift, Training Unknowable & Spike Detector
 // ---------------------------------------------------------------------------
 
+/** Simultaneous 95% Bonferroni normal critical value z_{1 - 0.05 / (2 * 2)} = Phi^{-1}(0.9875) */
+const Z_CITATION_SIMULTANEOUS_95 = 2.241402727604947
+
+function wilsonCitationBounds(
+  successes: number,
+  trials: number,
+  z = Z_CITATION_SIMULTANEOUS_95,
+): { readonly lower: number; readonly upper: number } {
+  if (!Number.isFinite(trials) || trials <= 0) {
+    return { lower: 0, upper: 1 }
+  }
+  const k = Math.min(trials, Math.max(0, successes))
+  const z2 = z * z
+  if (k === 0) {
+    return { lower: 0, upper: Math.min(1, z2 / (trials + z2)) }
+  }
+  const p = k / trials
+  const denom = 1 + z2 / trials
+  const center = p + z2 / (2 * trials)
+  const half = z * Math.sqrt((p * (1 - p) + z2 / (4 * trials)) / trials)
+  return {
+    lower: Math.max(0, (center - half) / denom),
+    upper: Math.min(1, (center + half) / denom),
+  }
+}
+
 export interface CitationBracketingResult {
   readonly wild_server_fetches: number
-  readonly p_fetched_given_cited: number
-  readonly p_cited_given_fetched: number
+  readonly p_fetched_given_cited: number | null
+  readonly p_cited_given_fetched: number | null
+  readonly p_fetched_given_cited_ci: { readonly lower: number; readonly upper: number }
+  readonly p_cited_given_fetched_ci: { readonly lower: number; readonly upper: number }
   readonly wild_citations_lower: number
-  readonly wild_citations_upper: number
+  readonly wild_citations_upper: number | null
+  readonly point_wild_citations_lower: number
+  readonly point_wild_citations_upper: number | null
+  readonly upper_identifiable: boolean
+  readonly gate_act_g25_passed: boolean
+  readonly unidentifiable_reason: string | null
   readonly evidence: 'inferred'
 }
 
 /**
  * 探針 × サーバーログ突合による「野生引用数」の両側挟み込み (§7.8):
- * - 下限: `N_fetch * P(cited | fetched)`（取得を伴う引用分）
- * - 上限: `N_fetch * P(cited | fetched) / max(floor, P(fetched | cited))`（キャッシュ済み引用分を含む上界）
+ * - 同時 95% Wilson 信頼区間 `[p_cf_L, p_cf_U]` と `[p_fc_L, p_fc_U]` を使用。
+ * - 下限: `N_fetch * p_cf_L`（取得を伴う引用の保守下界）
+ * - 上限: `p_fc_L > 0` かつ `act.G25` 充足時のみ `(N_fetch * p_cf_U) / p_fc_L`。
+ *   分母下限 `p_fc_L <= 0`（または `probe_cited_count === 0` / `act.G25` 未達）のときは
+ *   恣意的な `0.05` 床や点推定での除算を厳禁し、`wild_citations_upper: null`, `upper_identifiable: false` を返す！
  */
 export function computeCitationBracketing(params: {
   readonly wild_server_fetches: number
@@ -425,25 +461,86 @@ export function computeCitationBracketing(params: {
   readonly probe_cited_and_fetched_count: number
   readonly probe_fetched_count: number
   readonly probe_fetched_and_cited_count: number
+  readonly gate_act_g25_passed?: boolean
 }): CitationBracketingResult {
-  const pFetchedGivenCited =
+  const g25Passed = params.gate_act_g25_passed !== false
+  const fetches = Math.max(0, params.wild_server_fetches)
+
+  const pFcPoint =
     params.probe_cited_count > 0
-      ? Math.min(1, Math.max(0.05, params.probe_cited_and_fetched_count / params.probe_cited_count))
-      : 0.05
-  const pCitedGivenFetched =
+      ? Math.min(1, Math.max(0, params.probe_cited_and_fetched_count / params.probe_cited_count))
+      : null
+  const pCfPoint =
     params.probe_fetched_count > 0
       ? Math.min(1, Math.max(0, params.probe_fetched_and_cited_count / params.probe_fetched_count))
-      : 0
+      : null
 
-  const lower = params.wild_server_fetches * pCitedGivenFetched
-  const upper = lower / pFetchedGivenCited
+  const pFcCi = wilsonCitationBounds(params.probe_cited_and_fetched_count, params.probe_cited_count)
+  const pCfCi = wilsonCitationBounds(
+    params.probe_fetched_and_cited_count,
+    params.probe_fetched_count,
+  )
 
+  const pointLower = pCfPoint !== null ? fetches * pCfPoint : 0
+  const pointUpper =
+    pCfPoint !== null && pFcPoint !== null && pFcPoint > 0 ? pointLower / pFcPoint : null
+
+  if (!g25Passed) {
+    return Object.freeze({
+      wild_server_fetches: fetches,
+      p_fetched_given_cited: pFcPoint,
+      p_cited_given_fetched: pCfPoint,
+      p_fetched_given_cited_ci: Object.freeze(pFcCi),
+      p_cited_given_fetched_ci: Object.freeze(pCfCi),
+      wild_citations_lower: 0,
+      wild_citations_upper: null,
+      point_wild_citations_lower: pointLower,
+      point_wild_citations_upper: pointUpper,
+      upper_identifiable: false,
+      gate_act_g25_passed: false,
+      unidentifiable_reason: 'act.G25_unmet',
+      evidence: 'inferred',
+    })
+  }
+
+  const lower = params.probe_fetched_count > 0 ? fetches * pCfCi.lower : 0
+  if (params.probe_cited_count <= 0 || params.probe_fetched_count <= 0 || pFcCi.lower <= 0) {
+    return Object.freeze({
+      wild_server_fetches: fetches,
+      p_fetched_given_cited: pFcPoint,
+      p_cited_given_fetched: pCfPoint,
+      p_fetched_given_cited_ci: Object.freeze(pFcCi),
+      p_cited_given_fetched_ci: Object.freeze(pCfCi),
+      wild_citations_lower: lower,
+      wild_citations_upper: null,
+      point_wild_citations_lower: pointLower,
+      point_wild_citations_upper: pointUpper,
+      upper_identifiable: false,
+      gate_act_g25_passed: true,
+      unidentifiable_reason:
+        params.probe_cited_count <= 0
+          ? 'zero_probe_citations'
+          : params.probe_fetched_count <= 0
+            ? 'zero_probe_fetches'
+            : 'p_fetched_given_cited_ci_lower_includes_zero',
+      evidence: 'inferred',
+    })
+  }
+
+  const upper = Math.max(lower, (fetches * pCfCi.upper) / pFcCi.lower)
   return Object.freeze({
-    wild_server_fetches: params.wild_server_fetches,
-    p_fetched_given_cited: pFetchedGivenCited,
-    p_cited_given_fetched: pCitedGivenFetched,
+    wild_server_fetches: fetches,
+    p_fetched_given_cited: pFcPoint,
+    p_cited_given_fetched: pCfPoint,
+    p_fetched_given_cited_ci: Object.freeze(pFcCi),
+    p_cited_given_fetched_ci: Object.freeze(pCfCi),
     wild_citations_lower: lower,
     wild_citations_upper: upper,
+    point_wild_citations_lower: pointLower,
+    point_wild_citations_upper: pointUpper,
+    upper_identifiable: true,
+    gate_act_g25_passed: true,
+    unidentifiable_reason: null,
     evidence: 'inferred',
   })
 }
@@ -657,15 +754,18 @@ export function evaluateEligibilityRandomizationOutcome(params: {
   /** Guardrail drop limit (default -0.10 = -10% drop triggers auto-rollback) */
   readonly max_search_drop_ratio?: number
   readonly max_indexed_drop_ratio?: number
+  readonly gate_act_g25_passed?: boolean
 }): {
   readonly evidence_level: Extract<EvidenceLevel, 'proven' | 'observed'>
   readonly auto_rollback_triggered: boolean
   readonly rollback_reasons: readonly string[]
   readonly additional_pairs_needed: number
   readonly additional_units_needed: number
+  readonly gate_act_g25_passed: boolean
 } {
   const maxSearchDrop = params.max_search_drop_ratio ?? -0.1
   const maxIndexDrop = params.max_indexed_drop_ratio ?? -0.1
+  const g25Passed = params.gate_act_g25_passed !== false
   const rollbackReasons: string[] = []
 
   if (params.search_traffic_change_ratio < maxSearchDrop) {
@@ -681,9 +781,16 @@ export function evaluateEligibilityRandomizationOutcome(params: {
 
   const rollback = rollbackReasons.length > 0
   const pairsShortfall = Math.max(0, ELIGIBILITY_MIN_DIRECTORY_PAIRS - params.paired_directories)
-  const unitsShortfall = Math.max(0, params.planner_required_units - params.observed_units)
+  const requiredUnits = Math.max(1, params.planner_required_units)
+  const unitsShortfall = Math.max(0, requiredUnits - Math.max(0, params.observed_units))
 
-  const isProven = !rollback && pairsShortfall === 0 && unitsShortfall === 0
+  const isProven =
+    g25Passed &&
+    !rollback &&
+    pairsShortfall === 0 &&
+    unitsShortfall === 0 &&
+    params.observed_units > 0 &&
+    params.planner_required_units > 0
 
   return Object.freeze({
     evidence_level: isProven ? 'proven' : 'observed',
@@ -691,5 +798,6 @@ export function evaluateEligibilityRandomizationOutcome(params: {
     rollback_reasons: Object.freeze(rollbackReasons),
     additional_pairs_needed: pairsShortfall,
     additional_units_needed: unitsShortfall,
+    gate_act_g25_passed: g25Passed,
   })
 }

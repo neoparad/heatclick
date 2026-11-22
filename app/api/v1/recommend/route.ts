@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
+  KeyPepperUnconfiguredError,
   extractBearerToken,
   extractQueryParams,
   readOptionalJsonBody,
@@ -18,21 +19,35 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     req.headers.get('x-tenant-id') ??
     undefined;
 
-  const result = executeRecommendRequest({
-    channel: 'rest',
-    bearerToken: extractBearerToken(req),
-    clientIp: req.headers.get('x-forwarded-for')?.split(',')[0]?.trim(),
-    dpopThumbprint: req.headers.get('x-dpop-jkt') ?? undefined,
-    callerSuppliedTenantId,
-    body,
-  });
+  try {
+    const result = executeRecommendRequest({
+      channel: 'rest',
+      bearerToken: extractBearerToken(req),
+      clientIp:
+        req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
+        req.headers.get('x-real-ip')?.trim() ??
+        undefined,
+      dpopThumbprint: req.headers.get('x-dpop-jkt') ?? undefined,
+      requestedRevision: req.headers.get('x-ugoki-revision'),
+      callerSuppliedTenantId,
+      body,
+    });
 
-  const payload = result.envelope ?? { error: result.error };
-  return NextResponse.json(payload, {
-    status: result.httpStatus,
-    headers: {
-      'Cache-Control': 'no-store',
-      ...result.headers,
-    },
-  });
+    const payload = result.envelope ?? { error: result.error };
+    return NextResponse.json(payload, {
+      status: result.httpStatus,
+      headers: {
+        'Cache-Control': 'no-store',
+        ...result.headers,
+      },
+    });
+  } catch (err) {
+    if (err instanceof KeyPepperUnconfiguredError) {
+      return NextResponse.json(
+        { error: { code: err.code, message: err.message } },
+        { status: err.httpStatus, headers: { 'Cache-Control': 'no-store' } }
+      );
+    }
+    throw err;
+  }
 }

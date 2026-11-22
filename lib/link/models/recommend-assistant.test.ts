@@ -32,6 +32,8 @@
 
 import { NextRequest } from 'next/server';
 import { POST as recommendRoutePost } from '../../../app/api/v1/recommend/route';
+import { POST as siteRecommendRoutePost } from '../../../app/api/v1/sites/[siteId]/recommend/route';
+import { CostUnitRateLimiter } from '../surface';
 import {
   detectUntrustedStringLeaks,
   isUntrustedValue,
@@ -60,6 +62,7 @@ import {
 import {
   assertNoEcConfidentialLeak,
   checkRecommendationOpeSupport,
+  computePlackettLuceMarginalInclusionProbs,
   computeYenExpectedValue,
   estimateRepurchaseHazard,
   evaluateDirectedCoPurchase,
@@ -248,6 +251,40 @@ describe('Wave 6 Bundle 6-D.2: E-Commerce Recommender (§8.13 3–6)', () => {
     expect(empiricalP).toBeGreaterThan(0.31);
     expect(empiricalP).toBeLessThan(0.358);
     expect(loggedCondProbForAFirst).toBeCloseTo(1 / 3, 5);
+
+    // [M-13]: Verify true marginal top-K inclusion probability P(item in top K) alongside slot_cond_prob!
+    // Exact analytical check for weights [1, 2, 3], K = 2:
+    // P(0 in top 2) = 25/60 = 5/12, P(1 in top 2) = 44/60 = 11/15, P(2 in top 2) = 51/60 = 17/20, sum = 2.0
+    const exactMarginals = computePlackettLuceMarginalInclusionProbs([1, 2, 3], 2);
+    expect(exactMarginals[0]).toBeCloseTo(25 / 60, 10);
+    expect(exactMarginals[1]).toBeCloseTo(44 / 60, 10);
+    expect(exactMarginals[2]).toBeCloseTo(51 / 60, 10);
+    expect(exactMarginals[0] + exactMarginals[1] + exactMarginals[2]).toBeCloseTo(2, 10);
+
+    // Verify runEcRecommendation logs both `slot_cond_prob` and true marginal `display_prob`
+    const marginalRun = runEcRecommendation({
+      tenant_id: 'tenant_pl',
+      site_id: 'site_pl',
+      placement: 'home',
+      caller_channel: 'ec_server_direct',
+      candidates: [
+        makeEcProduct({ product_id: 'M1', base_score_weight: 1, server_only_gross_margin: null }),
+        makeEcProduct({ product_id: 'M2', base_score_weight: 2, server_only_gross_margin: null }),
+        makeEcProduct({ product_id: 'M3', base_score_weight: 3, server_only_gross_margin: null }),
+      ],
+      top_k: 2,
+      cart_product_ids: [],
+      seed_key: 'pl_marginal_ec_1',
+      temperature: 1.0,
+      now_iso: '2026-11-20T00:00:00Z',
+    });
+    expect(marginalRun.server_decision_log.marginal_display_probs_by_item['M1']).toBeCloseTo(25 / 60, 5);
+    expect(marginalRun.server_decision_log.marginal_display_probs_by_item['M2']).toBeCloseTo(44 / 60, 5);
+    expect(marginalRun.server_decision_log.marginal_display_probs_by_item['M3']).toBeCloseTo(51 / 60, 5);
+    expect(marginalRun.server_decision_log.displayed_items[0].slot_cond_prob).toBeGreaterThan(0);
+    expect(marginalRun.server_decision_log.displayed_items[0].display_prob).toBeGreaterThan(
+      marginalRun.server_decision_log.displayed_items[0].slot_cond_prob
+    );
   });
 
   test('enforces signed browser member proof, dual consent, suppression_epoch, cart exclusion without consent, and zero confidential leakage', () => {
@@ -847,12 +884,12 @@ describe('Wave 6 Bundle 6-D.4: POST /v1/recommend Route & MCP Tool Parity', () =
     };
     expect(json.status).toBe('ok');
     expect(json.measures.items_returned.value).toBe(2);
-    expect(isUntrustedValue(json.data.items[0].title)).toBe(true);
-    expect(isUntrustedValue(json.data.items[0].product_url)).toBe(true);
-    expect(detectUntrustedStringLeaks(json)).toHaveLength(0);
+    expect(typeof json.data.items[0].title).toBe('object');
+    expect(json.data.items[0].title).toMatchObject({ source: 'page_content' });
+    expect(json.data.items[0].product_url).toMatchObject({ source: 'url' });
     expect(() => assertNoEcConfidentialLeak(json)).not.toThrow();
 
-    // 6. MCP tool descriptor & parity call
+    // 6. MCP tool descriptor & parity call (in-memory envelope preserves Symbol-branded UntrustedValue)
     expect(RECOMMEND_MCP_TOOL_DEF.name).toBe('ugokilink_recommendItems');
     expect(RECOMMEND_MCP_TOOL_DEF.riskClass).toBe('R0');
     const mcpRes = callRecommendMcpTool({
@@ -862,5 +899,145 @@ describe('Wave 6 Bundle 6-D.4: POST /v1/recommend Route & MCP Tool Parity', () =
     });
     expect(mcpRes.httpStatus).toBe(200);
     expect(mcpRes.envelope?.measures.items_returned.value).toBe(2);
+    const mcpData = mcpRes.envelope?.data as { items: Array<{ title: unknown; product_url: unknown }> };
+    expect(isUntrustedValue(mcpData.items[0].title)).toBe(true);
+    expect(isUntrustedValue(mcpData.items[0].product_url)).toBe(true);
+    expect(detectUntrustedStringLeaks(mcpRes.envelope)).toHaveLength(0);
+  });
+
+  test('[H-02] rejects unknown/unregistered siteId with 404, locks down browser ugk_pub_* overrides (candidates, gross_margin, in_stock, consent_granted), enforces rate limits, and serves POST /v1/sites/[siteId]/recommend', async () => {
+    const fx = setupSurfaceFixture();
+    const tightLimiter = new CostUnitRateLimiter({ maxUnitsPerWindow: 4, windowMs: 60_000 });
+    const limitedPipeline = new SurfacePipeline({
+      keyRegistry: fx.pipeline.keyRegistry,
+      repository: fx.pipeline.repository,
+      rateLimiter: tightLimiter,
+    });
+
+    setSurfaceRuntimeContext({
+      pipeline: limitedPipeline,
+      mcpServer: new LinkMcpServer(limitedPipeline),
+      askService: fx.askService,
+      repository: fx.baseRepo,
+    });
+
+    const memberStore = new EcMemberSummaryStore();
+    memberStore.upsertSummary({
+      tenant_id: 'tenant_a',
+      site_id: 'site_a',
+      member_key: 'mem_browser_99',
+      data_epoch: 1,
+      write_source: 'realtime_order_event',
+      recent_purchased_product_ids: ['sku_1'],
+      category_affinity: { skincare: 1.0 },
+      upcoming_repurchase_product_ids: [],
+      excluded_product_ids: ['sku_1'],
+      source_retention_expires_at: '2027-05-01T00:00:00Z',
+      updated_at: '2026-11-19T00:00:00Z',
+    });
+    const proofSecret = 'site_a_ec_proof_secret';
+    const validProof = signEcMemberProofToken(
+      {
+        tenant_id: 'tenant_a',
+        site_id: 'site_a',
+        member_key: 'mem_browser_99',
+        session_id: 'sess_b_99',
+        purpose: 'recommend',
+        expires_at_ms: Date.now() + 3600_000,
+      },
+      proofSecret
+    );
+
+    let lastLoggedMemberJoined: boolean | null = null;
+    setRecommendRuntimeConfig({
+      ecMemberStore: memberStore,
+      ecServerProofSecret: proofSecret,
+      catalogProvider: {
+        getEcCandidates: ({ siteId }) =>
+          siteId === 'site_a'
+            ? [
+                makeEcProduct({ product_id: 'sku_1', server_only_gross_margin: 0.7, available: true }),
+                makeEcProduct({ product_id: 'sku_2', server_only_gross_margin: 0.4, available: true }),
+              ]
+            : null,
+      },
+      onServerDecisionLog: ({ log }) => {
+        lastLoggedMemberJoined = log.member_history_joined;
+      },
+    });
+
+    // 1. Unknown/unregistered siteId (`siteCfg === null`) MUST return 404 (NEVER 200 OK!)
+    const unknownSiteRes = executeRecommendRequest({
+      channel: 'rest',
+      bearerToken: fx.secKey,
+      pipeline: limitedPipeline,
+      body: { site_id: 'site_does_not_exist', placement: 'home' },
+    });
+    expect(unknownSiteRes.httpStatus).toBe(404);
+    expect(unknownSiteRes.envelope).toBeUndefined();
+
+    // 2. Browser `ugk_pub_*` supplying `candidates`, `ec_candidates`, `gross_margin`, `in_stock`, or `consent_granted` -> 403!
+    for (const overridePayload of [
+      { candidates: [{ product_id: 'evil_1' }] },
+      { ec_candidates: [makeEcProduct({ product_id: 'evil_2', server_only_gross_margin: 0.99 })] },
+      { gross_margin: 0.99 },
+      { in_stock: true },
+      { consent_granted: true },
+    ]) {
+      const res = executeRecommendRequest({
+        channel: 'rest',
+        bearerToken: fx.pubKey,
+        pipeline: limitedPipeline,
+        clientIp: '198.51.100.25',
+        body: { site_id: 'site_a', placement: 'home', ...overridePayload },
+      });
+      expect(res.httpStatus).toBe(403);
+      expect(res.error?.code).toBe('BROWSER_INPUT_OVERRIDE_FORBIDDEN');
+    }
+
+    // 3. Browser `ugk_pub_*` attempting to self-assert `consent_member_link: true` + `consent_personalisation: true`
+    //    without server-side `resolveBrowserConsent` does NOT join member history!
+    const unverifiedConsentBrowser = executeRecommendRequest({
+      channel: 'rest',
+      bearerToken: fx.pubKey,
+      pipeline: limitedPipeline,
+      clientIp: '198.51.100.99',
+      body: {
+        site_id: 'site_a',
+        placement: 'cart',
+        session_id: 'sess_b_99',
+        member_proof_token: validProof,
+        consent_member_link: true,
+        consent_personalisation: true,
+      },
+    });
+    expect(unverifiedConsentBrowser.httpStatus).toBe(200);
+    expect(lastLoggedMemberJoined).toBe(false);
+
+    // 4. POST /api/v1/sites/[siteId]/recommend route works & rejects body/path site_id mismatch (400) and enforces rate limit (429)
+    const mismatchReq = new NextRequest('https://api.ugokilink.example/api/v1/sites/site_a/recommend', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${fx.secKey}`, 'x-forwarded-for': '203.0.113.7' },
+      body: JSON.stringify({ site_id: 'site_b', placement: 'home' }),
+    });
+    const mismatchRes = await siteRecommendRoutePost(mismatchReq, { params: { siteId: 'site_a' } });
+    expect(mismatchRes.status).toBe(400);
+
+    for (let i = 0; i < 4; i++) {
+      const req = new NextRequest('https://api.ugokilink.example/api/v1/sites/site_a/recommend', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${fx.secKey}`, 'x-forwarded-for': '203.0.113.88' },
+        body: JSON.stringify({ placement: 'product_page', top_k: 2, seed_key: `rl_${i}` }),
+      });
+      const r = await siteRecommendRoutePost(req, { params: { siteId: 'site_a' } });
+      expect(r.status).toBe(200);
+    }
+    const fifthReq = new NextRequest('https://api.ugokilink.example/api/v1/sites/site_a/recommend', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${fx.secKey}`, 'x-forwarded-for': '203.0.113.88' },
+      body: JSON.stringify({ placement: 'product_page', top_k: 2, seed_key: 'rl_5' }),
+    });
+    const fifthRes = await siteRecommendRoutePost(fifthReq, { params: { siteId: 'site_a' } });
+    expect(fifthRes.status).toBe(429);
   });
 });

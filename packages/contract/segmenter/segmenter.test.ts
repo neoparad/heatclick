@@ -997,5 +997,74 @@ describe('Bundle 1-D: Unified Segmenter Engine (packages/contract/segmenter — 
       expect(SEGMENTER_CONTENT_HASH).toBe(computeSegmenterContentHash(DEFAULT_PRUNE_REGISTRY))
       expect(SEGMENTER_RULE_REVISIONS.norm).toBe('norm/1')
     })
+
+    it('[M-03] tracks <svg> vs <foreignObject> HTML integration points for <p> auto-closing and <style> rawtext/CDATA browser DOM parity', () => {
+      // 1. Inside <svg><foreignObject>, omitted </p> end tags auto-close before sibling <p> and <div>
+      //    exactly like browser HTML5 DOM!
+      const rawWithForeignObject = `<!DOCTYPE html><html><head><title>SVG ForeignObject Test</title></head><body>
+        <article>
+          <h2>図解セクション</h2>
+          <svg viewBox="0 0 400 200">
+            <style><![CDATA[ .svg-box > path { fill: #333; content: "<h2>ignored-in-cdata</h2>"; } ]]></style>
+            <path d="M0 0h10v10z" />
+            <foreignObject x="0" y="0" width="400" height="200">
+              <style>.fo > p { content: "<h2>ignored-in-rawtext</h2>"; }</style>
+              <p>最初のインライン段落テキストです
+              <p>2番目のインライン段落テキストです
+              <div>3番目のボックス説明文です</div>
+            </foreignObject>
+          </svg>
+        </article>
+      </body></html>`
+
+      // Build matching Browser-spec DOM tree independently
+      const headDom = new IndependentDomElement('head')
+      const titleEl = new IndependentDomElement('title')
+      titleEl.append(new IndependentDomText('SVG ForeignObject Test'))
+      headDom.append(titleEl)
+
+      const bodyDom = new IndependentDomElement('body')
+      const articleEl = new IndependentDomElement('article')
+      const h2El = new IndependentDomElement('h2')
+      h2El.append(new IndependentDomText('図解セクション'))
+      articleEl.append(h2El)
+
+      const svgEl = new IndependentDomElement('svg', { viewBox: '0 0 400 200' })
+      const svgStyle = new IndependentDomElement('style')
+      svgStyle.append(new IndependentDomText(' .svg-box > path { fill: #333; content: "<h2>ignored-in-cdata</h2>"; } '))
+      svgEl.append(svgStyle)
+      svgEl.append(new IndependentDomElement('path', { d: 'M0 0h10v10z' }))
+
+      const foEl = new IndependentDomElement('foreignObject', { x: '0', y: '0', width: '400', height: '200' })
+      const foStyle = new IndependentDomElement('style')
+      foStyle.append(new IndependentDomText('.fo > p { content: "<h2>ignored-in-rawtext</h2>"; }'))
+      foEl.append(foStyle)
+
+      const p1 = new IndependentDomElement('p')
+      p1.append(new IndependentDomText('最初のインライン段落テキストです\n              '))
+      foEl.append(p1)
+
+      const p2 = new IndependentDomElement('p')
+      p2.append(new IndependentDomText('2番目のインライン段落テキストです\n              '))
+      foEl.append(p2)
+
+      const div3 = new IndependentDomElement('div')
+      div3.append(new IndependentDomText('3番目のボックス説明文です'))
+      foEl.append(div3)
+
+      svgEl.append(foEl)
+      articleEl.append(svgEl)
+      bodyDom.append(articleEl)
+
+      const domDoc = new IndependentDomDocument(headDom, bodyDom)
+
+      const fromHtml = segmentHtml(rawWithForeignObject)
+      const fromDom = segmentDocument(domDoc)
+
+      expect(fromHtml).toEqual(fromDom)
+      expect(fromHtml.sections).toHaveLength(1)
+      // Must extract 3 distinct sibling blocks (p1, p2, div3), NOT collapse p2+div3 inside unclosed p1!
+      expect(fromHtml.sections[0].blocks).toHaveLength(3)
+    })
   })
 })

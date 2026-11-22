@@ -116,11 +116,16 @@ export interface EdgeDecisionContextResponse {
   readonly decisionContextId: string;
   readonly tenantId: string;
   readonly siteId: string;
+  /** Bound 1-PV context identifier (`req.pvId` on direct path, or `zone_<decisionContextId>` pre-draw). */
+  readonly pvId: string | null;
   readonly configVersion: string | null;
   readonly killStampVersion: number;
   readonly consentTier: ConsentTier;
   readonly displayLease: {
     readonly leaseId: string;
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly pvId: string;
     readonly issuedAtMs: number;
     readonly expiresAtMs: number;
     readonly signatureBase64Url: string;
@@ -132,14 +137,22 @@ export interface EdgeDecisionContextResponse {
   readonly reason: string;
 }
 
+interface DecisionContextBindingRecord {
+  readonly tenantId: string;
+  readonly siteId: string;
+  boundPvId: string | null;
+}
+
 export class EdgeDecisionWorker {
   private readonly controlStore: StrongControlStore;
   private readonly signingPrivateKeyPem: string;
   private readonly signingPublicKeyPem: string;
   private readonly ticketKey32: Buffer;
 
-  /** Zone Worker 1 decisionContextId -> first bound pvId (§9.1). */
-  private readonly zoneDecisionPvBindings = new Map<string, string>();
+  /** Zone Worker & 1-PV `(tenantId, siteId, pvId)` bindings (§9.1 + [M-16]). */
+  private readonly zoneDecisionPvBindings = new Map<string, DecisionContextBindingRecord>();
+  /** Consumed single-use provisional visitor tickets. */
+  private readonly consumedTicketIds = new Set<string>();
   /** Tracks edge-vs-browser consent overshoots (`edgeTier > browserTier` MUST stay 0!). */
   private consentOvershootCount = 0;
   private edgePreDrawDisabledDueToOvershoot = false;
@@ -187,26 +200,217 @@ export class EdgeDecisionWorker {
   }
 
   /**
-   * §9.1 Zone Worker invariant: binds a pre-drawn `decisionContextId` strictly to the FIRST `pvId`.
-   * Rejects any second `pvId` (e.g. from cached HTML served to a second visitor).
+   * §9.1 + [M-16] Zone Worker invariant: binds a pre-drawn `decisionContextId` strictly
+   * to `(tenantId, siteId)` and the FIRST `pvId`.
+   * Rejects any cross-tenant/cross-site probe or any second `pvId` (cached HTML reuse!).
    */
   public bindZoneDecisionToFirstPv(
     decisionContextId: string,
-    pvId: string
+    pvId: string,
+    context?: { readonly tenantId: string; readonly siteId: string }
   ): { readonly bound: boolean; readonly boundPvId: string; readonly reason: string } {
+    if (!pvId || pvId.trim().length === 0) {
+      return { bound: false, boundPvId: '', reason: 'INVALID_EMPTY_PV_ID' };
+    }
     const existing = this.zoneDecisionPvBindings.get(decisionContextId);
     if (!existing) {
-      this.zoneDecisionPvBindings.set(decisionContextId, pvId);
+      this.zoneDecisionPvBindings.set(decisionContextId, {
+        tenantId: context?.tenantId ?? '',
+        siteId: context?.siteId ?? '',
+        boundPvId: pvId,
+      });
       return { bound: true, boundPvId: pvId, reason: 'FIRST_PV_BOUND' };
     }
-    if (existing === pvId) {
-      return { bound: true, boundPvId: existing, reason: 'IDEMPOTENT_SAME_PV' };
+    if (context) {
+      if (
+        (existing.tenantId && existing.tenantId !== context.tenantId) ||
+        (existing.siteId && existing.siteId !== context.siteId)
+      ) {
+        return {
+          bound: false,
+          boundPvId: existing.boundPvId ?? '',
+          reason: 'DECISION_CONTEXT_TENANT_OR_SITE_MISMATCH',
+        };
+      }
+    }
+    if (existing.boundPvId === null) {
+      existing.boundPvId = pvId;
+      return { bound: true, boundPvId: pvId, reason: 'FIRST_PV_BOUND' };
+    }
+    if (existing.boundPvId === pvId) {
+      return { bound: true, boundPvId: existing.boundPvId, reason: 'IDEMPOTENT_SAME_PV' };
     }
     return {
       bound: false,
-      boundPvId: existing,
+      boundPvId: existing.boundPvId,
       reason: 'ZONE_DECISION_ALREADY_BOUND_TO_DIFFERENT_PV',
     };
+  }
+
+  /**
+   * [M-16] Cryptographically verifies `voucherToken` (and optional `displayLease`) and enforces
+   * strict 1-PV single-context `(tenant_id, site_id, pv_id)` binding.
+   */
+  public verifyDecisionVoucherForPv(params: {
+    readonly voucherToken: string;
+    readonly displayLease?: EdgeDecisionContextResponse['displayLease'];
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly pvId: string;
+    readonly nowMs?: number;
+  }): { readonly valid: boolean; readonly decisionContextId?: string; readonly reason: string } {
+    const nowMs = params.nowMs ?? Date.now();
+    if (!params.voucherToken.startsWith('vch_')) {
+      return { valid: false, reason: 'MALFORMED_VOUCHER_PREFIX' };
+    }
+    const rawRest = params.voucherToken.slice(4);
+    const dotIdx = rawRest.indexOf('.');
+    if (dotIdx <= 0 || dotIdx === rawRest.length - 1) {
+      return { valid: false, reason: 'MALFORMED_VOUCHER_STRUCTURE' };
+    }
+
+    let payloadText: string;
+    let sigBuf: Buffer;
+    let parsed: {
+      decisionContextId?: string;
+      tenantId?: string;
+      siteId?: string;
+      pvId?: string;
+      configVersion?: string;
+      issuedAtMs?: number;
+      expiresAtMs?: number;
+      singlePv?: boolean;
+    };
+    try {
+      payloadText = Buffer.from(rawRest.slice(0, dotIdx), 'base64url').toString('utf8');
+      sigBuf = Buffer.from(rawRest.slice(dotIdx + 1), 'base64url');
+      parsed = JSON.parse(payloadText) as typeof parsed;
+    } catch {
+      return { valid: false, reason: 'MALFORMED_VOUCHER_ENCODING' };
+    }
+
+    const sigOk = crypto.verify(
+      null,
+      Buffer.from(payloadText, 'utf8'),
+      this.signingPublicKeyPem,
+      sigBuf
+    );
+    if (!sigOk) {
+      return { valid: false, reason: 'INVALID_VOUCHER_SIGNATURE' };
+    }
+
+    if (typeof parsed.expiresAtMs === 'number' && nowMs >= parsed.expiresAtMs) {
+      return { valid: false, reason: 'VOUCHER_EXPIRED' };
+    }
+
+    // Strict (tenant_id, site_id, pv_id) single-context check
+    if (parsed.tenantId !== params.tenantId || parsed.siteId !== params.siteId) {
+      return { valid: false, reason: 'VOUCHER_TENANT_OR_SITE_MISMATCH' };
+    }
+
+    const dctxId = parsed.decisionContextId ?? '';
+    const isZonePreDraw = typeof parsed.pvId === 'string' && parsed.pvId.startsWith('zone_');
+    if (!isZonePreDraw && parsed.pvId !== params.pvId) {
+      return { valid: false, reason: 'VOUCHER_PV_ID_MISMATCH' };
+    }
+
+    const bindRes = this.bindZoneDecisionToFirstPv(dctxId, params.pvId, {
+      tenantId: params.tenantId,
+      siteId: params.siteId,
+    });
+    if (!bindRes.bound) {
+      return { valid: false, reason: bindRes.reason };
+    }
+
+    if (params.displayLease) {
+      const lease = params.displayLease;
+      if (
+        lease.tenantId !== params.tenantId ||
+        lease.siteId !== params.siteId ||
+        (!isZonePreDraw && lease.pvId !== params.pvId)
+      ) {
+        return { valid: false, reason: 'DISPLAY_LEASE_CONTEXT_MISMATCH' };
+      }
+      if (nowMs >= lease.expiresAtMs) {
+        return { valid: false, reason: 'DISPLAY_LEASE_EXPIRED' };
+      }
+      const ctrl = this.controlStore.readTenantControl(params.tenantId, params.siteId);
+      if (!ctrl.reachable || !ctrl.record) {
+        return { valid: false, reason: 'CONTROL_UNREACHABLE_DURING_LEASE_VERIFY' };
+      }
+      const expectedLeaseUnsigned = canonicalJson({
+        leaseId: lease.leaseId,
+        tenantId: lease.tenantId,
+        siteId: lease.siteId,
+        pvId: lease.pvId,
+        decisionContextId: dctxId,
+        killStampVersion: ctrl.record.killStampVersion,
+        issuedAtMs: lease.issuedAtMs,
+        expiresAtMs: lease.expiresAtMs,
+      });
+      const leaseSigOk = crypto.verify(
+        null,
+        Buffer.from(expectedLeaseUnsigned, 'utf8'),
+        this.signingPublicKeyPem,
+        Buffer.from(lease.signatureBase64Url, 'base64url')
+      );
+      if (!leaseSigOk) {
+        return { valid: false, reason: 'INVALID_DISPLAY_LEASE_SIGNATURE' };
+      }
+    }
+
+    return { valid: true, decisionContextId: dctxId, reason: 'VERIFIED_SINGLE_PV_CONTEXT' };
+  }
+
+  /**
+   * [M-16] Unseals and single-use consumes a provisional visitor ticket bound via AEAD AAD
+   * to `(tenantId, siteId, pvId)`.
+   */
+  public consumeProvisionalVisitorTicket(params: {
+    readonly ticket: SealedProvisionalVisitorTicket;
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly pvId: string;
+    readonly nowMs?: number;
+  }): { readonly valid: boolean; readonly visitorId?: string; readonly reason: string } {
+    const nowMs = params.nowMs ?? Date.now();
+    if (this.consumedTicketIds.has(params.ticket.ticketId)) {
+      return { valid: false, reason: 'PROVISIONAL_TICKET_ALREADY_CONSUMED' };
+    }
+    if (nowMs >= params.ticket.expiresAtMs) {
+      return { valid: false, reason: 'PROVISIONAL_TICKET_EXPIRED' };
+    }
+    try {
+      const combined = Buffer.from(params.ticket.sealedCiphertextBase64Url, 'base64url');
+      if (combined.byteLength < 29) {
+        return { valid: false, reason: 'MALFORMED_TICKET_CIPHERTEXT' };
+      }
+      const iv = combined.subarray(0, 12);
+      const tag = combined.subarray(12, 28);
+      const ciphertext = combined.subarray(28);
+      const decipher = crypto.createDecipheriv('aes-256-gcm', this.ticketKey32, iv);
+      decipher.setAAD(Buffer.from(`${params.tenantId}:${params.siteId}:${params.pvId}`, 'utf8'));
+      decipher.setAuthTag(tag);
+      const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+      const parsed = JSON.parse(plain) as {
+        visitorId: string;
+        tenantId: string;
+        siteId: string;
+        pvId: string;
+        singleUse: boolean;
+      };
+      if (
+        parsed.tenantId !== params.tenantId ||
+        parsed.siteId !== params.siteId ||
+        parsed.pvId !== params.pvId
+      ) {
+        return { valid: false, reason: 'TICKET_CONTEXT_MISMATCH' };
+      }
+      this.consumedTicketIds.add(params.ticket.ticketId);
+      return { valid: true, visitorId: parsed.visitorId, reason: 'CONSUMED_OK' };
+    } catch {
+      return { valid: false, reason: 'TICKET_AEAD_CONTEXT_MISMATCH_OR_TAMPERED' };
+    }
   }
 
   /**
@@ -227,6 +431,7 @@ export class EdgeDecisionWorker {
         decisionContextId,
         tenantId: req.tenantId,
         siteId: req.siteId,
+        pvId: req.pvId ?? null,
         configVersion: null,
         killStampVersion: 0,
         consentTier,
@@ -248,6 +453,7 @@ export class EdgeDecisionWorker {
         decisionContextId,
         tenantId: req.tenantId,
         siteId: req.siteId,
+        pvId: req.pvId ?? null,
         configVersion: rec.configVersion,
         killStampVersion: rec.killStampVersion,
         consentTier,
@@ -266,6 +472,7 @@ export class EdgeDecisionWorker {
         decisionContextId,
         tenantId: req.tenantId,
         siteId: req.siteId,
+        pvId: req.pvId ?? null,
         configVersion: rec.configVersion,
         killStampVersion: rec.killStampVersion,
         consentTier,
@@ -278,15 +485,28 @@ export class EdgeDecisionWorker {
       };
     }
 
+    const effectivePvId = req.pvId ?? `zone_${decisionContextId}`;
+    this.zoneDecisionPvBindings.set(decisionContextId, {
+      tenantId: req.tenantId,
+      siteId: req.siteId,
+      boundPvId: req.pvId ?? null,
+    });
+
     // Mint provisional visitor ID ticket ONLY when consent permits persistent visitor IDs (T2 & not off/cookieless)
     let provisionalVisitorId = req.existingVisitorId;
     let sealedTicket: SealedProvisionalVisitorTicket | null = null;
     if (!provisionalVisitorId && (req.consentMode === 'full' || req.consentMode === 'stats_exempt')) {
       provisionalVisitorId = `vis_${crypto.randomBytes(12).toString('hex')}`;
-      sealedTicket = this.sealProvisionalVisitorTicket(provisionalVisitorId, req.siteId, nowMs);
+      sealedTicket = this.sealProvisionalVisitorTicket(
+        provisionalVisitorId,
+        req.tenantId,
+        req.siteId,
+        effectivePvId,
+        decisionContextId,
+        nowMs
+      );
     }
 
-    const effectivePvId = req.pvId ?? `zone_${decisionContextId}`;
     const allocation = allocateDecision(
       {
         tenant_id: req.tenantId,
@@ -314,7 +534,9 @@ export class EdgeDecisionWorker {
     const leaseTtl = Math.min(Math.max(1000, req.leaseTtlMs ?? 5000), 10 * 60 * 1000);
     const leaseUnsigned = {
       leaseId: `lse_${crypto.randomBytes(8).toString('hex')}`,
+      tenantId: req.tenantId,
       siteId: req.siteId,
+      pvId: effectivePvId,
       decisionContextId,
       killStampVersion: rec.killStampVersion,
       issuedAtMs: nowMs,
@@ -326,9 +548,13 @@ export class EdgeDecisionWorker {
 
     const voucherPayload = canonicalJson({
       decisionContextId,
+      tenantId: req.tenantId,
       siteId: req.siteId,
+      pvId: effectivePvId,
       configVersion: rec.configVersion,
       issuedAtMs: nowMs,
+      expiresAtMs: nowMs + leaseTtl,
+      singlePv: true,
     });
     const voucherSig = crypto
       .sign(null, Buffer.from(voucherPayload, 'utf8'), this.signingPrivateKeyPem)
@@ -340,11 +566,15 @@ export class EdgeDecisionWorker {
       decisionContextId,
       tenantId: req.tenantId,
       siteId: req.siteId,
+      pvId: effectivePvId,
       configVersion: rec.configVersion,
       killStampVersion: rec.killStampVersion,
       consentTier,
       displayLease: {
         leaseId: leaseUnsigned.leaseId,
+        tenantId: leaseUnsigned.tenantId,
+        siteId: leaseUnsigned.siteId,
+        pvId: leaseUnsigned.pvId,
         issuedAtMs: leaseUnsigned.issuedAtMs,
         expiresAtMs: leaseUnsigned.expiresAtMs,
         signatureBase64Url: leaseSig,
@@ -359,12 +589,24 @@ export class EdgeDecisionWorker {
 
   private sealProvisionalVisitorTicket(
     visitorId: string,
+    tenantId: string,
     siteId: string,
+    pvId: string,
+    decisionContextId: string,
     nowMs: number
   ): SealedProvisionalVisitorTicket {
     const iv = crypto.randomBytes(12);
     const cipher = crypto.createCipheriv('aes-256-gcm', this.ticketKey32, iv);
-    const plaintext = JSON.stringify({ visitorId, siteId, singleUse: true, issuedAtMs: nowMs });
+    cipher.setAAD(Buffer.from(`${tenantId}:${siteId}:${pvId}`, 'utf8'));
+    const plaintext = JSON.stringify({
+      visitorId,
+      tenantId,
+      siteId,
+      pvId,
+      decisionContextId,
+      singleUse: true,
+      issuedAtMs: nowMs,
+    });
     const enc = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
     const tag = cipher.getAuthTag();
     const combined = Buffer.concat([iv, tag, enc]).toString('base64url');

@@ -91,15 +91,20 @@ export function validateOriginCookieMaxAge(maxAgeSeconds: number): number {
 
 /**
  * 実行時に `Set-Cookie` ヘッダ文字列を生成する。
- * `off` または `cookieless` モードでは必ず `null` を返し、Cookie を一切発行しない。
+ * - `off` / `cookieless` / 未確定同意 (`consent_resolved === false` または `'unresolved'` / `'pending'`) では
+ *   必ず `null` を返し、同意確定前の持続 Cookie 発行を物理防止する (§4.5)。
  */
 export function buildOriginCookieSetHeader(params: {
-  readonly consent_mode: OriginConsentMode
+  readonly consent_mode: OriginConsentMode | 'unresolved' | 'pending'
+  readonly consent_resolved?: boolean
   readonly cookie_value: string
   readonly cookie_name?: string
   readonly max_age_seconds?: number
 }): string | null {
-  if (params.consent_mode === 'off' || params.consent_mode === 'cookieless') {
+  if (params.consent_resolved === false) {
+    return null
+  }
+  if (params.consent_mode !== 'full' && params.consent_mode !== 'essential_first_party') {
     return null
   }
   const name = params.cookie_name ?? DEFAULT_ORIGIN_COOKIE_NAME
@@ -159,7 +164,7 @@ export function generateOriginKitConfig(
 
   const consentGatingRule =
     `Emit ${cookieName} (HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}) ONLY when ` +
-    `consent_mode is neither "off" nor "cookieless" and ${consentCookie} is not "off"/"cookieless".`
+    `consent_mode is neither "off" nor "cookieless" AND explicit resolved ${consentCookie} cookie is "full" or "essential_first_party" (never pre-consent; never echo ${cookieName} or UGK_EDGE_SECRET in Server-Timing).`
 
   let codeTemplate: string
   let limitations: string[]
@@ -262,8 +267,8 @@ interface TemplateVars {
 
 function renderCloudflareWorkerTemplate(v: TemplateVars): string {
   const cookieBlock = v.cookieEmitted
-    ? `    const consent = getCookie(request, '${v.consentCookie}') ?? '${v.consentMode}';
-    if (consent !== 'off' && consent !== 'cookieless' && !getCookie(request, '${v.cookieName}')) {
+    ? `    const consent = getCookie(request, '${v.consentCookie}');
+    if ((consent === 'full' || consent === 'essential_first_party') && !getCookie(request, '${v.cookieName}')) {
       const uid = crypto.randomUUID().replace(/-/g, '');
       headers.append('Set-Cookie', \`${v.cookieName}=\${uid}; Path=/; Max-Age=${v.maxAge}; HttpOnly; Secure; SameSite=Lax\`);
     }`
@@ -302,8 +307,8 @@ ${cookieBlock}
 
 function renderNextjsMiddlewareTemplate(v: TemplateVars): string {
   const cookieBlock = v.cookieEmitted
-    ? `  const consent = request.cookies.get('${v.consentCookie}')?.value ?? '${v.consentMode}'
-  if (consent !== 'off' && consent !== 'cookieless' && !request.cookies.get('${v.cookieName}')) {
+    ? `  const consent = request.cookies.get('${v.consentCookie}')?.value
+  if ((consent === 'full' || consent === 'essential_first_party') && !request.cookies.get('${v.cookieName}')) {
     const uid = crypto.randomUUID().replace(/-/g, '')
     response.cookies.set('${v.cookieName}', uid, {
       httpOnly: true,
@@ -334,29 +339,31 @@ ${cookieBlock}
 
 function renderNginxTemplate(v: TemplateVars): string {
   const cookieLines = v.cookieEmitted
-    ? `# Consent-gated HttpOnly 1P cookie (suppressed when ${v.consentCookie} is off/cookieless)
+    ? `# Consent-gated HttpOnly 1P cookie (strictly suppressed until ${v.consentCookie} is explicitly "full" or "essential_first_party";
+# NEVER reuse $request_id for ${v.cookieName} so Server-Timing never leaks the HttpOnly visitor cookie to JS!)
 map $cookie_${v.consentCookie} $ugk_cookie_allowed {
-    default 1;
-    "off" 0;
-    "cookieless" 0;
+    default 0;
+    "full" 1;
+    "essential_first_party" 1;
 }
-map "$ugk_cookie_allowed:$cookie_${v.cookieName}" $ugk_set_cookie {
-    "~^1:$" "${v.cookieName}=$request_id; Path=/; Max-Age=${v.maxAge}; HttpOnly; Secure; SameSite=Lax";
+# $ugk_cookie_uid MUST be populated from an independent CSPRNG source (e.g. njs/Lua CSPRNG or upstream X-Ugk-New-Uid), NEVER $request_id
+map "$ugk_cookie_allowed:$cookie_${v.cookieName}:$ugk_cookie_uid" $ugk_set_cookie {
+    "~^1::([A-Za-z0-9_-]{16,64})$" "${v.cookieName}=$1; Path=/; Max-Age=${v.maxAge}; HttpOnly; Secure; SameSite=Lax";
     default "";
 }
 add_header Set-Cookie $ugk_set_cookie always;`
     : `# Consent mode is "${v.consentMode}": Set-Cookie strictly suppressed (§4.5).`
 
   return `# UGOKI LINK v2 Origin Kit — Nginx (tenant=${v.tenantId}, site=${v.siteId})
-# Server-Timing handoff for 1-to-1 document join
+# Server-Timing handoff for 1-to-1 document join (carries ONLY per-request $request_id and $msec; never cookies or secrets)
 add_header Server-Timing 'ugk;desc="1.$request_id.$msec"' always;
 ${cookieLines}`
 }
 
 function renderWordpressTemplate(v: TemplateVars): string {
   const cookieBlock = v.cookieEmitted
-    ? `    $consent = $_COOKIE['${v.consentCookie}'] ?? '${v.consentMode}';
-    if ($consent !== 'off' && $consent !== 'cookieless' && empty($_COOKIE['${v.cookieName}'])) {
+    ? `    $consent = $_COOKIE['${v.consentCookie}'] ?? null;
+    if (($consent === 'full' || $consent === 'essential_first_party') && empty($_COOKIE['${v.cookieName}'])) {
         $uid = bin2hex(random_bytes(16));
         setcookie('${v.cookieName}', $uid, [
             'expires'  => time() + ${v.maxAge},

@@ -664,5 +664,78 @@ describe('Bundle 0-D: Actor Evidence Snapshot Clock (lib/link/clocks)', () => {
       expect(day2NewKey.valid_at_time).toBe(true)
       expect(day2NewKey.key?.thumbprint_sha256).toBe(newThumbprint)
     })
+
+    it('[M-11] never marks pre-archive (retro) IP or JWKS misses as refuted even on exhaustive production_poll feeds with >=3 snapshots', async () => {
+      const sailSrc = DEFAULT_EVIDENCE_SOURCES.find(
+        (s) => s.source_id === 'anthropic:claude-agent-sail',
+      )!
+      const jwksSrc = DEFAULT_EVIDENCE_SOURCES.find(
+        (s) => s.source_id === 'openai:chatgpt-cloud-browser-jwks',
+      )!
+
+      const store = new InMemoryEvidenceSnapshotStore()
+      let t = Date.parse('2026-11-20T00:00:00.000Z')
+      const clock = new ActorEvidenceClock({
+        store,
+        sources: [sailSrc, jwksSrc],
+        fetcher: makeMockFetcher({
+          [sailSrc.source_url]: { status: 200, body: ANTHROPIC_SAIL_DAY1 },
+          [jwksSrc.source_url]: { status: 200, body: OPENAI_JWKS_DAY2_ROTATED },
+        }),
+        now: () => new Date(t),
+        cadenceMode: 'production_poll',
+      })
+
+      // Capture 4 consecutive snapshots starting at 2026-11-20T00:00:00Z
+      for (let i = 0; i < 4; i++) {
+        await clock.captureAll()
+        t += 20 * 60 * 1000
+      }
+
+      // 1) Pre-archive event (2026-11-18, 2 days BEFORE earliest snapshot) whose IP rotated out before archive began:
+      //    MUST return 'unverifiable_pre_archive' — NEVER 'refuted'!
+      const retroIpMiss = await clock.lookupIpAtTime({
+        ip: '160.79.104.99',
+        at: '2026-11-18T12:00:00.000Z',
+        source_id: sailSrc.source_id,
+      })
+      expect(retroIpMiss.matched).toBe(false)
+      expect(retroIpMiss.verification_result).toBe('unverifiable_pre_archive')
+      expect(retroIpMiss.consecutive_misses).toBe(0)
+
+      // 2) Pre-archive event whose IP IS still present in earliest snapshot -> still returns 'verified_retro'
+      const retroIpHit = await clock.lookupIpAtTime({
+        ip: '160.79.104.10',
+        at: '2026-11-18T12:00:00.000Z',
+        source_id: sailSrc.source_id,
+      })
+      expect(retroIpHit.matched).toBe(true)
+      expect(retroIpHit.verification_result).toBe('verified_retro')
+
+      // 3) Pre-archive JWKS lookup for a rotated-out key (2026-11-18 < 2026-11-20 earliest snapshot):
+      //    MUST return 'unverifiable_pre_archive' instead of 'not_found'
+      const retroKeyMiss = await clock.lookupKeyAtTime({
+        thumbprint_or_kid: 'openai-2025-key',
+        at: '2026-11-18T12:00:00.000Z',
+        source_id: jwksSrc.source_id,
+      })
+      expect(retroKeyMiss.found).toBe(false)
+      expect(retroKeyMiss.reason).toBe('unverifiable_pre_archive')
+
+      // 4) In-window post-archive lookup for the same missing IP/key DOES refute / return not_found
+      const inWindowIpMiss = await clock.lookupIpAtTime({
+        ip: '160.79.104.99',
+        at: '2026-11-20T00:05:00.000Z',
+        source_id: sailSrc.source_id,
+      })
+      expect(inWindowIpMiss.verification_result).toBe('refuted')
+
+      const inWindowKeyMiss = await clock.lookupKeyAtTime({
+        thumbprint_or_kid: 'openai-2025-key',
+        at: '2026-11-20T00:05:00.000Z',
+        source_id: jwksSrc.source_id,
+      })
+      expect(inWindowKeyMiss.reason).toBe('not_found')
+    })
   })
 })

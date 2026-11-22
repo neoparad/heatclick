@@ -94,6 +94,7 @@ function makeVersionedKey(cellKey: string, buildSeq: number): string {
 
 export class SealedRollupBuilder {
   private buildSeqCounter = 0;
+  private lastSealEvaluatedAtMs: number | null = null;
   private readonly manifest = new Map<string, RollupManifestEntry>();
   private readonly siteHourHistory = new Map<string, SiteHourRollupRow>();
   private readonly pageHourHistory = new Map<string, readonly PageHourRollupRow[]>();
@@ -109,6 +110,10 @@ export class SealedRollupBuilder {
       options?.maxUnsealedTailLagMs ?? MAX_UNSEALED_TAIL_LAG_MS;
   }
 
+  public getLastSealEvaluatedAtMs(): number | null {
+    return this.lastSealEvaluatedAtMs;
+  }
+
   /**
    * Seals every eligible unsealed hour (`pvHourMs + 1h + 30m <= nowMs`) and
    * rebuilds any dirty cells (late frames, deletions, alias changes) under a
@@ -120,8 +125,14 @@ export class SealedRollupBuilder {
     options?: { readonly forceSealAll?: boolean }
   ): SealRunResult {
     const forceSealAll = options?.forceSealAll ?? false;
+    this.lastSealEvaluatedAtMs =
+      this.lastSealEvaluatedAtMs === null
+        ? nowMs
+        : Math.max(this.lastSealEvaluatedAtMs, nowMs);
 
-    // Group all live PV states by (tenantId, siteId, pvHourMs)
+    // Group all live PV states by (tenantId, siteId, pvHourMs).
+    // Synthetic lab PVs (`excludeFromHumanRollups === true`) are excluded from
+    // human rollups (H-21) while still allowing lab-only cells to seal cleanly to 0.
     const pvsByCell = new Map<
       string,
       { tenantId: string; siteId: string; pvHourMs: number; pvs: MergedPvState[] }
@@ -143,7 +154,9 @@ export class SealedRollupBuilder {
         };
         pvsByCell.set(ck, bucket);
       }
-      bucket.pvs.push(pv);
+      if (!pv.excludeFromHumanRollups) {
+        bucket.pvs.push(pv);
+      }
     }
 
     // Ensure dirty cells whose PVs were completely deleted are still rebuilt to zero!
@@ -350,11 +363,41 @@ export class SealedRollupBuilder {
     let sealedHoursIncluded = 0;
     let invalidCellsExcluded = 0;
 
+    // Track dirty cells and live human PV hours for this site so quiet 0-PV hours
+    // already covered by `lastSealEvaluatedAtMs` advance the seam without stalling
+    // low-traffic sites into false `builder_lag` (H-21).
+    const siteDirtyCellKeys = new Set<string>();
+    for (const dc of loader.getDirtyCells()) {
+      if (dc.tenantId === args.tenantId && dc.siteId === args.siteId) {
+        siteDirtyCellKeys.add(makeCellCompositeKey(dc.tenantId, dc.siteId, dc.pvHourMs));
+      }
+    }
+    const siteLivePvHours = new Set<number>();
+    for (const pv of loader.getAllPvStates()) {
+      if (
+        pv.placement.tenantId === args.tenantId &&
+        pv.placement.siteId === args.siteId &&
+        !pv.excludeFromHumanRollups
+      ) {
+        siteLivePvHours.add(pv.placement.pvHourMs);
+      }
+    }
+
     // Walk forward hour-by-hour from window start to determine contiguous sealed prefix
     for (let h = startHourMs; h <= currentHourMs; h += HOUR_MS) {
       const ck = makeCellCompositeKey(args.tenantId, args.siteId, h);
       const entry = this.manifest.get(ck);
       if (entry && entry.state === 'valid') {
+        seamHourMs = h + HOUR_MS;
+        sealedHoursIncluded += 1;
+      } else if (
+        entry === undefined &&
+        this.lastSealEvaluatedAtMs !== null &&
+        h + HOUR_MS + this.sealDelayMs <= this.lastSealEvaluatedAtMs &&
+        !siteDirtyCellKeys.has(ck) &&
+        !siteLivePvHours.has(h)
+      ) {
+        // Quiet 0-PV hour already evaluated past seal delay by `sealEligibleHours`
         seamHourMs = h + HOUR_MS;
         sealedHoursIncluded += 1;
       } else {
@@ -417,7 +460,8 @@ export class SealedRollupBuilder {
     for (const pv of loader.getAllPvStates()) {
       if (
         pv.placement.tenantId !== args.tenantId ||
-        pv.placement.siteId !== args.siteId
+        pv.placement.siteId !== args.siteId ||
+        pv.excludeFromHumanRollups
       ) {
         continue;
       }

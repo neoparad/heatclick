@@ -1,11 +1,5 @@
 /**
- * UGOKI LINK v2 — Deterministic 4-Platform Mobile SDK Generator (§11.11 item 5)
- *
- * Generates native & cross-platform mobile SDKs directly from `CANONICAL_SCHEMA`:
- *   1. `ios` (Swift)
- *   2. `android` (Kotlin)
- *   3. `react_native` (TypeScript)
- *   4. `flutter` (Dart)
+ * UGOKI LINK v2 — Deterministic 4-Platform Mobile SDK Generator (§11.11 item 5 / [C-09])
  */
 
 import { CANONICAL_SCHEMA } from '@/packages/contract/schema';
@@ -27,51 +21,255 @@ function generateIosSwiftSdk(schemaVersion: string): ReadonlyArray<MobileGenerat
 // Platform: iOS (Swift) | Contract Schema: ${schemaVersion}
 import Foundation
 
-public enum UgokiConsentMode: String { case off, cookieless, session, stats_exempt, full }
-public enum UgokiDataLane: String { case standard, customer_defined, session_replay }
+public enum UgokiConsentMode: String, Codable {
+    case off, cookieless, stats_exempt, session, full
+    var rank: Int {
+        switch self {
+        case .off: return 0
+        case .cookieless: return 1
+        case .stats_exempt: return 2
+        case .session: return 3
+        case .full: return 4
+        }
+    }
+}
 
-public struct UgokiMobileEvent: Codable {
+public enum UgokiDataLane: String, Codable { case standard, customer_defined, screen_replay }
+
+public struct UgokiRectBounds: Codable, Equatable {
+    public let x: Double
+    public let y: Double
+    public let width: Double
+    public let height: Double
+    public init(x: Double, y: Double, width: Double, height: Double) {
+        self.x = x; self.y = y; self.width = width; self.height = height
+    }
+    public var asArray: [Double] { [x, y, width, height] }
+}
+
+public struct UgokiMobileEvent: Codable, Equatable {
     public let eventId: String
     public let lane: String
     public let callType: String
+    public let eventName: String
     public let screenName: String?
-    public let section_join: String // Always "not_applicable" (§11.11.5)
-    public let actor_instrument: String // "mobile_app_integrity"
+    public let section_join: String
+    public let actor_instrument: String
     public let schemaVersion: String
+    public var consentMode: String
+    public var purposes: [String]
     public let occurredAtMs: Int64
+    public var properties: [String: String]
+}
+
+public protocol UgokiQueuePersistence: AnyObject {
+    func load() -> Data?
+    func save(_ data: Data)
+    func clear()
 }
 
 public final class UgokiLinkMobileSDK {
     public static let contractSchemaVersion = ${JSON.stringify(schemaVersion)}
     public static let sectionJoinStatus = "not_applicable"
+    public static let actorInstrument = "mobile_app_integrity"
     public static let maxOfflineEvents = ${DEFAULT_MOBILE_OFFLINE_CONFIG.maxEvents}
     public static let maxOfflineBytes = ${DEFAULT_MOBILE_OFFLINE_CONFIG.maxBytes}
     public static let maxOfflineRetentionMs: Int64 = ${DEFAULT_MOBILE_OFFLINE_CONFIG.maxRetentionMs}
     public static let segmentCallTypes = ["identify", "page", "screen", "track", "group", "alias"]
 
+    private let collectorEndpoint: URL
+    private let publishableKey: String
+    private let persistence: UgokiQueuePersistence?
+    private let session: URLSession
+    private let maxEvents: Int
+    private let ttlMs: Int64
+    private let maxRetries: Int = 4
+    private let baseBackoffMs: Int = 500
+
     private var consentMode: UgokiConsentMode = .off
+    private var consentPurposes: Set<String> = []
     private var offlineQueue: [UgokiMobileEvent] = []
     private var activeScreenName: String? = nil
+    private var isFlushing: Bool = false
+    private var retryAttempt: Int = 0
+    private var activeTask: URLSessionDataTask? = nil
+
+    public init(
+        collectorEndpoint: URL = URL(string: "https://collect.ugokilink.invalid/v1/compat/batch")!,
+        publishableKey: String = "",
+        persistence: UgokiQueuePersistence? = nil,
+        session: URLSession = .shared,
+        maxEvents: Int = UgokiLinkMobileSDK.maxOfflineEvents,
+        ttlMs: Int64 = UgokiLinkMobileSDK.maxOfflineRetentionMs
+    ) {
+        self.collectorEndpoint = collectorEndpoint
+        self.publishableKey = publishableKey
+        self.persistence = persistence
+        self.session = session
+        self.maxEvents = max(1, maxEvents)
+        self.ttlMs = max(1_000, ttlMs)
+    }
+
+    public func setConsent(mode: UgokiConsentMode, purposes: Set<String> = []) {
+        if mode == .off {
+            revokeConsent()
+            return
+        }
+        let prevRank = consentMode.rank
+        consentMode = mode
+        consentPurposes = filterPurposes(mode: mode, raw: purposes)
+        if mode.rank < prevRank {
+            offlineQueue = offlineQueue.compactMap { existing in
+                var item = existing
+                if ["identify", "group", "alias"].contains(item.callType) &&
+                    (mode == .cookieless || mode == .stats_exempt || !consentPurposes.contains("member_link")) {
+                    return nil
+                }
+                if mode == .cookieless {
+                    for k in ["vid", "sid", "anonymousId", "userId"] { item.properties.removeValue(forKey: k) }
+                } else if mode == .session {
+                    item.properties.removeValue(forKey: "vid")
+                }
+                item.consentMode = mode.rawValue
+                item.purposes = Array(consentPurposes).sorted()
+                return item
+            }
+        }
+        syncPersistence()
+    }
+
+    @discardableResult
+    public func track(
+        _ event: String,
+        props: [String: String] = [:],
+        nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
+    ) -> UgokiMobileEvent? {
+        guard consentMode != .off, !event.isEmpty else { return nil }
+        pruneExpired(nowMs: nowMs)
+        var clean = props
+        if consentMode == .cookieless {
+            for k in ["vid", "sid", "anonymousId"] { clean.removeValue(forKey: k) }
+        }
+        if !consentPurposes.contains("member_link") { clean.removeValue(forKey: "userId") }
+
+        let item = UgokiMobileEvent(
+            eventId: UUID().uuidString.lowercased(),
+            lane: UgokiDataLane.customer_defined.rawValue,
+            callType: "track",
+            eventName: event,
+            screenName: activeScreenName,
+            section_join: Self.sectionJoinStatus,
+            actor_instrument: Self.actorInstrument,
+            schemaVersion: Self.contractSchemaVersion,
+            consentMode: consentMode.rawValue,
+            purposes: Array(consentPurposes).sorted(),
+            occurredAtMs: nowMs,
+            properties: clean
+        )
+        while offlineQueue.count >= maxEvents { offlineQueue.removeFirst() }
+        offlineQueue.append(item)
+        syncPersistence()
+        return item
+    }
 
     public func didEnterBackground() {
-        // UIApplication.didEnterBackgroundNotification: halt active timer & flush if online + consented
         activeScreenName = nil
         if consentMode != .off { flushIfOnline() }
     }
 
+    public func optOut() { revokeConsent() }
+
     public func revokeConsent() {
-        // §11.11.5: Immediately wipe offline queue WITHOUT transmitting a single event
+        activeTask?.cancel()
+        activeTask = nil
+        isFlushing = false
+        retryAttempt = 0
         consentMode = .off
+        consentPurposes.removeAll()
         activeScreenName = nil
         offlineQueue.removeAll(keepingCapacity: false)
+        persistence?.clear()
     }
 
-    public func maskCustomDrawnView(bounds: (Double, Double, Double, Double)) -> [String: Any] {
-        // Metal / Canvas / WKWebView -> bounding_box_only (zero pixel/text capture)
-        return ["renderMode": "bounding_box_only", "bounds": bounds, "unreproducible": true]
+    public func maskCustomDrawnView(bounds: UgokiRectBounds) -> [String: Any] {
+        return ["renderMode": "bounding_box_only", "bounds": bounds.asArray, "unreproducible": true]
     }
 
-    private func flushIfOnline() {}
+    public func flushIfOnline(
+        nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000),
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        guard consentMode != .off, !publishableKey.isEmpty, !isFlushing else { completion?(false); return }
+        pruneExpired(nowMs: nowMs)
+        guard !offlineQueue.isEmpty else { completion?(true); return }
+        let batch = offlineQueue
+        guard let bodyData = try? JSONEncoder().encode(["batch": batch]) else {
+            offlineQueue.removeAll(keepingCapacity: false); syncPersistence(); completion?(false); return
+        }
+        var request = URLRequest(url: collectorEndpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.setValue(publishableKey, forHTTPHeaderField: "x-ugk-key")
+        request.httpBody = bodyData
+
+        isFlushing = true
+        let sentIds = Set(batch.map { $0.eventId })
+        let task = session.dataTask(with: request) { [weak self] _, response, error in
+            guard let self = self else { return }
+            self.isFlushing = false
+            self.activeTask = nil
+            guard self.consentMode != .off else { completion?(false); return }
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if error == nil && (200...299).contains(code) {
+                self.offlineQueue.removeAll { sentIds.contains($0.eventId) }
+                self.retryAttempt = 0
+                self.syncPersistence()
+                completion?(true)
+                return
+            }
+            if (400...499).contains(code) && code != 429 {
+                self.offlineQueue.removeAll { sentIds.contains($0.eventId) }
+                self.retryAttempt = 0
+                self.syncPersistence()
+                completion?(false)
+                return
+            }
+            if self.retryAttempt < self.maxRetries {
+                let delayMs = min(30_000, self.baseBackoffMs * (1 << self.retryAttempt))
+                self.retryAttempt += 1
+                DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(delayMs)) { [weak self] in
+                    self?.flushIfOnline(completion: completion)
+                }
+            } else {
+                completion?(false)
+            }
+        }
+        activeTask = task
+        task.resume()
+    }
+
+    private func pruneExpired(nowMs: Int64) {
+        let cutoff = nowMs - ttlMs
+        offlineQueue.removeAll { $0.occurredAtMs < cutoff }
+    }
+
+    private func syncPersistence() {
+        guard let persistence = persistence else { return }
+        if consentMode == .off || consentMode == .cookieless || offlineQueue.isEmpty {
+            persistence.clear(); return
+        }
+        if let encoded = try? JSONEncoder().encode(offlineQueue) { persistence.save(encoded) }
+    }
+
+    private func filterPurposes(mode: UgokiConsentMode, raw: Set<String>) -> Set<String> {
+        switch mode {
+        case .off: return []
+        case .cookieless: return raw.subtracting(["member_link", "timeline", "ads", "screen_replay"])
+        case .stats_exempt: return raw.subtracting(["member_link", "timeline", "ads", "pool", "personalise", "screen_replay"])
+        case .session: return raw.subtracting(["member_link"])
+        case .full: return raw
+        }
+    }
 }
 `;
   return [makeFile('ios/UgokiLinkMobile.swift', code)];
@@ -82,21 +280,64 @@ function generateAndroidKotlinSdk(schemaVersion: string): ReadonlyArray<MobileGe
 // Platform: Android (Kotlin) | Contract Schema: ${schemaVersion}
 package io.ugokilink.mobile
 
-enum class UgokiConsentMode { OFF, COOKIELESS, SESSION, STATS_EXEMPT, FULL }
-enum class UgokiDataLane { STANDARD, CUSTOMER_DEFINED, SESSION_REPLAY }
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.OutputStreamWriter
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.UUID
+import kotlin.math.min
+
+enum class UgokiConsentMode(val wireName: String, val rank: Int) {
+    OFF("off", 0), COOKIELESS("cookieless", 1), STATS_EXEMPT("stats_exempt", 2), SESSION("session", 3), FULL("full", 4)
+}
+
+enum class UgokiDataLane(val wireName: String) {
+    STANDARD("standard"), CUSTOMER_DEFINED("customer_defined"), SCREEN_REPLAY("screen_replay")
+}
+
+interface UgokiQueuePersistence {
+    fun load(): String?
+    fun save(json: String)
+    fun clear()
+}
 
 data class UgokiMobileEvent(
     val eventId: String,
     val lane: String,
     val callType: String,
+    val eventName: String,
     val screenName: String?,
     val section_join: String = "not_applicable",
     val actor_instrument: String = "mobile_app_integrity",
     val schemaVersion: String = ${JSON.stringify(schemaVersion)},
-    val occurredAtMs: Long
-)
+    var consentMode: String,
+    var purposes: List<String>,
+    val occurredAtMs: Long,
+    val properties: MutableMap<String, Any?> = mutableMapOf()
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("eventId", eventId)
+        .put("lane", lane)
+        .put("callType", callType)
+        .put("eventName", eventName)
+        .put("screenName", screenName ?: JSONObject.NULL)
+        .put("section_join", section_join)
+        .put("actor_instrument", actor_instrument)
+        .put("schemaVersion", schemaVersion)
+        .put("consentMode", consentMode)
+        .put("purposes", JSONArray(purposes))
+        .put("occurredAtMs", occurredAtMs)
+        .put("properties", JSONObject(properties))
+}
 
-class UgokiLinkMobileSDK {
+class UgokiLinkMobileSDK(
+    private val collectorEndpoint: String = "https://collect.ugokilink.invalid/v1/compat/batch",
+    private val publishableKey: String = "",
+    private val persistence: UgokiQueuePersistence? = null,
+    private val maxEvents: Int = MAX_OFFLINE_EVENTS,
+    private val ttlMs: Long = MAX_OFFLINE_RETENTION_MS
+) {
     companion object {
         const val CONTRACT_SCHEMA_VERSION = ${JSON.stringify(schemaVersion)}
         const val SECTION_JOIN_STATUS = "not_applicable"
@@ -107,28 +348,147 @@ class UgokiLinkMobileSDK {
     }
 
     private var consentMode: UgokiConsentMode = UgokiConsentMode.OFF
+    private var consentPurposes: Set<String> = emptySet()
     private val offlineQueue = ArrayDeque<UgokiMobileEvent>()
     private var activeScreenName: String? = null
+    private val maxRetries: Int = 4
+    private val baseBackoffMs: Long = 500L
+
+    @Synchronized
+    fun setConsent(mode: UgokiConsentMode, purposes: Set<String> = emptySet()) {
+        if (mode == UgokiConsentMode.OFF) { revokeConsent(); return }
+        val prevRank = consentMode.rank
+        consentMode = mode
+        consentPurposes = filterPurposes(mode, purposes)
+        if (mode.rank < prevRank) {
+            val retained = ArrayDeque<UgokiMobileEvent>()
+            for (ev in offlineQueue) {
+                if (ev.callType in listOf("identify", "group", "alias") &&
+                    (mode == UgokiConsentMode.COOKIELESS || mode == UgokiConsentMode.STATS_EXEMPT || !consentPurposes.contains("member_link"))) {
+                    continue
+                }
+                if (mode == UgokiConsentMode.COOKIELESS) {
+                    listOf("vid", "sid", "anonymousId", "userId").forEach { ev.properties.remove(it) }
+                } else if (mode == UgokiConsentMode.SESSION) {
+                    ev.properties.remove("vid")
+                }
+                ev.consentMode = mode.wireName
+                ev.purposes = consentPurposes.sorted()
+                retained.addLast(ev)
+            }
+            offlineQueue.clear()
+            offlineQueue.addAll(retained)
+        }
+        syncPersistence()
+    }
+
+    @Synchronized
+    fun track(event: String, props: Map<String, Any?> = emptyMap(), nowMs: Long = System.currentTimeMillis()): UgokiMobileEvent? {
+        if (consentMode == UgokiConsentMode.OFF || event.isBlank()) return null
+        pruneExpired(nowMs)
+        val clean = props.toMutableMap()
+        if (consentMode == UgokiConsentMode.COOKIELESS) listOf("vid", "sid", "anonymousId").forEach { clean.remove(it) }
+        if (!consentPurposes.contains("member_link")) clean.remove("userId")
+
+        val item = UgokiMobileEvent(
+            eventId = UUID.randomUUID().toString(),
+            lane = UgokiDataLane.CUSTOMER_DEFINED.wireName,
+            callType = "track",
+            eventName = event,
+            screenName = activeScreenName,
+            consentMode = consentMode.wireName,
+            purposes = consentPurposes.sorted(),
+            occurredAtMs = nowMs,
+            properties = clean
+        )
+        while (offlineQueue.size >= maxEvents) offlineQueue.removeFirst()
+        offlineQueue.addLast(item)
+        syncPersistence()
+        return item
+    }
 
     fun onStop() {
-        // DefaultLifecycleObserver.onStop: halt foreground timer & flush when online + consented
         activeScreenName = null
         if (consentMode != UgokiConsentMode.OFF) flushIfOnline()
     }
 
+    fun optOut() = revokeConsent()
+
+    @Synchronized
     fun revokeConsent() {
-        // §11.11.5: Wipe all buffered offline events immediately without sending
         consentMode = UgokiConsentMode.OFF
+        consentPurposes = emptySet()
         activeScreenName = null
         offlineQueue.clear()
+        persistence?.clear()
     }
 
-    fun maskCustomDrawnView(width: Int, height: Int): Map<String, Any> {
-        // Android Canvas / OpenGL / WebView -> bounding_box_only
-        return mapOf("renderMode" to "bounding_box_only", "width" to width, "height" to height, "unreproducible" to true)
+    fun maskCustomDrawnView(width: Int, height: Int): Map<String, Any> =
+        mapOf("renderMode" to "bounding_box_only", "width" to width, "height" to height, "unreproducible" to true)
+
+    @Synchronized
+    fun flushIfOnline(nowMs: Long = System.currentTimeMillis()): Boolean {
+        if (consentMode == UgokiConsentMode.OFF || publishableKey.isBlank()) return false
+        pruneExpired(nowMs)
+        if (offlineQueue.isEmpty()) return true
+        val arr = JSONArray()
+        for (ev in offlineQueue) arr.put(ev.toJson())
+        val payload = JSONObject().put("batch", arr).toString()
+
+        for (attempt in 0..maxRetries) {
+            if (consentMode == UgokiConsentMode.OFF) return false
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL(collectorEndpoint).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 5_000
+                    readTimeout = 5_000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    setRequestProperty("x-ugk-key", publishableKey)
+                }
+                OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload); it.flush() }
+                val status = conn.responseCode
+                if (status in 200..299) {
+                    offlineQueue.clear(); syncPersistence(); return true
+                }
+                if (status in 400..499 && status != 429) {
+                    offlineQueue.clear(); syncPersistence(); return false
+                }
+            } catch (_: Exception) {
+            } finally {
+                conn?.disconnect()
+            }
+            if (attempt < maxRetries) {
+                try { Thread.sleep(min(30_000L, baseBackoffMs * (1L shl attempt))) }
+                catch (_: InterruptedException) { Thread.currentThread().interrupt(); return false }
+            }
+        }
+        return false
     }
 
-    private fun flushIfOnline() {}
+    private fun pruneExpired(nowMs: Long) {
+        val cutoff = nowMs - ttlMs
+        while (offlineQueue.isNotEmpty() && offlineQueue.first().occurredAtMs < cutoff) offlineQueue.removeFirst()
+    }
+
+    private fun syncPersistence() {
+        val store = persistence ?: return
+        if (consentMode == UgokiConsentMode.OFF || consentMode == UgokiConsentMode.COOKIELESS || offlineQueue.isEmpty()) {
+            store.clear(); return
+        }
+        val arr = JSONArray()
+        for (ev in offlineQueue) arr.put(ev.toJson())
+        store.save(arr.toString())
+    }
+
+    private fun filterPurposes(mode: UgokiConsentMode, raw: Set<String>): Set<String> = when (mode) {
+        UgokiConsentMode.OFF -> emptySet()
+        UgokiConsentMode.COOKIELESS -> raw - setOf("member_link", "timeline", "ads", "screen_replay")
+        UgokiConsentMode.STATS_EXEMPT -> raw - setOf("member_link", "timeline", "ads", "pool", "personalise", "screen_replay")
+        UgokiConsentMode.SESSION -> raw - setOf("member_link")
+        UgokiConsentMode.FULL -> raw
+    }
 }
 `;
   return [makeFile('android/UgokiLinkMobile.kt', code)];
@@ -145,39 +505,214 @@ export const MAX_OFFLINE_BYTES = ${DEFAULT_MOBILE_OFFLINE_CONFIG.maxBytes};
 export const MAX_OFFLINE_RETENTION_MS = ${DEFAULT_MOBILE_OFFLINE_CONFIG.maxRetentionMs};
 export const SEGMENT_CALL_TYPES = ['identify', 'page', 'screen', 'track', 'group', 'alias'] as const;
 
+export type UgokiRnConsentMode = 'off' | 'cookieless' | 'stats_exempt' | 'session' | 'full';
+const CONSENT_RANK: Readonly<Record<UgokiRnConsentMode, number>> = {
+  off: 0, cookieless: 1, stats_exempt: 2, session: 3, full: 4,
+};
+
+export interface UgokiRnPersistenceAdapter {
+  getItem(key: string): Promise<string | null> | string | null;
+  setItem(key: string, value: string): Promise<void> | void;
+  removeItem(key: string): Promise<void> | void;
+}
+
+export interface UgokiRnQueuedEvent {
+  readonly eventId: string;
+  readonly lane: 'standard' | 'customer_defined' | 'screen_replay';
+  readonly callType: (typeof SEGMENT_CALL_TYPES)[number] | 'screen_view';
+  readonly eventName: string;
+  readonly screenName: string | null;
+  readonly section_join: typeof SECTION_JOIN_STATUS;
+  readonly actor_instrument: typeof ACTOR_INSTRUMENT;
+  readonly schemaVersion: string;
+  consentMode: UgokiRnConsentMode;
+  purposes: readonly string[];
+  readonly occurredAtMs: number;
+  properties: Record<string, unknown>;
+}
+
 export class UgokiLinkReactNativeSDK {
-  private consentMode: 'off' | 'cookieless' | 'session' | 'stats_exempt' | 'full' = 'off';
-  private offlineQueue: Array<Record<string, unknown>> = [];
+  private readonly collectorEndpoint: string;
+  private readonly publishableKey: string;
+  private readonly persistence?: UgokiRnPersistenceAdapter;
+  private readonly persistenceKey = 'ugk_rn_offline_queue_v2';
+  private readonly maxEvents: number;
+  private readonly ttlMs: number;
+  private readonly maxRetries: number;
+  private readonly baseBackoffMs: number;
+  private readonly fetchFn: typeof fetch;
+
+  private consentMode: UgokiRnConsentMode = 'off';
+  private consentPurposes = new Set<string>();
+  private offlineQueue: UgokiRnQueuedEvent[] = [];
   private activeScreenName: string | null = null;
+  private activeAbortController: AbortController | null = null;
+
+  constructor(options: {
+    readonly collectorEndpoint?: string;
+    readonly publishableKey?: string;
+    readonly persistence?: UgokiRnPersistenceAdapter;
+    readonly maxEvents?: number;
+    readonly ttlMs?: number;
+    readonly maxRetries?: number;
+    readonly baseBackoffMs?: number;
+    readonly fetchImpl?: typeof fetch;
+  } = {}) {
+    this.collectorEndpoint = options.collectorEndpoint ?? 'https://collect.ugokilink.invalid/v1/compat/batch';
+    this.publishableKey = options.publishableKey ?? '';
+    this.persistence = options.persistence;
+    this.maxEvents = Math.max(1, options.maxEvents ?? MAX_OFFLINE_EVENTS);
+    this.ttlMs = Math.max(1_000, options.ttlMs ?? MAX_OFFLINE_RETENTION_MS);
+    this.maxRetries = Math.max(0, options.maxRetries ?? 3);
+    this.baseBackoffMs = Math.max(10, options.baseBackoffMs ?? 250);
+    this.fetchFn = options.fetchImpl ?? globalThis.fetch;
+  }
+
+  public async setConsent(mode: UgokiRnConsentMode, purposes: readonly string[] = []): Promise<void> {
+    if (mode === 'off') { await this.revokeConsent(); return; }
+    const prevRank = CONSENT_RANK[this.consentMode];
+    this.consentMode = mode;
+    this.consentPurposes = this.filterPurposes(mode, purposes);
+    if (CONSENT_RANK[mode] < prevRank) {
+      this.offlineQueue = this.offlineQueue.filter((item) => {
+        const isIdentity = item.callType === 'identify' || item.callType === 'group' || item.callType === 'alias';
+        if (isIdentity && (mode === 'cookieless' || mode === 'stats_exempt' || !this.consentPurposes.has('member_link'))) {
+          return false;
+        }
+        if (mode === 'cookieless') {
+          delete item.properties.vid; delete item.properties.sid;
+          delete item.properties.anonymousId; delete item.properties.userId;
+        } else if (mode === 'session') {
+          delete item.properties.vid;
+        }
+        item.consentMode = mode;
+        item.purposes = [...this.consentPurposes].sort();
+        return true;
+      });
+    }
+    await this.syncPersistence();
+  }
+
+  public async track(event: string, props: Record<string, unknown> = {}, nowMs: number = Date.now()): Promise<UgokiRnQueuedEvent | null> {
+    if (this.consentMode === 'off' || !event.trim()) return null;
+    this.pruneExpired(nowMs);
+    const cleanProps: Record<string, unknown> = { ...props };
+    if (this.consentMode === 'cookieless') {
+      delete cleanProps.vid; delete cleanProps.sid; delete cleanProps.anonymousId;
+    }
+    if (!this.consentPurposes.has('member_link')) delete cleanProps.userId;
+
+    const item: UgokiRnQueuedEvent = {
+      eventId: \`rn_\${nowMs.toString(36)}_\${Math.random().toString(36).slice(2, 10)}\`,
+      lane: 'customer_defined',
+      callType: 'track',
+      eventName: event,
+      screenName: this.activeScreenName,
+      section_join: SECTION_JOIN_STATUS,
+      actor_instrument: ACTOR_INSTRUMENT,
+      schemaVersion: CONTRACT_SCHEMA_VERSION,
+      consentMode: this.consentMode,
+      purposes: [...this.consentPurposes].sort(),
+      occurredAtMs: nowMs,
+      properties: cleanProps,
+    };
+    while (this.offlineQueue.length >= this.maxEvents) this.offlineQueue.shift();
+    this.offlineQueue.push(item);
+    await this.syncPersistence();
+    return item;
+  }
 
   public onAppStateChange(nextState: 'active' | 'background' | 'inactive'): void {
     if (nextState === 'background') {
       this.activeScreenName = null;
-      if (this.consentMode !== 'off') this.flushIfOnline();
+      if (this.consentMode !== 'off') void this.flushIfOnline();
     }
   }
 
-  public revokeConsent(): void {
-    // §11.11.5: Zero-send immediate wipe on revocation
+  public async optOut(): Promise<void> { await this.revokeConsent(); }
+
+  public async revokeConsent(): Promise<void> {
+    this.activeAbortController?.abort();
+    this.activeAbortController = null;
     this.consentMode = 'off';
+    this.consentPurposes.clear();
     this.activeScreenName = null;
     this.offlineQueue = [];
+    await this.persistence?.removeItem(this.persistenceKey);
   }
 
   public maskCustomDrawnView(width: number, height: number) {
-    // Skia / Canvas / WebView -> bounding_box_only
     return { renderMode: 'bounding_box_only' as const, width, height, unreproducible: true };
   }
 
-  public getActiveScreenName(): string | null {
-    return this.activeScreenName;
+  public getActiveScreenName(): string | null { return this.activeScreenName; }
+  public getQueuedCount(): number { return this.offlineQueue.length; }
+
+  public async flushIfOnline(nowMs: number = Date.now()): Promise<{ sent: number; dropped4xx: number }> {
+    if (this.consentMode === 'off' || !this.publishableKey || typeof this.fetchFn !== 'function') {
+      return { sent: 0, dropped4xx: 0 };
+    }
+    this.pruneExpired(nowMs);
+    if (this.offlineQueue.length === 0) return { sent: 0, dropped4xx: 0 };
+
+    const batch = [...this.offlineQueue];
+    const sentIds = new Set(batch.map((b) => b.eventId));
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      if (this.consentMode === 'off') return { sent: 0, dropped4xx: 0 };
+      const controller = new AbortController();
+      this.activeAbortController = controller;
+      try {
+        const response = await this.fetchFn(this.collectorEndpoint, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json; charset=utf-8', 'x-ugk-key': this.publishableKey },
+          body: JSON.stringify({ batch }),
+          signal: controller.signal,
+        });
+        this.activeAbortController = null;
+        if (response.status >= 200 && response.status < 300) {
+          this.offlineQueue = this.offlineQueue.filter((e) => !sentIds.has(e.eventId));
+          await this.syncPersistence();
+          return { sent: batch.length, dropped4xx: 0 };
+        }
+        if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+          this.offlineQueue = this.offlineQueue.filter((e) => !sentIds.has(e.eventId));
+          await this.syncPersistence();
+          return { sent: 0, dropped4xx: batch.length };
+        }
+      } catch {
+        this.activeAbortController = null;
+      }
+      if (attempt < this.maxRetries) {
+        const delayMs = Math.min(30_000, this.baseBackoffMs * Math.pow(2, attempt));
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+    return { sent: 0, dropped4xx: 0 };
   }
 
-  public getQueuedCount(): number {
-    return this.offlineQueue.length;
+  private pruneExpired(nowMs: number): void {
+    const cutoff = nowMs - this.ttlMs;
+    while (this.offlineQueue.length > 0 && this.offlineQueue[0].occurredAtMs < cutoff) {
+      this.offlineQueue.shift();
+    }
   }
 
-  private flushIfOnline(): void {}
+  private async syncPersistence(): Promise<void> {
+    if (!this.persistence) return;
+    if (this.consentMode === 'off' || this.consentMode === 'cookieless' || this.offlineQueue.length === 0) {
+      await this.persistence.removeItem(this.persistenceKey); return;
+    }
+    await this.persistence.setItem(this.persistenceKey, JSON.stringify(this.offlineQueue));
+  }
+
+  private filterPurposes(mode: UgokiRnConsentMode, raw: readonly string[]): Set<string> {
+    const base = new Set(raw);
+    if (mode === 'off') return new Set();
+    if (mode === 'cookieless') ['member_link', 'timeline', 'ads', 'screen_replay'].forEach((k) => base.delete(k));
+    else if (mode === 'stats_exempt') ['member_link', 'timeline', 'ads', 'pool', 'personalise', 'screen_replay'].forEach((k) => base.delete(k));
+    else if (mode === 'session') base.delete('member_link');
+    return base;
+  }
 }
 `;
   return [makeFile('react_native/ugokilink-rn.ts', code)];
@@ -186,6 +721,17 @@ export class UgokiLinkReactNativeSDK {
 function generateFlutterDartSdk(schemaVersion: string): ReadonlyArray<MobileGeneratedFile> {
   const code = `// GENERATED BY UGOKI LINK v2 MOBILE SDK GENERATOR — DO NOT EDIT BY HAND
 // Platform: Flutter (Dart) | Contract Schema: ${schemaVersion}
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
+
+abstract class UgokiFlutterQueuePersistence {
+  Future<String?> load();
+  Future<void> save(String jsonPayload);
+  Future<void> clear();
+}
+
 class UgokiLinkFlutterSDK {
   static const String contractSchemaVersion = ${JSON.stringify(schemaVersion)};
   static const String sectionJoinStatus = 'not_applicable';
@@ -195,31 +741,179 @@ class UgokiLinkFlutterSDK {
   static const int maxOfflineRetentionMs = ${DEFAULT_MOBILE_OFFLINE_CONFIG.maxRetentionMs};
   static const List<String> segmentCallTypes = ['identify', 'page', 'screen', 'track', 'group', 'alias'];
 
+  static const Map<String, int> _consentRank = <String, int>{
+    'off': 0, 'cookieless': 1, 'stats_exempt': 2, 'session': 3, 'full': 4,
+  };
+
+  final String collectorEndpoint;
+  final String publishableKey;
+  final UgokiFlutterQueuePersistence? persistence;
+  final int maxEvents;
+  final int ttlMs;
+  final int maxRetries;
+  final int baseBackoffMs;
+
   String _consentMode = 'off';
+  Set<String> _consentPurposes = <String>{};
   final List<Map<String, Object?>> _offlineQueue = <Map<String, Object?>>[];
   String? _activeScreenName;
 
+  UgokiLinkFlutterSDK({
+    this.collectorEndpoint = 'https://collect.ugokilink.invalid/v1/compat/batch',
+    this.publishableKey = '',
+    this.persistence,
+    this.maxEvents = maxOfflineEvents,
+    this.ttlMs = maxOfflineRetentionMs,
+    this.maxRetries = 3,
+    this.baseBackoffMs = 300,
+  });
+
+  Future<void> setConsent(String mode, [Set<String> purposes = const <String>{}]) async {
+    if (mode == 'off' || !_consentRank.containsKey(mode)) { await revokeConsent(); return; }
+    final int prevRank = _consentRank[_consentMode] ?? 0;
+    final int nextRank = _consentRank[mode] ?? 0;
+    _consentMode = mode;
+    _consentPurposes = _filterPurposes(mode, purposes);
+    if (nextRank < prevRank) {
+      final List<Map<String, Object?>> retained = <Map<String, Object?>>[];
+      for (final Map<String, Object?> ev in _offlineQueue) {
+        final String ct = (ev['callType'] as String?) ?? '';
+        if ((ct == 'identify' || ct == 'group' || ct == 'alias') &&
+            (mode == 'cookieless' || mode == 'stats_exempt' || !_consentPurposes.contains('member_link'))) {
+          continue;
+        }
+        final Map<String, Object?> props = Map<String, Object?>.from(
+          (ev['properties'] as Map<String, Object?>?) ?? const <String, Object?>{},
+        );
+        if (mode == 'cookieless') {
+          props.remove('vid'); props.remove('sid'); props.remove('anonymousId'); props.remove('userId');
+        } else if (mode == 'session') {
+          props.remove('vid');
+        }
+        ev['consentMode'] = mode;
+        ev['purposes'] = _consentPurposes.toList()..sort();
+        ev['properties'] = props;
+        retained.add(ev);
+      }
+      _offlineQueue..clear()..addAll(retained);
+    }
+    await _syncPersistence();
+  }
+
+  Future<Map<String, Object?>?> track(String event, [Map<String, Object?> props = const <String, Object?>{}, int? nowMs]) async {
+    if (_consentMode == 'off' || event.trim().isEmpty) return null;
+    final int ts = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    _pruneExpired(ts);
+    final Map<String, Object?> clean = Map<String, Object?>.from(props);
+    if (_consentMode == 'cookieless') {
+      clean.remove('vid'); clean.remove('sid'); clean.remove('anonymousId');
+    }
+    if (!_consentPurposes.contains('member_link')) clean.remove('userId');
+
+    final Map<String, Object?> item = <String, Object?>{
+      'eventId': 'flt_\${ts}_\${Random().nextInt(1 << 30)}',
+      'lane': 'customer_defined',
+      'callType': 'track',
+      'eventName': event,
+      'screenName': _activeScreenName,
+      'section_join': sectionJoinStatus,
+      'actor_instrument': actorInstrument,
+      'schemaVersion': contractSchemaVersion,
+      'consentMode': _consentMode,
+      'purposes': (_consentPurposes.toList()..sort()),
+      'occurredAtMs': ts,
+      'properties': clean,
+    };
+    while (_offlineQueue.length >= maxEvents) _offlineQueue.removeAt(0);
+    _offlineQueue.add(item);
+    await _syncPersistence();
+    return item;
+  }
+
   void didChangeAppLifecycleState(String state) {
-    // WidgetsBindingObserver: pause on background
     if (state == 'paused') {
       _activeScreenName = null;
-      if (_consentMode != 'off') _flushIfOnline();
+      if (_consentMode != 'off') unawaited(flushIfOnline());
     }
   }
 
-  void revokeConsent() {
-    // §11.11.5: Immediately clear offline queue without sending any buffered event
+  Future<void> optOut() async => revokeConsent();
+
+  Future<void> revokeConsent() async {
     _consentMode = 'off';
+    _consentPurposes.clear();
     _activeScreenName = null;
     _offlineQueue.clear();
+    await persistence?.clear();
   }
 
   Map<String, Object> maskCustomDrawnWidget(double width, double height) {
-    // CustomPaint / Skia / Impeller / WebView -> bounding_box_only
-    return {'renderMode': 'bounding_box_only', 'width': width, 'height': height, 'unreproducible': true};
+    return <String, Object>{'renderMode': 'bounding_box_only', 'width': width, 'height': height, 'unreproducible': true};
   }
 
-  void _flushIfOnline() {}
+  Future<bool> flushIfOnline([int? nowMs]) async {
+    if (_consentMode == 'off' || publishableKey.isEmpty) return false;
+    final int ts = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    _pruneExpired(ts);
+    if (_offlineQueue.isEmpty) return true;
+
+    final List<Map<String, Object?>> batch = List<Map<String, Object?>>.from(_offlineQueue);
+    final Set<String> sentIds = batch.map((Map<String, Object?> e) => e['eventId'] as String).toSet();
+    final String bodyJson = jsonEncode(<String, Object?>{'batch': batch});
+
+    for (int attempt = 0; attempt <= maxRetries; attempt++) {
+      if (_consentMode == 'off') return false;
+      final HttpClient client = HttpClient();
+      try {
+        final HttpClientRequest req = await client.postUrl(Uri.parse(collectorEndpoint));
+        req.headers.set(HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
+        req.headers.set('x-ugk-key', publishableKey);
+        req.add(utf8.encode(bodyJson));
+        final HttpClientResponse resp = await req.close();
+        await resp.drain<void>();
+        if (resp.statusCode >= 200 && resp.statusCode < 300) {
+          _offlineQueue.removeWhere((Map<String, Object?> e) => sentIds.contains(e['eventId']));
+          await _syncPersistence();
+          return true;
+        }
+        if (resp.statusCode >= 400 && resp.statusCode < 500 && resp.statusCode != 429) {
+          _offlineQueue.removeWhere((Map<String, Object?> e) => sentIds.contains(e['eventId']));
+          await _syncPersistence();
+          return false;
+        }
+      } catch (_) {
+      } finally {
+        client.close(force: true);
+      }
+      if (attempt < maxRetries) {
+        await Future<void>.delayed(Duration(milliseconds: min(30000, baseBackoffMs * (1 << attempt))));
+      }
+    }
+    return false;
+  }
+
+  void _pruneExpired(int nowMs) {
+    final int cutoff = nowMs - ttlMs;
+    _offlineQueue.removeWhere((Map<String, Object?> e) => ((e['occurredAtMs'] as int?) ?? 0) < cutoff);
+  }
+
+  Future<void> _syncPersistence() async {
+    final UgokiFlutterQueuePersistence? store = persistence;
+    if (store == null) return;
+    if (_consentMode == 'off' || _consentMode == 'cookieless' || _offlineQueue.isEmpty) {
+      await store.clear(); return;
+    }
+    await store.save(jsonEncode(_offlineQueue));
+  }
+
+  Set<String> _filterPurposes(String mode, Set<String> raw) {
+    if (mode == 'off') return <String>{};
+    final Set<String> out = Set<String>.from(raw);
+    if (mode == 'cookieless') out.removeAll(const <String>['member_link', 'timeline', 'ads', 'screen_replay']);
+    else if (mode == 'stats_exempt') out.removeAll(const <String>['member_link', 'timeline', 'ads', 'pool', 'personalise', 'screen_replay']);
+    else if (mode == 'session') out.remove('member_link');
+    return out;
+  }
 }
 `;
   return [makeFile('flutter/ugokilink_flutter.dart', code)];

@@ -224,9 +224,15 @@ export function runReplayZeroLeakCanaryGate(): CanaryAuditReport {
   const key = crypto.randomBytes(32);
 
   // 1. Default mask-all mode
+  const auditAad = {
+    tenantId: 'tenant_canary_audit',
+    siteId: 'site_canary_audit',
+    pvId: 'pv_canary_audit_01',
+    chunkSeq: 0,
+  } as const;
   const maskedDefault = maskReplayDomTree(fixture.root, DEFAULT_MASK_ALL_CONFIG);
-  const encDefault = encryptReplayPayload(maskedDefault, key, 'k_audit_v1');
-  const decDefault = decryptReplayPayload(encDefault, key);
+  const encDefault = encryptReplayPayload(maskedDefault, key, 'k_audit_v1', auditAad);
+  const decDefault = decryptReplayPayload(encDefault, key, auditAad);
   const defaultLeaks = scanDecodedPayloadForCanaries(
     decDefault.rawDecodedText,
     fixture.mustNeverLeakDefault
@@ -239,8 +245,8 @@ export function runReplayZeroLeakCanaryGate(): CanaryAuditReport {
     allowedKeys: ['hero_copy_approved'],
   };
   const maskedAllow = maskReplayDomTree(fixture.root, allowConfig);
-  const encAllow = encryptReplayPayload(maskedAllow, key, 'k_audit_v1');
-  const decAllow = decryptReplayPayload(encAllow, key);
+  const encAllow = encryptReplayPayload(maskedAllow, key, 'k_audit_v1', auditAad);
+  const decAllow = decryptReplayPayload(encAllow, key, auditAad);
   const allowLeaks = scanDecodedPayloadForCanaries(
     decAllow.rawDecodedText,
     fixture.mustNeverLeakAllowlist

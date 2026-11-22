@@ -23,10 +23,13 @@ import {
   validateClosedGrammarAction,
 } from './grammar-validator';
 import type {
+  BundleStateRecord,
+  BundleStateStore,
   BundleVerificationResult,
   ConfigBundlePayload,
   ManifestAlertLevel,
   ManifestVerificationResult,
+  RelaxationPasskeyApproval,
   ReleaseManifestPayload,
   SignedConfigBundle,
   SignedReleaseManifest,
@@ -257,19 +260,102 @@ function validateConfigBundleStructure(
   return errors;
 }
 
+export class SignerCasConflictError extends Error {
+  constructor(tenantId: string, siteId: string) {
+    super(`BundleStateStore CAS conflict for (${tenantId}, ${siteId})`);
+    this.name = 'SignerCasConflictError';
+  }
+}
+
+/**
+ * Computes the canonical SHA-256 diff digest for a privacy relaxation approval,
+ * binding `(tenant_id, site_id, prev_seq, next_seq, next_measure)` (C-18).
+ */
+export async function computeRelaxationDiffSha256(params: {
+  readonly tenantId: string;
+  readonly siteId: string;
+  readonly prevSeq: number;
+  readonly nextSeq: number;
+  readonly nextMeasure: ConfigBundlePayload['measure'];
+}): Promise<string> {
+  const { relaxation_approval: _ignored, ...measureWithoutApproval } = params.nextMeasure;
+  return sha256Hex(
+    canonicalJson({
+      tenant_id: params.tenantId,
+      site_id: params.siteId,
+      prev_seq: params.prevSeq,
+      next_seq: params.nextSeq,
+      next_measure: measureWithoutApproval,
+    })
+  );
+}
+
+export async function createSignedRelaxationApproval(params: {
+  readonly approverKid: string;
+  readonly approverPrivateKey: CryptoKey;
+  readonly tenantId: string;
+  readonly siteId: string;
+  readonly prevSeq: number;
+  readonly nextSeq: number;
+  readonly nextMeasure: ConfigBundlePayload['measure'];
+}): Promise<RelaxationPasskeyApproval> {
+  const diffSha256 = await computeRelaxationDiffSha256({
+    tenantId: params.tenantId,
+    siteId: params.siteId,
+    prevSeq: params.prevSeq,
+    nextSeq: params.nextSeq,
+    nextMeasure: params.nextMeasure,
+  });
+  const { sigB64 } = await signCanonicalObject(params.approverPrivateKey, {
+    tenant_id: params.tenantId,
+    site_id: params.siteId,
+    prev_seq: params.prevSeq,
+    next_seq: params.nextSeq,
+    diff_sha256: diffSha256,
+  });
+  return {
+    approver_kid: params.approverKid,
+    prev_seq: params.prevSeq,
+    next_seq: params.nextSeq,
+    diff_sha256: diffSha256,
+    sig_b64: sigB64,
+  };
+}
+
 async function verifyPasskeyRelaxationIfNeeded(
-  prevMeasure: ConfigBundlePayload['measure'] | undefined,
-  nextMeasure: ConfigBundlePayload['measure'],
+  prevBundle: ConfigBundlePayload | undefined,
+  nextPayload: ConfigBundlePayload,
   releaseManifest: ReleaseManifestPayload
 ): Promise<string[]> {
-  if (!prevMeasure) return [];
-  const check = detectPrivacyRelaxation(prevMeasure, nextMeasure);
+  const nextMeasure = nextPayload.measure;
+  const expectedPrevSeq = prevBundle ? prevBundle.seq : 0;
+  const baselineMeasure: ConfigBundlePayload['measure'] = prevBundle
+    ? prevBundle.measure
+    : {
+        ...nextMeasure,
+        site_default_consent: 'cookieless',
+        allow_cmp_opt_in_from_default_off: false,
+      };
+
+  const check = detectPrivacyRelaxation(baselineMeasure, nextMeasure);
   if (!check.isRelaxation) return [];
 
   const approval = nextMeasure.relaxation_approval;
   if (!approval) {
     return [
       `Privacy/protection relaxation requires approver passkey signature pinned in offline release manifest (§10.1): ${check.reasons.join(', ')}`,
+    ];
+  }
+
+  if (approval.prev_seq !== expectedPrevSeq) {
+    return [
+      `Passkey approval prev_seq (${approval.prev_seq}) does not match authoritative previous seq (${expectedPrevSeq})`,
+    ];
+  }
+
+  if (approval.next_seq !== undefined && approval.next_seq !== nextPayload.seq) {
+    return [
+      `Passkey approval next_seq (${approval.next_seq}) does not match target bundle seq (${nextPayload.seq})`,
     ];
   }
 
@@ -282,18 +368,29 @@ async function verifyPasskeyRelaxationIfNeeded(
     ];
   }
 
-  const { relaxation_approval: _ignored, ...measureWithoutApproval } = nextMeasure;
-  const expectedDiffSha = await sha256Hex(
-    canonicalJson({ prev_seq: approval.prev_seq, next_measure: measureWithoutApproval })
-  );
+  const expectedDiffSha = await computeRelaxationDiffSha256({
+    tenantId: nextPayload.aud.tenant_id,
+    siteId: nextPayload.aud.site_id,
+    prevSeq: expectedPrevSeq,
+    nextSeq: nextPayload.seq,
+    nextMeasure,
+  });
   if (approval.diff_sha256 !== expectedDiffSha) {
-    return ['Passkey approval diff_sha256 does not match the proposed privacy relaxation'];
+    return [
+      'Passkey approval diff_sha256 does not match (tenant_id, site_id, prev_seq, next_seq, next_measure)',
+    ];
   }
 
   const pubKey = await importEd25519PublicKey(approverEntry.public_key_jwk);
   const sigOk = await verifyCanonicalObject(
     pubKey,
-    { prev_seq: approval.prev_seq, diff_sha256: approval.diff_sha256 },
+    {
+      tenant_id: nextPayload.aud.tenant_id,
+      site_id: nextPayload.aud.site_id,
+      prev_seq: expectedPrevSeq,
+      next_seq: nextPayload.seq,
+      diff_sha256: approval.diff_sha256,
+    },
     approval.sig_b64
   );
   if (!sigOk) {
@@ -327,18 +424,24 @@ export async function signConfigBundle(
   }
 
   if (options?.previousBundle) {
-    if (payload.seq <= options.previousBundle.seq) {
+    if (
+      options.previousBundle.aud.tenant_id !== payload.aud.tenant_id ||
+      options.previousBundle.aud.site_id !== payload.aud.site_id
+    ) {
+      errors.push('previousBundle audience does not match target ConfigBundle aud');
+    } else if (payload.seq !== options.previousBundle.seq + 1) {
       errors.push(
-        `Config bundle seq ${payload.seq} must strictly increase above previous seq ${options.previousBundle.seq}`
+        `Config bundle seq ${payload.seq} must equal previous seq + 1 (${options.previousBundle.seq + 1})`
       );
     }
-    const relaxErrors = await verifyPasskeyRelaxationIfNeeded(
-      options.previousBundle.measure,
-      payload.measure,
-      releaseManifest
-    );
-    errors.push(...relaxErrors);
   }
+
+  const relaxErrors = await verifyPasskeyRelaxationIfNeeded(
+    options?.previousBundle,
+    payload,
+    releaseManifest
+  );
+  errors.push(...relaxErrors);
 
   if (errors.length > 0) {
     throw new SignerPolicyError(errors, 'Refused to sign ConfigBundle');
@@ -441,14 +544,12 @@ export async function verifyConfigBundle(
   const structErrors = validateConfigBundleStructure(signedBundle.payload, signedManifest.payload);
   errors.push(...structErrors);
 
-  if (options.previousBundle) {
-    const relaxErrors = await verifyPasskeyRelaxationIfNeeded(
-      options.previousBundle.measure,
-      signedBundle.payload.measure,
-      signedManifest.payload
-    );
-    errors.push(...relaxErrors);
-  }
+  const relaxErrors = await verifyPasskeyRelaxationIfNeeded(
+    options.previousBundle,
+    signedBundle.payload,
+    signedManifest.payload
+  );
+  errors.push(...relaxErrors);
 
   if (errors.length > 0) {
     return failClosedAll();
@@ -516,4 +617,106 @@ export async function verifyConfigBundle(
     },
     errors: [],
   };
+}
+
+// =========================================================================
+// Authoritative CAS BundleStateStore & SignerService (C-18)
+// =========================================================================
+
+export class InMemoryBundleStateStore implements BundleStateStore {
+  private readonly store = new Map<string, BundleStateRecord>();
+  private versionSeq = 0;
+
+  private key(tenantId: string, siteId: string): string {
+    return `${tenantId}::${siteId}`;
+  }
+
+  public async getCurrent(tenantId: string, siteId: string): Promise<BundleStateRecord | null> {
+    return this.store.get(this.key(tenantId, siteId)) ?? null;
+  }
+
+  public async seedBundle(bundle: SignedConfigBundle): Promise<BundleStateRecord> {
+    this.versionSeq += 1;
+    const rec: BundleStateRecord = {
+      bundle,
+      versionToken: `v_${this.versionSeq}_${bundle.bundle_hash.slice(0, 16)}`,
+    };
+    this.store.set(this.key(bundle.payload.aud.tenant_id, bundle.payload.aud.site_id), rec);
+    return rec;
+  }
+
+  public async compareAndSwap(params: {
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly expectedVersionToken: string | null;
+    readonly nextBundle: SignedConfigBundle;
+  }): Promise<{ readonly committed: boolean; readonly current: BundleStateRecord | null }> {
+    const k = this.key(params.tenantId, params.siteId);
+    const existing = this.store.get(k) ?? null;
+    const actualToken = existing ? existing.versionToken : null;
+    if (actualToken !== params.expectedVersionToken) {
+      return { committed: false, current: existing };
+    }
+    this.versionSeq += 1;
+    const nextRec: BundleStateRecord = {
+      bundle: params.nextBundle,
+      versionToken: `v_${this.versionSeq}_${params.nextBundle.bundle_hash.slice(0, 16)}`,
+    };
+    this.store.set(k, nextRec);
+    return { committed: true, current: nextRec };
+  }
+}
+
+export class SignerService {
+  constructor(
+    private readonly deps: {
+      readonly onlinePrivateKey: CryptoKey;
+      readonly onlineKid: string;
+      readonly getReleaseManifest: () => Promise<SignedReleaseManifest>;
+      readonly bundleStateStore: BundleStateStore;
+    }
+  ) {}
+
+  /**
+   * Signs and atomically commits the next ConfigBundle for `(tenant_id, site_id)` using
+   * the authoritative `BundleStateStore` (NEVER trusting caller-supplied `previousBundle`!).
+   */
+  public async signAndCommitBundle(payload: ConfigBundlePayload): Promise<SignedConfigBundle> {
+    const tenantId = payload.aud?.tenant_id?.trim() ?? '';
+    const siteId = payload.aud?.site_id?.trim() ?? '';
+    if (!tenantId || !siteId) {
+      throw new SignerPolicyError(['aud.tenant_id and aud.site_id are required']);
+    }
+
+    const current = await this.deps.bundleStateStore.getCurrent(tenantId, siteId);
+    const prevPayload = current?.bundle.payload;
+    const expectedSeq = prevPayload ? prevPayload.seq + 1 : 1;
+
+    if (!Number.isInteger(payload.seq) || payload.seq !== expectedSeq) {
+      throw new SignerPolicyError([
+        `Config bundle seq ${payload.seq} must equal authoritative next seq ${expectedSeq} (prev=${prevPayload ? prevPayload.seq : 'none'})`,
+      ]);
+    }
+
+    const manifest = await this.deps.getReleaseManifest();
+    const signed = await signConfigBundle(
+      payload,
+      this.deps.onlinePrivateKey,
+      this.deps.onlineKid,
+      manifest.payload,
+      { previousBundle: prevPayload }
+    );
+
+    const cas = await this.deps.bundleStateStore.compareAndSwap({
+      tenantId,
+      siteId,
+      expectedVersionToken: current ? current.versionToken : null,
+      nextBundle: signed,
+    });
+    if (!cas.committed) {
+      throw new SignerCasConflictError(tenantId, siteId);
+    }
+
+    return signed;
+  }
 }

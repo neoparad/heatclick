@@ -3,9 +3,11 @@ import { wrapUntrusted } from '@/packages/contract/response'
 import {
   assertValidHeatmapDisplayLabel,
   buildExperimentHeatmapComparison,
+  encodeDeterministicRgbaPng,
   HEATMAP_IMAGE_MCP_TOOL,
   HeatmapRenderService,
   invokeHeatmapImageMcpTool,
+  MAX_HEATMAP_PNG_DIMENSION,
   type HeatmapFetchPrincipal,
   type HeatmapRenderRequest,
   type HeatmapUnitDataset,
@@ -513,5 +515,389 @@ describe('§11.12 Gates 3–6: Per-Fetch Auth, Differencing Defense, Deletion In
     )
     expect(budgetExceeded.http_status).toBe(429)
     expect(budgetExceeded.error).toBe('tenant_pixel_budget_exceeded')
+  })
+})
+
+// ===========================================================================
+// Wave 8 Adversarial Regression Tests: [C-03], [H-25], [H-30], [L-04]
+// ===========================================================================
+
+describe('Wave 8 Adversarial Regressions: [C-03] Audience Isolation, Zero Count Leakage & Immediate Purge', () => {
+  test('[C-03] external_party cannot fetch unredacted site_owner artifact by ID (403 audience_mismatch_redaction_required) and unauthenticated probing never leaks 404 vs 401', () => {
+    const svc = new HeatmapRenderService()
+    const ownerRes = svc.renderHeatmap(OWNER_PRINCIPAL, makeBaseRequest())
+    const ownerArtId = ownerRes.artifacts[0].artifact_id
+
+    // Non-existent artifact for unauthenticated caller -> still 401 (no existence oracle!)
+    expect(
+      svc.fetchArtifactById({
+        principal: null,
+        artifact_id: 'hm_nonexistent_id',
+        now_iso: '2026-11-20T12:01:00Z',
+      }).http_status,
+    ).toBe(401)
+
+    // External party in same tenant attempting to read site_owner artifact -> 403!
+    const extSameTenant: HeatmapFetchPrincipal = {
+      ...OWNER_PRINCIPAL,
+      principal_id: 'ext_partner_same_tenant',
+      audience: 'external_party',
+    }
+    const crossAudienceFetch = svc.fetchArtifactById({
+      principal: extSameTenant,
+      artifact_id: ownerArtId,
+      now_iso: '2026-11-20T12:01:00Z',
+    })
+    expect(crossAudienceFetch.http_status).toBe(403)
+    expect(crossAudienceFetch.reason).toBe('audience_mismatch_redaction_required')
+    expect(crossAudienceFetch.artifact).toBeNull()
+    expect(crossAudienceFetch.png_bytes).toBeNull()
+
+    // target_site_id mismatch -> 403
+    const wrongSiteOwner: HeatmapFetchPrincipal = {
+      ...OWNER_PRINCIPAL,
+      allowed_site_ids: ['site_1', 'site_2'],
+    }
+    const siteMismatch = svc.fetchArtifactById({
+      principal: wrongSiteOwner,
+      artifact_id: ownerArtId,
+      target_site_id: 'site_2',
+      now_iso: '2026-11-20T12:01:00Z',
+    })
+    expect(siteMismatch.http_status).toBe(403)
+    expect(siteMismatch.reason).toBe('target_site_id_mismatch')
+  })
+
+  test('[C-03] suppressed cells scrub ALL raw counts (reach_pvs/dwell_pvs/cta_clicks/sample_size/click_count -> null), greedy complementary suppression enforces sum >= 10, and suppressed envelope masks denominator_n', () => {
+    const svc = new HeatmapRenderService()
+    const extPrincipal: HeatmapFetchPrincipal = {
+      ...OWNER_PRINCIPAL,
+      principal_id: 'ext_partner_k10',
+      audience: 'external_party',
+    }
+
+    // Segment < 10 -> status='suppressed' AND envelope.coverage.denominator_n === 0 (no raw count leak!)
+    const smallSeg = svc.renderHeatmap(
+      extPrincipal,
+      makeBaseRequest({
+        segment_id: 'seg_tiny_7',
+        unit_datasets: [makeUnitDataset({ total_units_in_segment: 7 })],
+      }),
+    )
+    expect(smallSeg.artifacts[0].status).toBe('suppressed')
+    expect(smallSeg.artifacts[0].envelope.coverage.denominator_n).toBe(0)
+
+    // 3 sections [3, 4, 50]: 3 + 4 = 7 < 10 -> greedy complementary suppression must ALSO suppress the 3rd cell!
+    const baseSec = makeUnitDataset().sections[0]
+    const baseClick = makeUnitDataset().clicks[0]
+    const dsGreedy = makeUnitDataset({
+      total_units_in_segment: 57,
+      subject_ids: Array.from({ length: 57 }, (_, i) => `u_${i}`),
+      sections: [
+        { ...baseSec, section_uid: 's1', sec_fp: 'f1', ordinal: 0, top_ratio: 0, height_ratio: 0.3, reach_pvs: 3, dwell_pvs: 3, cta_clicks: 2, sample_size: 3, pooling_weight: 0.2 },
+        { ...baseSec, section_uid: 's2', sec_fp: 'f2', ordinal: 1, top_ratio: 0.3, height_ratio: 0.3, reach_pvs: 4, dwell_pvs: 4, cta_clicks: 1, sample_size: 4, pooling_weight: 0.3 },
+        { ...baseSec, section_uid: 's3', sec_fp: 'f3', ordinal: 2, top_ratio: 0.6, height_ratio: 0.4, reach_pvs: 50, dwell_pvs: 50, cta_clicks: 20, sample_size: 50, pooling_weight: 0.5 },
+      ],
+      clicks: [
+        { ...baseClick, el_fp: 'c1', click_count: 4, sample_size: 4 },
+        { ...baseClick, el_fp: 'c2', click_count: 5, sample_size: 5 },
+        { ...baseClick, el_fp: 'c3', click_count: 25, sample_size: 25 },
+      ],
+    })
+    const greedyRes = svc.renderHeatmap(
+      extPrincipal,
+      makeBaseRequest({ segment_id: 'seg_57', unit_datasets: [dsGreedy] }),
+    )
+    expect(greedyRes.http_status).toBe(200)
+    const art = greedyRes.artifacts[0]
+    expect(art.sections).toHaveLength(3)
+    for (const s of art.sections) {
+      expect(s.status).toBe('suppressed')
+      expect(s.reach_rate).toBeNull()
+      expect(s.dwell_center40_ms).toBeNull()
+      expect(s.reach_pvs).toBeNull()
+      expect(s.dwell_pvs).toBeNull()
+      expect(s.cta_clicks).toBeNull()
+      expect(s.sample_size).toBeNull()
+      expect(s.pooling_weight).toBeNull()
+    }
+    for (const c of art.clicks) {
+      expect(c.status).toBe('suppressed')
+      expect(c.click_count).toBeNull()
+      expect(c.sample_size).toBeNull()
+    }
+    // Disclosed denominator rounded down to multiple of 10 (57 -> 50)
+    expect(art.envelope.coverage.denominator_n).toBe(50)
+  })
+
+  test('[C-03] recordDeletionEvent & recordRebuildSeq zero-wipe PNG buffers immediately while preserving 410 for owners and 404 for foreign tenants', () => {
+    const svc = new HeatmapRenderService()
+    const created = svc.renderHeatmap(OWNER_PRINCIPAL, makeBaseRequest())
+    const artId = created.artifacts[0].artifact_id
+    const before = svc.fetchArtifactById({
+      principal: OWNER_PRINCIPAL,
+      artifact_id: artId,
+      now_iso: '2026-11-20T12:00:30Z',
+    })
+    expect(before.http_status).toBe(200)
+    const heldBufferRef = before.png_bytes!
+    expect(heldBufferRef.some((b) => b !== 0)).toBe(true)
+
+    svc.recordRebuildSeq('tenant_a', 'site_1', 'https://example.jp/guide', 5)
+    // Underlying PNG bytes wiped in-place immediately on rebuild!
+    expect(heldBufferRef.every((b) => b === 0)).toBe(true)
+
+    // Authorized owner gets 410
+    expect(
+      svc.fetchArtifactById({
+        principal: OWNER_PRINCIPAL,
+        artifact_id: artId,
+        now_iso: '2026-11-20T12:01:00Z',
+      }).http_status,
+    ).toBe(410)
+
+    // Foreign tenant still gets 404 (not 410)
+    expect(
+      svc.fetchArtifactById({
+        principal: { ...OWNER_PRINCIPAL, tenant_id: 'tenant_foreign', principal_id: 'att' },
+        artifact_id: artId,
+        now_iso: '2026-11-20T12:01:00Z',
+      }).http_status,
+    ).toBe(404)
+  })
+})
+
+describe('Wave 8 Adversarial Regressions: [H-25] Shifted-Window, Equal-Cardinality Swap & 3+ Query Denning-Schlorer Attacks', () => {
+  test('[H-25] rejects millisecond-unaligned ISO period and blocks same-segment_id 1-day shifted window differencing (with and without subject_ids)', () => {
+    const svc = new HeatmapRenderService()
+    const ext: HeatmapFetchPrincipal = {
+      ...OWNER_PRINCIPAL,
+      principal_id: 'ext_shift_att',
+      audience: 'external_party',
+    }
+
+    // Sub-second 500ms offset rejected even when hours/minutes/seconds are 0
+    const msUnaligned = svc.renderHeatmap(
+      ext,
+      makeBaseRequest({
+        period_start: '2026-11-01T00:00:00.500Z',
+        period_end: '2026-11-15T00:00:00.000Z',
+      }),
+    )
+    expect(msUnaligned.artifacts[0].status).toBe('suppressed')
+
+    // Query 1: same segment_id="seg_all", [Nov 1..15], 100 PVs (no subject_ids)
+    const w1 = svc.renderHeatmap(
+      ext,
+      makeBaseRequest({
+        segment_id: 'seg_all',
+        period_start: '2026-11-01T00:00:00Z',
+        period_end: '2026-11-15T00:00:00Z',
+        unit_datasets: [makeUnitDataset({ total_units_in_segment: 100 })],
+      }),
+    )
+    expect(w1.http_status).toBe(200)
+
+    // Query 2: SAME segment_id="seg_all", shifted 1 day [Nov 1..14], 96 PVs -> isolates 4 PVs on Nov 14 -> BLOCKED (403)!
+    const w2 = svc.renderHeatmap(
+      ext,
+      makeBaseRequest({
+        segment_id: 'seg_all',
+        period_start: '2026-11-01T00:00:00Z',
+        period_end: '2026-11-14T00:00:00Z',
+        unit_datasets: [makeUnitDataset({ total_units_in_segment: 96 })],
+      }),
+    )
+    expect(w2.http_status).toBe(403)
+    expect(w2.error).toBe('differencing_attack_blocked')
+  })
+
+  test('[H-25] blocks equal-cardinality swap (|S1|=|S2|=50, |S1 △ S2|=2) and 3-query Denning-Schlorer linear combination where ALL pairwise diffs >= 20', () => {
+    const svc = new HeatmapRenderService()
+    const ext1: HeatmapFetchPrincipal = {
+      ...OWNER_PRINCIPAL,
+      principal_id: 'ext_linear_1',
+      audience: 'external_party',
+    }
+    const ext2: HeatmapFetchPrincipal = {
+      ...OWNER_PRINCIPAL,
+      principal_id: 'ext_linear_2',
+      audience: 'external_party',
+    }
+
+    // 3-query Denning-Schlorer attack:
+    // A = {a_0..a_19} (20), B = {b_0..b_19} (20), victim = {'ceo_1'} (1)
+    // Q1 = A ∪ B ∪ {victim} (41)
+    // Q2 = A (20) -> |Q1 △ Q2| = 21 >= 10 (passes pairwise!)
+    // Q3 = B (20) -> |Q1 △ Q3| = 21 >= 10, |Q2 △ Q3| = 40 >= 10 (passes ALL pairwise!),
+    //               yet Q1 - Q2 - Q3 = {victim} (size 1 < 10)!
+    const setA = Array.from({ length: 20 }, (_, i) => `a_${i}`)
+    const setB = Array.from({ length: 20 }, (_, i) => `b_${i}`)
+    const q1Subjects = [...setA, ...setB, 'ceo_1']
+
+    const r1 = svc.renderHeatmap(
+      ext1,
+      makeBaseRequest({
+        segment_id: 'seg_q1',
+        unit_datasets: [makeUnitDataset({ subject_ids: q1Subjects, total_units_in_segment: 41 })],
+      }),
+    )
+    expect(r1.http_status).toBe(200)
+
+    const r2 = svc.renderHeatmap(
+      ext1,
+      makeBaseRequest({
+        segment_id: 'seg_q2',
+        unit_datasets: [makeUnitDataset({ subject_ids: setA, total_units_in_segment: 20 })],
+      }),
+    )
+    expect(r2.http_status).toBe(200)
+
+    // Even if colluding principal ext2 issues Q3, RREF linear-combination guard MUST block it!
+    const r3 = svc.renderHeatmap(
+      ext2,
+      makeBaseRequest({
+        segment_id: 'seg_q3',
+        unit_datasets: [makeUnitDataset({ subject_ids: setB, total_units_in_segment: 20 })],
+      }),
+    )
+    expect(r3.http_status).toBe(403)
+    expect(r3.error).toBe('differencing_attack_blocked')
+
+    // Equal-cardinality swap on another page: |S1|=50, |S2|=50 with 1-out, 1-in (|S1 △ S2|=2)
+    const s50a = Array.from({ length: 50 }, (_, i) => `p_${i}`)
+    const s50b = [...s50a.slice(1), 'p_new']
+    expect(
+      svc.renderHeatmap(
+        ext1,
+        makeBaseRequest({
+          page_url: 'https://www.example.jp/pricing',
+          segment_id: 'swap_a',
+          unit_datasets: [makeUnitDataset({ subject_ids: s50a, total_units_in_segment: 50 })],
+        }),
+      ).http_status,
+    ).toBe(200)
+    expect(
+      svc.renderHeatmap(
+        ext1,
+        makeBaseRequest({
+          page_url: 'https://www.example.jp/pricing',
+          segment_id: 'swap_b',
+          unit_datasets: [makeUnitDataset({ subject_ids: s50b, total_units_in_segment: 50 })],
+        }),
+      ).http_status,
+    ).toBe(403)
+  })
+
+  test('[H-25] blocks 3-window subtraction attack without subject_ids ([Nov 1..20]=100, [Nov 1..10]=50, [Nov 10..19]=45 -> isolates 5 PVs)', () => {
+    const svc = new HeatmapRenderService()
+    const ext: HeatmapFetchPrincipal = {
+      ...OWNER_PRINCIPAL,
+      principal_id: 'ext_3win',
+      audience: 'external_party',
+    }
+    expect(
+      svc.renderHeatmap(
+        ext,
+        makeBaseRequest({
+          segment_id: 'seg_all',
+          period_start: '2026-11-01T00:00:00Z',
+          period_end: '2026-11-20T00:00:00Z',
+          unit_datasets: [makeUnitDataset({ total_units_in_segment: 100 })],
+        }),
+      ).http_status,
+    ).toBe(200)
+    expect(
+      svc.renderHeatmap(
+        ext,
+        makeBaseRequest({
+          segment_id: 'seg_all',
+          period_start: '2026-11-01T00:00:00Z',
+          period_end: '2026-11-10T00:00:00Z',
+          unit_datasets: [makeUnitDataset({ total_units_in_segment: 50 })],
+        }),
+      ).http_status,
+    ).toBe(200)
+    // Pairwise diff vs [1..20] is 55 >= 10, disjoint from [1..10], yet 100 - 50 - 45 = 5 < 10!
+    const w3 = svc.renderHeatmap(
+      ext,
+      makeBaseRequest({
+        segment_id: 'seg_all',
+        period_start: '2026-11-10T00:00:00Z',
+        period_end: '2026-11-19T00:00:00Z',
+        unit_datasets: [makeUnitDataset({ total_units_in_segment: 45 })],
+      }),
+    )
+    expect(w3.http_status).toBe(403)
+    expect(w3.error).toBe('differencing_attack_blocked')
+  })
+})
+
+describe('Wave 8 Adversarial Regressions: [H-30] Model-Inferred Feature Ban & [L-04] PNG Bounds / SVG Escaping', () => {
+  test('[H-30] rejects behavioral_stat_*, novelty_score, provenance=model_inferred input features, and certified=false headers', () => {
+    const svc = new HeatmapRenderService()
+    expect(
+      svc.renderHeatmap(
+        OWNER_PRINCIPAL,
+        makeBaseRequest({
+          actor_bucket: 'model_inferred',
+          requested_metric_keys: ['behavioral_stat_12'],
+          model_inferred_header: { likelihood_ratio: 10, fpr_upper_bound: 0.005, certificate_id: 'c1' },
+        }),
+      ).http_status,
+    ).toBe(400)
+
+    expect(
+      svc.renderHeatmap(
+        OWNER_PRINCIPAL,
+        makeBaseRequest({
+          actor_bucket: 'verified_actor',
+          requested_input_features: [{ key: 'prev_ai_score', provenance: 'model_inferred' }],
+        }),
+      ).http_status,
+    ).toBe(400)
+
+    expect(
+      svc.renderHeatmap(
+        OWNER_PRINCIPAL,
+        makeBaseRequest({
+          actor_bucket: 'model_inferred',
+          model_inferred_header: {
+            likelihood_ratio: 10,
+            fpr_upper_bound: 0.005,
+            certificate_id: 'c_uncertified',
+            certified: false,
+          },
+        }),
+      ).http_status,
+    ).toBe(400)
+  })
+
+  test('[L-04] rejects out-of-range PNG dimensions (0, negative, float, >4096) and XML-escapes SVG data-sec-fp / data-el-fp attributes', () => {
+    expect(() => encodeDeterministicRgbaPng(0, 100, new Uint8Array(0))).toThrow()
+    expect(() => encodeDeterministicRgbaPng(-5, 100, new Uint8Array(0))).toThrow()
+    expect(() => encodeDeterministicRgbaPng(12.5, 100, new Uint8Array(0))).toThrow()
+    expect(() =>
+      encodeDeterministicRgbaPng(MAX_HEATMAP_PNG_DIMENSION + 1, 10, new Uint8Array(0)),
+    ).toThrow()
+
+    const svc = new HeatmapRenderService()
+    const xssPayload = 'fp"><script>alert(1)</script><g x="'
+    const baseDs = makeUnitDataset()
+    const res = svc.renderHeatmap(
+      OWNER_PRINCIPAL,
+      makeBaseRequest({
+        unit_datasets: [
+          makeUnitDataset({
+            sections: [{ ...baseDs.sections[0], sec_fp: xssPayload }, baseDs.sections[1]],
+            clicks: [{ ...baseDs.clicks[0], el_fp: xssPayload }],
+          }),
+        ],
+      }),
+    )
+    expect(res.http_status).toBe(200)
+    const svg = res.artifacts[0].svg_markup!
+    expect(svg).not.toContain('<script>')
+    expect(svg).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
   })
 })

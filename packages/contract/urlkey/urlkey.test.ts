@@ -5,13 +5,14 @@ import {
   PII_SCRUB_TOKEN,
   URL_KEY_VERSION,
   UrlKeyError,
+  UrlUnknowablesRegistry,
   computeConformanceSuiteHash,
   computeLengthBucket,
   computeUrlKeyV2,
   isPiiShapedValue,
   verifyUrlKeyIdempotency,
   type UrlKeyV2Rules,
-} from './urlkey'
+} from './index'
 
 interface ValidVector {
   readonly id: string
@@ -758,14 +759,21 @@ describe('Bundle 1-C: urlkey/2 Single Authority Normalizer (packages/contract/ur
       }
     }
 
-    // Strict collector-side idempotency: urlkey(urlkey(x)) === urlkey(x)
-    const idem = verifyUrlKeyIdempotency(v.input, v.rules)
-    expect(idem.idempotent).toBe(true)
-    expect(idem.second.url_key_v2).toBe(idem.first.url_key_v2)
-    expect(idem.second.url_id).toBe(idem.first.url_id)
-    expect(idem.second.path_key).toBe(idem.first.path_key)
-    expect(idem.second.coarse_key).toBe(idem.first.coarse_key)
-    expect(idem.second.unclassified_param_names).toEqual(idem.first.unclassified_param_names)
+    // Strict collector-side fixed-point idempotency:
+    // 1. Canonical output `res.url_key_v2` MUST be a true fixed point (`idempotent === true`)
+    const canonicalIdem = verifyUrlKeyIdempotency(res.url_key_v2, v.rules)
+    expect(canonicalIdem.idempotent).toBe(true)
+    expect(canonicalIdem.first.url_key_v2).toBe(res.url_key_v2)
+    expect(canonicalIdem.second.url_key_v2).toBe(res.url_key_v2)
+    expect(canonicalIdem.second.url_id).toBe(res.url_id)
+    expect(canonicalIdem.second.path_key).toBe(res.path_key)
+    expect(canonicalIdem.second.coarse_key).toBe(res.coarse_key)
+    expect(canonicalIdem.second.unclassified_param_names).toEqual(res.unclassified_param_names)
+
+    // 2. Raw input is only already-idempotent when `v.input === res.url_key_v2` ([C-08])
+    const rawIdem = verifyUrlKeyIdempotency(v.input, v.rules)
+    expect(rawIdem.idempotent).toBe(v.input === res.url_key_v2)
+    expect(rawIdem.second.url_key_v2).toBe(rawIdem.first.url_key_v2)
   })
 
   it.each(INVALID_VECTORS)('[$id] ($category) rejects invalid or non-http(s) URL', (v) => {
@@ -824,5 +832,103 @@ describe('Bundle 1-C: urlkey/2 Single Authority Normalizer (packages/contract/ur
     const hash2 = computeConformanceSuiteHash(manifestInput)
     expect(hash1).toMatch(/^[0-9a-f]{64}$/)
     expect(hash1).toBe(hash2)
+  })
+
+  describe('Wave 8 Adversarial Regressions: [C-08] & [H-12]', () => {
+    it('[C-08] enforces true fixed-point idempotency (rejects raw credentials/fragments/uppercase as non-idempotent) and supports single-label host:port/path', () => {
+      // Raw URLs with credentials, fragments, scheme, uppercase host, or unsorted query are NOT already canonical!
+      expect(verifyUrlKeyIdempotency('https://user:secret@EXAMPLE.COM/page#frag').idempotent).toBe(false)
+      expect(verifyUrlKeyIdempotency('example.com/page#frag').idempotent).toBe(false)
+      expect(verifyUrlKeyIdempotency('EXAMPLE.COM/page').idempotent).toBe(false)
+      expect(verifyUrlKeyIdempotency('example.com/list?sort=price&page=2', CONTENT_SITE_RULES).idempotent).toBe(false)
+      expect(verifyUrlKeyIdempotency('example.com/list?page=2&sort=price', CONTENT_SITE_RULES).idempotent).toBe(true)
+
+      // Single-label host:port/path (e.g. staging:8080/page, app-dev:3000/a) succeeds on 1st & 2nd pass
+      const first = computeUrlKeyV2('http://staging:8080/page/')
+      expect(first.url_key_v2).toBe('staging:8080/page')
+      const second = computeUrlKeyV2(first.url_key_v2)
+      expect(second.url_key_v2).toBe('staging:8080/page')
+      expect(verifyUrlKeyIdempotency(first.url_key_v2).idempotent).toBe(true)
+
+      // Known non-HTTP schemes with numeric payload (e.g. tel:110, sms:12345) MUST still throw UrlKeyError!
+      expect(() => computeUrlKeyV2('tel:110')).toThrow(UrlKeyError)
+      expect(() => computeUrlKeyV2('sms:12345')).toThrow(UrlKeyError)
+    })
+
+    it('[H-12] catches malformed-% PII bypass (alice%40example.com%ZZ), matches case-insensitive/wildcard search paths, records unknowables, and rejects https:///path', () => {
+      // 1. Malformed %ZZ suffix cannot bypass %40 -> @ PII scrubbing!
+      expect(isPiiShapedValue('alice%40example.com%ZZ')).toBe(true)
+      expect(isPiiShapedValue('090%2D1234%2D5678%ZZ')).toBe(true)
+      expect(isPiiShapedValue('4111%2D1111%2D1111%2D1111%2')).toBe(true)
+
+      const scrubbedContent = computeUrlKeyV2(
+        'https://example.com/list?id=alice%40example.com%ZZ&utm_campaign=bob%40secret.jp%ZZ',
+        CONTENT_SITE_RULES,
+      )
+      expect(scrubbedContent.url_key_v2).toBe(`example.com/list?id=${PII_SCRUB_TOKEN}`)
+      expect(scrubbedContent.url_key_v2).not.toContain('alice')
+      expect(scrubbedContent.campaign_attribution.utm.campaign).toBe(PII_SCRUB_TOKEN)
+      expect(JSON.stringify(scrubbedContent)).not.toContain('bob')
+
+      // 2. Case-insensitive & multi-segment wildcard search paths (`/Search/...`, `/search/*/query`)
+      const caseInsensitiveSearch = computeUrlKeyV2(
+        'https://example.com/Search/secret-medical-term/page/2',
+        CONTENT_SITE_RULES,
+      )
+      expect(caseInsensitiveSearch.path_masked).toBe(true)
+      expect(caseInsensitiveSearch.url_key_v2).toBe(
+        `example.com/search/${LENGTH_BUCKET_TOKENS.LEN_17_64}/page/2`,
+      )
+      expect(caseInsensitiveSearch.url_key_v2).not.toContain('secret-medical-term')
+
+      const midWildcardRules: UrlKeyV2Rules = {
+        inputPathPatterns: [
+          { id: 'mid_wild_placeholder', pattern: '/Search/*/:query' },
+          { id: 'mid_wild_implicit', pattern: '/find/*/query' },
+          { id: 'multi_dots', pattern: '/lookup/...' },
+        ],
+      }
+      const r1 = computeUrlKeyV2('https://example.com/SEARCH/books/retinol-serum', midWildcardRules)
+      expect(r1.path_masked).toBe(true)
+      expect(r1.url_key_v2).toBe(`example.com/search/books/${LENGTH_BUCKET_TOKENS.LEN_5_16}`)
+      expect(verifyUrlKeyIdempotency(r1.url_key_v2, midWildcardRules).idempotent).toBe(true)
+
+      const r2 = computeUrlKeyV2('https://example.com/Find/retinol-serum/Query', midWildcardRules)
+      expect(r2.path_masked).toBe(true)
+      expect(r2.url_key_v2).toBe(`example.com/find/${LENGTH_BUCKET_TOKENS.LEN_5_16}/query`)
+      expect(verifyUrlKeyIdempotency(r2.url_key_v2, midWildcardRules).idempotent).toBe(true)
+
+      const r3 = computeUrlKeyV2('https://example.com/Lookup/catA/secretTerm', midWildcardRules)
+      expect(r3.path_masked).toBe(true)
+      expect(r3.url_key_v2).toBe(
+        `example.com/lookup/${LENGTH_BUCKET_TOKENS.LEN_1_4}/${LENGTH_BUCKET_TOKENS.LEN_5_16}`,
+      )
+      expect(verifyUrlKeyIdempotency(r3.url_key_v2, midWildcardRules).idempotent).toBe(true)
+
+      // 3. Unregistered search-like paths recorded in unknowables metadata without raw terms!
+      const unreg = computeUrlKeyV2('https://example.com/Search/SensitiveSecretTerm?mystery=123')
+      expect(unreg.path_masked).toBe(false)
+      expect(unreg.unknowables.unregistered_search_path.suspected).toBe(true)
+      expect(unreg.unknowables.unregistered_search_path.suggested_pattern).toBe('/search/<term>')
+      expect(JSON.stringify(unreg.unknowables)).not.toContain('SensitiveSecretTerm')
+
+      const tracker = new UrlUnknowablesRegistry()
+      tracker.record(unreg)
+      expect(tracker.snapshot().suspectedSearchPatterns['/search/<term>']).toBe(1)
+      expect(tracker.snapshot().unclassifiedParamCounts['mystery']).toBe(1)
+
+      // 4. Empty-host URLs (`https:///path`, `http:///admin`, `///secret`, `https://:8080/a`, `https://user@/a`) throw UrlKeyError!
+      for (const emptyHostUrl of [
+        'https:///path',
+        'http:///admin/panel',
+        '///secret/path',
+        'https://\\escaped',
+        'https://:8080/path',
+        'https://user:pass@/path',
+        'https:/single-slash',
+      ]) {
+        expect(() => computeUrlKeyV2(emptyHostUrl)).toThrow(UrlKeyError)
+      }
+    })
   })
 })

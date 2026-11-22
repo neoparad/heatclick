@@ -16,6 +16,7 @@ import {
   evaluatePageRolloutVerdict,
   evaluateProspectiveMetaAnalysis,
   evaluateReverseHoldbackBundle,
+  normalizeProbsWithFloor,
   planStratifiedPageRollout,
   recordChangeEffectObservation,
   runGeneratorWithPreflightRepair,
@@ -560,5 +561,61 @@ describe('lib/link/rollout/page-rollout & adaptive-allocation (§9.6, §9.8, §9
     });
     expect(externalLocked.status).toBe('not_entitled');
     expect(externalLocked.decision).toBe('fallback_default');
+  });
+
+  test('[H-07] normalizeProbsWithFloor is strictly idempotent via simplex water-filling so 10,000 replay draws match exact logged propensities without shrinkage', () => {
+    // 1. Strict idempotency on 2-arm and multi-arm inputs
+    const p2Once = normalizeProbsWithFloor([1, 9], 2, 0.25);
+    expect(p2Once[0]).toBeCloseTo(0.25, 12);
+    expect(p2Once[1]).toBeCloseTo(0.75, 12);
+    const p2Twice = normalizeProbsWithFloor(p2Once, 2, 0.25);
+    expect(Math.abs(p2Twice[0] - p2Once[0])).toBeLessThan(1e-15);
+    expect(Math.abs(p2Twice[1] - p2Once[1])).toBeLessThan(1e-15);
+
+    // Already-valid interior propensity [0.30, 0.70] with floor 0.25 MUST NOT shrink to [0.40, 0.60]!
+    const interior = normalizeProbsWithFloor([0.3, 0.7], 2, 0.25);
+    expect(interior[0]).toBeCloseTo(0.3, 12);
+    expect(interior[1]).toBeCloseTo(0.7, 12);
+
+    // 3-arm active-set water-filling: [0.05, 0.35, 0.60] with floor 0.20 -> [0.20, 0.2947368..., 0.5052631...]
+    const p3Once = normalizeProbsWithFloor([0.05, 0.35, 0.6], 3, 0.2);
+    const p3Twice = normalizeProbsWithFloor(p3Once, 3, 0.2);
+    for (let k = 0; k < 3; k += 1) {
+      expect(p3Once[k]).toBeGreaterThanOrEqual(0.2 - 1e-15);
+      expect(Math.abs(p3Twice[k] - p3Once[k])).toBeLessThan(1e-15);
+    }
+
+    // 2. Policy returning already-floored [0.30, 0.70] retains exact propensity inside 10,000-replay verifier
+    const policyCalls: number[][] = [];
+    const fixedLoggedPolicy = () => {
+      const p = normalizeProbsWithFloor([0.3, 0.7], 2, 0.25);
+      policyCalls.push(p);
+      return p;
+    };
+    const arrivals: AdaptiveArrivalObservation[] = Array.from({ length: 40 }, (_, i) => ({
+      arrivalIndex: i,
+      batchIndex: 0,
+      armIndex: i % 10 < 7 ? 1 : 0,
+      propensity: i % 10 < 7 ? 0.7 : 0.3,
+      outcome: i % 3 === 0 ? 1 : 0,
+      inUniformSlice: i % 10 === 0,
+    }));
+    const res = verifyAdaptiveAllocationPolicy({
+      experimentId: 'exp_h07_idempotent',
+      numArms: 2,
+      targetArmIndex: 1,
+      arrivals,
+      loggedPolicy: fixedLoggedPolicy,
+      preregLocked: true,
+      allocatorLoggedBeforeOutcomes: true,
+      integrityStatus: 'pass',
+      platformCanaryPassed: true,
+      durationDays: 14,
+      replayCount: 10_000,
+      evaluatedAtIso: '2026-11-20T00:00:00Z',
+    });
+    expect(res.replayCountExecuted).toBe(10_000);
+    expect(policyCalls.length).toBe(10_000);
+    expect(normalizeProbsWithFloor(policyCalls[0], 2, 0.25)[1]).toBeCloseTo(0.7, 12);
   });
 });

@@ -113,7 +113,9 @@ export async function GET(request: Request): Promise<NextResponse> {
     })
   }
 
-  // Stage 5 (続 M-12): KV-first merge with POC fallback
+  // Stage 5 (続 M-12) + Wave 8 M-07: KV-first merge with fail-closed behavior on KV failure.
+  // If KV cannot be read or validated, we MUST NOT resurrect paused/archived POC scenarios;
+  // serve the empty no-store payload instead.
   let kvScenarios: Scenario[] = []
   try {
     const repo = createScenarioRepository()
@@ -121,10 +123,15 @@ export async function GET(request: Request): Promise<NextResponse> {
   } catch (e) {
     if (e instanceof CloudflareKvError || e instanceof ScenarioValidationError) {
       // eslint-disable-next-line no-console
-      console.warn(`[scenarios/runtime] KV read failed, POC fallback only: ${(e as Error).message}`)
-    } else {
-      throw e
+      console.warn(
+        `[scenarios/runtime] KV read failed, serving fail-closed empty payload: ${(e as Error).message}`,
+      )
+      return NextResponse.json(emptyRuntimePayload(tenant_id, site_id), {
+        status: 200,
+        headers: { 'Cache-Control': 'no-store', ...CORS_HEADERS },
+      })
     }
+    throw e
   }
   const pocScenarios = getPocScenariosForTenant(tenant_id, site_id)
   const merged = mergeForRuntime(kvScenarios, pocScenarios)
@@ -203,20 +210,20 @@ function emptyRuntimePayload(tenant_id: string, site_id: string): ScenarioRuntim
 }
 
 /**
- * Stage 5 (続 M-12): Merge KV + POC scenarios for runtime serving.
- *   - KV scenarios with status in {live, measure_only} are exposed.
- *     'draft' / 'paused' / 'archived' は server-side gate で除外。
- *   - REQ-SEC-006: 'preview' is NOT exposed in this public payload — preview is for
- *     authoring/QA review, not for delivery to every anonymous visitor. Gating it here
- *     (and not in scenario-runtime.js) ensures preview HTML never leaves the server to the
- *     general public, even if a client tweaks its evaluation.
- *   - POC fallback は KV に同 id が無いときのみ採用 (legacy 維持)。
+ * Stage 5 (続 M-12) + Wave 8 M-07: Merge KV + POC scenarios for runtime serving.
+ *   - KV scenarios with status in {live, measure_only} and `archived_at === null` are exposed.
+ *     'draft' / 'paused' / 'preview' / 'archived' は server-side gate で除外。
+ *   - CRITICAL (M-07): KV に同一 id のレコードが存在する場合 (たとえ 'paused' / 'draft' /
+ *     'archived' であっても)、POC fallback の live レコードは必ず抑制される。これにより管理画面から
+ *     POC シナリオを pause / archive した際に live へ復活するバグを防ぐ。
  *   - updated_at desc sort で最新順配信。
  */
 function mergeForRuntime(kv: Scenario[], poc: ReadonlyArray<Scenario>): Scenario[] {
   const RUNTIME_STATUSES = new Set(['live', 'measure_only'])
+  const kvIds = new Set(kv.map((s) => s.id))
   const byId = new Map<string, Scenario>()
   for (const s of poc) {
+    if (kvIds.has(s.id)) continue
     if (s.archived_at !== null) continue
     if (!RUNTIME_STATUSES.has(s.status)) continue
     byId.set(s.id, s)
@@ -224,7 +231,7 @@ function mergeForRuntime(kv: Scenario[], poc: ReadonlyArray<Scenario>): Scenario
   for (const s of kv) {
     if (s.archived_at !== null) continue
     if (!RUNTIME_STATUSES.has(s.status)) continue
-    byId.set(s.id, s) // KV overrides POC for same id
+    byId.set(s.id, s)
   }
   return [...byId.values()].sort((a, b) => (a.updated_at > b.updated_at ? -1 : 1))
 }

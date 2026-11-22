@@ -187,4 +187,25 @@ describe('lib/link/residency/oss-prep (§11.11 #12 / D-28)', () => {
     expect(codes).toContain('UNFIXED_WEAKNESS_DOC_REF');
     expect(codes).toContain('PROPRIETARY_PATH_IN_OSS_BUNDLE');
   });
+
+  test('Wave 8 Regression (H-22): catches actual v2 proprietary directories (actors/, ai-layer/, oem/) and fails closed on unclassified paths', () => {
+    const res = auditOssExportBoundary([
+      {
+        relativePath: 'lib/link/actors/verdict-engine.ts',
+        content: 'export const x = 1;',
+      },
+      {
+        relativePath: 'lib/link/ai-layer/local-ai-scorer.ts',
+        content: 'export const y = 2;',
+      },
+      {
+        relativePath: 'mystery/unclassified/file.ts',
+        content: 'export const z = 3;',
+      },
+    ]);
+    expect(res.passed).toBe(false);
+    const codes = res.findings.map((f) => f.code);
+    expect(codes).toContain('PROPRIETARY_PATH_IN_OSS_BUNDLE');
+    expect(codes).toContain('UNCLASSIFIED_PATH_IN_OSS_BUNDLE');
+  });
 });

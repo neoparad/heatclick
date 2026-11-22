@@ -9,13 +9,17 @@ import {
   assertNoCrossInstrumentMixing,
   assertNoPosteriorAiProbability,
   BEHAVIORAL_STAT_COUNT,
+  boundWildAiPrevalenceAndLift,
   buildAiSearchLedger,
   buildInstrumentCHttpCrawlerFriction,
   buildInstrumentDWildBrowserAi,
   buildLocalAiModelCertificate,
   compressBehavioralStats60,
   computeFprUpperBound95,
+  computeGaussianLogDensity60,
+  computeSimultaneousWilsonIntervals,
   decompressBehavioralStats60,
+  divideConfidenceIntervalsConservative,
   evaluateInstrumentBLabTaskRun,
   LocalAiLikelihoodScorer,
   MAX_COMPRESSED_BEHAVIORAL_BYTES,
@@ -389,5 +393,137 @@ describe('AI Search 8-Stage Integrated Ledger (§7.7)', () => {
     expect(surf.economics.value_vs_cost_range.lower_observed_value_jpy).toBe(45000)
     expect(surf.economics.value_vs_cost_range.upper_inferred_value_jpy).toBeGreaterThan(45000)
     expect(surf.spike_alert.spike_detected).toBe(true)
+  })
+})
+
+// ===========================================================================
+// Wave 8 Adversarial Regression Tests: [H-30] Hard Certification, Simultaneous CIs, Conservative Division & 60D Log-Normalizer
+// ===========================================================================
+
+describe('Wave 8 Adversarial Regressions: [H-30] Local AI Scorer Rigor & Feature Provenance Ban', () => {
+  const validEightFamilies = {
+    f1: 0.92,
+    f2: 0.9,
+    f3: 0.95,
+    f4: 0.89,
+    f5: 0.88,
+    f6: 0.91,
+    f7: 0.93,
+    f8: 0.87,
+  }
+
+  test('[H-30] hard certification gates reject high FPR / low recall / poor ECE, and scorer refuses automated promotion on uncertified cert', () => {
+    const highFprCert = buildLocalAiModelCertificate({
+      certificate_id: 'cert_high_fpr',
+      model_version: 'local-ai/bad-fpr',
+      issued_at: '2026-11-20T00:00:00Z',
+      positive_family_recalls: validEightFamilies,
+      unseen_framework_recalls: {},
+      threshold_panel_n: 300,
+      test_panel_n: 1000,
+      test_panel_false_positives: 25, // > 1% FPR cap!
+      panel_cohort_coverage: {
+        assistive_tech_included: true,
+        input_methods_included: true,
+        ad_blockers_included: true,
+      },
+      wild_flagged_rate: 0.03,
+      panel_vs_wild_auc: 0.5,
+      expected_calibration_error: 0.12,
+      roc_auc: 0.65,
+    })
+    expect(highFprCert.valid).toBe(false)
+    expect(highFprCert.certified).toBe(false)
+    expect(highFprCert.gate_failures.some((f) => f.includes('human_fpr_upper_bound_exceeds_cap'))).toBe(true)
+    expect(highFprCert.gate_failures.some((f) => f.includes('calibration_ece_exceeds_cap'))).toBe(true)
+    expect(highFprCert.gate_failures.some((f) => f.includes('roc_auc_below_floor'))).toBe(true)
+
+    const scorerWithBadCert = new LocalAiLikelihoodScorer({
+      certificate: highFprCert,
+      human_centroid_60: new Array<number>(60).fill(0.2),
+      human_scale: 0.2,
+      family_profiles: [{ family_id: 'f1', centroid_60: new Array<number>(60).fill(0.9), scale: 0.2 }],
+    })
+    const botVec = compressBehavioralStats60({ stats_60: new Array<number>(60).fill(0.9) })
+    const refused = scorerWithBadCert.scorePv({
+      pv_id: 'pv_must_refuse',
+      pointer_type: 'fine',
+      interaction_event_count: 30,
+      compressed_stats_60: botVec,
+    })
+    expect(refused.scorable).toBe(false)
+    expect(refused.status).toBe('unscorable')
+    expect(refused.unscorable_reason).toBe('uncertified_model_certificate')
+  })
+
+  test('[H-30] conservative CI division returns unidentifiable when denominator CI touches/contains 0, and simultaneous Wilson CIs adjust for k buckets', () => {
+    const unid = divideConfidenceIntervalsConservative(
+      { lower: 0.02, upper: 0.08 },
+      { lower: 0, upper: 0.15 },
+    )
+    expect(unid.identifiable).toBe(false)
+    expect(unid.upper).toBeNull()
+
+    // Small recall trial (1 hit out of 4) vs high FPR -> tpr_L - fpr_U <= 0 -> unidentifiable!
+    const unidPrev = boundWildAiPrevalenceAndLift({
+      wild_flagged_count: 5,
+      wild_scorable_n: 100,
+      panel_false_positives: 10,
+      panel_n: 50,
+      positive_recall_hits: 1,
+      positive_recall_trials: 4,
+    })
+    expect(unidPrev.identifiable).toBe(false)
+    expect(unidPrev.status).toBe('unidentifiable')
+    expect(unidPrev.prevalence_upper).toBeNull()
+
+    // Well-powered panel & recall -> identifiable conservative prevalence bounds
+    const okPrev = boundWildAiPrevalenceAndLift({
+      wild_flagged_count: 50,
+      wild_scorable_n: 1000,
+      panel_false_positives: 0,
+      panel_n: 1000,
+      positive_recall_hits: 190,
+      positive_recall_trials: 200,
+    })
+    expect(okPrev.identifiable).toBe(true)
+    expect(okPrev.prevalence_upper!).toBeGreaterThan(okPrev.prevalence_lower)
+    expect(okPrev.prevalence_upper!).toBeLessThanOrEqual(0.2)
+
+    // Simultaneous Wilson intervals: k=4 buckets yields strictly wider CI than unadjusted k=1
+    const single = computeSimultaneousWilsonIntervals([
+      { bucket_id: 'b1', successes: 20, trials: 100 },
+    ])[0]
+    const quad = computeSimultaneousWilsonIntervals([
+      { bucket_id: 'b1', successes: 20, trials: 100 },
+      { bucket_id: 'b2', successes: 30, trials: 100 },
+      { bucket_id: 'b3', successes: 10, trials: 100 },
+      { bucket_id: 'b4', successes: 40, trials: 100 },
+    ])[0]
+    expect(quad.upper - quad.lower).toBeGreaterThan(single.upper - single.lower)
+  })
+
+  test('[H-30] includes full 60D Gaussian log-determinant normalizer and bans provenance=model_inferred input features', () => {
+    const center = new Array<number>(60).fill(0.5)
+    const tight = computeGaussianLogDensity60(center, center, 0.1)
+    const wide = computeGaussianLogDensity60(center, center, 0.5)
+    // At x === mu, tighter covariance (0.1 vs 0.5) MUST have strictly higher log-density by 60 * ln(5)!
+    expect(tight.logDensity - wide.logDensity).toBeCloseTo(60 * Math.log(5), 5)
+
+    // Rejects model_inferred provenance in behavioral input/retraining and Instrument D
+    expect(() =>
+      compressBehavioralStats60({
+        stats_60: center,
+        feature_provenances: [{ key: 'prior_session_ai_flag', provenance: 'model_inferred' }],
+      }),
+    ).toThrow(/Model-inferred feature provenance/)
+
+    expect(() =>
+      buildInstrumentDWildBrowserAi({
+        sub_tier: 'model_inferred',
+        behavioral_metrics: { behavioral_stat_0: 0.4 },
+        behavioral_summary_note: 'Observed scroll distribution',
+      }),
+    ).toThrow(/Classifier feature/)
   })
 })

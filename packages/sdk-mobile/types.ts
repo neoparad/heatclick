@@ -2,7 +2,7 @@
  * UGOKI LINK v2 — Mobile App SDK Types (iOS, Android, React Native, Flutter — §11.11 item 5)
  */
 
-import type { ConsentMode, ConsentPurpose } from '@/packages/contract/schema';
+import type { CollectionLane, ConsentMode, ConsentPurpose } from '@/packages/contract/schema';
 
 export const MOBILE_PLATFORMS = [
   'ios',
@@ -13,7 +13,7 @@ export const MOBILE_PLATFORMS = [
 
 export type MobilePlatform = (typeof MOBILE_PLATFORMS)[number];
 
-export type MobileDataLane = 'standard' | 'customer_defined' | 'session_replay';
+export type MobileDataLane = CollectionLane;
 
 export type MobileSegmentCallType =
   | 'identify'

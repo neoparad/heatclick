@@ -33,7 +33,50 @@ export const LOCAL_AI_CLASSIFIER_FEATURE_METRICS: ReadonlySet<string> = new Set(
   'focus_switch_rate',
   'hover_to_click_latency_ms',
   'mouse_straightness_ratio',
+  'novelty_score',
+  'max_likelihood_ratio',
+  'family_likelihood_ratio',
 ])
+
+export function isLocalAiClassifierFeatureMetric(metricKey: string): boolean {
+  const norm = metricKey.trim().toLowerCase()
+  return (
+    LOCAL_AI_CLASSIFIER_FEATURE_METRICS.has(norm) ||
+    /^behavioral_stat_\d+$/.test(norm) ||
+    norm.startsWith('family_likelihood_ratio')
+  )
+}
+
+export interface FeatureProvenanceDescriptor {
+  readonly feature_key?: string
+  readonly key?: string
+  readonly provenance: 'observed' | 'verified_actor' | 'explicit_evidence' | 'model_inferred' | string
+}
+
+export function assertNoModelInferredInputFeatures(
+  features: readonly FeatureProvenanceDescriptor[] | Readonly<Record<string, string>> | undefined,
+): void {
+  if (!features) return
+  if (Array.isArray(features)) {
+    const leaked = features
+      .filter((f) => f.provenance === 'model_inferred')
+      .map((f) => f.feature_key ?? f.key ?? 'unknown_feature')
+    if (leaked.length > 0) {
+      throw new Error(
+        `Model-inferred feature provenance is strictly banned as downstream input: [${leaked.join(', ')}] (§7.5 / §7.6)`,
+      )
+    }
+    return
+  }
+  const leaked = Object.entries(features)
+    .filter(([, prov]) => prov === 'model_inferred')
+    .map(([k]) => k)
+  if (leaked.length > 0) {
+    throw new Error(
+      `Model-inferred feature provenance is strictly banned as downstream input: [${leaked.join(', ')}] (§7.5 / §7.6)`,
+    )
+  }
+}
 
 export interface ModelInferredDisclosureHeader {
   readonly verdict_version: string
@@ -60,13 +103,42 @@ export function validateActorBucketForHeatmap(params: {
   readonly kind: HeatmapKind
   readonly verdict_version: string
   readonly requested_metric_keys?: readonly string[]
+  readonly input_feature_provenances?:
+    | readonly FeatureProvenanceDescriptor[]
+    | Readonly<Record<string, string>>
   readonly model_inferred_header?: {
     readonly likelihood_ratio: number
     readonly fpr_upper_bound: number
     readonly certificate_id: string
+    readonly certified?: boolean
     readonly ai_probability?: never
   } | null
 }): ActorBucketPolicyCheck {
+  if (!params.verdict_version || !params.verdict_version.trim()) {
+    return Object.freeze({
+      allowed: false,
+      bucket: params.bucket,
+      verdict_version: params.verdict_version,
+      effective_render_mode: 'rejected',
+      model_inferred_disclosure: null,
+      rejection_reason: 'missing_verdict_version',
+    })
+  }
+
+  try {
+    assertNoModelInferredInputFeatures(params.input_feature_provenances)
+  } catch (err) {
+    return Object.freeze({
+      allowed: false,
+      bucket: params.bucket,
+      verdict_version: params.verdict_version,
+      effective_render_mode: 'rejected',
+      model_inferred_disclosure: null,
+      rejection_reason:
+        err instanceof Error ? err.message : 'model_inferred_input_feature_prohibited',
+    })
+  }
+
   // 1. HTTP Crawler: NEVER draws click, scroll_reach, or section_dwell behavioral maps!
   if (params.bucket === 'http_crawler') {
     return Object.freeze({
@@ -79,7 +151,7 @@ export function validateActorBucketForHeatmap(params: {
     })
   }
 
-  // 2. model_inferred: requires LR + FPR upper bound (NEVER probability), and bans classifier features!
+  // 2. model_inferred: requires LR + FPR upper bound (NEVER probability), certified cert, and bans classifier features!
   if (params.bucket === 'model_inferred') {
     if (!params.model_inferred_header) {
       return Object.freeze({
@@ -94,14 +166,49 @@ export function validateActorBucketForHeatmap(params: {
 
     // Runtime check against accidental ai_probability leak
     const rawHeader = params.model_inferred_header as Record<string, unknown>
-    if ('ai_probability' in rawHeader || 'p_ai' in rawHeader || 'bot_probability' in rawHeader) {
+    if (
+      'ai_probability' in rawHeader ||
+      'p_ai' in rawHeader ||
+      'bot_probability' in rawHeader ||
+      'posterior_ai_probability' in rawHeader
+    ) {
       throw new Error(
         'Prohibited posterior AI probability detected on model_inferred heatmap (§7.5 / §11.12)',
       )
     }
 
+    if (params.model_inferred_header.certified === false) {
+      return Object.freeze({
+        allowed: false,
+        bucket: params.bucket,
+        verdict_version: params.verdict_version,
+        effective_render_mode: 'rejected',
+        model_inferred_disclosure: null,
+        rejection_reason: 'uncertified_model_certificate_rejected',
+      })
+    }
+
+    if (
+      !params.model_inferred_header.certificate_id ||
+      !params.model_inferred_header.certificate_id.trim() ||
+      !Number.isFinite(params.model_inferred_header.likelihood_ratio) ||
+      params.model_inferred_header.likelihood_ratio <= 0 ||
+      !Number.isFinite(params.model_inferred_header.fpr_upper_bound) ||
+      params.model_inferred_header.fpr_upper_bound <= 0 ||
+      params.model_inferred_header.fpr_upper_bound > 1
+    ) {
+      return Object.freeze({
+        allowed: false,
+        bucket: params.bucket,
+        verdict_version: params.verdict_version,
+        effective_render_mode: 'rejected',
+        model_inferred_disclosure: null,
+        rejection_reason: 'invalid_model_inferred_disclosure_header_bounds',
+      })
+    }
+
     const forbiddenUsed = (params.requested_metric_keys ?? []).filter((k) =>
-      LOCAL_AI_CLASSIFIER_FEATURE_METRICS.has(k),
+      isLocalAiClassifierFeatureMetric(k),
     )
     if (forbiddenUsed.length > 0) {
       return Object.freeze({
@@ -152,6 +259,9 @@ export interface ExperimentVariantHeatmapSlice {
   readonly skel_fp: string | null
   readonly css_fp: string | null
   readonly unit_key_serialized: string
+  readonly actor_bucket?: HeatmapActorBucket
+  readonly verdict_version?: string
+  readonly model_inferred_disclosure?: ModelInferredDisclosureHeader | null
 }
 
 export interface ExperimentHeatmapComparisonContract {
@@ -181,12 +291,35 @@ export function buildExperimentHeatmapComparison(params: {
     reasons.push('mismatched_exposure_conditions_across_variants')
   }
 
+  const verdictVersions = new Set(
+    params.slices.map((s) => s.verdict_version).filter((v): v is string => Boolean(v)),
+  )
+  if (verdictVersions.size > 1) {
+    reasons.push('mismatched_verdict_versions_across_variants')
+  }
+
   for (const s of params.slices) {
     if (s.experiment_id !== params.experiment_id) {
       reasons.push(`slice_experiment_mismatch:${s.experiment_id}`)
     }
     if (s.denominator_units < minUnits) {
       reasons.push(`insufficient_denominator_units:${s.variant_key}=${s.denominator_units}`)
+    }
+    if (s.actor_bucket === 'model_inferred') {
+      const disc = s.model_inferred_disclosure
+      if (
+        !disc ||
+        !disc.certificate_id?.trim() ||
+        !disc.verdict_version?.trim() ||
+        !Number.isFinite(disc.likelihood_ratio) ||
+        disc.likelihood_ratio <= 0 ||
+        !Number.isFinite(disc.fpr_upper_bound) ||
+        disc.fpr_upper_bound <= 0 ||
+        disc.fpr_upper_bound > 1 ||
+        disc.probability_omitted_by_design !== true
+      ) {
+        reasons.push(`missing_or_invalid_model_inferred_disclosure:${s.variant_key}`)
+      }
     }
   }
 

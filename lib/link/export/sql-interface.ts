@@ -17,9 +17,11 @@
 
 import type { VerifiedPrincipal } from '../auth';
 import {
+  extractSqlFunctionCalls,
   inspectSqlAst,
   perTenantRoUsername,
   TenantScopedQueryBuilder,
+  tokenizeSql,
   type SanctionedClickHouseQuery,
 } from '../isolation';
 import {
@@ -166,39 +168,46 @@ export interface AdHocSqlResponse {
   readonly envelope: SerializedResponseEnvelope | null;
 }
 
-function extractCalledFunctions(sql: string): string[] {
-  // Strip string literals first so function-like text in literals isn't flagged
-  const withoutStrings = sql.replace(/'(?:''|\\'|[^'])*'/g, "''");
-  const found = new Set<string>();
-  const regex = /\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g;
-  const sqlClauseKeywords = new Set([
-    'select',
-    'from',
-    'where',
-    'in',
-    'not',
-    'and',
-    'or',
-    'as',
-    'on',
-    'having',
-    'exists',
-    'case',
-    'when',
-    'over',
-    'partition',
-    'values',
-    'tuple',
-  ]);
-  let match: RegExpExecArray | null = regex.exec(withoutStrings);
-  while (match !== null) {
-    const fn = match[1]!.toLowerCase();
-    if (!sqlClauseKeywords.has(fn)) {
-      found.add(fn);
-    }
-    match = regex.exec(withoutStrings);
+function brandDataNumbers(
+  value: unknown,
+  refId: string,
+  createdAt: string
+): unknown {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return createDataLayerMetric(value, refId, { createdAt });
   }
-  return Array.from(found).sort();
+  if (Array.isArray(value)) {
+    return value.map((item) => brandDataNumbers(item, refId, createdAt));
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = brandDataNumbers(v, refId, createdAt);
+    }
+    return out;
+  }
+  return value;
+}
+
+function extractCalledFunctions(sql: string): string[] {
+  return extractSqlFunctionCalls(sql);
+}
+
+function hasForbiddenSchemaToken(sql: string): boolean {
+  const lex = tokenizeSql(sql);
+  for (let i = 0; i < lex.tokens.length - 1; i += 1) {
+    const t = lex.tokens[i]!;
+    const next = lex.tokens[i + 1]!;
+    if (
+      t.kind === 'IDENT' &&
+      (t.lower === 'system' || t.lower === 'information_schema' || t.lower === 'pg_catalog') &&
+      next.kind === 'PUNCT' &&
+      next.value === '.'
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export class TenantSqlInterface {
@@ -235,9 +244,11 @@ export class TenantSqlInterface {
       };
     }
 
-    // 1. Block `system.*` explicitly before AST inspection
-    if (/\bsystem\s*\./i.test(req.sql)) {
-      violations.push('forbidden_system_table: queries against system.* are strictly forbidden');
+    // 1. Block `system.*`, `information_schema.*`, and `pg_catalog.*` via state-machine lexer
+    if (hasForbiddenSchemaToken(req.sql)) {
+      violations.push(
+        'forbidden_system_table: queries against system.*, information_schema.*, or pg_catalog.* are strictly forbidden'
+      );
     }
 
     // 2. Function whitelist & forbidden external-connection functions
@@ -447,14 +458,18 @@ export class TenantSqlInterface {
           interval: null,
         },
       },
-      data: {
-        clickhouse_user: validation.sanitizedQuery.clickhouseUser,
-        tables: validation.sanitizedQuery.tables,
-        authoritative_truth_prohibited: isAdHoc,
-        ad_hoc_sql_not_authoritative: isAdHoc,
-        rows: execResult.rows,
-        duration_ms: execResult.durationMs,
-      },
+      data: brandDataNumbers(
+        {
+          clickhouse_user: validation.sanitizedQuery.clickhouseUser,
+          tables: validation.sanitizedQuery.tables,
+          authoritative_truth_prohibited: isAdHoc,
+          ad_hoc_sql_not_authoritative: isAdHoc,
+          rows: execResult.rows,
+          duration_ms: execResult.durationMs,
+        },
+        ref.ref_id,
+        nowIso
+      ),
     });
 
     return {

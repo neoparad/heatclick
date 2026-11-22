@@ -10,8 +10,8 @@
  *   IME share, native/aria/node validation errors; password/payment fields record PRESENCE ONLY
  *   and immediately suppress Tier 1/2 kinematic timeline emission for the PV.
  * - Activations: `el_fp`, relative coords (omitted inside forms/choice groups/keypads per TEL A5 #10),
- *   `multi_click` & `no_effect_click` statistics, `tel:`/`mailto:` scheme-only counting (no PII),
- *   ≤50 in-browser conversion rules with 2s/order-hash deduplication.
+ *   `multi_click` / rage-click & `no_effect_click` / dead-click statistics, `tel:`/`mailto:` scheme-only
+ *   counting (no PII), ≤50 in-browser conversion rules with 2s/order-hash deduplication.
  * - Replay Tier 0/1/2: integers-only 8 KiB ring buffer; Tier 1/2 strictly gated behind Owner
  *   Decision `D-08` (`requireDecisionEntitled('D-08')` -> `not_entitled` until recorded).
  * - Heavy-device degradation ladder (`degrade_level`: 0 -> 1 -> 2 -> 3).
@@ -21,19 +21,20 @@ import { requireDecisionEntitled } from '../contract/ledgers';
 import {
   sha256Hex,
   type ActivationKind,
-  type BlockRegisterPayload,
   type ConsentPurpose,
-  type FieldRegisterPayload,
-  type FormRegisterPayload,
-  type MediaRegisterPayload,
-  type SectionRegisterPayload,
-  type TelemetryLogItem,
   type VitalsRegisterPayload,
 } from '../contract/schema';
 import { rewriteOutboundForLabSink } from './lab-sink';
 import type {
   BlockGeometryInput,
+  BrowserBlockRegisterPayload,
+  BrowserFieldRegisterPayload,
+  BrowserFormRegisterPayload,
+  BrowserMediaRegisterPayload,
+  BrowserSectionRegisterPayload,
+  BrowserTelemetryLogItem,
   ClickEventInput,
+  ConversionPredicateKind,
   ConversionRuleSpec,
   DegradeLevel,
   FormErrorInput,
@@ -48,6 +49,63 @@ export const MAX_CONVERSION_RULES = 50 as const;
 const MAX_SECTION_TOKENS = 64;
 const MAX_ERROR_HASHES = 8;
 const MAX_TIMELINE_RING_INTS = 2048; // 2048 * 4B = 8 KiB ring cap (TEL M6)
+
+export interface NormalizedConversionRule {
+  readonly cv_key: string;
+  readonly rule_ver: number;
+  readonly predicate_kind: ConversionPredicateKind;
+  readonly predicate_values: readonly string[];
+}
+
+export function normalizeConversionRule(rule: ConversionRuleSpec): NormalizedConversionRule {
+  const rec = rule as unknown as Record<string, unknown>;
+  const rawKind = (rec.predicate_kind ?? rec.match_kind ?? 'selector') as string;
+  const rawValue = rec.predicate_value ?? rec.match_value ?? '';
+  const ruleVer =
+    typeof rec.rule_ver === 'number' && Number.isFinite(rec.rule_ver) && rec.rule_ver >= 1
+      ? Math.trunc(rec.rule_ver)
+      : 1;
+
+  let kind: ConversionPredicateKind;
+  switch (rawKind) {
+    case 'id':
+    case 'class':
+    case 'selector':
+    case 'text':
+    case 'href':
+    case 'href_prefix':
+    case 'el_fp':
+    case 'el_fp_set':
+      kind = rawKind;
+      break;
+    default:
+      kind = 'selector';
+      break;
+  }
+
+  let values: string[];
+  if (Array.isArray(rawValue)) {
+    values = rawValue.map((v) => String(v).trim()).filter((v) => v.length > 0);
+  } else if (typeof rawValue === 'string') {
+    if (kind === 'el_fp_set' || kind === 'el_fp') {
+      values = rawValue
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+    } else {
+      values = [rawValue];
+    }
+  } else {
+    values = [];
+  }
+
+  return {
+    cv_key: String(rec.cv_key ?? ''),
+    rule_ver: ruleVer,
+    predicate_kind: kind,
+    predicate_values: values,
+  };
+}
 
 export interface InternalSectionState {
   readonly sec_fp: string;
@@ -115,12 +173,14 @@ export interface MultiClickStat {
   readonly count: number;
   readonly minIntervalMs: number;
   readonly spreadPx: number;
+  readonly rageClick: boolean;
 }
 
 export interface NoEffectClickStat {
   readonly el_fp: string;
   readonly effectBits: number;
   readonly timeToFirstEffectBin: 0 | 1 | 2 | 3; // 0: <600ms, 1: 600-2000ms, 2: >2000ms, 3: none
+  readonly deadClick: boolean;
 }
 
 export interface ReplayEmissionDecision {
@@ -161,6 +221,11 @@ function velocityBinIndex(pxPerSec: number): 0 | 1 | 2 | 3 {
   if (pxPerSec <= 400) return 1;
   if (pxPerSec <= 1500) return 2;
   return 3;
+}
+
+function clampPermille(val: number | undefined): number | undefined {
+  if (val === undefined || !Number.isFinite(val)) return undefined;
+  return Math.max(0, Math.min(1000, Math.round(val)));
 }
 
 function sanitizeDestKeyClick(
@@ -205,7 +270,7 @@ export class BehaviourCaptureEngine {
   private readonly fixedTopPx: number;
   private readonly fixedBottomPx: number;
   private readonly blockSampleRate: number;
-  private readonly conversionRules: readonly ConversionRuleSpec[];
+  private readonly normalizedRules: readonly NormalizedConversionRule[];
   private readonly replayCfg: ReplayEntitlementConfig;
   private readonly labMarker: LabMarkerToken | null;
   private readonly labSinkPath?: string;
@@ -235,8 +300,11 @@ export class BehaviourCaptureEngine {
   private readonly forms = new Map<string, InternalFormState>();
   private readonly media = new Map<string, InternalMediaState>();
   private vitals: VitalsRegisterPayload = {};
+  private vitalsDirty = false;
+  private errorHashesDirty = false;
+  private emittedSectionTokenCount = 0;
 
-  private readonly logItems: TelemetryLogItem[] = [];
+  private readonly logItems: BrowserTelemetryLogItem[] = [];
   private nextLogOrdinal = 1;
   private readonly conversionDedupeKeys = new Set<string>();
   private readonly recentClicksByEl = new Map<string, Array<{ t: number; y: number }>>();
@@ -263,7 +331,10 @@ export class BehaviourCaptureEngine {
     this.docHMax = this.docHFirst;
     this.docHLastValue = this.docHFirst;
     this.blockSampleRate = Math.min(1, Math.max(0.001, options.blockSampleRate));
-    this.conversionRules = options.conversionRules.slice(0, MAX_CONVERSION_RULES);
+    this.normalizedRules = options.conversionRules
+      .slice(0, MAX_CONVERSION_RULES)
+      .map(normalizeConversionRule)
+      .filter((r) => r.cv_key.length > 0 && r.predicate_values.length > 0);
     this.replayCfg = options.replay;
     this.labMarker = options.labMarker ?? null;
     this.labSinkPath = options.labSinkPath;
@@ -394,7 +465,10 @@ export class BehaviourCaptureEngine {
         const overlapBottom = Math.min(focalBottom, geo.bottomPx);
         const overlapPx = Math.max(0, overlapBottom - overlapTop);
         const inFocal = overlapPx > 0;
-        const fracPermille = Math.min(1000, Math.round((overlapPx / Math.min(secHeight, freeH * 0.4)) * 1000));
+        const fracPermille = Math.min(
+          1000,
+          Math.round((overlapPx / Math.min(secHeight, freeH * 0.4)) * 1000)
+        );
 
         if (overlapPx > maxOverlap) {
           maxOverlap = overlapPx;
@@ -486,8 +560,14 @@ export class BehaviourCaptureEngine {
 
     // Kinematic dead-reckoning buffer (integers only, 8 KiB ring, degradeLevel === 0)
     if (this.degradeLevel === 0 && params.visible && !this.hasSensitiveFieldOnPv) {
-      const tolPx = Math.max(8, Math.round((this.viewportHeightPx * this.timelineTolerancePct) / 100));
-      if (Math.abs(scrollY - this.lastTimelineScrollPx) >= tolPx || now - this.lastTimelineMs >= 150) {
+      const tolPx = Math.max(
+        8,
+        Math.round((this.viewportHeightPx * this.timelineTolerancePct) / 100)
+      );
+      if (
+        Math.abs(scrollY - this.lastTimelineScrollPx) >= tolPx ||
+        now - this.lastTimelineMs >= 150
+      ) {
         const dt100 = Math.max(0, Math.round((now - this.lastTimelineMs) / 100));
         const secOrd = Math.max(0, primaryFocalIdx);
         const offsetPx8 = Math.round(scrollY / 8);
@@ -504,7 +584,12 @@ export class BehaviourCaptureEngine {
     this.lastAdvanceMs = now;
   }
 
-  private appendTimelineKeyframe(dt100: number, tableRev: number, secOrd: number, offsetPx8: number): void {
+  private appendTimelineKeyframe(
+    dt100: number,
+    tableRev: number,
+    secOrd: number,
+    offsetPx8: number
+  ): void {
     if (this.timelineRingInts.length + 4 > MAX_TIMELINE_RING_INTS) {
       // Coarsen tolerance 2 -> 4 -> 8% and decimate ring by half (TEL M6)
       this.timelineTolerancePct = this.timelineTolerancePct === 2 ? 4 : 8;
@@ -566,7 +651,7 @@ export class BehaviourCaptureEngine {
         el_fp: input.el_fp,
         isSensitive: input.isSensitive,
         order_idx: this.formFocusOrderCounter,
-        focus_n: 1,
+        focus_n: input.isSensitive ? 0 : 1,
         focus_ms: 0,
         first_input_latency_ms: null,
         refocus_n: 0,
@@ -684,9 +769,10 @@ export class BehaviourCaptureEngine {
     this.markUserInput(input.tMono);
 
     // Inside form / choice group / keypad: record ONLY group_fp, omit coords (TEL A5 #10 / tel.G7)
-    const recordedElFp = input.insideFormOrChoiceOrKeypad
-      ? (input.groupFp ?? 'group_redacted')
-      : input.el_fp;
+    const suppressCoords = Boolean(input.insideFormOrChoiceOrKeypad);
+    const recordedElFp = suppressCoords ? (input.groupFp ?? 'group_redacted') : input.el_fp;
+    const xPermille = suppressCoords ? undefined : clampPermille(input.xPermille);
+    const yPermille = suppressCoords ? undefined : clampPermille(input.yPermille);
 
     // Detect tel:/mailto: destination kinds without leaking phone/email PII (§4.10)
     let activationKind: ActivationKind = input.activation_kind;
@@ -718,8 +804,13 @@ export class BehaviourCaptureEngine {
       }
     }
 
-    // Track multi_click burst statistics (server decides rage threshold!)
-    if (!input.insideFormOrChoiceOrKeypad) {
+    let isRageClick = false;
+    let isDeadClick = false;
+    let effectBitsVal: number | undefined;
+    let effectBinVal: 0 | 1 | 2 | 3 | undefined;
+
+    // Track multi_click / rage-click & dead-click / no-effect statistics
+    if (!suppressCoords) {
       const history = this.recentClicksByEl.get(recordedElFp) ?? [];
       const cutoff = input.tMono - 1000;
       const recent = history.filter((c) => c.t >= cutoff);
@@ -737,16 +828,24 @@ export class BehaviourCaptureEngine {
           minY = Math.min(minY, recent[i].y);
           maxY = Math.max(maxY, recent[i].y);
         }
+        const safeMinInterval = Number.isFinite(minInterval) ? minInterval : 0;
+        const spreadPx = Math.max(0, maxY - minY);
+        isRageClick = safeMinInterval <= 500 && spreadPx <= 64;
         this.multiClickStats.push({
           el_fp: recordedElFp,
           count: recent.length,
-          minIntervalMs: Number.isFinite(minInterval) ? minInterval : 0,
-          spreadPx: Math.max(0, maxY - minY),
+          minIntervalMs: safeMinInterval,
+          spreadPx,
+          rageClick: isRageClick,
         });
         this.pushLogItem({
           kind: 'multi_click_burst',
           t_mono: Math.round(input.tMono),
           el_fp: recordedElFp,
+          click_count: recent.length,
+          min_interval_ms: safeMinInterval,
+          spread_px: spreadPx,
+          rage_click: isRageClick,
         });
       }
 
@@ -760,10 +859,14 @@ export class BehaviourCaptureEngine {
               : effMs <= 2000
                 ? 1
                 : 2;
+        effectBitsVal = input.effectBits ?? 0;
+        effectBinVal = bin;
+        isDeadClick = effectBitsVal === 0 && (effMs === undefined || effMs > 2000);
         this.noEffectClickStats.push({
           el_fp: recordedElFp,
-          effectBits: input.effectBits ?? 0,
+          effectBits: effectBitsVal,
           timeToFirstEffectBin: bin,
+          deadClick: isDeadClick,
         });
       }
     }
@@ -774,11 +877,17 @@ export class BehaviourCaptureEngine {
       activation_kind: activationKind,
       el_fp: recordedElFp,
       ...(destKeyClick !== undefined ? { dest_key_click: destKeyClick } : {}),
+      ...(xPermille !== undefined ? { x_permille: xPermille } : {}),
+      ...(yPermille !== undefined ? { y_permille: yPermille } : {}),
+      ...(isRageClick ? { rage_click: true } : {}),
+      ...(effectBitsVal !== undefined ? { effect_bits: effectBitsVal } : {}),
+      ...(effectBinVal !== undefined ? { time_to_first_effect_bin: effectBinVal } : {}),
+      ...(isDeadClick ? { dead_click: true } : {}),
     });
 
     // Evaluate <=50 conversion rules IN-BROWSER; emit ONLY [cv_key, rule_ver, el_fp] (§4.10)
     const matchedConversions: string[] = [];
-    for (const rule of this.conversionRules) {
+    for (const rule of this.normalizedRules) {
       if (!this.matchesConversionRule(rule, input)) continue;
       const dedupeKey = input.orderRefHash
         ? `ord:${rule.cv_key}:${input.orderRefHash}`
@@ -802,32 +911,55 @@ export class BehaviourCaptureEngine {
       !destKeyClick.startsWith(new URL(this.pageOrigin).host.toLowerCase());
 
     return {
-      isCritical: isOutbound || matchedConversions.length > 0 || activationKind === 'tel_link' || activationKind === 'mailto_link',
+      isCritical:
+        isOutbound ||
+        matchedConversions.length > 0 ||
+        activationKind === 'tel_link' ||
+        activationKind === 'mailto_link',
       effectiveHref,
       matchedConversions,
     };
   }
 
-  private matchesConversionRule(rule: ConversionRuleSpec, input: ClickEventInput): boolean {
+  private matchesConversionRule(rule: NormalizedConversionRule, input: ClickEventInput): boolean {
+    const vals = rule.predicate_values;
+    if (vals.length === 0) return false;
     switch (rule.predicate_kind) {
       case 'id':
-        return input.elementId === rule.predicate_value;
+        return Boolean(input.elementId && vals.includes(input.elementId));
       case 'class':
-        return Boolean(input.elementClasses?.includes(rule.predicate_value));
+        return Boolean(input.elementClasses?.some((c) => vals.includes(c)));
       case 'selector':
-        return input.elementSelector === rule.predicate_value;
+        return Boolean(input.elementSelector && vals.includes(input.elementSelector));
       case 'text':
         return Boolean(
           input.elementTextForRuleMatchOnly &&
-            input.elementTextForRuleMatchOnly.includes(rule.predicate_value)
+            vals.some((v) => input.elementTextForRuleMatchOnly!.includes(v))
         );
       case 'href':
-        return Boolean(input.href && input.href.includes(rule.predicate_value));
+        return Boolean(input.href && vals.some((v) => input.href!.includes(v)));
+      case 'href_prefix': {
+        if (!input.href) return false;
+        const rawHref = input.href;
+        let resolvedHref: string | null = null;
+        let resolvedPath: string | null = null;
+        try {
+          const parsed = new URL(rawHref, this.pageOrigin);
+          resolvedHref = parsed.href;
+          resolvedPath = parsed.pathname;
+        } catch {
+          // ignore malformed URL
+        }
+        return vals.some(
+          (prefix) =>
+            rawHref.startsWith(prefix) ||
+            (resolvedHref !== null && resolvedHref.startsWith(prefix)) ||
+            (resolvedPath !== null && resolvedPath.startsWith(prefix))
+        );
+      }
+      case 'el_fp':
       case 'el_fp_set':
-        return rule.predicate_value
-          .split(',')
-          .map((s) => s.trim())
-          .includes(input.el_fp);
+        return vals.includes(input.el_fp);
     }
   }
 
@@ -868,17 +1000,25 @@ export class BehaviourCaptureEngine {
     bReg.dirty = true;
   }
 
-  public recordMediaProgress(blkFp: string, playedMs: number, completed = false): void {
+  public recordMediaProgress(
+    blkFp: string,
+    playedMs: number,
+    completed = false,
+    incrementPlays = false
+  ): void {
     let mReg = this.media.get(blkFp);
     if (!mReg) {
       mReg = { blk_fp: blkFp, played_ms: 0, plays: 1, completed: false, dirty: true };
       this.media.set(blkFp, mReg);
+    } else if (incrementPlays) {
+      mReg.plays += 1;
+      mReg.dirty = true;
     }
     if (playedMs > mReg.played_ms) {
       mReg.played_ms = Math.round(playedMs);
       mReg.dirty = true;
     }
-    if (completed) {
+    if (completed && !mReg.completed) {
       mReg.completed = true;
       mReg.dirty = true;
     }
@@ -886,6 +1026,7 @@ export class BehaviourCaptureEngine {
 
   public recordJsError(errorName: string, lineNo: number, colNo: number): void {
     this.jsErrorN += 1;
+    this.errorHashesDirty = true;
     const h = sha256Hex(`${errorName}:${lineNo}:${colNo}`).slice(0, 12);
     if (this.errorHashes.length < MAX_ERROR_HASHES && !this.errorHashes.includes(h)) {
       this.errorHashes.push(h);
@@ -901,6 +1042,7 @@ export class BehaviourCaptureEngine {
       ...this.vitals,
       [kind]: { value: Math.max(0, Math.round(value)), seq },
     };
+    this.vitalsDirty = true;
   }
 
   public recordAnchorJump(tMono: number): void {
@@ -990,8 +1132,8 @@ export class BehaviourCaptureEngine {
   // Frame Register Extraction (Delta vs Full) & Log Item Ack Compaction
   // =========================================================================
 
-  private pushLogItem(item: Omit<TelemetryLogItem, 'i'>): TelemetryLogItem {
-    const fullItem: TelemetryLogItem = {
+  private pushLogItem(item: Omit<BrowserTelemetryLogItem, 'i'>): BrowserTelemetryLogItem {
+    const fullItem: BrowserTelemetryLogItem = {
       i: this.nextLogOrdinal,
       ...item,
     };
@@ -1016,10 +1158,14 @@ export class BehaviourCaptureEngine {
     for (const f of this.fields.values()) f.dirty = false;
     for (const fm of this.forms.values()) fm.dirty = false;
     for (const m of this.media.values()) m.dirty = false;
+    this.vitalsDirty = false;
+    this.errorHashesDirty = false;
   }
 
   public hasDirtyState(): boolean {
     if (this.logItems.length > 0) return true;
+    if (this.vitalsDirty || this.errorHashesDirty) return true;
+    if (this.sectionTokens.length > this.emittedSectionTokenCount) return true;
     for (const s of this.sections.values()) if (s.dirty) return true;
     for (const b of this.blocks.values()) if (b.dirty) return true;
     for (const f of this.fields.values()) if (f.dirty) return true;
@@ -1033,15 +1179,17 @@ export class BehaviourCaptureEngine {
     readonly purposes: readonly ConsentPurpose[];
     readonly tMono: number;
   }): {
-    readonly sections: readonly SectionRegisterPayload[];
-    readonly blocks: readonly BlockRegisterPayload[];
-    readonly fields: readonly FieldRegisterPayload[];
-    readonly forms: readonly FormRegisterPayload[];
-    readonly media: readonly MediaRegisterPayload[];
+    readonly sections: readonly BrowserSectionRegisterPayload[];
+    readonly blocks: readonly BrowserBlockRegisterPayload[];
+    readonly fields: readonly BrowserFieldRegisterPayload[];
+    readonly forms: readonly BrowserFormRegisterPayload[];
+    readonly media: readonly BrowserMediaRegisterPayload[];
     readonly vitals: VitalsRegisterPayload | undefined;
-    readonly log_items: readonly TelemetryLogItem[];
+    readonly section_tokens: readonly string[];
+    readonly error_hashes: readonly string[];
+    readonly log_items: readonly BrowserTelemetryLogItem[];
   } {
-    const sections: SectionRegisterPayload[] = [];
+    const sections: BrowserSectionRegisterPayload[] = [];
     for (const s of this.sections.values()) {
       if (options.full || s.dirty) {
         sections.push({
@@ -1050,54 +1198,86 @@ export class BehaviourCaptureEngine {
           t_first_ms: s.t_first_ms,
           entries: s.entries,
           max_frac_permille: s.max_frac_permille,
+          gap_ms: [s.gap_ms[0], s.gap_ms[1], s.gap_ms[2], s.gap_ms[3]],
+          vel_ms: [s.vel_ms[0], s.vel_ms[1], s.vel_ms[2], s.vel_ms[3]],
         });
       }
     }
 
-    const blocks: BlockRegisterPayload[] = [];
+    const blocks: BrowserBlockRegisterPayload[] = [];
     for (const b of this.blocks.values()) {
       if (options.full || b.dirty) {
         blocks.push({
           blk_fp: b.blk_fp,
           vis_ms: b.vis_ms,
           copy_n: b.copy_n,
+          always_watch: b.alwaysWatch,
+          sample_pi: b.inclusionProb,
         });
       }
     }
 
-    const fields: FieldRegisterPayload[] = [];
+    const fields: BrowserFieldRegisterPayload[] = [];
     for (const f of this.fields.values()) {
       if (options.full || f.dirty) {
         fields.push({
           el_fp: f.el_fp,
+          form_fp: f.form_fp,
+          is_sensitive: f.isSensitive,
+          order_idx: f.order_idx,
+          focus_n: f.focus_n,
           focus_ms: f.focus_ms,
+          first_input_latency_ms: f.first_input_latency_ms,
+          refocus_n: f.refocus_n,
+          edit_bursts: f.edit_bursts,
+          correction_bursts: f.correction_bursts,
+          composition_inputs: f.composition_inputs,
+          total_inputs: f.total_inputs,
           invalid_n: f.invalid_n,
+          validation_observable: f.validation_observable,
+          filled_ever: f.filled_ever,
         });
       }
     }
 
-    const forms: FormRegisterPayload[] = [];
+    const forms: BrowserFormRegisterPayload[] = [];
     for (const fm of this.forms.values()) {
       if (options.full || fm.dirty) {
         forms.push({
           form_fp: fm.form_fp,
+          started: fm.started,
+          t_first_ms: fm.t_first_ms,
           submit_attempts: fm.submit_attempts,
+          blocked_submits: fm.blocked_submits,
+          last_field_fp: fm.last_field_fp,
         });
       }
     }
 
-    const media: MediaRegisterPayload[] = [];
+    const media: BrowserMediaRegisterPayload[] = [];
     for (const m of this.media.values()) {
       if (options.full || m.dirty) {
         media.push({
           blk_fp: m.blk_fp,
           played_ms: m.played_ms,
+          plays: m.plays,
+          completed: m.completed,
         });
       }
     }
 
+    // Emit section_tokens log item when new focal section transitions occurred ([H-10])
+    if (this.sectionTokens.length > this.emittedSectionTokenCount) {
+      this.pushLogItem({
+        kind: 'section_tokens',
+        t_mono: Math.round(options.tMono),
+        section_tokens: [...this.sectionTokens],
+      });
+      this.emittedSectionTokenCount = this.sectionTokens.length;
+    }
+
     // Unacknowledged log items ride every frame (§4.1 / TEL M1)
-    const outgoingLogs: TelemetryLogItem[] = [...this.logItems];
+    const outgoingLogs: BrowserTelemetryLogItem[] = [...this.logItems];
 
     // Kinematic timeline_chunk leaves the browser ONLY when D-08 entitlement passes!
     const replayDecision = this.evaluateKinematicTimelineEmission(options.purposes);
@@ -1111,7 +1291,7 @@ export class BehaviourCaptureEngine {
       this.timelineRingInts.length = 0;
     }
 
-    const hasVitals = Object.keys(this.vitals).length > 0;
+    const hasVitals = Object.keys(this.vitals).length > 0 && (options.full || this.vitalsDirty);
 
     return {
       sections,
@@ -1120,6 +1300,8 @@ export class BehaviourCaptureEngine {
       forms,
       media,
       vitals: hasVitals ? { ...this.vitals } : undefined,
+      section_tokens: [...this.sectionTokens],
+      error_hashes: [...this.errorHashes],
       log_items: outgoingLogs,
     };
   }

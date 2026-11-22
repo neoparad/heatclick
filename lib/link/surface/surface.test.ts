@@ -1,13 +1,25 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { NextRequest } from 'next/server';
 import {
   ALL_SCOPES,
   IdentityKeyRegistry,
   type VerifiedPrincipal,
 } from '@/lib/link/auth';
+import { AskService } from '@/lib/link/ask';
+import type { HeatmapFetchPrincipal, HeatmapRenderRequest, HeatmapRenderService } from '@/lib/link/heatmap-render';
+import { GET as mcpRouteGet, POST as mcpRoutePost } from '@/app/api/v1/mcp/route';
+import {
+  GET as heatmapRouteGet,
+  POST as heatmapRoutePost,
+} from '@/app/api/v1/sites/[siteId]/heatmap-image/route';
 import { validateSerializedEnvelope } from '@/packages/contract/response';
 import {
+  BoundedTtlMap,
   CostUnitRateLimiter,
   EmptyUnconnectedRepository,
   INTERNAL_SCREENS,
+  KeyPepperUnconfiguredError,
   LinkMcpServer,
   OPERATION_CATALOG,
   SegmentRegistry,
@@ -20,7 +32,10 @@ import {
   evaluateSegmentMembership,
   evaluateSegmentRule,
   evaluateSiteUsage,
+  getSurfaceRuntimeContext,
   loadInternalScreenViaV1,
+  resolveRuntimePepperSecret,
+  setSurfaceRuntimeContext,
   validateMcpContentProvenance,
   type SiteRuntimeConfig,
   type SurfaceDataRepository,
@@ -599,5 +614,514 @@ describe('lib/link/surface — OpenAPI 3.1, Single Pipeline, MCP, Segments, Jour
       now,
     });
     expect(sessOverview.mode).toBe('v1_ok');
+  });
+
+  test('[C-01] fails closed (503) in production when UGOKILINK_KEY_PEPPER is unset, eliminates static fallback strings, and enforces Bearer auth + tenant-scoped sessions on ALL /api/v1/mcp methods', async () => {
+    // 1. Static source audit: zero hardcoded fallback pepper anywhere in http-adapter.ts
+    const adapterSrc = fs.readFileSync(path.join(__dirname, 'http-adapter.ts'), 'utf8');
+    expect(adapterSrc).not.toContain('unconfigured_ephemeral_pepper_do_not_use_in_prod');
+
+    // 2. Production fail-closed check (`NODE_ENV === 'production'` without `UGOKILINK_KEY_PEPPER` -> 503!)
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevPepper = process.env.UGOKILINK_KEY_PEPPER;
+    try {
+      setSurfaceRuntimeContext(null);
+      delete process.env.UGOKILINK_KEY_PEPPER;
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+
+      expect(() => resolveRuntimePepperSecret()).toThrow(KeyPepperUnconfiguredError);
+      expect(() => getSurfaceRuntimeContext()).toThrow(KeyPepperUnconfiguredError);
+
+      const prodMcpRes = await mcpRouteGet(new NextRequest('https://api.ugokilink.example/api/v1/mcp'));
+      expect(prodMcpRes.status).toBe(503);
+      const prodJson = (await prodMcpRes.json()) as { error: { code: string } };
+      expect(prodJson.error.code).toBe('UGOKILINK_KEY_PEPPER_UNCONFIGURED');
+
+      // Non-production generates 64-hex CSPRNG secret
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'test';
+      const nonProdSecret = resolveRuntimePepperSecret();
+      expect(nonProdSecret).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
+      if (prevPepper === undefined) {
+        delete process.env.UGOKILINK_KEY_PEPPER;
+      } else {
+        process.env.UGOKILINK_KEY_PEPPER = prevPepper;
+      }
+      setSurfaceRuntimeContext(null);
+    }
+
+    // 3. Mandatory Bearer auth + cross-tenant session isolation on GET & POST /api/v1/mcp
+    const { now, keyRegistry, emptyRepo, fullKey } = buildSurfaceTestFixture();
+    keyRegistry.registerPrincipal({
+      principalId: 'user_b',
+      tenantId: 'tenant_b',
+      orgId: 'org_1',
+      kind: 'human',
+      role: 'admin',
+      passkeyEnrolled: true,
+    });
+    const tenantBKey = keyRegistry.issueSecretKey({
+      tenantId: 'tenant_b',
+      principalId: 'user_b',
+      scopes: ['analytics:read'],
+      now,
+    }).rawKey;
+    keyRegistry.registerSite({
+      siteId: 'site_a1',
+      tenantId: 'tenant_a',
+      siteRef: 'ref_a1',
+      env: 'live',
+      hostnames: ['example-a.jp'],
+      allowedOrigins: ['https://example-a.jp'],
+      createdAt: now.toISOString(),
+    });
+    const pubKeyA = keyRegistry.issuePublicKey('site_a1');
+
+    const pipeline = new SurfacePipeline({ keyRegistry, repository: emptyRepo });
+    const mcpServer = new LinkMcpServer(pipeline);
+    const askService = new AskService({
+      executor: {
+        executePublicViewQuery: (p) => ({
+          connected: false,
+          rows: [],
+          queryRefId: p.viewName,
+          paramsHash: 'h',
+          resultDigest: 'd',
+        }),
+      },
+    });
+    setSurfaceRuntimeContext({ pipeline, mcpServer, askService, repository: emptyRepo });
+
+    try {
+      // Unauthenticated GET & POST across ALL 4 MCP methods -> 401!
+      expect((await mcpRouteGet(new NextRequest('https://api.ugokilink.example/api/v1/mcp'))).status).toBe(401);
+      for (const method of ['tools/list', 'tools/search', 'tools/enable', 'tools/call']) {
+        const unauth = await mcpRoutePost(
+          new NextRequest('https://api.ugokilink.example/api/v1/mcp', {
+            method: 'POST',
+            body: JSON.stringify({ method, sessionId: 'shared_sid', toolName: 'ugokilink_listNotifications', query: 'notif' }),
+          })
+        );
+        expect(unauth.status).toBe(401);
+      }
+
+      // Browser public key (`ugk_pub_*`) rejected with 403 on MCP endpoint
+      const pubAttempt = await mcpRoutePost(
+        new NextRequest('https://api.ugokilink.example/api/v1/mcp', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${pubKeyA}` },
+          body: JSON.stringify({ method: 'tools/list' }),
+        })
+      );
+      expect(pubAttempt.status).toBe(403);
+
+      // Tenant A enables deferred tool `ugokilink_request` (`ugokilink_recommendSiteItems`) on `sessionId: "shared_sid"`;
+      // Tenant B listing tools with the IDENTICAL `sessionId: "shared_sid"` MUST NOT see Tenant A's enabled tool!
+      const deferredToolName = 'ugokilink_recommendSiteItems';
+      const enableA = await mcpRoutePost(
+        new NextRequest('https://api.ugokilink.example/api/v1/mcp', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${fullKey}` },
+          body: JSON.stringify({ method: 'tools/enable', sessionId: 'shared_sid', toolName: deferredToolName }),
+        })
+      );
+      expect(enableA.status).toBe(200);
+
+      const listA = await mcpRoutePost(
+        new NextRequest('https://api.ugokilink.example/api/v1/mcp', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${fullKey}` },
+          body: JSON.stringify({ method: 'tools/list', clientFamily: 'generic_mcp', sessionId: 'shared_sid' }),
+        })
+      );
+      const bodyA = (await listA.json()) as { visibleTools: Array<{ name: string }> };
+      expect(bodyA.visibleTools.some((t) => t.name === deferredToolName)).toBe(true);
+
+      const listB = await mcpRoutePost(
+        new NextRequest('https://api.ugokilink.example/api/v1/mcp', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${tenantBKey}` },
+          body: JSON.stringify({ method: 'tools/list', clientFamily: 'generic_mcp', sessionId: 'shared_sid' }),
+        })
+      );
+      const bodyB = (await listB.json()) as { visibleTools: Array<{ name: string }> };
+      expect(bodyB.visibleTools.some((t) => t.name === deferredToolName)).toBe(false);
+    } finally {
+      setSurfaceRuntimeContext(null);
+    }
+  });
+
+  test('[L-03] enforces bounded max-size + TTL eviction on BoundedTtlMap, CostUnitRateLimiter, SurfacePipeline idempotencyStore, and LinkMcpServer sessions', () => {
+    const t0 = new Date('2026-11-20T12:00:00Z');
+
+    // 1. BoundedTtlMap caps entries & expires past TTL
+    const ttlMap = new BoundedTtlMap<number>({ maxEntries: 3, ttlMs: 1_000 });
+    ttlMap.set('k1', 1, 100);
+    ttlMap.set('k2', 2, 100);
+    ttlMap.set('k3', 3, 100);
+    ttlMap.set('k4', 4, 100);
+    expect(ttlMap.getActiveCount(100)).toBe(3);
+    expect(ttlMap.get('k1', 100)).toBeUndefined(); // oldest evicted!
+    expect(ttlMap.get('k4', 1_200)).toBeUndefined(); // expired after 1000ms TTL!
+
+    // 2. CostUnitRateLimiter caps active buckets
+    const limiter = new CostUnitRateLimiter({ maxBuckets: 3, windowMs: 10_000, maxUnitsPerWindow: 50 });
+    for (let i = 0; i < 10; i++) {
+      limiter.consume(`bucket_${i}`, 1, t0);
+    }
+    expect(limiter.getActiveBucketCount(t0)).toBeLessThanOrEqual(3);
+
+    // 3. SurfacePipeline idempotencyStore caps maxEntries, replays identical payload, and rejects payload mismatch (409)
+    const { keyRegistry, emptyRepo, fullKey } = buildSurfaceTestFixture();
+    const pipeline = new SurfacePipeline({
+      keyRegistry,
+      repository: emptyRepo,
+      idempotencyMaxEntries: 2,
+      idempotencyTtlMs: 5_000,
+    });
+    const firstWrite = pipeline.execute({
+      operationId: 'upsertGoal',
+      channel: 'rest',
+      bearerToken: fullKey,
+      siteId: 'site_a1',
+      idempotencyKey: 'idem_bound_001',
+      body: { name: 'Goal 1', kind: 'url_match', matcher: '/a' },
+      now: t0,
+    });
+    expect(firstWrite.httpStatus).toBe(200);
+
+    // Identical Idempotency-Key + identical body -> replayed with header!
+    const replayWrite = pipeline.execute({
+      operationId: 'upsertGoal',
+      channel: 'rest',
+      bearerToken: fullKey,
+      siteId: 'site_a1',
+      idempotencyKey: 'idem_bound_001',
+      body: { name: 'Goal 1', kind: 'url_match', matcher: '/a' },
+      now: t0,
+    });
+    expect(replayWrite.httpStatus).toBe(200);
+    expect(replayWrite.headers['X-UGOKI-Idempotent-Replay']).toBe('true');
+
+    // Identical Idempotency-Key + DIFFERENT body -> 409 conflict!
+    const conflictWrite = pipeline.execute({
+      operationId: 'upsertGoal',
+      channel: 'rest',
+      bearerToken: fullKey,
+      siteId: 'site_a1',
+      idempotencyKey: 'idem_bound_001',
+      body: { name: 'TAMPERED Goal', kind: 'url_match', matcher: '/evil' },
+      now: t0,
+    });
+    expect(conflictWrite.httpStatus).toBe(409);
+    expect(conflictWrite.error?.code).toBe('IDEMPOTENCY_KEY_PAYLOAD_MISMATCH');
+
+    // Exceeding maxEntries=2 evicts oldest idempotency record
+    pipeline.execute({
+      operationId: 'upsertGoal',
+      channel: 'rest',
+      bearerToken: fullKey,
+      siteId: 'site_a1',
+      idempotencyKey: 'idem_bound_002',
+      body: { name: 'Goal 2', kind: 'url_match', matcher: '/b' },
+      now: t0,
+    });
+    pipeline.execute({
+      operationId: 'upsertGoal',
+      channel: 'rest',
+      bearerToken: fullKey,
+      siteId: 'site_a1',
+      idempotencyKey: 'idem_bound_003',
+      body: { name: 'Goal 3', kind: 'url_match', matcher: '/c' },
+      now: t0,
+    });
+    expect(pipeline.getIdempotencyEntryCount(t0)).toBeLessThanOrEqual(2);
+
+    // 4. LinkMcpServer session map caps maxSessions & expires past sessionTtlMs
+    const mcp = new LinkMcpServer(pipeline, OPERATION_CATALOG, { maxSessions: 2, sessionTtlMs: 2_000 });
+    mcp.enableTool('s1', 'ugokilink_listNotifications', { tenantId: 'tenant_a', principalId: 'u1' }, t0);
+    mcp.enableTool('s2', 'ugokilink_listNotifications', { tenantId: 'tenant_a', principalId: 'u1' }, t0);
+    mcp.enableTool('s3', 'ugokilink_listNotifications', { tenantId: 'tenant_a', principalId: 'u1' }, t0);
+    expect(mcp.getActiveSessionCount(t0)).toBeLessThanOrEqual(2);
+    expect(mcp.getActiveSessionCount(new Date(t0.getTime() + 3_000))).toBe(0);
+  });
+
+  test('[C-02] heatmap-image route eliminates unverified x-ugk-* header auth, rejects client unit_datasets, enforces foreign-tenant 404, and derives audience server-side', async () => {
+    // 1. Static source check: `extractPrincipalFromRequest` & `x-ugk-principal-id`/`x-ugk-audience` header trust deleted!
+    const routeSrc = fs.readFileSync(
+      path.join(__dirname, '../../../app/api/v1/sites/[siteId]/heatmap-image/route.ts'),
+      'utf8'
+    );
+    expect(routeSrc).not.toContain('extractPrincipalFromRequest');
+    expect(routeSrc).not.toContain('x-ugk-principal-id');
+    expect(routeSrc).not.toContain('x-ugk-scopes');
+    expect(routeSrc).not.toContain('x-ugk-audience');
+
+    const { now, keyRegistry, emptyRepo, fullKey } = buildSurfaceTestFixture();
+    // Register an external/OEM partner principal to verify server-derived `audience === 'external_party'`
+    keyRegistry.registerPrincipal({
+      principalId: 'oem_partner_1',
+      tenantId: 'tenant_a',
+      orgId: 'org_1',
+      kind: 'oem_partner',
+      role: 'viewer',
+      passkeyEnrolled: false,
+    });
+    const oemPartnerKey = keyRegistry.issueSecretKey({
+      tenantId: 'tenant_a',
+      principalId: 'oem_partner_1',
+      scopes: ['analytics:read'],
+      now,
+    }).rawKey;
+
+    let capturedPrincipals: HeatmapFetchPrincipal[] = [];
+    const mockHeatmapService = {
+      fetchArtifactById: (p: { principal: HeatmapFetchPrincipal | null; artifact_id: string }) => {
+        if (p.principal) capturedPrincipals.push(p.principal);
+        return {
+          http_status: 200 as const,
+          artifact: { artifact_id: p.artifact_id, png_sha256: 'deadbeef' },
+        };
+      },
+      renderHeatmap: (principal: HeatmapFetchPrincipal | null, req: HeatmapRenderRequest) => {
+        if (principal) capturedPrincipals.push(principal);
+        return {
+          http_status: 200 as const,
+          tenant_id: req.tenant_id,
+          site_id: req.site_id,
+          audience_seen: principal?.audience,
+        };
+      },
+    } as unknown as HeatmapRenderService;
+
+    const pipeline = new SurfacePipeline({ keyRegistry, repository: emptyRepo });
+    const mcpServer = new LinkMcpServer(pipeline);
+    const askService = new AskService({
+      executor: {
+        executePublicViewQuery: (p) => ({
+          connected: false,
+          rows: [],
+          queryRefId: p.viewName,
+          paramsHash: 'h',
+          resultDigest: 'd',
+        }),
+      },
+    });
+
+    try {
+      // Phase A: Unconnected dataset provider
+      setSurfaceRuntimeContext({
+        pipeline,
+        mcpServer,
+        askService,
+        repository: emptyRepo,
+        heatmapService: mockHeatmapService,
+      });
+
+      // Forged `x-ugk-*` headers without Bearer token -> 401!
+      const spoofedHeaderReq = new NextRequest(
+        'https://api.ugokilink.example/api/v1/sites/site_a1/heatmap-image?artifact_id=art_1',
+        {
+          method: 'GET',
+          headers: {
+            'x-ugk-principal-id': 'admin_root',
+            'x-ugk-tenant-id': 'tenant_a',
+            'x-ugk-scopes': 'analytics:read,site:admin',
+            'x-ugk-audience': 'site_owner',
+          },
+        }
+      );
+      expect((await heatmapRouteGet(spoofedHeaderReq, { params: { siteId: 'site_a1' } })).status).toBe(401);
+
+      // Signed-URL-only `?sig=...` without Bearer token -> 401!
+      const sigOnlyReq = new NextRequest(
+        'https://api.ugokilink.example/api/v1/sites/site_a1/heatmap-image?artifact_id=art_1&sig=forged_sig',
+        { method: 'GET' }
+      );
+      expect((await heatmapRouteGet(sigOnlyReq, { params: { siteId: 'site_a1' } })).status).toBe(401);
+
+      // Foreign body.tenant_id probe with valid Bearer token -> 404!
+      const foreignBodyReq = new NextRequest(
+        'https://api.ugokilink.example/api/v1/sites/site_a1/heatmap-image',
+        {
+          method: 'POST',
+          headers: { authorization: `Bearer ${fullKey}` },
+          body: JSON.stringify({
+            tenant_id: 'tenant_b',
+            page_url: 'https://example-a.jp/',
+            kind: 'click',
+            actor_bucket: 'human',
+          }),
+        }
+      );
+      expect((await heatmapRoutePost(foreignBodyReq, { params: { siteId: 'site_a1' } })).status).toBe(404);
+
+      // Client attempting to inject `unit_datasets` in POST body -> 403!
+      const clientDatasetReq = new NextRequest(
+        'https://api.ugokilink.example/api/v1/sites/site_a1/heatmap-image',
+        {
+          method: 'POST',
+          headers: { authorization: `Bearer ${fullKey}` },
+          body: JSON.stringify({
+            page_url: 'https://example-a.jp/',
+            kind: 'click',
+            actor_bucket: 'human',
+            unit_datasets: [{ fake: true }],
+          }),
+        }
+      );
+      expect((await heatmapRoutePost(clientDatasetReq, { params: { siteId: 'site_a1' } })).status).toBe(403);
+
+      // Unconnected repository returns honest `not_collected` ResponseEnvelope!
+      const unconnectedPost = new NextRequest(
+        'https://api.ugokilink.example/api/v1/sites/site_a1/heatmap-image',
+        {
+          method: 'POST',
+          headers: { authorization: `Bearer ${fullKey}` },
+          body: JSON.stringify({
+            page_url: 'https://example-a.jp/',
+            kind: 'click',
+            actor_bucket: 'human',
+          }),
+        }
+      );
+      const unconnectedRes = await heatmapRoutePost(unconnectedPost, { params: { siteId: 'site_a1' } });
+      expect(unconnectedRes.status).toBe(200);
+      const unconnectedBody = (await unconnectedRes.json()) as { status: string };
+      expect(unconnectedBody.status).toBe('not_collected');
+
+      // Phase B: Connected server-side `heatmapDatasetProvider` -> verifies server-derived `audience`!
+      capturedPrincipals = [];
+      setSurfaceRuntimeContext({
+        pipeline,
+        mcpServer,
+        askService,
+        repository: emptyRepo,
+        heatmapService: mockHeatmapService,
+        heatmapDatasetProvider: {
+          loadUnitDatasets: () => [] as unknown as HeatmapRenderRequest['unit_datasets'],
+        },
+      });
+
+      // Direct tenant secret key -> `audience: 'site_owner'`
+      const ownerPost = new NextRequest(
+        'https://api.ugokilink.example/api/v1/sites/site_a1/heatmap-image',
+        {
+          method: 'POST',
+          headers: { authorization: `Bearer ${fullKey}`, 'x-ugk-audience': 'external_party' },
+          body: JSON.stringify({
+            page_url: 'https://example-a.jp/',
+            kind: 'click',
+            actor_bucket: 'human',
+          }),
+        }
+      );
+      expect((await heatmapRoutePost(ownerPost, { params: { siteId: 'site_a1' } })).status).toBe(200);
+      expect(capturedPrincipals[0]?.audience).toBe('site_owner');
+      expect(capturedPrincipals[0]?.tenant_id).toBe('tenant_a');
+
+      // OEM partner principal trying to spoof `x-ugk-audience: site_owner` -> server forces `'external_party'`!
+      const oemPost = new NextRequest(
+        'https://api.ugokilink.example/api/v1/sites/site_a1/heatmap-image',
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${oemPartnerKey}`,
+            'x-ugk-audience': 'site_owner',
+          },
+          body: JSON.stringify({
+            page_url: 'https://example-a.jp/',
+            kind: 'click',
+            actor_bucket: 'human',
+          }),
+        }
+      );
+      expect((await heatmapRoutePost(oemPost, { params: { siteId: 'site_a1' } })).status).toBe(200);
+      expect(capturedPrincipals[1]?.audience).toBe('external_party');
+      expect(capturedPrincipals[1]?.tenant_id).toBe('tenant_a');
+    } finally {
+      setSurfaceRuntimeContext(null);
+    }
+  });
+
+  test('[H-01] enforces 100% 1-to-1 bijection between OPERATION_CATALOG, OpenAPI 3.1 paths, MCP tools, and app/api/v1/**/route.ts on disk', () => {
+    const v1Root = path.resolve(__dirname, '../../../app/api/v1');
+
+    function collectRouteFiles(dir: string): string[] {
+      const out: string[] = [];
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          out.push(...collectRouteFiles(full));
+        } else if (entry.isFile() && entry.name === 'route.ts') {
+          out.push(full);
+        }
+      }
+      return out;
+    }
+
+    const routeFiles = collectRouteFiles(v1Root);
+    const diskEndpoints = new Set<string>();
+
+    for (const file of routeFiles) {
+      const relDir = path
+        .relative(v1Root, path.dirname(file))
+        .split(path.sep)
+        .filter(Boolean)
+        .map((seg) => seg.replace(/^\[([^\]]+)\]$/, '{$1}'))
+        .join('/');
+      const openApiPath = `/v1/${relDir}`;
+      const src = fs.readFileSync(file, 'utf8');
+      const methodRegex = /export\s+(?:async\s+)?function\s+(GET|POST|PUT|DELETE)\b/g;
+      let match: RegExpExecArray | null;
+      while ((match = methodRegex.exec(src)) !== null) {
+        diskEndpoints.add(`${match[1]} ${openApiPath}`);
+      }
+    }
+
+    const catalogEndpoints = new Set<string>(
+      OPERATION_CATALOG.map((op) => `${op.method} ${op.path}`)
+    );
+
+    // 1. Exact 1-to-1 parity between OPERATION_CATALOG and Next.js App Router files on disk!
+    expect([...diskEndpoints].sort()).toEqual([...catalogEndpoints].sort());
+
+    // 2. Required Wave 8 operations explicitly present in OPERATION_CATALOG, OpenAPI 3.1, and MCP
+    for (const requiredEndpoint of [
+      'POST /v1/decisions',
+      'POST /v1/recommend',
+      'POST /v1/sites/{siteId}/recommend',
+      'GET /v1/sites/{siteId}/heatmap-image',
+      'POST /v1/sites/{siteId}/heatmap-image',
+      'GET /v1/sites/{siteId}/insights',
+      'GET /v1/sites/{siteId}/notifications',
+      'POST /v1/sites/{siteId}/segments/compare',
+      'POST /v1/sites/{siteId}/decisions/publish',
+      'POST /v1/sites/{siteId}/origin/apply',
+      'POST /v1/sites/{siteId}/grants',
+    ]) {
+      expect(catalogEndpoints.has(requiredEndpoint)).toBe(true);
+      expect(diskEndpoints.has(requiredEndpoint)).toBe(true);
+    }
+
+    const doc = buildOpenApi31Document();
+    const openApiEndpoints = new Set<string>();
+    for (const [p, methodsObj] of Object.entries(doc.paths)) {
+      for (const m of Object.keys(methodsObj)) {
+        openApiEndpoints.add(`${m.toUpperCase()} ${p}`);
+      }
+    }
+    expect([...openApiEndpoints].sort()).toEqual([...catalogEndpoints].sort());
+
+    const { keyRegistry, emptyRepo } = buildSurfaceTestFixture();
+    const mcp = new LinkMcpServer(new SurfacePipeline({ keyRegistry, repository: emptyRepo }));
+    for (const op of OPERATION_CATALOG) {
+      if (op.exposeInMcp) {
+        expect(mcp.getTool(`ugokilink_${op.operationId}`)).toBeDefined();
+      } else {
+        expect(mcp.getTool(`ugokilink_${op.operationId}`)).toBeUndefined();
+      }
+    }
   });
 });

@@ -29,6 +29,7 @@ import {
 import {
   buildSiteUrlKeyRules,
   classifyUrlParameter,
+  computeTenantSubjectHmac,
   DEFAULT_8GIB_MEMORY_BUDGET,
   DeletionExecutionEngine,
   inspectQueryPolicy,
@@ -726,5 +727,92 @@ describe('lib/link/store/reconciliation (Independent Closures ①–④)', () =>
     // Invalidated cell is now flagged invalid in rollup_manifest and refused on read!
     expect(builder.getManifestEntry('t-rec', 's-rec', h0)?.state).toBe('invalid');
     expect(builder.getCurrentSiteHourRollup('t-rec', 's-rec', h0)).toBeUndefined();
+  });
+
+  test('Wave 8 Regressions (H-19, H-21): RFC 2104 computeTenantSubjectHmac matches TenantKeyVersionRegistry and DownstreamDeletionSinks execute across mask + purge + WAL tombstones', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const nodeCrypto = require('node:crypto') as typeof import('node:crypto');
+    const expectedRfc2104 = nodeCrypto
+      .createHmac('sha256', 'secret-salt-v3')
+      .update('tenant-hmac:visitor_id:vis-raw-999', 'utf8')
+      .digest('hex');
+
+    const reg = new TenantKeyVersionRegistry();
+    reg.registerKeyVersion({
+      tenantId: 'tenant-hmac',
+      keyVersion: 3,
+      secretSalt: 'secret-salt-v3',
+      status: 'active',
+      activeRowCount: 1,
+      createdAtMs: 1000,
+    });
+    expect(
+      reg.computeSubjectDigestsAcrossAllVersions('tenant-hmac', 'visitor_id', 'vis-raw-999')
+    ).toEqual([{ keyVersion: 3, hmacHex: expectedRfc2104 }]);
+    expect(
+      computeTenantSubjectHmac('secret-salt-v3', 'tenant-hmac', 'visitor_id', 'vis-raw-999')
+    ).toBe(expectedRfc2104);
+
+    let tombstoneRegistered = false;
+    const adapter: DeletionStoreAdapter = {
+      async resolveSubjectKeys() {
+        return {
+          visitorKeys: [expectedRfc2104],
+          sessionKeys: ['s1'],
+          pvIds: ['pv-del-1'],
+          reqUids: [],
+          unitIds: ['pv-del-1'],
+          touchedPvHoursMs: [Date.UTC(2026, 10, 20, 6, 0, 0)],
+          matchedKeyVersions: [3],
+        };
+      },
+      async maskSubjectImmediate() {
+        return { ecMemberSummaryDeleted: 1, edgeCacheKeysPurged: 2 };
+      },
+      async purgeTable() {
+        return { matchedRows: 1, deletedRows: 1 };
+      },
+      async purgeExternalStore() {
+        return { deletedObjects: 1, status: 'deleted' };
+      },
+      async markRollupHoursDirty() {},
+      async notifyCustomerExportSinks() {
+        return [];
+      },
+    };
+
+    const engine = new DeletionExecutionEngine(adapter, reg, {
+      purgeLiveDurableObject: () => 1,
+      purgeContinuousStreams: () => 2,
+      purgeEcOrderSummary: () => 1,
+      purgeHeatmapCache: () => 3,
+      purgeAskAndMlFeatureCache: () => 4,
+      registerWalReplayTombstones: () => {
+        tombstoneRegistered = true;
+      },
+    });
+
+    const t0 = Date.UTC(2026, 10, 20, 8, 0, 0);
+    engine.scheduleRequest({
+      requestId: 'req-sinks-1',
+      tenantId: 'tenant-hmac',
+      siteId: 'site-1',
+      subjectKind: 'visitor_id',
+      rawSubjectValue: 'vis-raw-999',
+      requestedAtMs: t0,
+    });
+    await engine.executeMaskPhase('req-sinks-1', t0 + 1000);
+    await engine.executePhysicalPurgePhase('req-sinks-1', t0 + 2000);
+    const cert = engine.issueCertificate('req-sinks-1', t0 + 3000);
+
+    expect(tombstoneRegistered).toBe(true);
+    expect(cert.downstreamPurgeSummary).toEqual({
+      liveDoUnitsPurged: 2,
+      continuousStreamItemsPurged: 2,
+      ecOrderSummariesPurged: 1,
+      heatmapCacheEntriesPurged: 3,
+      askAndMlCacheEntriesPurged: 4,
+      walReplayTombstonesRegistered: true,
+    });
   });
 });

@@ -802,6 +802,59 @@ export class IdentityKeyRegistry {
     return { rawKey, record };
   }
 
+  /**
+   * Immediately revokes an OEM management key AND cascades revocation to all
+   * outstanding `ugk_oemx_*` child exchanged tokens derived from it (H-24).
+   */
+  public revokeOemKey(
+    keyId: string,
+    now: Date = new Date()
+  ): { readonly revoked: boolean; readonly invalidatedChildTokens: number } {
+    const record = this.oemKeys.get(keyId);
+    if (!record) {
+      return { revoked: false, invalidatedChildTokens: 0 };
+    }
+    (record as { revokedAt?: string }).revokedAt = now.toISOString();
+    let invalidated = 0;
+    for (const [jti, claims] of this.exchangedTokens.entries()) {
+      if (claims.act.oemKeyId === keyId) {
+        this.exchangedTokens.delete(jti);
+        invalidated += 1;
+      }
+    }
+    return { revoked: true, invalidatedChildTokens: invalidated };
+  }
+
+  /**
+   * Immediately revokes OEM delegation on a child tenant AND invalidates all
+   * outstanding `ugk_oemx_*` tokens targeting that child tenant (H-24).
+   */
+  public revokeOemChildRelationship(childTenantId: string): {
+    readonly revoked: boolean;
+    readonly invalidatedChildTokens: number;
+  } {
+    const child = this.tenants.get(childTenantId);
+    if (!child) {
+      return { revoked: false, invalidatedChildTokens: 0 };
+    }
+    this.tenants.set(childTenantId, {
+      ...child,
+      delegationPolicy: {
+        ...child.delegationPolicy,
+        allowOemAccess: false,
+      },
+      revocationEpoch: child.revocationEpoch + 1,
+    });
+    let invalidated = 0;
+    for (const [jti, claims] of this.exchangedTokens.entries()) {
+      if (claims.childTenantId === childTenantId) {
+        this.exchangedTokens.delete(jti);
+        invalidated += 1;
+      }
+    }
+    return { revoked: true, invalidatedChildTokens: invalidated };
+  }
+
   public verifyOemManagementKey(rawKey: string, now: Date = new Date()): VerifyCredentialResult {
     const match = /^ugk_oem_live_(oem_[a-f0-9]{16})_([A-Za-z0-9_-]+)$/.exec(rawKey.trim());
     if (!match) {
@@ -986,6 +1039,7 @@ export class IdentityKeyRegistry {
       return { ok: false, httpStatus: 401, code: 'OEM_TOKEN_REVOKED', reason: 'Token not active' };
     }
     if (new Date(claims.expiresAt).getTime() <= now.getTime()) {
+      this.exchangedTokens.delete(claims.jti);
       return { ok: false, httpStatus: 401, code: 'OEM_TOKEN_EXPIRED', reason: 'Exchanged OEM token expired' };
     }
     const durationSec =
@@ -999,8 +1053,29 @@ export class IdentityKeyRegistry {
       };
     }
 
+    // Re-verify parent OEM management key exists and has NOT been revoked (H-24)
+    const parentOemKey = this.oemKeys.get(claims.act.oemKeyId);
+    if (
+      !parentOemKey ||
+      parentOemKey.orgId !== claims.orgId ||
+      (parentOemKey.revokedAt && new Date(parentOemKey.revokedAt).getTime() <= now.getTime())
+    ) {
+      this.exchangedTokens.delete(claims.jti);
+      return {
+        ok: false,
+        httpStatus: 401,
+        code: 'OEM_PARENT_KEY_REVOKED',
+        reason: 'Parent OEM key has been revoked; child exchanged token invalidated',
+      };
+    }
+
     const childTenant = this.tenants.get(claims.childTenantId);
-    if (!childTenant || !childTenant.delegationPolicy.allowOemAccess) {
+    if (
+      !childTenant ||
+      childTenant.orgId !== parentOemKey.orgId ||
+      !childTenant.delegationPolicy.allowOemAccess
+    ) {
+      this.exchangedTokens.delete(claims.jti);
       return {
         ok: false,
         httpStatus: 403,
@@ -1011,6 +1086,7 @@ export class IdentityKeyRegistry {
 
     const effective = intersectScopes(
       claims.scopes,
+      parentOemKey.delegableScopes,
       childTenant.delegationPolicy.allowedOemScopes,
       childTenant.planScopes
     );

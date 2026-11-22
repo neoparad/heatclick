@@ -4,23 +4,29 @@
  * Implements §4.2, §4.5, TEL M5, TEL A4, TEL A5 #1, tel.G10, tel.G12:
  * - 5 modes: `off | cookieless | stats_exempt | session | full`
  * - Mode × Jurisdiction matrix: every row defaults to strict side until `legalSignedOff`
- *   (Japan defaults to `cookieless` until signed off; EU/EEA defaults to `off`).
+ *   (Japan defaults to `cookieless` until signed off; GB/FR/EU_EEA/UNKNOWN default to `off`).
  * - Online loader region class can ONLY tighten, NEVER raise above signed site default or origin.
  * - Minors flag caps at `cookieless`; unverified disclosure blocks JP external-transmission
  *   subject sites to `off` (and caps other sites at `cookieless`).
  * - Privacy signal (GPC/DNT) ALWAYS strips `pool`, `ads`, `member_link` across all jurisdictions
  *   and applies jurisdiction-specific caps.
  * - `GuardedStorageAdapter` physically blocks ALL cookie/localStorage/sessionStorage reads & writes
- *   before consent resolution AND in `off`/`cookieless` modes (`tel.G10`).
+ *   before consent resolution AND in `off`/`cookieless` modes (`tel.G10`), while providing
+ *   immediate cookie/storage purge on consent downgrade or `optOut()`.
  */
 
-import type { ConsentMode, ConsentPurpose } from '../contract/schema';
+import {
+  normalizeJurisdictionCode,
+  type ConsentMode,
+  type ConsentPurpose,
+} from '../contract/schema';
 import type {
   ConsentResolutionInput,
   ConsentResolutionResult,
   CookieJarLike,
   JurisdictionRowPolicy,
   RegionClass,
+  RegionClassInput,
   StorageLike,
 } from './types';
 
@@ -40,6 +46,26 @@ const RANK_TO_MODE: readonly ConsentMode[] = [
   'full',
 ];
 
+const CANONICAL_REGION_SET: ReadonlySet<string> = new Set<RegionClass>([
+  'JP',
+  'GB',
+  'FR',
+  'EU_EEA',
+  'US_OPTOUT',
+  'UNKNOWN',
+]);
+
+export function normalizeRegionClass(
+  raw: RegionClassInput | string | null | undefined
+): RegionClass | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const norm = normalizeJurisdictionCode(raw);
+  if (CANONICAL_REGION_SET.has(norm)) {
+    return norm as RegionClass;
+  }
+  return 'UNKNOWN';
+}
+
 export function minConsentMode(a: ConsentMode, b: ConsentMode): ConsentMode {
   return CONSENT_MODE_RANK[a] <= CONSENT_MODE_RANK[b] ? a : b;
 }
@@ -53,6 +79,8 @@ export function stepDownConsentMode(mode: ConsentMode): ConsentMode {
  * Default Jurisdiction Matrix (TEL A4):
  * Every row starts with `legalSignedOff: false`, activating the stricter default
  * until formal legal sign-off is recorded (Owner Decision 1 / tel.G10).
+ * Canonical UK code is `'GB'` (`'UK'` inputs normalize to `'GB'`), and `'UNKNOWN'`
+ * fails closed to `'off'` until region or explicit consent is established.
  */
 export const DEFAULT_JURISDICTION_MATRIX: Readonly<Record<RegionClass, JurisdictionRowPolicy>> = {
   JP: {
@@ -62,8 +90,8 @@ export const DEFAULT_JURISDICTION_MATRIX: Readonly<Record<RegionClass, Jurisdict
     signedOffMode: 'full',
     privacySignalAction: 'cap_cookieless',
   },
-  UK: {
-    region: 'UK',
+  GB: {
+    region: 'GB',
     defaultMode: 'off', // Strict until Owner scope decision + legal sign-off
     legalSignedOff: false,
     signedOffMode: 'stats_exempt',
@@ -92,10 +120,10 @@ export const DEFAULT_JURISDICTION_MATRIX: Readonly<Record<RegionClass, Jurisdict
   },
   UNKNOWN: {
     region: 'UNKNOWN',
-    defaultMode: 'cookieless',
+    defaultMode: 'off', // Fail-closed until region or explicit consent is known ([H-11])
     legalSignedOff: false,
-    signedOffMode: 'session',
-    privacySignalAction: 'cap_cookieless',
+    signedOffMode: 'cookieless',
+    privacySignalAction: 'off',
   },
 };
 
@@ -125,9 +153,28 @@ const MODE_DISALLOWED_PURPOSES: Readonly<Record<ConsentMode, ReadonlySet<Consent
   full: new Set<ConsentPurpose>([]),
 };
 
+function buildNormalizedPolicies(
+  custom?: Readonly<Partial<Record<RegionClassInput, JurisdictionRowPolicy>>>
+): Readonly<Record<RegionClass, JurisdictionRowPolicy>> {
+  const merged: Record<RegionClass, JurisdictionRowPolicy> = {
+    ...DEFAULT_JURISDICTION_MATRIX,
+  };
+  if (custom) {
+    for (const [rawKey, policy] of Object.entries(custom)) {
+      if (!policy) continue;
+      const canonical = normalizeRegionClass(rawKey) ?? 'UNKNOWN';
+      merged[canonical] = {
+        ...policy,
+        region: canonical,
+      };
+    }
+  }
+  return merged;
+}
+
 function modeForRegion(
   region: RegionClass,
-  policies: Readonly<Partial<Record<RegionClass, JurisdictionRowPolicy>>>
+  policies: Readonly<Record<RegionClass, JurisdictionRowPolicy>>
 ): ConsentMode {
   const row = policies[region] ?? DEFAULT_JURISDICTION_MATRIX[region];
   if (row.legalSignedOff && row.signedOffMode) {
@@ -140,11 +187,11 @@ function modeForRegion(
  * Resolves effective consent mode and allowed purposes strictly BEFORE any storage touch.
  */
 export function resolveBrowserConsent(input: ConsentResolutionInput): ConsentResolutionResult {
-  const policies: Readonly<Partial<Record<RegionClass, JurisdictionRowPolicy>>> = {
-    ...DEFAULT_JURISDICTION_MATRIX,
-    ...(input.jurisdictionPolicies ?? {}),
-  };
+  const policies = buildNormalizedPolicies(input.jurisdictionPolicies);
 
+  const originRegion = normalizeRegionClass(input.originRegionClass);
+  const loaderRegion = normalizeRegionClass(input.loaderRegionClass);
+  let effectiveRegion: RegionClass = originRegion ?? loaderRegion ?? 'UNKNOWN';
   let cappedReason: string | null = null;
 
   // 1. Explicit opt-out always resolves to `off`
@@ -153,7 +200,7 @@ export function resolveBrowserConsent(input: ConsentResolutionInput): ConsentRes
       resolved: true,
       mode: 'off',
       purposes: [],
-      effectiveRegion: input.originRegionClass ?? input.loaderRegionClass ?? 'UNKNOWN',
+      effectiveRegion,
       storageAllowed: false,
       sessionStorageAllowed: false,
       persistentStorageAllowed: false,
@@ -168,7 +215,7 @@ export function resolveBrowserConsent(input: ConsentResolutionInput): ConsentRes
       resolved: true,
       mode: 'off',
       purposes: [],
-      effectiveRegion: input.originRegionClass ?? input.loaderRegionClass ?? 'UNKNOWN',
+      effectiveRegion,
       storageAllowed: false,
       sessionStorageAllowed: false,
       persistentStorageAllowed: false,
@@ -178,10 +225,6 @@ export function resolveBrowserConsent(input: ConsentResolutionInput): ConsentRes
   }
 
   // 3. Determine strictest region class across (origin, loader)
-  const originRegion = input.originRegionClass ?? null;
-  const loaderRegion = input.loaderRegionClass ?? null;
-  let effectiveRegion: RegionClass = originRegion ?? loaderRegion ?? 'UNKNOWN';
-
   let mode: ConsentMode;
   if (input.explicitConsentMode !== undefined && input.explicitConsentMode !== null) {
     mode = input.explicitConsentMode;
@@ -204,7 +247,12 @@ export function resolveBrowserConsent(input: ConsentResolutionInput): ConsentRes
       }
     }
     if (!originRegion && !loaderRegion) {
-      mode = minConsentMode(mode, modeForRegion('UNKNOWN', policies));
+      const unknownMode = modeForRegion('UNKNOWN', policies);
+      if (CONSENT_MODE_RANK[unknownMode] < CONSENT_MODE_RANK[mode]) {
+        mode = unknownMode;
+        effectiveRegion = 'UNKNOWN';
+        cappedReason = 'unknown_jurisdiction_fail_closed';
+      }
     }
   }
 
@@ -286,9 +334,11 @@ export function resolveBrowserConsent(input: ConsentResolutionInput): ConsentRes
 }
 
 /**
- * Storage & Cookie firewall enforcing TEL A5 #1 & tel.G10:
+ * Storage & Cookie firewall enforcing TEL A5 #1, tel.G10 & [H-11]:
  * ZERO reads or writes touch the underlying cookieJar / sessionStorage / localStorage
- * before consent is resolved OR while in `off` / `cookieless` mode.
+ * before consent is resolved OR while booting in `off` / `cookieless` mode.
+ * On explicit consent downgrade or `optOut()`, immediately deletes disallowed cookies
+ * and clears `sessionStorage` / `localStorage` keys regardless of the downgraded target mode.
  */
 export class GuardedStorageAdapter {
   private consent: ConsentResolutionResult | null = null;
@@ -313,6 +363,36 @@ export class GuardedStorageAdapter {
 
   public isResolved(): boolean {
     return this.consent !== null && this.consent.resolved;
+  }
+
+  /**
+   * Unconditionally deletes first-party cookies and clears web storage keys that are
+   * no longer permitted after a consent downgrade or `optOut()` ([H-11]).
+   */
+  public purgeDisallowedStorage(
+    nextConsent: ConsentResolutionResult,
+    options: {
+      readonly sessionWalKeys: readonly string[];
+      readonly persistentWalKeys: readonly string[];
+      readonly forcePurgeAll?: boolean;
+    }
+  ): void {
+    const wipeAll = options.forcePurgeAll === true || !nextConsent.storageAllowed;
+
+    if (wipeAll || !nextConsent.persistentStorageAllowed) {
+      for (const key of options.persistentWalKeys) {
+        this.localStorage?.removeItem(key);
+      }
+    }
+    if (wipeAll || !nextConsent.sessionStorageAllowed) {
+      for (const key of options.sessionWalKeys) {
+        this.sessionStorage?.removeItem(key);
+      }
+      this.cookieJar?.deleteCookie('ugk_sid');
+    }
+    if (wipeAll || (nextConsent.mode !== 'stats_exempt' && nextConsent.mode !== 'full')) {
+      this.cookieJar?.deleteCookie('ugk_vid');
+    }
   }
 
   public getCookie(name: string): string | null {

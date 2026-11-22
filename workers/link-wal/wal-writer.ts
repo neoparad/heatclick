@@ -9,12 +9,15 @@
  * - Decision 29 (D-29) data residency enforcement & §5.12 Tier 1/2/3 storage adapters
  */
 
+import crypto from 'node:crypto';
 import { getConstant } from '../../packages/contract/ledgers';
 import {
   CANONICAL_SCHEMA,
   canonicalJsonStringify,
   createIngestValidator,
+  normalizeCollectionLane,
   sha256Hex,
+  type CollectionLane,
   type GeneratedIngestValidator,
   type IngestValidationResult,
   type TelemetryFrame,
@@ -31,6 +34,7 @@ import {
 } from './storage-adapter';
 import type {
   DataRegion,
+  EncryptedQuarantineEnvelope,
   PostAckLossReport,
   PostAckMissingFrame,
   QuarantineObject,
@@ -54,6 +58,7 @@ export interface WalWriterOptions {
   readonly bucket?: R2BucketLike;
   readonly defaultRetentionDays?: number;
   readonly quarantineRetentionDays?: number;
+  readonly quarantineMasterKeyHex?: string;
   readonly deletionEpoch?: number;
   readonly postAckDetector?: PostAckLossDetector;
   readonly validator?: GeneratedIngestValidator;
@@ -316,6 +321,7 @@ export class WalWriter {
   private readonly validator: GeneratedIngestValidator;
   private readonly defaultRetentionDays: number;
   private readonly quarantineRetentionDays: number;
+  private readonly quarantineMasterKey: Buffer;
   private deletionEpoch: number;
 
   public constructor(options: WalWriterOptions) {
@@ -333,8 +339,110 @@ export class WalWriter {
     this.defaultRetentionDays = options.defaultRetentionDays ?? DEFAULT_RETENTION_DAYS;
     this.quarantineRetentionDays =
       options.quarantineRetentionDays ?? DEFAULT_QUARANTINE_RETENTION_DAYS;
+    this.quarantineMasterKey =
+      options.quarantineMasterKeyHex && /^[0-9a-fA-F]{64}$/.test(options.quarantineMasterKeyHex)
+        ? Buffer.from(options.quarantineMasterKeyHex, 'hex')
+        : crypto.randomBytes(32);
     this.deletionEpoch = options.deletionEpoch ?? 1;
     this.postAckDetector = options.postAckDetector ?? new PostAckLossDetector();
+  }
+
+  private deriveTenantQuarantineKey(tenantId: string, siteId: string): Buffer {
+    const derived = crypto.hkdfSync(
+      'sha256',
+      this.quarantineMasterKey,
+      Buffer.from(this.region, 'utf8'),
+      Buffer.from(`ugk-quarantine-aes256gcm:${tenantId}:${siteId}`, 'utf8'),
+      32
+    );
+    return Buffer.from(derived);
+  }
+
+  private encryptQuarantineObject(obj: QuarantineObject): EncryptedQuarantineEnvelope {
+    const key = this.deriveTenantQuarantineKey(obj.tenant_id, obj.site_id);
+    const iv = crypto.randomBytes(12);
+    const aad = Buffer.from(`${obj.region}\u0000${obj.tenant_id}\u0000${obj.site_id}`, 'utf8');
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    cipher.setAAD(aad);
+    const plaintext = Buffer.from(canonicalJsonStringify(obj), 'utf8');
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const tag = cipher.getAuthTag();
+
+    return {
+      quarantine_version: 1,
+      encrypted: true,
+      alg: 'AES-256-GCM',
+      region: obj.region,
+      tenant_id: obj.tenant_id,
+      site_id: obj.site_id,
+      shard_id: obj.shard_id,
+      received_at_ms: obj.received_at_ms,
+      expires_at_ms: obj.expires_at_ms,
+      iv_b64: iv.toString('base64'),
+      tag_b64: tag.toString('base64'),
+      ciphertext_b64: ciphertext.toString('base64'),
+    };
+  }
+
+  private decryptQuarantineEnvelope(
+    rawText: string,
+    expectedTenantId?: string,
+    expectedSiteId?: string
+  ): QuarantineObject | null {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      return null;
+    }
+    if (!parsed || typeof parsed !== 'object') return null;
+    const env = parsed as Partial<EncryptedQuarantineEnvelope>;
+    if (
+      env.encrypted !== true ||
+      env.alg !== 'AES-256-GCM' ||
+      typeof env.tenant_id !== 'string' ||
+      typeof env.site_id !== 'string' ||
+      typeof env.iv_b64 !== 'string' ||
+      typeof env.tag_b64 !== 'string' ||
+      typeof env.ciphertext_b64 !== 'string'
+    ) {
+      return null;
+    }
+
+    const tenantToUse = expectedTenantId ?? env.tenant_id;
+    const siteToUse = expectedSiteId ?? env.site_id;
+    if (tenantToUse !== env.tenant_id || siteToUse !== env.site_id) {
+      return null;
+    }
+
+    try {
+      const key = this.deriveTenantQuarantineKey(tenantToUse, siteToUse);
+      const iv = Buffer.from(env.iv_b64, 'base64');
+      const tag = Buffer.from(env.tag_b64, 'base64');
+      const ciphertext = Buffer.from(env.ciphertext_b64, 'base64');
+      const aad = Buffer.from(`${this.region}\u0000${tenantToUse}\u0000${siteToUse}`, 'utf8');
+      const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+      decipher.setAAD(aad);
+      decipher.setAuthTag(tag);
+      const plainBuf = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      return JSON.parse(plainBuf.toString('utf8')) as QuarantineObject;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Reads and decrypts a tenant-scoped quarantine object from storage, verifying
+   * AES-256-GCM authentication tag + `(region, tenantId, siteId)` AAD (C-15).
+   */
+  public async readQuarantineObject(
+    key: string,
+    expectedTenantId: string,
+    expectedSiteId: string
+  ): Promise<QuarantineObject | null> {
+    const obj = await this.adapter.getObject(key);
+    if (!obj) return null;
+    return this.decryptQuarantineEnvelope(await obj.text(), expectedTenantId, expectedSiteId);
   }
 
   public setDeletionEpoch(epoch: number): void {
@@ -462,10 +570,40 @@ export class WalWriter {
         };
       }
 
+      let canonicalLane: CollectionLane = 'standard';
+      if (item.lane !== undefined) {
+        const rawLaneStr = String(item.lane);
+        const mappedLane = rawLaneStr === 'visual_replay' ? 'screen_replay' : rawLaneStr;
+        try {
+          canonicalLane = normalizeCollectionLane(mappedLane);
+        } catch {
+          return {
+            ok: false,
+            failed: {
+              payload: item,
+              reason: `invalid_collection_lane:${rawLaneStr}`,
+              validationResult: null,
+            },
+          };
+        }
+      }
+
+      if (item.lab_exclusion?.block_ingest === true) {
+        return {
+          ok: false,
+          failed: {
+            payload: item,
+            reason: 'lab_exclusion_block_ingest',
+            validationResult: null,
+          },
+        };
+      }
+
+      const rawSource = item.raw_frame !== undefined ? item.raw_frame : item.frame;
       const rawPayload =
-        typeof item.raw_frame === 'string'
-          ? (JSON.parse(item.raw_frame) as unknown)
-          : item.raw_frame;
+        typeof rawSource === 'string'
+          ? (JSON.parse(rawSource) as unknown)
+          : rawSource;
 
       const validation = this.validator.validateIngestFrame(rawPayload, {
         serverNowMs: item.received_at_ms || nowMs,
@@ -485,6 +623,7 @@ export class WalWriter {
       const frame = validation.sanitizedFrame;
       const frameHash = computeFrameHash(frame);
       const record: WalRecord = {
+        lane: canonicalLane,
         tenant_id: item.tenant_id,
         site_id: item.site_id,
         storage_region: this.region,
@@ -497,6 +636,7 @@ export class WalWriter {
         partial: validation.partial,
         state_incomplete: validation.stateIncomplete,
         rej: [...validation.rej],
+        ...(item.lab_exclusion ? { lab_exclusion: item.lab_exclusion } : {}),
       };
 
       return { ok: true, validated: { payload: item, record } };
@@ -576,18 +716,25 @@ export class WalWriter {
       writtenRecords: WalRecord[];
     }
   ): Promise<void> {
-    // Group by (shard_id, minute_utc) so each WAL object strictly follows wal/{region}/{shard}/{minute}/{sha256}.json
+    // Strictly partition WAL objects by (tenant_id, site_id, shard_id, minute_utc) so multiple tenants
+    // NEVER share a WalObject or leak across Tier 2 / Tier 3 customer storage buckets (C-15)!
     const groups = new Map<
       string,
-      { shardId: number; minuteUtc: string; items: ValidatedItem[] }
+      { tenantId: string; siteId: string; shardId: number; minuteUtc: string; items: ValidatedItem[] }
     >();
 
     for (const v of validated) {
       const minuteUtc = formatUtcMinuteBucket(v.record.received_at_ms);
-      const groupKey = `${v.record.shard_id}\u0000${minuteUtc}`;
+      const groupKey = `${v.record.tenant_id}\u0000${v.record.site_id}\u0000${v.record.shard_id}\u0000${minuteUtc}`;
       let group = groups.get(groupKey);
       if (!group) {
-        group = { shardId: v.record.shard_id, minuteUtc, items: [] };
+        group = {
+          tenantId: v.record.tenant_id,
+          siteId: v.record.site_id,
+          shardId: v.record.shard_id,
+          minuteUtc,
+          items: [],
+        };
         groups.set(groupKey, group);
       }
       group.items.push(v);
@@ -600,12 +747,16 @@ export class WalWriter {
       const walKey = formatWalObjectKey(
         this.region,
         group.shardId,
+        group.tenantId,
+        group.siteId,
         group.minuteUtc,
         sha256
       );
       const walObject: WalObject = {
         wal_version: 1,
         region: this.region,
+        tenant_id: group.tenantId,
+        site_id: group.siteId,
         shard_id: group.shardId,
         minute_utc: group.minuteUtc,
         sha256,
@@ -614,7 +765,7 @@ export class WalWriter {
         records,
       };
       const body = canonicalJsonStringify(walObject);
-      const tenantIds = Array.from(new Set(records.map((r) => r.tenant_id))).sort();
+      const tenantIds = [group.tenantId];
 
       const putOutcome = await this.adapter.putWalImmutable({
         key: walKey,
@@ -623,6 +774,8 @@ export class WalWriter {
         deletionEpoch: this.deletionEpoch,
         nowMs,
         customMetadata: {
+          tenant_id: group.tenantId,
+          site_id: group.siteId,
           shard_id: String(group.shardId),
           minute_utc: group.minuteUtc,
           record_count: String(records.length),
@@ -699,12 +852,13 @@ export class WalWriter {
         : 0;
 
     const qr = failed.validationResult?.quarantineRecord ?? null;
-    const pvId = qr?.pvId ?? safeExtractPvId(payload?.raw_frame);
-    const seq = qr?.seq ?? safeExtractSeq(payload?.raw_frame);
+    const rawSource = payload?.raw_frame !== undefined ? payload?.raw_frame : payload?.frame;
+    const pvId = qr?.pvId ?? safeExtractPvId(rawSource);
+    const seq = qr?.seq ?? safeExtractSeq(rawSource);
     const sanitizedFields: Record<string, unknown> = qr
       ? { ...qr.sanitizedFields }
       : {
-          raw_frame: sanitizeUnknownForQuarantine(payload?.raw_frame),
+          raw_frame: sanitizeUnknownForQuarantine(rawSource),
         };
     const payloadSha =
       qr?.payloadSha256 ??
@@ -749,12 +903,19 @@ export class WalWriter {
       dayUtc,
       payloadSha
     );
-    await this.adapter.putQuarantineObject(key, canonicalJsonStringify(quarantineObj), {
+    const encryptedEnvelope = this.encryptQuarantineObject(quarantineObj);
+    const pvIdHmac = pvId
+      ? crypto
+          .createHmac('sha256', this.deriveTenantQuarantineKey(tenantId, siteId))
+          .update(pvId, 'utf8')
+          .digest('hex')
+      : '';
+    await this.adapter.putQuarantineObject(key, canonicalJsonStringify(encryptedEnvelope), {
       tenant_id: tenantId,
       site_id: siteId,
-      pv_id: pvId ?? '',
+      pv_id_hmac: pvIdHmac,
       expires_at_ms: String(quarantineObj.expires_at_ms),
-      reason: failed.reason.slice(0, 128),
+      encrypted: 'AES-256-GCM',
     });
 
     return key;
@@ -789,7 +950,12 @@ export class WalWriter {
       scannedCount += 1;
       const obj = await this.adapter.getObject(meta.key);
       if (!obj) continue;
-      const parsed = JSON.parse(await obj.text()) as QuarantineObject;
+      const parsed = this.decryptQuarantineEnvelope(
+        await obj.text(),
+        options.tenantId,
+        options.siteId
+      );
+      if (!parsed) continue;
       if (parsed.expires_at_ms <= nowMs) {
         skippedExpiredCount += 1;
         continue;
@@ -833,20 +999,26 @@ export class WalWriter {
     pvIds: ReadonlySet<string> | readonly string[]
   ): Promise<{ readonly scannedCount: number; readonly deletedKeys: readonly string[] }> {
     const pvSet = pvIds instanceof Set ? pvIds : new Set(pvIds);
+    const tenantKey = this.deriveTenantQuarantineKey(tenantId, siteId);
+    const pvHmacSet = new Set<string>();
+    for (const pvId of pvSet) {
+      pvHmacSet.add(crypto.createHmac('sha256', tenantKey).update(pvId, 'utf8').digest('hex'));
+    }
+
     const prefix = `quarantine/${this.region}/${tenantId}/${siteId}/`;
     const listed = await this.adapter.listObjects(prefix, 1000);
     const toDelete: string[] = [];
 
     for (const meta of listed.objects) {
-      const metaPvId = meta.customMetadata?.pv_id;
-      if (metaPvId && pvSet.has(metaPvId)) {
+      const metaPvHmac = meta.customMetadata?.pv_id_hmac;
+      if (metaPvHmac && pvHmacSet.has(metaPvHmac)) {
         toDelete.push(meta.key);
         continue;
       }
       const obj = await this.adapter.getObject(meta.key);
       if (!obj) continue;
-      const parsed = JSON.parse(await obj.text()) as QuarantineObject;
-      if (parsed.pv_id && pvSet.has(parsed.pv_id)) {
+      const parsed = this.decryptQuarantineEnvelope(await obj.text(), tenantId, siteId);
+      if (parsed?.pv_id && pvSet.has(parsed.pv_id)) {
         toDelete.push(meta.key);
       }
     }
@@ -872,10 +1044,25 @@ export class WalWriter {
     const expired: string[] = [];
 
     for (const meta of listed.objects) {
+      const metaExp = meta.customMetadata?.expires_at_ms
+        ? Number(meta.customMetadata.expires_at_ms)
+        : Number.NaN;
+      if (Number.isFinite(metaExp) && metaExp <= nowMs) {
+        expired.push(meta.key);
+        continue;
+      }
       const obj = await this.adapter.getObject(meta.key);
       if (!obj) continue;
-      const parsed = JSON.parse(await obj.text()) as QuarantineObject;
-      if (parsed.expires_at_ms <= nowMs) {
+      let expiresAt = Number.NaN;
+      try {
+        const rawJson = JSON.parse(await obj.text()) as { expires_at_ms?: number };
+        if (typeof rawJson.expires_at_ms === 'number') {
+          expiresAt = rawJson.expires_at_ms;
+        }
+      } catch {
+        expiresAt = Number.NaN;
+      }
+      if (Number.isFinite(expiresAt) && expiresAt <= nowMs) {
         expired.push(meta.key);
       }
     }

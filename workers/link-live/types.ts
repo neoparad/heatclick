@@ -6,6 +6,7 @@
  * strict-TypeScript implementation.
  */
 
+import type { CollectionLane } from '../../packages/contract/schema';
 import type { DataRegion } from '../link-wal';
 
 export const LIVE_LANES = [
@@ -14,6 +15,7 @@ export const LIVE_LANES = [
   'visual_replay',
 ] as const;
 export type TelemetryLane = (typeof LIVE_LANES)[number];
+export type AcceptedLiveLane = TelemetryLane | CollectionLane | 'custom_event' | 'replay';
 
 export type LiveTrustLevel =
   | 'edge_attested'
@@ -42,7 +44,7 @@ export interface LiveIngestEvent {
   readonly siteId: string;
   readonly storageRegion: DataRegion;
   readonly processingRegion: string;
-  readonly lane: TelemetryLane;
+  readonly lane: AcceptedLiveLane;
   /** `pv_id` for standard_telemetry, or immutable `event_id`/`replay_id` for other lanes. */
   readonly unitId: string;
   readonly urlId?: string;

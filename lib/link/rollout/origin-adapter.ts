@@ -517,14 +517,17 @@ export class WpPluginOriginAdapter implements OriginAdapter {
       };
     }
 
+    const siteIdentity = this.engine.getSiteIdentity();
     const payload: WpCommandPayload = {
       command: 'apply',
       seq: this.nextSeq(),
       not_after: new Date(Date.now() + 60_000).toISOString(),
+      tenant_id: siteIdentity.tenantId,
+      site_id: siteIdentity.siteId,
+      home_url: siteIdentity.homeUrl,
       post_id: req.postId,
       promotion_id: req.promotionId,
       change_class: req.changeClass,
-      owner_wp_admin_confirmed: req.ownerWpAdminConfirmed,
       expected_content_sha256: req.expectedContentSha256,
       expected_modified_gmt: req.expectedModifiedGmt,
       byte_start: req.byteStart,
@@ -576,10 +579,14 @@ export class WpPluginOriginAdapter implements OriginAdapter {
     readonly postId: number;
     readonly promotionId: string;
   }): Promise<OriginRevertResult> {
+    const siteIdentity = this.engine.getSiteIdentity();
     const payload: WpCommandPayload = {
       command: 'restore',
       seq: this.nextSeq(),
       not_after: new Date(Date.now() + 60_000).toISOString(),
+      tenant_id: siteIdentity.tenantId,
+      site_id: siteIdentity.siteId,
+      home_url: siteIdentity.homeUrl,
       post_id: params.postId,
       promotion_id: params.promotionId,
     };
@@ -621,10 +628,14 @@ export class WpPluginOriginAdapter implements OriginAdapter {
     readonly postId: number;
     readonly expectedSha256: string;
   }): Promise<OriginVerifyResult> {
+    const siteIdentity = this.engine.getSiteIdentity();
     const payload: WpCommandPayload = {
       command: 'verify',
       seq: this.nextSeq(),
       not_after: new Date(Date.now() + 60_000).toISOString(),
+      tenant_id: siteIdentity.tenantId,
+      site_id: siteIdentity.siteId,
+      home_url: siteIdentity.homeUrl,
       post_id: params.postId,
       expected_sha256: params.expectedSha256,
     };

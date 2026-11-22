@@ -350,4 +350,75 @@ describe('lib/link/isolation — Layer A AST Inspector & Query Builder, Layer B 
     expect(g4.passed).toBe(true);
     expect(g4.ledgerRegistered).toBe(true);
   });
+
+  test('Wave 8 Regressions (C-10, C-11, C-14): blocks backslash-escaped quote smuggling, OR 2=2 tautology, literal spoofing, UNION/subquery/comma-join/PREWHERE, and enforces dual base+per-tenant row policies', () => {
+    // C-10: Backslash-escaped quote smuggling ('\\'; ...) must NOT fool lexer into hiding url(...) inside a fake string literal
+    const smuggledUrl = `
+      SELECT '\\' AS a, '\\'' AS c
+      FROM url('http://169.254.169.254/latest/meta-data', 'CSV', 'x String')
+      WHERE tenant_id = {tenant_id:String}
+    `;
+    const c10 = inspectSqlAst(smuggledUrl);
+    expect(c10.valid).toBe(false);
+    expect(
+      c10.violations.some(
+        (v) => v.code === 'FORBIDDEN_DDL_DML_OR_CONTROL' && v.message.includes('url()')
+      )
+    ).toBe(true);
+
+    // C-11a: Top-level OR tautology bypass (`WHERE tenant_id = {tenant_id:String} OR 2=2`)
+    const orBypass = inspectSqlAst(
+      `SELECT page_id FROM rollup_page_hourly WHERE tenant_id = {tenant_id:String} OR 2 = 2`
+    );
+    expect(orBypass.valid).toBe(false);
+    expect(orBypass.violations.some((v) => v.code === 'SUSPECT_SQL_INJECTION_PAYLOAD')).toBe(true);
+    expect(orBypass.violations.some((v) => v.code === 'MISSING_TENANT_BIND_PREDICATE')).toBe(true);
+
+    // C-11b: Bind token spoofed inside a string literal (`SELECT 'tenant_id = {tenant_id:String}'`)
+    const spoofedLiteral = inspectSqlAst(
+      `SELECT 'tenant_id = {tenant_id:String}' AS fake FROM rollup_page_hourly WHERE 1 = 1`
+    );
+    expect(spoofedLiteral.valid).toBe(false);
+    expect(spoofedLiteral.violations.some((v) => v.code === 'MISSING_TENANT_BIND_PREDICATE')).toBe(true);
+
+    // C-11c: UNION ALL & comma-join & unscoped subquery & PREWHERE
+    expect(
+      inspectSqlAst(
+        `SELECT page_id FROM rollup_page_hourly WHERE tenant_id = {tenant_id:String} UNION ALL SELECT name FROM system.tables`
+      ).valid
+    ).toBe(false);
+    expect(
+      inspectSqlAst(
+        `SELECT a.page_id FROM rollup_page_hourly a, system.tables b WHERE a.tenant_id = {tenant_id:String}`
+      ).valid
+    ).toBe(false);
+    expect(
+      inspectSqlAst(
+        `SELECT page_id FROM (SELECT page_id FROM rollup_page_hourly) sub WHERE tenant_id = {tenant_id:String}`
+      ).valid
+    ).toBe(false);
+    expect(
+      inspectSqlAst(
+        `SELECT page_id FROM rollup_page_hourly PREWHERE site_id = 's1' WHERE tenant_id = {tenant_id:String}`
+      ).valid
+    ).toBe(false);
+
+    // C-14: Dual base DDL SHA256 row policy + per-tenant RESTRICTIVE policy intersection returns rows for own tenant and 0 for foreign
+    const sim = new ClickHouseIsolationSimulator();
+    sim.registerTable('rollup_page_hourly', [
+      { tenant_id: 'tenant_a', marker: 'a_row' },
+      { tenant_id: 'tenant_b', marker: 'b_row' },
+    ]);
+    const userA = sim.provisionTenantRoIdentity('tenant_a', ['rollup_page_hourly']);
+    sim.provisionTenantRoIdentity('tenant_b', ['rollup_page_hourly']);
+    expect(userA).toBe(perTenantRoUsername('tenant_a'));
+    expect(userA).toMatch(/^ugk_ro_[0-9a-f]{32}$/);
+
+    const selA = sim.executeSelect({ username: userA, table: 'rollup_page_hourly' });
+    expect(selA.ok).toBe(true);
+    if (selA.ok) {
+      expect(selA.rows).toHaveLength(1);
+      expect(selA.rows[0]?.tenant_id).toBe('tenant_a');
+    }
+  });
 });

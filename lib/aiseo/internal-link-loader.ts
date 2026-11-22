@@ -1,8 +1,10 @@
 /**
  * AISEO Phase 1: 内部リンク提案 loader
  *
- * Wave 0 (束 0-A 止血):
+ * Wave 0 (束 0-A 止血) + Wave 8 L-02 パストラバーサル防御:
  *   - 本番経路での fixture stub 自動フォールバックを完全廃止。
+ *   - `siteId` / `tenantId` を `/^[a-zA-Z0-9_-]{1,64}$/` で厳格検証し、さらに `path.resolve` による
+ *     `dataRoot/internal_link` 配下のディレクトリ封じ込め検査を実施する。
  *   - `LINKSCRAWL_DATA_ROOT` 未設定・ファイル不在・パース失敗時は
  *     `status: 'not_collected'`, `source: 'not_collected'`, `proposals: []` を返す。
  */
@@ -15,6 +17,24 @@ import {
   type InternalLinkProposalsBatch,
   InternalLinkProposalSchema,
 } from './types'
+
+const SAFE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/
+const SAFE_PROPOSALS_FILENAME_PATTERN = /^proposals_[a-zA-Z0-9._-]+\.json$/
+
+export class InvalidInternalLinkIdentifierError extends Error {
+  public constructor(message: string) {
+    super(message)
+    this.name = 'InvalidInternalLinkIdentifierError'
+  }
+}
+
+export function assertSafeInternalLinkId(value: string, fieldName: 'siteId' | 'tenantId'): void {
+  if (typeof value !== 'string' || !SAFE_ID_PATTERN.test(value)) {
+    throw new InvalidInternalLinkIdentifierError(
+      `Invalid ${fieldName}: must match /^[a-zA-Z0-9_-]{1,64}$/`,
+    )
+  }
+}
 
 interface LoadOptions {
   tenantId: string
@@ -42,15 +62,30 @@ async function resolveLatestProposalsFile(
   dataRoot: string,
   siteId: string,
 ): Promise<string | null> {
-  const dir = path.join(dataRoot, 'internal_link', siteId)
+  assertSafeInternalLinkId(siteId, 'siteId')
+
+  const baseDir = path.resolve(dataRoot, 'internal_link')
+  const siteDir = path.resolve(baseDir, siteId)
+  if (!siteDir.startsWith(baseDir + path.sep)) {
+    throw new InvalidInternalLinkIdentifierError('Path traversal blocked for siteId')
+  }
+
   try {
-    const files = await fs.readdir(dir)
+    const files = await fs.readdir(siteDir)
     const matched = files
-      .filter((f) => f.startsWith('proposals_') && f.endsWith('.json'))
+      .filter((f) => SAFE_PROPOSALS_FILENAME_PATTERN.test(f) && !f.includes('..'))
       .sort()
     const latest = matched.at(-1)
-    return latest ? path.join(dir, latest) : null
-  } catch {
+    if (!latest) return null
+    const resolvedFile = path.resolve(siteDir, latest)
+    if (!resolvedFile.startsWith(siteDir + path.sep)) {
+      throw new InvalidInternalLinkIdentifierError('Path traversal blocked for proposals file')
+    }
+    return resolvedFile
+  } catch (err) {
+    if (err instanceof InvalidInternalLinkIdentifierError) {
+      throw err
+    }
     return null
   }
 }
@@ -59,6 +94,8 @@ export async function loadInternalLinkProposals(
   options: LoadOptions,
 ): Promise<InternalLinkProposalsBatch> {
   const { tenantId, siteId } = options
+  assertSafeInternalLinkId(tenantId, 'tenantId')
+  assertSafeInternalLinkId(siteId, 'siteId')
 
   const dataRoot = process.env.LINKSCRAWL_DATA_ROOT
   if (!dataRoot) {

@@ -8,7 +8,11 @@ import {
   type OperabilityAuditResult,
   type RenderPageResult,
 } from '@/lib/link/lab'
-import { LOCAL_AI_CLASSIFIER_FEATURE_METRICS } from '@/lib/link/heatmap-render'
+import {
+  assertNoModelInferredInputFeatures,
+  isLocalAiClassifierFeatureMetric,
+  type FeatureProvenanceDescriptor,
+} from '@/lib/link/heatmap-render'
 import type { EvidenceLevel } from '@/packages/contract/response'
 
 export type FrictionInstrumentKind =
@@ -267,7 +271,11 @@ export function buildInstrumentDWildBrowserAi(params: {
   readonly action_trace?: readonly WildAgentActionStep[]
   readonly behavioral_metrics: Readonly<Record<string, number>>
   readonly behavioral_summary_note: string
+  readonly input_feature_provenances?:
+    | readonly FeatureProvenanceDescriptor[]
+    | Readonly<Record<string, string>>
 }): InstrumentDOutput {
+  assertNoModelInferredInputFeatures(params.input_feature_provenances)
   const lowNote = params.behavioral_summary_note.toLowerCase()
   for (const term of FORBIDDEN_WILD_STUCK_TERMS) {
     if (lowNote.includes(term.toLowerCase())) {
@@ -289,7 +297,7 @@ export function buildInstrumentDWildBrowserAi(params: {
 
   if (params.sub_tier === 'model_inferred') {
     const leaked = Object.keys(params.behavioral_metrics).filter((k) =>
-      LOCAL_AI_CLASSIFIER_FEATURE_METRICS.has(k),
+      isLocalAiClassifierFeatureMetric(k),
     )
     if (leaked.length > 0) {
       throw new Error(

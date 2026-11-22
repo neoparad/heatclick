@@ -221,9 +221,10 @@ export function runClosure2CrossTableInvariants(
     }
   }
 
-  // Count base PVs per cell to compare against sealed site_hour rollups
+  // Count base human PVs per cell to compare against sealed site_hour rollups (excluding synthetic lab PVs per H-21)
   const basePvCountByCell = new Map<string, number>();
   for (const pv of pvStates) {
+    if (pv.excludeFromHumanRollups) continue;
     const ck = makeCellCompositeKey(
       pv.placement.tenantId,
       pv.placement.siteId,
@@ -630,6 +631,14 @@ export async function runClosure4SecondImplementationRederivation(args: {
     if (!obj) continue;
     const walObj = JSON.parse(await obj.text()) as WalObject;
     for (const rec of walObj.records) {
+      if (
+        (rec.lab_exclusion as unknown) === true ||
+        rec.lab_exclusion?.is_lab_traffic === true ||
+        rec.lab_exclusion?.exclude_human_rollups === true ||
+        (rec.frame.lab_run_id !== undefined && rec.frame.lab_run_id !== '')
+      ) {
+        continue;
+      }
       const pvComposite = `${rec.tenant_id}\u0000${rec.site_id}\u0000${rec.frame.pv_id}`;
       if (deletedPvKeys.has(pvComposite)) continue;
 

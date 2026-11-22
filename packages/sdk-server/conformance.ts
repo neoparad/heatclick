@@ -21,8 +21,12 @@ import { spawnSync } from 'node:child_process';
 import { drawUniformU, hmacSha256Hex } from '@/lib/link/allocator';
 import { CANONICAL_SCHEMA } from '@/packages/contract/schema';
 import { canonicalJson } from '@/packages/contract/response';
-import { buildOpenApi31Document } from '@/lib/link/surface/openapi';
-import { generateAll8ServerSdks } from './generator';
+import { buildOpenApi31Document, OPERATION_CATALOG } from '@/lib/link/surface/openapi';
+import {
+  generateAll8ServerSdks,
+  toPascalCaseOperationId,
+  toSnakeCaseOperationId,
+} from './generator';
 import {
   SDK_LANGUAGES,
   type AllocatorConformanceVector,
@@ -269,6 +273,41 @@ function verifyStaticContract(
   }
   if (!combinedSource.includes('user_agent')) {
     issues.push('Missing actor-blind forbidden key guard');
+  }
+
+  // [H-01]: Verify all 8 languages emit real HTTP `request` dispatcher AND 1-to-1 typed operation methods
+  // for EVERY operation in `OPERATION_CATALOG`!
+  if (!/\b(?:request|Request|RequestAsync)\s*\(/.test(combinedSource)) {
+    issues.push('Missing HTTP request(...) client dispatcher');
+  }
+  for (const op of OPERATION_CATALOG) {
+    let expectedMethodToken: string;
+    switch (artifact.language) {
+      case 'typescript':
+      case 'java':
+      case 'php':
+        expectedMethodToken = `${op.operationId}(`;
+        break;
+      case 'python':
+      case 'ruby':
+      case 'rust':
+        expectedMethodToken = `${toSnakeCaseOperationId(op.operationId)}(`;
+        break;
+      case 'go':
+        expectedMethodToken = `${toPascalCaseOperationId(op.operationId)}(`;
+        break;
+      case 'dotnet':
+        expectedMethodToken = `${toPascalCaseOperationId(op.operationId)}Async(`;
+        break;
+    }
+    if (!combinedSource.includes(expectedMethodToken)) {
+      issues.push(
+        `Missing generated operation method "${expectedMethodToken}" for catalog operation ${op.operationId}`
+      );
+    }
+    if (!combinedSource.includes(op.path)) {
+      issues.push(`Missing catalog path "${op.path}" for operation ${op.operationId}`);
+    }
   }
 
   return { passed: issues.length === 0, issues };

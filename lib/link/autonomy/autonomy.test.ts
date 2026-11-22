@@ -14,6 +14,7 @@ import {
   CrossTenantPoolingLedger,
   ProhibitedPoolingLaneError,
   RowLevelPoolingProhibitedError,
+  SingleUsePasskeyApprovalVerifier,
   bindJapaneseEmbeddingArtifact,
   createSealedAutonomyEnvelope,
   evaluateAndSignAgentPublish,
@@ -314,6 +315,247 @@ describe('lib/link/autonomy/agent-publisher (§10.10, §11.7 — 1,000+ Hijack S
     expect(hijackReport.perClientCounts['mcp_client_b']).toBe(520);
     expect(hijackReport.outOfEnvelopePublishes).toBe(0);
     expect(hijackReport.unapprovedOpenFieldsSigned).toBe(0);
+  });
+
+  test('[C-16] fails closed on unknown provenance, non-primitive/HTML payloads, self-declared allowedValues, mechanical URL/price/consent smuggling, and replayed/stale passkey approvals', () => {
+    const owner = makeHumanOwner();
+    const created = createSealedAutonomyEnvelope({
+      author: owner,
+      spec: {
+        tenantId: 'ten_1',
+        siteId: 'site_1',
+        allowedActions: ['delivery.publish_banner'],
+        allowedScopes: ['decisions:publish'],
+        allowedPagePatterns: ['/articles/*'],
+        allowedFieldProvenance: ['closed_enum', 'copy_library'],
+        maxCostUnits: 100,
+        maxExposedUnits: 2730,
+        maxConversionsAtRisk: 55,
+        smokeEpsilon: 0.01,
+        maxGuardrailStalenessSec: 3600,
+        terminatingEvents: ['kill_switch'],
+        reviewByIso: '2026-12-20T00:00:00Z',
+      },
+      nowIso: '2026-11-20T12:00:00Z',
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const envelope = created.envelope;
+
+    const verifier = new SingleUsePasskeyApprovalVerifier({ requireRegisteredApproval: true });
+    const baseCtx = {
+      envelope,
+      guardrails: { lastCheckedAtIso: '2026-11-20T11:55:00Z', allGuardrailsHealthy: true },
+      sensitiveIndustry: false,
+      preflightPassed: true,
+      section106Passed: true,
+      approvedServerLookupIds: new Set(['sec_hero']),
+      approvedAssetRefs: new Set(['asset_banner_01']),
+      sourceTickets: new Map(),
+      slotCatalog: {
+        theme: { slotName: 'theme', provenance: 'closed_enum' as const, allowedValues: ['light', 'dark'] },
+        headline: { slotName: 'headline', provenance: 'open_free_text' as const },
+      },
+      passkeyApprovalVerifier: verifier,
+      nowIso: '2026-11-20T12:00:00Z',
+    };
+
+    // 1. Unknown provenance MUST fail closed immediately in default branch
+    const unknownProv = evaluateAndSignAgentPublish(
+      {
+        requestId: 'req_c16_unknown_prov',
+        clientId: 'mcp_a',
+        agentPrincipalId: 'agent_1',
+        action: 'delivery.publish_banner',
+        pagePath: '/articles/guide',
+        bundleTier: 'A1',
+        fields: [{ name: 'theme', provenance: 'forged_provenance' as 'closed_enum', value: 'light' }],
+        requestedExposedUnits: 50,
+        requestedConversionsAtRisk: 1,
+        requestedCostUnits: 1,
+        isSmokePhase: true,
+      },
+      { ...baseCtx, slotCatalog: undefined }
+    );
+    expect(unknownProv.signed).toBe(false);
+    expect(unknownProv.code).toBe('UNKNOWN_OR_UNREGISTERED_PROVENANCE');
+
+    // 2. Non-primitive object/array or HTML/script payload MUST fail closed
+    const objVal = evaluateAndSignAgentPublish(
+      {
+        requestId: 'req_c16_obj',
+        clientId: 'mcp_a',
+        agentPrincipalId: 'agent_1',
+        action: 'delivery.publish_banner',
+        pagePath: '/articles/guide',
+        bundleTier: 'A1',
+        fields: [{ name: 'theme', provenance: 'closed_enum', value: { evil: 1 } as unknown as string }],
+        requestedExposedUnits: 50,
+        requestedConversionsAtRisk: 1,
+        requestedCostUnits: 1,
+        isSmokePhase: true,
+      },
+      baseCtx
+    );
+    expect(objVal.signed).toBe(false);
+    expect(objVal.code).toBe('NON_PRIMITIVE_SLOT_VALUE_FORBIDDEN');
+
+    const htmlVal = evaluateAndSignAgentPublish(
+      {
+        requestId: 'req_c16_html',
+        clientId: 'mcp_a',
+        agentPrincipalId: 'agent_1',
+        action: 'delivery.publish_banner',
+        pagePath: '/articles/guide',
+        bundleTier: 'A1',
+        fields: [{ name: 'headline', provenance: 'open_free_text', value: '<b>Injected</b><script>x()</script>' }],
+        requestedExposedUnits: 50,
+        requestedConversionsAtRisk: 1,
+        requestedCostUnits: 1,
+        isSmokePhase: true,
+      },
+      baseCtx
+    );
+    expect(htmlVal.signed).toBe(false);
+    expect(htmlVal.code).toBe('HTML_OR_SCRIPT_PAYLOAD_FORBIDDEN');
+
+    // 3. Agent self-declared `allowedValues` ignored when server slotCatalog restricts to ['light', 'dark']
+    const selfAllowlist = evaluateAndSignAgentPublish(
+      {
+        requestId: 'req_c16_self_enum',
+        clientId: 'mcp_a',
+        agentPrincipalId: 'agent_1',
+        action: 'delivery.publish_banner',
+        pagePath: '/articles/guide',
+        bundleTier: 'A1',
+        fields: [
+          {
+            name: 'theme',
+            provenance: 'closed_enum',
+            value: 'neon_override',
+            allowedValues: ['neon_override'],
+          },
+        ],
+        requestedExposedUnits: 50,
+        requestedConversionsAtRisk: 1,
+        requestedCostUnits: 1,
+        isSmokePhase: true,
+      },
+      baseCtx
+    );
+    expect(selfAllowlist.signed).toBe(false);
+    expect(selfAllowlist.code).toBe('CLOSED_ENUM_VIOLATION');
+
+    // 4. Mechanical URL / price / consent detection blocks autonomous publish even with self-declared booleans = false
+    const smuggledPriceAndUrl = evaluateAndSignAgentPublish(
+      {
+        requestId: 'req_c16_mech',
+        clientId: 'mcp_a',
+        agentPrincipalId: 'agent_1',
+        action: 'delivery.publish_banner',
+        pagePath: '/articles/guide',
+        bundleTier: 'A1',
+        fields: [{ name: 'theme', provenance: 'closed_enum', value: 'light' }],
+        operations: [{ op: 'SetText', text: '特別価格 ¥1,980 (50% OFF) https://other-host.example/deal' }],
+        touchesDestination: false,
+        touchesHost: false,
+        touchesOfferCondition: false,
+        changesPrice: false,
+        relaxesPrivacy: false,
+        requestedExposedUnits: 50,
+        requestedConversionsAtRisk: 1,
+        requestedCostUnits: 1,
+        isSmokePhase: true,
+      },
+      baseCtx
+    );
+    expect(smuggledPriceAndUrl.signed).toBe(false);
+    expect(smuggledPriceAndUrl.status).toBe('requires_human_approval');
+
+    // 5. Passkey approval must be registered, fresh <= 5 min, and single-use consumed (replay fails closed!)
+    const candidatePayload = {
+      pagePath: '/articles/guide',
+      bundleTier: 'A1' as const,
+      fields: [{ name: 'headline', provenance: 'open_free_text' as const, value: '安全な見出し' }],
+    };
+    const hashes = computeActionAndDiffHash('delivery.publish_banner', candidatePayload);
+
+    // Stale approval (created 10 minutes ago > 5 min window) -> rejected
+    const staleApproval: PasskeyApprovalRecord = {
+      approvalId: 'apr_stale_10m',
+      tenantId: 'ten_1',
+      siteId: 'site_1',
+      approverPrincipalId: owner.principalId,
+      approverRole: 'owner',
+      action: 'delivery.publish_banner',
+      actionHash: hashes.actionHash,
+      renderedDiffHash: hashes.renderedDiffHash,
+      webauthnCredentialId: 'cred_1',
+      createdAt: '2026-11-20T11:49:00Z',
+      expiresAt: '2026-11-20T12:30:00Z',
+    };
+    verifier.registerApproval(staleApproval);
+    const staleRes = evaluateAndSignAgentPublish(
+      {
+        requestId: 'req_c16_stale_apr',
+        clientId: 'mcp_a',
+        agentPrincipalId: 'agent_1',
+        action: 'delivery.publish_banner',
+        ...candidatePayload,
+        requestedExposedUnits: 50,
+        requestedConversionsAtRisk: 1,
+        requestedCostUnits: 1,
+        isSmokePhase: true,
+        humanApproval: staleApproval,
+      },
+      baseCtx
+    );
+    expect(staleRes.signed).toBe(false);
+    expect(staleRes.code).toBe('INVALID_OR_MISMATCHED_HUMAN_APPROVAL');
+
+    // Fresh approval (created 1 minute ago) -> 1st use signs; 2nd replay FAILS CLOSED!
+    const freshApproval: PasskeyApprovalRecord = {
+      ...staleApproval,
+      approvalId: 'apr_fresh_1m',
+      createdAt: '2026-11-20T11:59:00Z',
+    };
+    verifier.registerApproval(freshApproval);
+
+    const firstUse = evaluateAndSignAgentPublish(
+      {
+        requestId: 'req_c16_apr_1',
+        clientId: 'mcp_a',
+        agentPrincipalId: 'agent_1',
+        action: 'delivery.publish_banner',
+        ...candidatePayload,
+        requestedExposedUnits: 50,
+        requestedConversionsAtRisk: 1,
+        requestedCostUnits: 1,
+        isSmokePhase: true,
+        humanApproval: freshApproval,
+      },
+      baseCtx
+    );
+    expect(firstUse.signed).toBe(true);
+
+    const replayUse = evaluateAndSignAgentPublish(
+      {
+        requestId: 'req_c16_apr_replay',
+        clientId: 'mcp_a',
+        agentPrincipalId: 'agent_1',
+        action: 'delivery.publish_banner',
+        ...candidatePayload,
+        requestedExposedUnits: 50,
+        requestedConversionsAtRisk: 1,
+        requestedCostUnits: 1,
+        isSmokePhase: true,
+        humanApproval: freshApproval,
+      },
+      baseCtx
+    );
+    expect(replayUse.signed).toBe(false);
+    expect(replayUse.code).toBe('INVALID_OR_MISMATCHED_HUMAN_APPROVAL');
+    expect(replayUse.reason).toContain('approval_already_consumed');
   });
 
   test('asymmetric stop authority: site resumes after 60 min while named interventions stay stopped until human release; whole-tenant stop requires human or 2 principals', () => {

@@ -1,8 +1,10 @@
 /**
  * GET /api/seo/internal-links — LINKTH CRAWL 内部リンク構造
  *
- * Wave 0 (束 0-A 止血):
+ * Wave 0 (束 0-A 止血) + Wave 8 H-23 テナント分離強化:
  *   - LINKTH CRAWL 未接続・エラー時のモック返却 (`generateInternalLinksMock`) および `?mock=1` を完全廃止。
+ *   - `process.env.LINKSCRAWL_DEFAULT_JOB_ID` グローバルフォールバックを完全廃止し、
+ *     認証済みアクティブサイト自身の `site.linkscrawlJobId` と一致しない `?job_id=` 指定は 403 で拒否 (IDOR 防止)。
  *   - 未収集時は `status: 'not_collected'`, `source: 'not_collected'` + 空の構造オブジェクトを返す。
  */
 
@@ -41,11 +43,17 @@ export async function GET(req: NextRequest) {
   const { site } = active
 
   const sp = req.nextUrl.searchParams
-  const jobId =
-    sp.get('job_id') ||
-    site.linkscrawlJobId ||
-    process.env.LINKSCRAWL_DEFAULT_JOB_ID ||
-    ''
+  const requestedJobId = (sp.get('job_id') || '').trim()
+  const siteJobId = (site.linkscrawlJobId || '').trim()
+
+  if (requestedJobId && requestedJobId !== siteJobId) {
+    return NextResponse.json(
+      { error: 'FORBIDDEN: job_id does not belong to the authenticated tenant site' },
+      { status: 403 },
+    )
+  }
+
+  const jobId = siteJobId
   const baseUrl = (process.env.LINKSCRAWL_API_URL || '').replace(/\/+$/, '')
 
   if (!baseUrl || !jobId) {

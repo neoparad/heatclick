@@ -11,6 +11,7 @@
  * - On hash or ABI mismatch -> falls back cleanly to uniform draw or rule default and logs `fallback_reason`.
  */
 
+import zlib from 'node:zlib';
 import {
   canonicalJsonStringify,
   sha256Hex,
@@ -72,14 +73,11 @@ export interface ArtifactValidationResult {
 }
 
 /**
- * Deterministic RLE/deflate-conservative byte estimator when native CompressionStream is unavailable,
- * plus exact UTF-8 byte length check. Uses pure ES2022 so it works identically in browsers & Workers.
+ * Measures actual gzip-compressed byte size via `zlib.gzipSync` (`[M-14]`), never trusting
+ * downward caller-supplied `measuredGzipBytes` overrides.
  */
 export function estimateCompressedBytes(rawBytes: Uint8Array): number {
-  // Simple deterministic LZ-like byte counter (upper-bound safe; exact gzip is equal or smaller)
-  // For small JSON payloads, rawBytes.length is already a conservative upper bound;
-  // when checking the 50KB budget we enforce BOTH exact raw check or supplied gzip byte count.
-  return rawBytes.byteLength;
+  return zlib.gzipSync(Buffer.from(rawBytes)).byteLength;
 }
 
 export function packageInt8ModelArtifact(
@@ -88,7 +86,13 @@ export function packageInt8ModelArtifact(
 ): SignedInt8ModelArtifact {
   const canonical = canonicalJsonStringify(payload);
   const rawBytes = utf8ToBytes(canonical);
-  const compressedBytes = measuredGzipBytes ?? estimateCompressedBytes(rawBytes);
+  const actualGzipBytes = estimateCompressedBytes(rawBytes);
+  // [M-14]: Never trust downward-spoofed `measuredGzipBytes` to bypass the 50 KB cap;
+  // take `Math.max(actualGzipBytes, measuredGzipBytes)` so oversized payloads always fail closed.
+  const compressedBytes =
+    measuredGzipBytes !== undefined && Number.isFinite(measuredGzipBytes)
+      ? Math.max(actualGzipBytes, Math.trunc(measuredGzipBytes))
+      : actualGzipBytes;
 
   if (compressedBytes > MAX_MODEL_ARTIFACT_COMPRESSED_BYTES) {
     throw new Error(
@@ -117,16 +121,24 @@ export function validateInt8ModelArtifact(
   if (!(SUPPORTED_EVALUATOR_ABIS as readonly number[]).includes(p.abi_version)) {
     errors.push(`Unsupported ABI version ${p.abi_version}`);
   }
-  if (artifact.compressed_bytes > MAX_MODEL_ARTIFACT_COMPRESSED_BYTES) {
+  const serializedCanonical = canonicalJsonStringify(p);
+  const actualGzipBytes = estimateCompressedBytes(utf8ToBytes(serializedCanonical));
+  const effectiveCompressedBytes = Math.max(artifact.compressed_bytes, actualGzipBytes);
+  if (effectiveCompressedBytes > MAX_MODEL_ARTIFACT_COMPRESSED_BYTES) {
     errors.push(
-      `Artifact compressed size ${artifact.compressed_bytes} exceeds 50 KB cap (${MAX_MODEL_ARTIFACT_COMPRESSED_BYTES})`
+      `Artifact compressed size ${effectiveCompressedBytes} exceeds 50 KB cap (${MAX_MODEL_ARTIFACT_COMPRESSED_BYTES})`
+    );
+  }
+  if (artifact.compressed_bytes < actualGzipBytes) {
+    errors.push(
+      `Artifact declared compressed_bytes (${artifact.compressed_bytes}) is smaller than actual gzip size (${actualGzipBytes})`
     );
   }
   if (!p.license_id || !p.license_notice) {
     errors.push('Missing bundled license_id or license_notice (§8.14)');
   }
 
-  const recomputedSha = sha256Hex(canonicalJsonStringify(p));
+  const recomputedSha = sha256Hex(serializedCanonical);
   if (recomputedSha !== artifact.artifact_sha256) {
     errors.push('Artifact SHA-256 content hash mismatch (tampered or corrupted)');
   }
@@ -272,9 +284,62 @@ export function evaluateInt8ModelArtifact(params: {
   }
 
   const scorePermille = intQ8LogitToPermille(logitQ8);
-  // Deterministic inverse-CDF arm choice driven by server random draw `serverUniformU`
-  const uPermille = Math.floor(Math.max(0, Math.min(0.999999, params.serverUniformU)) * 1000);
-  const chosenArmIndex = numArms === 2 ? (uPermille < scorePermille ? 1 : 0) : Math.min(numArms - 1, Math.floor((scorePermille * numArms) / 1001));
+  // [M-14]: Deterministic inverse-CDF arm sampling driven by `serverUniformU` across ALL `numArms >= 2`
+  // (`sum_{j <= k} p_j > u`, pure integer permille arithmetic for bit-exact browser/server parity).
+  let chosenArmIndex = 0;
+  if (numArms >= 2) {
+    const clampedU = Math.max(0, Math.min(0.999999, params.serverUniformU));
+    const uPermille = Math.floor(clampedU * 1000);
+
+    if (numArms === 2) {
+      // Exact 2-arm CDF: arm 1 has mass `scorePermille / 1000`, arm 0 has `(1000 - scorePermille) / 1000`
+      // Invert cumulative [p_0, p_0 + p_1] using u' = 999 - uPermille (preserving exact 2-arm mapping).
+      const arm0Permille = 1000 - scorePermille;
+      const armProbs = [arm0Permille, scorePermille];
+      const uInv = 999 - uPermille;
+      let cum = 0;
+      chosenArmIndex = 1;
+      for (let k = 0; k < 2; k += 1) {
+        cum += armProbs[k];
+        if (uInv < cum) {
+          chosenArmIndex = k;
+          break;
+        }
+      }
+    } else {
+      // Multi-arm (`numArms >= 3`) integer permille distribution summing strictly to 1000
+      const rawWeights = new Array<number>(numArms);
+      rawWeights[0] = Math.max(10, 1000 - scorePermille);
+      const treatArms = numArms - 1;
+      for (let k = 1; k < numArms; k += 1) {
+        // Incorporate per-output dense logit or deterministic integer rank offset around scorePermille
+        const armOffsetQ8 =
+          p.dense_layer && k - 1 < p.dense_layer.bias_q8.length
+            ? p.dense_layer.bias_q8[k - 1]
+            : (treatArms - k) * 32;
+        rawWeights[k] = Math.max(10, intQ8LogitToPermille(logitQ8 + armOffsetQ8));
+      }
+      const weightSum = rawWeights.reduce((s, w) => s + w, 0);
+      const armPermille = new Array<number>(numArms);
+      let allocated = 0;
+      for (let k = 0; k < numArms - 1; k += 1) {
+        const share = Math.max(1, Math.trunc((rawWeights[k] * 1000) / weightSum));
+        armPermille[k] = share;
+        allocated += share;
+      }
+      armPermille[numArms - 1] = Math.max(1, 1000 - allocated);
+
+      let cumPermille = 0;
+      chosenArmIndex = numArms - 1;
+      for (let k = 0; k < numArms; k += 1) {
+        cumPermille += armPermille[k];
+        if (uPermille < cumPermille) {
+          chosenArmIndex = k;
+          break;
+        }
+      }
+    }
+  }
 
   return {
     ok: true,

@@ -15,18 +15,18 @@
 
 ## 0. エグゼクティブサマリー
 
-波 0 から波 7 までの **全 32 束**（追加分の `4-F`・`4-G`・`4-H`・`4-I`・`6-F` を含む）をローカルブランチ `feat/ugokilink-v2` 上に実装・単体検証・統合検証完了した。
+波 0 から波 7 までの **全 32 束**（追加分の `4-F`・`4-G`・`4-H`・`4-I`・`6-F` を含む）の実装完了後、独立した 4 スライスによる敵対的コード＆数理レビューを実施し、検出された **全 71 件（Critical 18・High 30・Medium 18・Low 5）** を **Wave 8** にて一括是正・回帰テスト追加・再ビルド検証まで完了した（詳細は `docs/ugokilink/REVIEW_REPORT.md` および `docs/ugokilink/CODEX_REVIEW_HANDOFF.md` を参照）。
 
 - **絶対禁止事項（実装計画 §2）の完全遵守**:
   - 本番 DDL 適用・本番データ変更・Vercel/Cloudflare デプロイ・`git push` は一切未実行。
   - `.env*` ファイルの読み取り・改変・コミット 0 件（新規環境変数 34 件の名称と用途のみ `env.example` に追記）。
   - 未追跡作業資料 `docs/proposals/2026-11-19-ugokilink-v2-working/` は `.git/info/exclude` により保護・未コミット・実行時参照 0 件。
-  - **Jev 出力の学習・重み・蒸留先生利用は一切実装せず、決定 31-b による永久禁止をコードと機械検査で固定**。
-- **検証結果サマリー**:
-  - **UGOKI LINK v2 全 Jest テスト**: **53 スイート / 958 テスト全 PASS（失敗 0・保留 0）**
+  - **Jev 出力の学習・重み・蒸留先生利用は一切実装せず、決定 31-b による永久禁止をコードと深さ無制限の機械検査で固定**。
+- **最終検証結果サマリー（Wave 8 是正後）**:
+  - **UGOKI LINK v2 全 Jest テスト**: **56 スイート / 1,089 テスト全 PASS（失敗 0・保留 0）**
   - **Node テスト**: `scripts/link/inspect-prod-baseline.test.mjs` **9/9 PASS**、既存 `workers/event-ingest` **101/101 PASS**
   - **型検査 (`npm run type-check`)**: **0 エラー（exit 0）**
-  - **本番ビルド (`npm run build`)**: **成功（exit 0、静的 60 ページ ＋ 新規 `/api/v1/**` 13 ルートすべてビルド完了）**
+  - **本番ビルド (`npm run build`)**: **成功（exit 0、静的 60 ページ ＋ `/api/v1/**` 全 20 ルート［`OPERATION_CATALOG` 26 操作と 1:1 完全一致］すべてビルド完了）**
 
 ---
 
@@ -164,13 +164,13 @@
 
 | 検証種別 | コマンド | 結果 | 備考 |
 |---|---|---|---|
-| **UGOKI LINK v2 全 Jest** | `npx jest packages/contract packages/sdk-* packages/wp-plugin workers/link-* lib/link tests/unit/wave0-no-dummy-and-tenant-guard.test.ts tests/unit/ugokilink-v2-integration.test.ts` | **53/53 スイート・958/958 テスト PASS** | 失敗 0・**保留 0**（36.3 秒） |
+| **UGOKI LINK v2 全 Jest（Wave 8 是正後）** | `npx jest packages/contract packages/sdk-* packages/wp-plugin workers/link-* lib/link middleware.classify.test.ts __tests__/api-utils.test.ts app/api/scenarios/runtime/route.test.ts tests/unit/wave0-no-dummy-and-tenant-guard.test.ts tests/unit/ugokilink-v2-integration.test.ts` | **56/56 スイート・1,089/1,089 テスト PASS** | 失敗 0・**保留 0**（敵対的回帰テスト +131 件追加済） |
 | **既存連携回帰 Jest** | `npx jest --runTestsByPath lib/ml/pragmatic-ml-engine.test.ts lib/heatmap/agent-heatmap-client.test.ts` | **2/2 スイート・10/10 テスト PASS** | 分離リファクタ後回帰 0 |
 | **0-C 本番記録 Node 試験** | `node --test scripts/link/inspect-prod-baseline.test.mjs` | **9/9 PASS** | `.env*` 非参照・SELECT/SHOW 限定確認 |
 | **既存 Worker 回帰試験** | `npm test --prefix workers/event-ingest` | **101/101 PASS** | 既存稼働 Worker 無破壊確認 |
 | **TypeScript 型検査** | `npm run type-check` (`tsc --noEmit`) | **0 エラー（exit 0）** | リポジトリ全体 `strict: true` 通過 |
-| **Next.js 本番ビルド** | `npm run build` (`next build`) | **成功（exit 0）** | 60 静的ページ＋新規 `/api/v1/**` 13 ルート全生成 |
-| **保留テスト・禁止事項監査** | `tests/unit/ugokilink-v2-integration.test.ts` | **5/5 PASS** | 50 テストファイルで保留 0、261 本番ファイルで `.env` 読取 0・working 参照 0、13 `/api/v1` ルートでダミー 0 |
+| **Next.js 本番ビルド** | `npm run build` (`next build`) | **成功（exit 0）** | 60 静的ページ＋`/api/v1/**` 全 20 ルート生成 |
+| **保留テスト・禁止事項・偽装ヘッダ監査** | `tests/unit/ugokilink-v2-integration.test.ts` | **5/5 PASS** | 保留 0、`.env`/working 参照 0、全 20 `/api/v1` ルートでダミー 0・偽装ヘッダ読取 0・無変換 Collector→WAL→Loader 直結 PASS |
 
 ### 手元で確かめられなかったもの（実機・本番環境待ち）
 1. 本番 ClickHouse 8 GiB ノード・Postgres RLS・Cloudflare Workers/R2/Queues/Durable Objects 実配備下での負荷・遅延・30 日連続稼働・復旧時間（RTO）。

@@ -189,40 +189,215 @@ export interface ParsedSignatureAgent {
   readonly origin_host: string | null
 }
 
+const SFV_KEY_RE = /^[a-z*][a-z0-9_.*-]*$/
+
+function skipOws(s: string, pos: number): number {
+  let i = pos
+  while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++
+  return i
+}
+
+/**
+ * RFC 8941 §4.2.5 Quoted-String parser (`"..."` with `\"` and `\\` escapes).
+ */
+function parseSfvString(s: string, pos: number): { readonly value: string; readonly next: number } | null {
+  if (pos >= s.length || s[pos] !== '"') return null
+  let i = pos + 1
+  let out = ''
+  while (i < s.length) {
+    const ch = s[i]
+    if (ch === '\\') {
+      if (i + 1 >= s.length) return null
+      const esc = s[i + 1]
+      if (esc !== '"' && esc !== '\\') return null
+      out += esc
+      i += 2
+      continue
+    }
+    if (ch === '"') {
+      return { value: out, next: i + 1 }
+    }
+    const code = ch.charCodeAt(0)
+    if (code < 0x20 || code === 0x7f) return null
+    out += ch
+    i++
+  }
+  return null
+}
+
+function serializeSfvString(val: string): string {
+  return `"${val.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
+function parseSfvKey(s: string, pos: number): { readonly key: string; readonly next: number } | null {
+  let i = pos
+  while (i < s.length && /[A-Za-z0-9_.*-]/.test(s[i])) i++
+  if (i === pos) return null
+  const raw = s.slice(pos, i).toLowerCase()
+  if (!SFV_KEY_RE.test(raw)) return null
+  return { key: raw, next: i }
+}
+
+type SfvParamValue = string | number | boolean
+
+function parseSfvParameters(
+  s: string,
+  pos: number,
+): {
+  readonly params: ReadonlyMap<string, SfvParamValue>
+  readonly rawSlice: string
+  readonly next: number
+} | null {
+  let i = pos
+  const start = pos
+  const params = new Map<string, SfvParamValue>()
+  while (i < s.length) {
+    const ws = skipOws(s, i)
+    if (ws >= s.length || s[ws] !== ';') break
+    i = skipOws(s, ws + 1)
+    const kRes = parseSfvKey(s, i)
+    if (!kRes) return null
+    i = kRes.next
+    if (i < s.length && s[i] === '=') {
+      i++
+      if (i >= s.length) return null
+      if (s[i] === '"') {
+        const strRes = parseSfvString(s, i)
+        if (!strRes) return null
+        params.set(kRes.key, strRes.value)
+        i = strRes.next
+      } else if (s[i] === '?') {
+        if (i + 1 >= s.length || (s[i + 1] !== '0' && s[i + 1] !== '1')) return null
+        params.set(kRes.key, s[i + 1] === '1')
+        i += 2
+      } else if (/[-0-9]/.test(s[i])) {
+        let j = i + (s[i] === '-' ? 1 : 0)
+        const digitStart = j
+        while (j < s.length && /[0-9]/.test(s[j])) j++
+        if (j === digitStart) return null
+        if (j < s.length && s[j] === '.') {
+          j++
+          const fracStart = j
+          while (j < s.length && /[0-9]/.test(s[j])) j++
+          if (j === fracStart) return null
+        }
+        const num = Number(s.slice(i, j))
+        if (!Number.isFinite(num)) return null
+        params.set(kRes.key, num)
+        i = j
+      } else {
+        // RFC 8941 Token
+        let j = i
+        while (j < s.length && /[A-Za-z0-9_.*:/!#$%&'+^`|~-]/.test(s[j])) j++
+        if (j === i) return null
+        params.set(kRes.key, s.slice(i, j))
+        i = j
+      }
+    } else {
+      params.set(kRes.key, true)
+    }
+  }
+  return { params, rawSlice: s.slice(start, i), next: i }
+}
+
+interface ParsedSignatureAgentInternal {
+  readonly publicParsed: ParsedSignatureAgent
+  readonly members: ReadonlyMap<string, string>
+}
+
+function parseSignatureAgentInternal(
+  headerValue: string | null | undefined,
+): ParsedSignatureAgentInternal | null {
+  if (!headerValue || !headerValue.trim()) return null
+  const trimmed = headerValue.trim()
+
+  // Form 1: Bare RFC 8941 String `"https://chatgpt.com"`
+  if (trimmed.startsWith('"')) {
+    const strRes = parseSfvString(trimmed, 0)
+    if (!strRes) return null
+    const afterParams = parseSfvParameters(trimmed, strRes.next)
+    if (!afterParams || skipOws(trimmed, afterParams.next) !== trimmed.length) return null
+    const uri = strRes.value.trim()
+    if (!uri) return null
+    return {
+      publicParsed: Object.freeze({
+        format: 'string',
+        key: null,
+        uri,
+        origin_host: extractUriHost(uri),
+      }),
+      members: new Map(),
+    }
+  }
+
+  // Form 2: RFC 8941 Dictionary `g="https://agent.bot.goog"[, other="https://..."]`
+  let i = 0
+  const members = new Map<string, string>()
+  let firstKey: string | null = null
+  let firstUri: string | null = null
+
+  while (i < trimmed.length) {
+    i = skipOws(trimmed, i)
+    const kRes = parseSfvKey(trimmed, i)
+    if (!kRes) return null
+    i = skipOws(trimmed, kRes.next)
+    if (i >= trimmed.length || trimmed[i] !== '=') return null
+    i = skipOws(trimmed, i + 1)
+    if (i >= trimmed.length) return null
+
+    if (trimmed[i] === '"') {
+      const valRes = parseSfvString(trimmed, i)
+      if (!valRes) return null
+      const pRes = parseSfvParameters(trimmed, valRes.next)
+      if (!pRes) return null
+      i = pRes.next
+      const uri = valRes.value.trim()
+      if (uri) {
+        members.set(kRes.key, uri)
+        if (firstKey === null) {
+          firstKey = kRes.key
+          firstUri = uri
+        }
+      }
+    } else {
+      // Skip non-string dictionary member cleanly if properly formed
+      while (i < trimmed.length && trimmed[i] !== ',') {
+        if (trimmed[i] === '"') {
+          const skipStr = parseSfvString(trimmed, i)
+          if (!skipStr) return null
+          i = skipStr.next
+        } else {
+          i++
+        }
+      }
+    }
+
+    i = skipOws(trimmed, i)
+    if (i >= trimmed.length) break
+    if (trimmed[i] !== ',') return null
+    i = skipOws(trimmed, i + 1)
+    if (i >= trimmed.length) return null
+  }
+
+  if (firstKey === null || firstUri === null) return null
+  return {
+    publicParsed: Object.freeze({
+      format: 'dictionary',
+      key: firstKey,
+      uri: firstUri,
+      origin_host: extractUriHost(firstUri),
+    }),
+    members,
+  }
+}
+
 /**
  * `Signature-Agent` ヘッダの 2 形式両対応パーサー (facts/web-ai-agents.md §2, §5, §8):
  * 1. OpenAI 形式 (RFC 8941 String): `"https://chatgpt.com"`
  * 2. IETF draft-01 形式 (RFC 8941 Dictionary): `g="https://agent.bot.goog"` または `sig1="https://chatgpt.com"`
  */
 export function parseSignatureAgentHeader(headerValue: string | null | undefined): ParsedSignatureAgent | null {
-  if (!headerValue || !headerValue.trim()) return null
-  const trimmed = headerValue.trim()
-
-  // Form 1: Bare RFC 8941 quoted string `"https://chatgpt.com"`
-  const bareMatch = /^"([^"]+)"$/.exec(trimmed)
-  if (bareMatch) {
-    const uri = bareMatch[1].trim()
-    return Object.freeze({
-      format: 'string',
-      key: null,
-      uri,
-      origin_host: extractUriHost(uri),
-    })
-  }
-
-  // Form 2: RFC 8941 dictionary `g="https://agent.bot.goog"` (take first member with string value)
-  const dictMatch = /(?:^|,\s*)([a-z*][a-z0-9_.*-]*)\s*=\s*"([^"]+)"/i.exec(trimmed)
-  if (dictMatch) {
-    const uri = dictMatch[2].trim()
-    return Object.freeze({
-      format: 'dictionary',
-      key: dictMatch[1],
-      uri,
-      origin_host: extractUriHost(uri),
-    })
-  }
-
-  return null
+  return parseSignatureAgentInternal(headerValue)?.publicParsed ?? null
 }
 
 function extractUriHost(uri: string): string | null {
@@ -235,49 +410,126 @@ function extractUriHost(uri: string): string | null {
   }
 }
 
+function normalizeAgentUri(uri: string): string {
+  try {
+    const u = new URL(uri.trim())
+    const path = u.pathname === '/' ? '' : u.pathname.replace(/\/+$/, '')
+    return `${u.protocol.toLowerCase()}//${u.host.toLowerCase()}${path}`
+  } catch {
+    return uri.trim().toLowerCase().replace(/\/+$/, '')
+  }
+}
+
+function serializeComponentIdentifier(
+  lowerName: string,
+  itemParams: ReadonlyMap<string, SfvParamValue>,
+): string {
+  if (itemParams.size === 0) {
+    return lowerName
+  }
+  const parts: string[] = [serializeSfvString(lowerName)]
+  for (const [pk, pv] of itemParams.entries()) {
+    if (pv === true) parts.push(`;${pk}`)
+    else if (pv === false) parts.push(`;${pk}=?0`)
+    else if (typeof pv === 'number') parts.push(`;${pk}=${pv}`)
+    else parts.push(`;${pk}=${serializeSfvString(pv)}`)
+  }
+  return parts.join('')
+}
+
 /**
- * `Signature-Input` ヘッダを解析する (RFC 9421 §4.1)。
- * 複数ラベルがある場合は `tag="web-bot-auth"` を優先選択する。
+ * `Signature-Input` ヘッダを RFC 8941 / RFC 9421 構文に従い文字単位で厳密解析する (RFC 9421 §4.1)。
+ * - `"signature-agent";key="g"` 等の構造化辞書メンバ指定に対応
+ * - 引用符内の `;`, `=`, `,`, `)`, `\"`, `\\` を誤分割しない
+ * - 重複コンポーネント識別子を拒否 (RFC 9421 §2.5)
+ * - 複数ラベルがある場合は `tag="web-bot-auth"` を優先選択する。
  */
 export function parseSignatureInputHeader(headerValue: string): ParsedSignatureInput | null {
   if (!headerValue || !headerValue.trim()) return null
-
+  const s = headerValue.trim()
   const entries: ParsedSignatureInput[] = []
-  // Match `<label>=(<components>)<params>` entries separated by top-level commas
-  const entryRe = /([a-z*][a-z0-9_.*-]*)\s*=\s*(\(([^)]*)\)(?:;[^,]*)?)/gi
-  let match: RegExpExecArray | null
-  while ((match = entryRe.exec(headerValue)) !== null) {
-    const label = match[1]
-    const rawParams = match[2].trim()
-    const compBody = match[3]
+  let i = 0
 
+  while (i < s.length) {
+    i = skipOws(s, i)
+    const labelRes = parseSfvKey(s, i)
+    if (!labelRes) return null
+    i = skipOws(s, labelRes.next)
+    if (i >= s.length || s[i] !== '=') return null
+    i = skipOws(s, i + 1)
+    if (i >= s.length || s[i] !== '(') return null
+
+    const rawParamsStart = i
+    i++ // consume '('
     const components: string[] = []
-    const compRe = /"([^"]+)"/g
-    let cm: RegExpExecArray | null
-    while ((cm = compRe.exec(compBody)) !== null) {
-      components.push(cm[1].toLowerCase())
+    const seenComponents = new Set<string>()
+
+    while (i < s.length) {
+      i = skipOws(s, i)
+      if (i >= s.length) return null
+      if (s[i] === ')') {
+        i++
+        break
+      }
+      if (components.length > 0 && s[i - 1] !== ' ' && s[i - 1] !== '\t') {
+        return null
+      }
+      const compStr = parseSfvString(s, i)
+      if (!compStr || !compStr.value) return null
+      const itemParams = parseSfvParameters(s, compStr.next)
+      if (!itemParams) return null
+      i = itemParams.next
+
+      const compId = serializeComponentIdentifier(
+        compStr.value.toLowerCase(),
+        itemParams.params,
+      )
+      // Canonical dedup check (`"@method"` vs `@method`)
+      const dedupKey = compId.startsWith('"') ? compId : serializeSfvString(compId)
+      if (seenComponents.has(dedupKey)) return null
+      seenComponents.add(dedupKey)
+      components.push(compId)
     }
 
-    const createdMatch = /;created=(\d+)/i.exec(rawParams)
-    const expiresMatch = /;expires=(\d+)/i.exec(rawParams)
-    const keyidMatch = /;keyid="([^"]+)"/i.exec(rawParams)
-    const tagMatch = /;tag="([^"]+)"/i.exec(rawParams)
-    const nonceMatch = /;nonce="([^"]+)"/i.exec(rawParams)
-    const algMatch = /;alg="([^"]+)"/i.exec(rawParams)
+    const sigParamsRes = parseSfvParameters(s, i)
+    if (!sigParamsRes) return null
+    i = sigParamsRes.next
+    const rawParams = s.slice(rawParamsStart, i).trim()
+
+    const p = sigParamsRes.params
+    const createdVal = p.get('created')
+    const expiresVal = p.get('expires')
+    const keyidVal = p.get('keyid')
+    const tagVal = p.get('tag')
+    const nonceVal = p.get('nonce')
+    const algVal = p.get('alg')
+
+    if (createdVal !== undefined && (typeof createdVal !== 'number' || !Number.isInteger(createdVal))) {
+      return null
+    }
+    if (expiresVal !== undefined && (typeof expiresVal !== 'number' || !Number.isInteger(expiresVal))) {
+      return null
+    }
 
     entries.push(
       Object.freeze({
-        label,
+        label: labelRes.key,
         covered_components: Object.freeze(components),
         raw_signature_params: rawParams,
-        created: createdMatch ? Number(createdMatch[1]) : null,
-        expires: expiresMatch ? Number(expiresMatch[1]) : null,
-        keyid: keyidMatch ? keyidMatch[1] : null,
-        tag: tagMatch ? tagMatch[1] : null,
-        nonce: nonceMatch ? nonceMatch[1] : null,
-        alg: algMatch ? algMatch[1] : null,
+        created: typeof createdVal === 'number' ? createdVal : null,
+        expires: typeof expiresVal === 'number' ? expiresVal : null,
+        keyid: typeof keyidVal === 'string' ? keyidVal : null,
+        tag: typeof tagVal === 'string' ? tagVal : null,
+        nonce: typeof nonceVal === 'string' ? nonceVal : null,
+        alg: typeof algVal === 'string' ? algVal : null,
       }),
     )
+
+    i = skipOws(s, i)
+    if (i >= s.length) break
+    if (s[i] !== ',') return null
+    i = skipOws(s, i + 1)
+    if (i >= s.length) return null
   }
 
   if (entries.length === 0) return null
@@ -285,15 +537,47 @@ export function parseSignatureInputHeader(headerValue: string): ParsedSignatureI
 }
 
 /**
- * `Signature` ヘッダから指定ラベルのバイト列 (`label=:base64:`) を取り出す。
+ * `Signature` ヘッダから指定ラベルのバイト列 (`label=:base64:`) を RFC 8941 辞書として厳密抽出する。
  */
 export function parseSignatureHeader(headerValue: string, label: string): Uint8Array | null {
   if (!headerValue || !label) return null
-  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const re = new RegExp(`(?:^|,\\s*)${escaped}\\s*=\\s*:([A-Za-z0-9+/=]+):`, 'i')
-  const m = re.exec(headerValue.trim())
-  if (!m) return null
-  return new Uint8Array(Buffer.from(m[1], 'base64'))
+  const targetLabel = label.trim().toLowerCase()
+  const s = headerValue.trim()
+  let i = 0
+
+  while (i < s.length) {
+    i = skipOws(s, i)
+    const kRes = parseSfvKey(s, i)
+    if (!kRes) return null
+    i = skipOws(s, kRes.next)
+    if (i >= s.length || s[i] !== '=') return null
+    i = skipOws(s, i + 1)
+    if (i >= s.length || s[i] !== ':') return null
+    i++ // consume opening ':'
+    const b64Start = i
+    while (i < s.length && s[i] !== ':') i++
+    if (i >= s.length) return null
+    const rawB64 = s.slice(b64Start, i)
+    i++ // consume closing ':'
+
+    const pRes = parseSfvParameters(s, i)
+    if (!pRes) return null
+    i = pRes.next
+
+    if (kRes.key === targetLabel) {
+      if (!rawB64 || rawB64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(rawB64)) {
+        return null
+      }
+      return new Uint8Array(Buffer.from(rawB64, 'base64'))
+    }
+
+    i = skipOws(s, i)
+    if (i >= s.length) break
+    if (s[i] !== ',') return null
+    i = skipOws(s, i + 1)
+    if (i >= s.length) return null
+  }
+  return null
 }
 
 export interface Rfc9421SignatureBaseInput {
@@ -307,8 +591,36 @@ export interface Rfc9421SignatureBaseInput {
   readonly covered_headers?: Readonly<Record<string, string>>
 }
 
+function parseCoveredComponentSpec(comp: string): {
+  readonly baseName: string
+  readonly serializedId: string
+  readonly dictKey: string | null
+} {
+  const trimmed = comp.trim()
+  if (trimmed.startsWith('"')) {
+    const strRes = parseSfvString(trimmed, 0)
+    if (strRes) {
+      const pRes = parseSfvParameters(trimmed, strRes.next)
+      if (pRes && skipOws(trimmed, pRes.next) === trimmed.length) {
+        const keyParam = pRes.params.get('key')
+        return {
+          baseName: strRes.value.toLowerCase(),
+          serializedId: serializeComponentIdentifier(strRes.value.toLowerCase(), pRes.params),
+          dictKey: typeof keyParam === 'string' ? keyParam : null,
+        }
+      }
+    }
+  }
+  const lower = trimmed.toLowerCase()
+  return {
+    baseName: lower,
+    serializedId: serializeSfvString(lower),
+    dictKey: null,
+  }
+}
+
 /**
- * RFC 9421 §2.5 に準拠した署名ベース文字列を生成する。
+ * RFC 9421 §2.5 / §2.1.2 に準拠した署名ベース文字列を生成する。
  */
 export function buildRfc9421SignatureBase(input: Rfc9421SignatureBaseInput): string {
   const lines: string[] = []
@@ -330,10 +642,14 @@ export function buildRfc9421SignatureBase(input: Rfc9421SignatureBaseInput): str
   if (input.signature_agent) {
     lowerHeaders.set('signature-agent', input.signature_agent)
   }
+  const parsedSigAgentDict = input.signature_agent
+    ? parseSignatureAgentInternal(input.signature_agent)
+    : null
 
-  for (const comp of input.covered_components) {
+  for (const rawComp of input.covered_components) {
+    const spec = parseCoveredComponentSpec(rawComp)
     let val: string
-    switch (comp) {
+    switch (spec.baseName) {
       case '@method':
         val = input.method.toUpperCase()
         break
@@ -350,14 +666,24 @@ export function buildRfc9421SignatureBase(input: Rfc9421SignatureBaseInput): str
         val = `https://${authority}${path}${normalizedQuery === '?' ? '' : normalizedQuery}`
         break
       default: {
-        const hv = lowerHeaders.get(comp)
+        if (spec.dictKey !== null && spec.baseName === 'signature-agent') {
+          const memberUri = parsedSigAgentDict?.members.get(spec.dictKey)
+          if (!memberUri) {
+            throw new Error(
+              `Missing dictionary key "${spec.dictKey}" in Signature-Agent for RFC 9421 signature base`,
+            )
+          }
+          val = serializeSfvString(memberUri)
+          break
+        }
+        const hv = lowerHeaders.get(spec.baseName)
         if (hv === undefined) {
-          throw new Error(`Missing covered header component "${comp}" for RFC 9421 signature base`)
+          throw new Error(`Missing covered header component "${spec.baseName}" for RFC 9421 signature base`)
         }
         val = hv
       }
     }
-    lines.push(`"${comp}": ${val}`)
+    lines.push(`${spec.serializedId}: ${val}`)
   }
 
   lines.push(`"@signature-params": ${input.raw_signature_params}`)
@@ -397,14 +723,28 @@ export async function signRfc9421Request(
 }> {
   const label = params.label ?? 'sig1'
   const keyid = params.publicJwk.thumbprint_sha256 ?? computeJwkThumbprintSha256(params.publicJwk)
-  const covered = params.covered_components ?? ['@authority', 'signature-agent']
-  const compList = covered.map((c) => `"${c.toLowerCase()}"`).join(' ')
-  const noncePart = params.nonce ? `;nonce="${params.nonce}"` : ''
+  const hasNonEmptyQuery = Boolean(params.query && params.query.replace(/^\?/, '').length > 0)
+  const covered =
+    params.covered_components ?? [
+      '@method',
+      '@authority',
+      '@path',
+      ...(hasNonEmptyQuery ? ['@query'] : []),
+      'signature-agent',
+    ]
+  const normalizedCovered = covered.map((c) => {
+    const spec = parseCoveredComponentSpec(c)
+    return c.trim().startsWith('"') ? spec.serializedId : spec.baseName
+  })
+  const compList = normalizedCovered
+    .map((c) => (c.startsWith('"') ? c : serializeSfvString(c)))
+    .join(' ')
+  const noncePart = params.nonce ? `;nonce=${serializeSfvString(params.nonce)}` : ''
   const algPart = params.algorithm === 'Ed25519' ? ';alg="ed25519"' : ';alg="ecdsa-p256-sha256"'
-  const rawParams = `(${compList});created=${params.created};expires=${params.expires};keyid="${keyid}"${noncePart}${algPart};tag="web-bot-auth"`
+  const rawParams = `(${compList});created=${params.created};expires=${params.expires};keyid=${serializeSfvString(keyid)}${noncePart}${algPart};tag="web-bot-auth"`
 
   const signatureBase = buildRfc9421SignatureBase({
-    covered_components: covered.map((c) => c.toLowerCase()),
+    covered_components: normalizedCovered,
     raw_signature_params: rawParams,
     method: params.method,
     authority: params.authority,
@@ -436,32 +776,40 @@ async function verifySignatureWithJwk(
   jwk: Rfc9421Jwk,
   signatureBase: string,
   signatureBytes: Uint8Array,
+  declaredAlg?: string | null,
 ): Promise<boolean> {
-  const data = new TextEncoder().encode(signatureBase)
+  try {
+    const normAlg = declaredAlg?.trim().toLowerCase() ?? null
+    const data = new TextEncoder().encode(signatureBase)
 
-  if (jwk.kty === 'OKP' && jwk.crv === 'Ed25519' && jwk.x) {
-    const key = await subtle.importKey(
-      'jwk',
-      { kty: 'OKP', crv: 'Ed25519', x: jwk.x, ext: true },
-      { name: 'Ed25519' },
-      false,
-      ['verify'],
-    )
-    return subtle.verify({ name: 'Ed25519' }, key, signatureBytes, data)
+    if (jwk.kty === 'OKP' && jwk.crv === 'Ed25519' && jwk.x) {
+      if (normAlg !== null && normAlg !== 'ed25519') return false
+      const key = await subtle.importKey(
+        'jwk',
+        { kty: 'OKP', crv: 'Ed25519', x: jwk.x, ext: true },
+        { name: 'Ed25519' },
+        false,
+        ['verify'],
+      )
+      return await subtle.verify({ name: 'Ed25519' }, key, signatureBytes, data)
+    }
+
+    if (jwk.kty === 'EC' && jwk.crv === 'P-256' && jwk.x && jwk.y) {
+      if (normAlg !== null && normAlg !== 'ecdsa-p256-sha256' && normAlg !== 'es256') return false
+      const key = await subtle.importKey(
+        'jwk',
+        { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, ext: true },
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        false,
+        ['verify'],
+      )
+      return await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, signatureBytes, data)
+    }
+
+    return false
+  } catch {
+    return false
   }
-
-  if (jwk.kty === 'EC' && jwk.crv === 'P-256' && jwk.x && jwk.y) {
-    const key = await subtle.importKey(
-      'jwk',
-      { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, ext: true },
-      { name: 'ECDSA', namedCurve: 'P-256' },
-      false,
-      ['verify'],
-    )
-    return subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, signatureBytes, data)
-  }
-
-  return false
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +818,8 @@ async function verifySignatureWithJwk(
 
 export class Rfc9421ReplayCache {
   private readonly seen = new Map<string, number>()
+
+  constructor(private readonly maxEntries = 10_000) {}
 
   /**
    * 同一 `(keyid, nonce or sigHash)` が有効期限内に再出現した場合に `true` を返す。
@@ -494,6 +844,10 @@ export class Rfc9421ReplayCache {
     const existingExp = this.seen.get(cacheKey)
     if (existingExp !== undefined && existingExp >= params.nowSec) {
       return true
+    }
+    if (this.seen.size >= this.maxEntries) {
+      const oldestKey = this.seen.keys().next().value
+      if (oldestKey !== undefined) this.seen.delete(oldestKey)
     }
     this.seen.set(cacheKey, params.expiresSec)
     return false
@@ -579,10 +933,13 @@ export async function verifyRfc9421Signature(params: {
     })
   }
 
-  // Mandatory covered components: @authority (or @target-uri)
-  const hasAuthority =
-    parsedInput.covered_components.includes('@authority') ||
-    parsedInput.covered_components.includes('@target-uri')
+  // Mandatory full request target binding (§7.2 / RFC 9421 Web Bot Auth):
+  // Require @method AND (@target-uri OR (@authority AND @path)) AND (if non-empty query: @target-uri OR @query)
+  const coveredBaseNames = new Set(
+    parsedInput.covered_components.map((c) => parseCoveredComponentSpec(c).baseName),
+  )
+  const hasTargetUri = coveredBaseNames.has('@target-uri')
+  const hasAuthority = hasTargetUri || coveredBaseNames.has('@authority')
   if (!hasAuthority) {
     return Object.freeze({
       valid: false,
@@ -598,12 +955,60 @@ export async function verifyRfc9421Signature(params: {
       reason: 'authority_not_covered',
     })
   }
+  if (!coveredBaseNames.has('@method')) {
+    return Object.freeze({
+      valid: false,
+      result: 'signature_invalid',
+      identity_assurance: 'unverified',
+      verified_actor_id: null,
+      verified_operator: null,
+      verified_domain: null,
+      keyid: parsedInput.keyid,
+      snapshot_id: null,
+      source_id: null,
+      replay_suspected: false,
+      reason: 'method_not_covered',
+    })
+  }
+  if (!hasTargetUri && !coveredBaseNames.has('@path')) {
+    return Object.freeze({
+      valid: false,
+      result: 'signature_invalid',
+      identity_assurance: 'unverified',
+      verified_actor_id: null,
+      verified_operator: null,
+      verified_domain: null,
+      keyid: parsedInput.keyid,
+      snapshot_id: null,
+      source_id: null,
+      replay_suspected: false,
+      reason: 'path_not_covered',
+    })
+  }
+  const hasNonEmptyQuery = Boolean(params.query && params.query.replace(/^\?/, '').length > 0)
+  if (hasNonEmptyQuery && !hasTargetUri && !coveredBaseNames.has('@query')) {
+    return Object.freeze({
+      valid: false,
+      result: 'signature_invalid',
+      identity_assurance: 'unverified',
+      verified_actor_id: null,
+      verified_operator: null,
+      verified_domain: null,
+      keyid: parsedInput.keyid,
+      snapshot_id: null,
+      source_id: null,
+      replay_suspected: false,
+      reason: 'query_not_covered',
+    })
+  }
 
-  // Time window validation (C.M2): created <= T + 60s, T <= expires, expires - created <= 86400s
+  // Time window validation (C.M2): created <= T + 60s, T <= expires, expires >= created, expires - created <= 86400s
   const obsSec = Math.floor(Date.parse(params.observed_at) / 1000)
   if (
+    !Number.isFinite(obsSec) ||
     parsedInput.created === null ||
     parsedInput.expires === null ||
+    parsedInput.expires < parsedInput.created ||
     parsedInput.created > obsSec + 60 ||
     obsSec > parsedInput.expires ||
     parsedInput.expires - parsedInput.created > 86400
@@ -623,8 +1028,30 @@ export async function verifyRfc9421Signature(params: {
     })
   }
 
-  const parsedAgent = parseSignatureAgentHeader(params.headers.signature_agent)
-  if (parsedAgent && !parsedInput.covered_components.includes('signature-agent')) {
+  // Require valid Signature-Agent header AND require Signature-Agent to be covered by the signature!
+  const parsedAgentFull = parseSignatureAgentInternal(params.headers.signature_agent)
+  if (!parsedAgentFull) {
+    return Object.freeze({
+      valid: false,
+      result: 'signature_invalid',
+      identity_assurance: 'unverified',
+      verified_actor_id: null,
+      verified_operator: null,
+      verified_domain: null,
+      keyid: parsedInput.keyid,
+      snapshot_id: null,
+      source_id: null,
+      replay_suspected: false,
+      reason: 'missing_or_malformed_signature_agent',
+    })
+  }
+
+  // Determine exact covered Signature-Agent URI (bare `signature-agent` vs `"signature-agent";key="g"`)
+  const sigAgentSpecs = parsedInput.covered_components
+    .map((c) => parseCoveredComponentSpec(c))
+    .filter((sp) => sp.baseName === 'signature-agent')
+
+  if (sigAgentSpecs.length === 0) {
     return Object.freeze({
       valid: false,
       result: 'signature_invalid',
@@ -637,6 +1064,77 @@ export async function verifyRfc9421Signature(params: {
       source_id: null,
       replay_suspected: false,
       reason: 'signature_agent_not_covered',
+    })
+  }
+
+  let effectiveAgentUri = parsedAgentFull.publicParsed.uri
+  const keyedSigAgentSpec = sigAgentSpecs.find((sp) => sp.dictKey !== null)
+  if (keyedSigAgentSpec && keyedSigAgentSpec.dictKey !== null) {
+    if (parsedAgentFull.publicParsed.format !== 'dictionary') {
+      return Object.freeze({
+        valid: false,
+        result: 'signature_invalid',
+        identity_assurance: 'unverified',
+        verified_actor_id: null,
+        verified_operator: null,
+        verified_domain: null,
+        keyid: parsedInput.keyid,
+        snapshot_id: null,
+        source_id: null,
+        replay_suspected: false,
+        reason: 'signature_agent_dictionary_key_on_bare_string',
+      })
+    }
+    const memberUri = parsedAgentFull.members.get(keyedSigAgentSpec.dictKey)
+    if (!memberUri) {
+      return Object.freeze({
+        valid: false,
+        result: 'signature_invalid',
+        identity_assurance: 'unverified',
+        verified_actor_id: null,
+        verified_operator: null,
+        verified_domain: null,
+        keyid: parsedInput.keyid,
+        snapshot_id: null,
+        source_id: null,
+        replay_suspected: false,
+        reason: 'signature_agent_dictionary_key_not_found',
+      })
+    }
+    effectiveAgentUri = memberUri
+  } else if (
+    parsedAgentFull.publicParsed.format === 'dictionary' &&
+    parsedAgentFull.members.size > 1
+  ) {
+    return Object.freeze({
+      valid: false,
+      result: 'signature_invalid',
+      identity_assurance: 'unverified',
+      verified_actor_id: null,
+      verified_operator: null,
+      verified_domain: null,
+      keyid: parsedInput.keyid,
+      snapshot_id: null,
+      source_id: null,
+      replay_suspected: false,
+      reason: 'ambiguous_multi_member_signature_agent',
+    })
+  }
+
+  const effectiveOriginHost = extractUriHost(effectiveAgentUri)
+  if (!effectiveOriginHost) {
+    return Object.freeze({
+      valid: false,
+      result: 'signature_invalid',
+      identity_assurance: 'unverified',
+      verified_actor_id: null,
+      verified_operator: null,
+      verified_domain: null,
+      keyid: parsedInput.keyid,
+      snapshot_id: null,
+      source_id: null,
+      replay_suspected: false,
+      reason: 'invalid_signature_agent_origin',
     })
   }
 
@@ -668,103 +1166,175 @@ export async function verifyRfc9421Signature(params: {
     })
   }
 
-  // 1. Lookup public key in ActorEvidenceClock at observed_at
-  const declaredByAgent = parsedAgent
-    ? matchDeclaredActorBySignatureAgent(parsedAgent.uri)
-    : null
-  const preferredSourceId = declaredByAgent?.verification_methods.find(
-    (m) => m.method === 'http_sig',
-  )?.source_id
-
-  const keyLookup = await params.clock.lookupKeyAtTime({
-    thumbprint_or_kid: parsedInput.keyid,
-    at: params.observed_at,
-    source_id: preferredSourceId,
-  })
-
-  if (keyLookup.found && keyLookup.key) {
-    if (!keyLookup.valid_at_time) {
-      return Object.freeze({
-        valid: false,
-        result:
-          keyLookup.reason === 'stale_snapshot'
-            ? 'unverifiable_stale_evidence'
-            : 'signature_expired',
-        identity_assurance: 'unverified',
-        verified_actor_id: null,
-        verified_operator: null,
-        verified_domain: parsedAgent?.origin_host ?? null,
-        keyid: parsedInput.keyid,
-        snapshot_id: keyLookup.snapshot_id,
-        source_id: keyLookup.source_id,
-        replay_suspected: false,
-        reason: `clock_key_${keyLookup.reason}`,
-      })
-    }
-
-    const cryptoOk = await verifySignatureWithJwk(keyLookup.key, signatureBase, sigBytes)
-    if (!cryptoOk) {
+  // 1. Strict JWKS pinning to claimed Signature-Agent!
+  // NEVER perform an unpinned wildcard scan (`source_id: undefined`) across all operators' JWKS snapshots.
+  const declaredByAgent = matchDeclaredActorBySignatureAgent(effectiveAgentUri)
+  if (declaredByAgent) {
+    const pinnedSourceId = declaredByAgent.verification_methods.find(
+      (m) => m.method === 'http_sig',
+    )?.source_id
+    if (!pinnedSourceId) {
       return Object.freeze({
         valid: false,
         result: 'signature_invalid',
         identity_assurance: 'unverified',
         verified_actor_id: null,
         verified_operator: null,
-        verified_domain: parsedAgent?.origin_host ?? null,
+        verified_domain: effectiveOriginHost,
         keyid: parsedInput.keyid,
-        snapshot_id: keyLookup.snapshot_id,
-        source_id: keyLookup.source_id,
+        snapshot_id: null,
+        source_id: null,
         replay_suspected: false,
-        reason: 'cryptographic_verification_failed',
+        reason: 'actor_has_no_http_sig_source',
       })
     }
 
-    const replaySuspected = params.replayCache
-      ? params.replayCache.checkAndRecord({
+    const keyLookup = await params.clock.lookupKeyAtTime({
+      thumbprint_or_kid: parsedInput.keyid,
+      at: params.observed_at,
+      source_id: pinnedSourceId,
+    })
+
+    if (keyLookup.found && keyLookup.key && keyLookup.source_id === pinnedSourceId) {
+      if (
+        keyLookup.key.signature_agent &&
+        normalizeAgentUri(keyLookup.key.signature_agent) !== normalizeAgentUri(effectiveAgentUri)
+      ) {
+        return Object.freeze({
+          valid: false,
+          result: 'signature_invalid',
+          identity_assurance: 'unverified',
+          verified_actor_id: null,
+          verified_operator: null,
+          verified_domain: effectiveOriginHost,
           keyid: parsedInput.keyid,
-          nonce: parsedInput.nonce,
-          signatureBytes: sigBytes,
-          nowSec: obsSec,
-          expiresSec: parsedInput.expires,
+          snapshot_id: keyLookup.snapshot_id,
+          source_id: keyLookup.source_id,
+          replay_suspected: false,
+          reason: 'jwk_signature_agent_mismatch',
         })
-      : false
+      }
 
-    // Resolve actor entry from source_id or Signature-Agent URI
-    const matchedEntry =
-      declaredByAgent ??
-      matchActorByHttpSigSourceId(keyLookup.source_id) ??
-      (keyLookup.key.signature_agent
-        ? matchDeclaredActorBySignatureAgent(keyLookup.key.signature_agent)
-        : null)
+      if (!keyLookup.valid_at_time) {
+        return Object.freeze({
+          valid: false,
+          result:
+            keyLookup.reason === 'stale_snapshot'
+              ? 'unverifiable_stale_evidence'
+              : keyLookup.reason === 'unverifiable_pre_archive'
+                ? 'unverifiable_pre_archive'
+                : 'signature_expired',
+          identity_assurance: 'unverified',
+          verified_actor_id: null,
+          verified_operator: null,
+          verified_domain: effectiveOriginHost,
+          keyid: parsedInput.keyid,
+          snapshot_id: keyLookup.snapshot_id,
+          source_id: keyLookup.source_id,
+          replay_suspected: false,
+          reason: `clock_key_${keyLookup.reason}`,
+        })
+      }
 
-    const resultCode: VerdictVerificationResult =
-      keyLookup.relation === 'retro' ? 'verified_retro' : 'verified'
+      const cryptoOk = await verifySignatureWithJwk(
+        keyLookup.key,
+        signatureBase,
+        sigBytes,
+        parsedInput.alg,
+      )
+      if (!cryptoOk) {
+        return Object.freeze({
+          valid: false,
+          result: 'signature_invalid',
+          identity_assurance: 'unverified',
+          verified_actor_id: null,
+          verified_operator: null,
+          verified_domain: effectiveOriginHost,
+          keyid: parsedInput.keyid,
+          snapshot_id: keyLookup.snapshot_id,
+          source_id: keyLookup.source_id,
+          replay_suspected: false,
+          reason: 'cryptographic_verification_failed',
+        })
+      }
+
+      const replaySuspected = params.replayCache
+        ? params.replayCache.checkAndRecord({
+            keyid: parsedInput.keyid,
+            nonce: parsedInput.nonce,
+            signatureBytes: sigBytes,
+            nowSec: obsSec,
+            expiresSec: parsedInput.expires,
+          })
+        : false
+
+      const resultCode: VerdictVerificationResult =
+        keyLookup.relation === 'retro' ? 'verified_retro' : 'verified'
+
+      return Object.freeze({
+        valid: true,
+        result: resultCode,
+        identity_assurance: 'verified',
+        verified_actor_id: declaredByAgent.actor_id,
+        verified_operator: declaredByAgent.operator,
+        verified_domain: effectiveOriginHost,
+        keyid: parsedInput.keyid,
+        snapshot_id: keyLookup.snapshot_id,
+        source_id: keyLookup.source_id,
+        replay_suspected: replaySuspected,
+        reason: 'rfc9421_verified',
+      })
+    }
 
     return Object.freeze({
-      valid: true,
-      result: resultCode,
-      identity_assurance: 'verified',
-      verified_actor_id: matchedEntry?.actor_id ?? null,
-      verified_operator: matchedEntry?.operator ?? keyLookup.provider,
-      verified_domain: parsedAgent?.origin_host ?? null,
+      valid: false,
+      result:
+        keyLookup.reason === 'no_snapshot' || keyLookup.reason === 'stale_snapshot'
+          ? 'unverifiable_stale_evidence'
+          : keyLookup.reason === 'unverifiable_pre_archive'
+            ? 'unverifiable_pre_archive'
+            : 'signature_invalid',
+      identity_assurance: 'unverified',
+      verified_actor_id: null,
+      verified_operator: null,
+      verified_domain: effectiveOriginHost,
       keyid: parsedInput.keyid,
       snapshot_id: keyLookup.snapshot_id,
       source_id: keyLookup.source_id,
-      replay_suspected: replaySuspected,
-      reason: 'rfc9421_verified',
+      replay_suspected: false,
+      reason: `key_lookup_${keyLookup.reason}`,
     })
   }
 
-  // 2. Unknown signer domain fallback (proves domain possession -> `crypto_domain`, NOT registry verified)
-  if (parsedAgent?.origin_host && params.unknownDomainJwks) {
+  // 2. Uncatalogued Signature-Agent domain fallback:
+  // ONLY checks `unknownDomainJwks` strictly matching `effectiveOriginHost` -> `crypto_domain` (NEVER registry `verified`)!
+  if (params.unknownDomainJwks) {
     const domainEntry = params.unknownDomainJwks.find(
-      (d) => d.domain.toLowerCase() === parsedAgent.origin_host,
+      (d) => d.domain.toLowerCase() === effectiveOriginHost,
     )
     const jwk = domainEntry?.jwks.find(
       (k) => k.thumbprint_sha256 === parsedInput.keyid || k.kid === parsedInput.keyid,
     )
     if (jwk) {
-      const ok = await verifySignatureWithJwk(jwk, signatureBase, sigBytes)
+      if (
+        jwk.signature_agent &&
+        normalizeAgentUri(jwk.signature_agent) !== normalizeAgentUri(effectiveAgentUri)
+      ) {
+        return Object.freeze({
+          valid: false,
+          result: 'signature_invalid',
+          identity_assurance: 'unverified',
+          verified_actor_id: null,
+          verified_operator: null,
+          verified_domain: effectiveOriginHost,
+          keyid: parsedInput.keyid,
+          snapshot_id: null,
+          source_id: `domain:${effectiveOriginHost}`,
+          replay_suspected: false,
+          reason: 'unknown_domain_jwk_signature_agent_mismatch',
+        })
+      }
+      const ok = await verifySignatureWithJwk(jwk, signatureBase, sigBytes, parsedInput.alg)
       if (ok) {
         const replaySuspected = params.replayCache
           ? params.replayCache.checkAndRecord({
@@ -781,10 +1351,10 @@ export async function verifyRfc9421Signature(params: {
           identity_assurance: 'crypto_domain',
           verified_actor_id: null,
           verified_operator: null,
-          verified_domain: parsedAgent.origin_host,
+          verified_domain: effectiveOriginHost,
           keyid: parsedInput.keyid,
           snapshot_id: null,
-          source_id: `domain:${parsedAgent.origin_host}`,
+          source_id: `domain:${effectiveOriginHost}`,
           replay_suspected: replaySuspected,
           reason: 'unknown_signer_crypto_domain_verified',
         })
@@ -795,10 +1365,10 @@ export async function verifyRfc9421Signature(params: {
         identity_assurance: 'unverified',
         verified_actor_id: null,
         verified_operator: null,
-        verified_domain: parsedAgent.origin_host,
+        verified_domain: effectiveOriginHost,
         keyid: parsedInput.keyid,
         snapshot_id: null,
-        source_id: `domain:${parsedAgent.origin_host}`,
+        source_id: `domain:${effectiveOriginHost}`,
         replay_suspected: false,
         reason: 'unknown_domain_cryptographic_verification_failed',
       })
@@ -807,34 +1377,17 @@ export async function verifyRfc9421Signature(params: {
 
   return Object.freeze({
     valid: false,
-    result:
-      keyLookup.reason === 'no_snapshot' || keyLookup.reason === 'stale_snapshot'
-        ? 'unverifiable_stale_evidence'
-        : 'signature_invalid',
+    result: 'signature_invalid',
     identity_assurance: 'unverified',
     verified_actor_id: null,
     verified_operator: null,
-    verified_domain: parsedAgent?.origin_host ?? null,
+    verified_domain: effectiveOriginHost,
     keyid: parsedInput.keyid,
-    snapshot_id: keyLookup.snapshot_id,
-    source_id: keyLookup.source_id,
+    snapshot_id: null,
+    source_id: null,
     replay_suspected: false,
-    reason: `key_lookup_${keyLookup.reason}`,
+    reason: 'unknown_signature_agent_not_in_jwks',
   })
-}
-
-function matchActorByHttpSigSourceId(sourceId: string | null): ActorRegistryEntry | null {
-  if (!sourceId) return null
-  if (sourceId === 'openai:chatgpt-cloud-browser-jwks') {
-    return findActorById('openai:chatgpt-cloud-browser')
-  }
-  if (sourceId === 'google:google-agent-jwks') {
-    return findActorById('google:google-agent')
-  }
-  if (sourceId === 'you:youbot-jwks') {
-    return findActorById('you:youbot')
-  }
-  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,7 +1645,11 @@ export interface EvaluateObservationOptions {
 }
 
 export class ActorVerdictEngine {
-  constructor(private readonly deps: VerdictEngineDependencies) {}
+  private readonly replayCache: Rfc9421ReplayCache
+
+  constructor(private readonly deps: VerdictEngineDependencies) {
+    this.replayCache = deps.replayCache ?? new Rfc9421ReplayCache()
+  }
 
   async evaluateObservation(
     observation: ActorObservationRecord,
@@ -1137,7 +1694,7 @@ export class ActorVerdictEngine {
         query: observation.query,
         observed_at: observation.observed_at,
         clock: this.deps.clock,
-        replayCache: this.deps.replayCache,
+        replayCache: this.replayCache,
         unknownDomainJwks: options?.unknownDomainJwks,
       })
       if (sigVerdict.snapshot_id) snapshotIds.add(sigVerdict.snapshot_id)

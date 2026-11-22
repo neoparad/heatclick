@@ -15,7 +15,7 @@
  * 7. §11.11 #1/#7 Unmanned self-serve onboarding + public pricing & monthly cost calculator
  */
 
-import { verifyPublicKeyStateless, type VerifiedPrincipal } from '../auth';
+import { IdentityKeyRegistry, verifyPublicKeyStateless, type VerifiedPrincipal } from '../auth';
 import { perTenantRoUsername } from '../isolation';
 import { validateSerializedEnvelope } from '../../../packages/contract/response';
 import {
@@ -763,5 +763,83 @@ describe('lib/link/export/self-serve-billing (§11.11 #1 & #7)', () => {
     expect(highCalc.recommended.tierId).not.toBe('free');
     expect(highCalc.recommended.estimatedMonthlyUsd).toBeGreaterThan(0);
     expect(highCalc.recommended.estimatedMonthlyJpy).toBeGreaterThan(0);
+  });
+
+  test('Wave 8 Regressions (C-10, C-11, C-12, H-17, H-20, M-06): Worker escape/prototype defense, cross-origin redirect & hex IPv6 SSRF defense, SRI + redacted secretKey, and per-slice complementary suppression', async () => {
+    const escapeAttempt = executeDestinationFunctionSandboxed({
+      code: `function transform() { const p = ({}).constructor.constructor('return process')(); return { method: 'POST', url: 'https://hooks.customer.invalid/ugokilink/events', headers: {}, body: { env: p.env } }; }`,
+      eventInput: {},
+    });
+    expect(escapeAttempt.ok).toBe(false);
+
+    const protoAttempt = executeDestinationFunctionSandboxed({
+      code: `function transform() { Object.prototype.ugkPolluted = 'pwned'; return { method: 'POST', url: 'https://hooks.customer.invalid/ugokilink/events', headers: {}, body: {} }; }`,
+      eventInput: {},
+    });
+    expect(protoAttempt.ok).toBe(false);
+    expect((Object.prototype as Record<string, unknown>).ugkPolluted).toBeUndefined();
+
+    expect(isForbiddenInternalIp('::ffff:a9fe:a9fe')).toBe(true);
+    expect(isForbiddenInternalIp('0177.0.0.1')).toBe(true);
+
+    const dest = getDestinationSpec('stor_webhook_direct')!;
+    const sender = new LinkControlledDestinationSender(
+      { async resolveAll() { return ['203.0.113.42']; } },
+      { async getBoundAuthHeaders() { return { authorization: 'Bearer vault_secret' }; } },
+      { async send() { return { status: 307, locationHeader: 'https://other.customer.invalid/x' }; } }
+    );
+    const crossRedirect = await sender.executeAndSend({
+      tenantId: 'ten-a',
+      destination: dest,
+      transformCode: `function transform() { return { method: 'POST', url: 'https://hooks.customer.invalid/ugokilink/events', headers: {}, body: { a: 1 } }; }`,
+      eventInput: {},
+      eventRevocationEpoch: 1,
+      currentRevocationEpoch: 1,
+      allowedOutboundFields: ['a'],
+      entitlementContext: {
+        tenantId: 'ten-a',
+        consentMode: 'cookieless',
+        grantedPurposes: [],
+        approvedExceptions: new Set(),
+      },
+    });
+    expect(crossRedirect.status).toBe('redirect_blocked');
+
+    const keyReg = new IdentityKeyRegistry({ pepperVersion: 'p1', pepperSecret: 'pep-h20' });
+    const orch = new SelfServeOnboardingOrchestrator({ identityRegistry: keyReg });
+    const ws = orch.provisionWorkspace({
+      organizationName: 'SRI Corp',
+      siteName: 'SRI Site',
+      hostname: 'sri.example.jp',
+      policyUrl: 'https://sri.example.jp/privacy',
+    });
+    expect(ws.installSnippetHtml).toMatch(/integrity="sha384-[A-Za-z0-9+/=]+"/);
+    expect(orch.getStoredWorkspace(ws.siteId)?.secretKey).toBe('[REDACTED_ONE_TIME_ISSUED]');
+    expect(keyReg.verifySecretKey(ws.secretKey).ok).toBe(true);
+
+    const exporter = new WarehouseBatchExporter();
+    const cutoffMs = Date.UTC(2026, 10, 22, 10, 0, 0);
+    const multiSlice = await exporter.exportBatch({
+      config: {
+        exportId: 'exp-m06',
+        tenantId: 'ten-a',
+        siteId: 'site-1',
+        target: 'snowflake',
+        recipientClass: 'external_party',
+        storageRegion: 'jp',
+        destinationRegion: 'jp',
+        deletionEpoch: 1,
+      },
+      rows: [
+        makeAnalyticsRow({ rowId: 'd1-s', windowStartIso: '2026-11-20T00:00:00.000Z', windowEndIso: '2026-11-21T00:00:00.000Z', cellUnitCount: 4 }),
+        makeAnalyticsRow({ rowId: 'd1-b', windowStartIso: '2026-11-20T00:00:00.000Z', windowEndIso: '2026-11-21T00:00:00.000Z', cellUnitCount: 25 }),
+        makeAnalyticsRow({ rowId: 'd2-s', windowStartIso: '2026-11-21T00:00:00.000Z', windowEndIso: '2026-11-22T00:00:00.000Z', cellUnitCount: 6 }),
+        makeAnalyticsRow({ rowId: 'd2-b', windowStartIso: '2026-11-21T00:00:00.000Z', windowEndIso: '2026-11-22T00:00:00.000Z', cellUnitCount: 30 }),
+      ],
+      sourceEventCutoffMs: cutoffMs,
+      nowMs: cutoffMs + 1000,
+    });
+    expect(multiSlice.suppressedCellsCount).toBe(2);
+    expect(multiSlice.complementarySuppressedCount).toBe(2);
   });
 });

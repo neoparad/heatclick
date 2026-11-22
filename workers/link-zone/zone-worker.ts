@@ -19,6 +19,7 @@ import type {
   ZoneBudgetConfig,
   ZoneContextResponse,
   ZoneObservationRecord,
+  ZonePublicSelfTestResponse,
   ZoneSelfTestReport,
   ZoneTextRewriteOp,
   ZoneWorkerDeps,
@@ -34,7 +35,7 @@ export const DEFAULT_ZONE_BUDGETS: ZoneBudgetConfig = {
 };
 
 const AFFILIATE_ANCHOR_RE =
-  /(<a\b[^>]*\bhref\s*=\s*["'])(https?:\/\/(?:[^"']*\b(?:a8\.net|afb\.jp|valuecommerce\.com|accesstrade\.net|felmat\.net|hb\.afl\.rakuten\.co\.jp)\b[^"']*))(["'][^>]*>)/gi;
+  /(<a\b[^>]*\bhref\s*=\s*["'])(https?:\/\/(?:(?:[^/"']+\.)?(?:a8\.net|afb\.jp|valuecommerce\.com|accesstrade\.net|felmat\.net|rakuten\.co\.jp|moshimo\.com|janet\.ad\.jp|amazon\.(?:co\.jp|com|jp)|amzn\.(?:to|asia)|assoc-amazon\.com)(?:[/:?#][^"']*)?|[^"']*[?&](?:a8mat|aff_id|affiliate_id|vc_sid|scid|tag|ascsubtag|linkCode)=[^"']*))(["'][^>]*>)/gi;
 
 function bytesToHex(bytes: Uint8Array): string {
   let out = '';
@@ -67,12 +68,28 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   return bytesToHex(new Uint8Array(sig));
 }
 
-async function sha256Hex(input: string): Promise<string> {
+async function sha256Bytes(input: string): Promise<Uint8Array> {
   const digest = await globalThis.crypto.subtle.digest(
     'SHA-256',
     toArrayBuffer(new TextEncoder().encode(input))
   );
-  return bytesToHex(new Uint8Array(digest));
+  return new Uint8Array(digest);
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  return bytesToHex(await sha256Bytes(input));
+}
+
+async function constantTimeSecretMatch(provided: string | null, expected: string): Promise<boolean> {
+  if (!provided || !expected || expected.trim().length === 0) {
+    return false;
+  }
+  const [a, b] = await Promise.all([sha256Bytes(provided), sha256Bytes(expected)]);
+  let diff = provided.length ^ expected.length;
+  for (let i = 0; i < a.length; i += 1) {
+    diff |= a[i] ^ b[i];
+  }
+  return diff === 0;
 }
 
 /**
@@ -83,13 +100,15 @@ export async function deriveZoneSubKeys(edgeIntegritySecret: string): Promise<{
   readonly handoffMacKey: string;
   readonly logIngestKey: string;
   readonly sessionTokenKey: string;
+  readonly selftestToken: string;
 }> {
-  const [handoffMacKey, logIngestKey, sessionTokenKey] = await Promise.all([
+  const [handoffMacKey, logIngestKey, sessionTokenKey, selftestToken] = await Promise.all([
     hmacSha256Hex(edgeIntegritySecret, 'ugk:zone:subkey:handoff_mac:v1'),
     hmacSha256Hex(edgeIntegritySecret, 'ugk:zone:subkey:log_ingest:v1'),
     hmacSha256Hex(edgeIntegritySecret, 'ugk:zone:subkey:session_token:v1'),
+    hmacSha256Hex(edgeIntegritySecret, 'ugk:zone:subkey:selftest_diag:v1'),
   ]);
-  return { handoffMacKey, logIngestKey, sessionTokenKey };
+  return { handoffMacKey, logIngestKey, sessionTokenKey, selftestToken };
 }
 
 function deterministicUnitFraction(hexDigest: string): number {
@@ -166,19 +185,32 @@ async function applyBufferedTextRewrites(
 
 /**
  * D-22 Outbound-sink mode: replaces affiliate link destinations with a first-party
- * sink URL ONLY when a verified `lab_token` is present (0 requests reach affiliate hosts).
+ * sink URL ONLY when a verified `lab_token` is present (0 requests reach affiliate hosts,
+ * and raw affiliate domains are replaced with a truncated SHA-256 digest).
  */
-function applyLabOutboundSink(html: string, runId: string): { readonly html: string; readonly count: number } {
-  let count = 0;
-  const replaced = html.replace(
-    AFFILIATE_ANCHOR_RE,
-    (_full, prefix: string, href: string, suffix: string) => {
-      count += 1;
-      const sinkHref = `/_ugk/lab-sink?run_id=${encodeURIComponent(runId)}&orig_sha=${encodeURIComponent(href.slice(0, 32))}`;
-      return `${prefix}${sinkHref}${suffix}`;
-    }
-  );
-  return { html: replaced, count };
+async function applyLabOutboundSink(
+  html: string,
+  runId: string
+): Promise<{ readonly html: string; readonly count: number }> {
+  const matches = Array.from(html.matchAll(AFFILIATE_ANCHOR_RE));
+  if (matches.length === 0) {
+    return { html, count: 0 };
+  }
+  let out = '';
+  let cursor = 0;
+  for (const m of matches) {
+    const idx = m.index ?? 0;
+    const full = m[0];
+    const prefix = m[1];
+    const href = m[2];
+    const suffix = m[3];
+    const hrefDigest = (await sha256Hex(href)).slice(0, 16);
+    const sinkHref = `/_ugk/lab-sink?run_id=${encodeURIComponent(runId)}&orig_sha=${hrefDigest}`;
+    out += html.slice(cursor, idx) + `${prefix}${sinkHref}${suffix}`;
+    cursor = idx + full.length;
+  }
+  out += html.slice(cursor);
+  return { html: out, count: matches.length };
 }
 
 function injectNonExecutableJsonBlock(
@@ -259,6 +291,7 @@ export function createZoneWorkerHandler(deps: ZoneWorkerDeps) {
   };
 
   const getSelfTestReport = (): ZoneSelfTestReport => ({
+    status: 'ok',
     release_hash: deps.releaseHash,
     abi: deps.abi,
     conformance_passed: true,
@@ -270,6 +303,14 @@ export function createZoneWorkerHandler(deps: ZoneWorkerDeps) {
     counters: { ...counters },
   });
 
+  const getRedactedPublicSelfTestReport = (): ZonePublicSelfTestResponse => ({
+    status: 'ok',
+    abi: deps.abi,
+    conformance_passed: true,
+    delivery_before_capture: true,
+    watchdog_remove_p95_target_s: 180,
+  });
+
   return {
     getSelfTestReport,
 
@@ -277,13 +318,29 @@ export function createZoneWorkerHandler(deps: ZoneWorkerDeps) {
       const startMs = now();
       const url = new URL(request.url);
 
-      // 1. Self-test endpoint (/_ugk/selftest, DEL App. H)
+      // 1. Self-test endpoint (/_ugk/selftest, DEL App. H + [L-05] internal diagnostic token auth)
       if (url.pathname === '/_ugk/selftest') {
-        return new Response(JSON.stringify(getSelfTestReport()), {
+        const subKeys = await subKeysPromise;
+        const expectedToken = deps.selftestDiagnosticToken ?? subKeys.selftestToken;
+        const headerToken = request.headers.get('x-ugk-selftest-token');
+        const authHeader = request.headers.get('authorization');
+        const bearerMatch = authHeader ? /^Bearer\s+(\S+)$/i.exec(authHeader.trim()) : null;
+        const providedToken = headerToken ?? (bearerMatch ? bearerMatch[1] : null);
+        const authorized = await constantTimeSecretMatch(providedToken, expectedToken);
+        if (!authorized) {
+          return new Response(JSON.stringify({ error: 'unauthorized' }), {
+            status: 401,
+            headers: {
+              'content-type': 'application/json; charset=utf-8',
+              'cache-control': 'private, no-store',
+            },
+          });
+        }
+        return new Response(JSON.stringify(getRedactedPublicSelfTestReport()), {
           status: 200,
           headers: {
             'content-type': 'application/json; charset=utf-8',
-            'cache-control': 'no-store',
+            'cache-control': 'private, no-store',
           },
         });
       }
@@ -404,7 +461,7 @@ export function createZoneWorkerHandler(deps: ZoneWorkerDeps) {
                   );
                   resolvedConsentMode = raced.value.consent_mode;
                   deliverApplied = true;
-                  outHeaders.set('cache-control', 'private, no-cache');
+                  outHeaders.set('cache-control', 'private, no-store');
                   outHeaders.delete('content-length');
                 }
               }
@@ -422,10 +479,10 @@ export function createZoneWorkerHandler(deps: ZoneWorkerDeps) {
               if (verified) {
                 executionOrder.push('lab_sink');
                 const htmlToSink = outBodyText ?? (await originResponse.text());
-                const sinked = applyLabOutboundSink(htmlToSink, verified.run_id);
+                const sinked = await applyLabOutboundSink(htmlToSink, verified.run_id);
                 outBodyText = sinked.html;
                 labSinkApplied = sinked.count > 0;
-                outHeaders.set('cache-control', 'no-store');
+                outHeaders.set('cache-control', 'private, no-store');
                 outHeaders.delete('content-length');
               }
             }
@@ -484,6 +541,27 @@ export function createZoneWorkerHandler(deps: ZoneWorkerDeps) {
                 );
               }
             }
+          }
+
+          // [M-16]: Never leave `Cache-Control: public` (or CDN shared cache headers) when ANY
+          // personalized rewrite, per-request Server-Timing, Set-Cookie, lab sink, or experiment
+          // header is present on the response.
+          const hasPerRequestOrExperimentState =
+            deliverApplied ||
+            labSinkApplied ||
+            handoffAttached ||
+            isPassthroughArm ||
+            outHeaders.has('set-cookie') ||
+            outHeaders.has('server-timing') ||
+            outHeaders.has('x-ugk-passthrough') ||
+            outHeaders.has('x-ugk-region');
+
+          if (hasPerRequestOrExperimentState) {
+            outHeaders.set('cache-control', 'private, no-store');
+            outHeaders.delete('cdn-cache-control');
+            outHeaders.delete('cloudflare-cdn-cache-control');
+            outHeaders.delete('surrogate-control');
+            outHeaders.delete('expires');
           }
 
           const finalResponse =

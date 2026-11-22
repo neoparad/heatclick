@@ -16,9 +16,16 @@ export {
   type ProtectedHumanPipeline,
 } from './lab-marker';
 export {
+  BoundedTtlLruMap,
   LinkCollectorEngine,
+  SharedInMemoryAckLedgerStore,
+  computeDeterministicWalShardId,
+  constantTimeHexEqual,
+  deriveServerNetworkPrefix,
+  issueEdgeHandoffHeader,
   type CollectFrameRequestInput,
   type CollectFrameResponse,
+  type SharedAckLedgerOptions,
 } from './collector';
 export {
   CrossLaneAggregationError,

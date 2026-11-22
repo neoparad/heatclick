@@ -39,6 +39,14 @@ export const ALLOWED_SET_ATTR_NAMES: ReadonlySet<string> = new Set([
   'width', 'height', 'loading', 'decoding', 'placeholder', 'lang', 'dir', 'href',
 ]);
 
+export const ALLOWED_INSERT_ATTR_NAMES: ReadonlySet<string> = new Set([
+  ...ALLOWED_SET_ATTR_NAMES,
+  'src',
+  'id',
+  'class',
+  'data-ugk-slot',
+]);
+
 export const ALLOWED_STYLE_PROPERTIES: ReadonlySet<string> = new Set([
   'color', 'background-color', 'border-color', 'border-top-color', 'border-right-color',
   'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color',
@@ -59,7 +67,35 @@ const FORBIDDEN_URL_SCHEME_RE = /^\s*(?:javascript|data|blob|vbscript)\s*:/i;
 const FORBIDDEN_CSS_VALUE_RE = /(?:url\s*\(|expression\s*\(|@import|@font-face|var\s*\(\s*(?!\-\-ugk\-))/i;
 const FORBIDDEN_POSITION_RE = /^\s*(?:fixed|sticky|absolute)\s*$/i;
 const MARKUP_OR_SCRIPT_RE = /<\s*(?:script|iframe|style|svg|object|embed)\b|on[a-z]+\s*=/i;
-const AFFILIATE_HOST_RE = /\b(?:a8\.net|afb\.jp|valuecommerce\.com|accesstrade\.net|felmat\.net|amazon\.(?:co\.jp|com)\/.*tag=|hb\.afl\.rakuten\.co\.jp)\b/i;
+const AFFILIATE_HOST_RE =
+  /\b(?:a8\.net|afb\.jp|valuecommerce\.com|accesstrade\.net|felmat\.net|moshimo\.com|linksynergy\.com|janet\.jp|amzn\.to|amzn\.asia|assoc-amazon\.com|amazon\.(?:co\.jp|com|jp)|hb\.afl\.rakuten\.co\.jp)\b/i;
+const AFFILIATE_PARAM_RE =
+  /(?:[?&]|^)(?:a8mat|a8ejpredirect|afb|vc_sid|vc_ptn|tag|linkcode|moshimo|aff_id|affiliate_id|clickref)\s*=/i;
+const EXTERNAL_HOST_URL_RE = /^\s*(?:https?:)?\/\/([^/?#\s]+)/i;
+const FORBIDDEN_PROTO_ATTR_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function inspectDestinationOrResourceAttr(
+  attrName: string,
+  attrValue: string,
+  path: string,
+  errors: string[],
+  forbidExternalHost: boolean
+): void {
+  if (FORBIDDEN_URL_SCHEME_RE.test(attrValue)) {
+    errors.push(`${path}: ${attrName} uses forbidden URL scheme`);
+  }
+  if (AFFILIATE_HOST_RE.test(attrValue) || AFFILIATE_PARAM_RE.test(attrValue)) {
+    errors.push(`${path}: ${attrName} cannot mutate or inject affiliate destinations/params (SSOT A-15)`);
+  }
+  if (forbidExternalHost) {
+    const hostMatch = EXTERNAL_HOST_URL_RE.exec(attrValue);
+    if (hostMatch) {
+      errors.push(
+        `${path}: ${attrName} cannot inject external outbound host "${hostMatch[1]}" via closed host grammar`
+      );
+    }
+  }
+}
 
 export interface GrammarValidationResult {
   readonly valid: boolean;
@@ -120,18 +156,27 @@ function validateSingleOp(
     }
     case 'SetAttr': {
       const attr = (op.attr_name ?? '').trim().toLowerCase();
-      if (!attr || attr.startsWith('on') || attr === 'style' || attr === 'srcdoc') {
+      if (
+        !attr ||
+        FORBIDDEN_PROTO_ATTR_KEYS.has(attr) ||
+        attr.startsWith('on') ||
+        attr === 'style' ||
+        attr === 'srcdoc'
+      ) {
         errors.push(`${path}: SetAttr attribute "${attr}" is strictly forbidden`);
       } else if (!ALLOWED_SET_ATTR_NAMES.has(attr)) {
         errors.push(`${path}: SetAttr attribute "${attr}" is outside DEL App. A.2 allow-list`);
       }
       if (typeof op.attr_value === 'string') {
-        if (FORBIDDEN_URL_SCHEME_RE.test(op.attr_value)) {
-          errors.push(`${path}: SetAttr value uses forbidden URL scheme`);
-        }
-        if (attr === 'href' && AFFILIATE_HOST_RE.test(op.attr_value)) {
-          errors.push(`${path}: SetAttr href cannot mutate or target affiliate destinations (SSOT A-15)`);
-        }
+        inspectDestinationOrResourceAttr(
+          `SetAttr.${attr}`,
+          op.attr_value,
+          path,
+          errors,
+          attr === 'href'
+        );
+      } else {
+        errors.push(`${path}: SetAttr requires a string attr_value`);
       }
       break;
     }
@@ -154,22 +199,59 @@ function validateSingleOp(
       if (FORBIDDEN_HOST_TAGS.has(tag) || !ALLOWED_INSERTABLE_TAGS.has(tag)) {
         errors.push(`${path}: InsertNode tag "${tag}" is forbidden in host customer origin`);
       }
-      if (op.insert_attrs) {
-        for (const [k, v] of Object.entries(op.insert_attrs)) {
-          const lk = k.trim().toLowerCase();
-          if (lk.startsWith('on') || lk === 'style' || lk === 'srcdoc') {
-            errors.push(`${path}: InsertNode attribute "${lk}" is strictly forbidden`);
-          }
-          if (FORBIDDEN_URL_SCHEME_RE.test(v)) {
-            errors.push(`${path}: InsertNode attribute "${lk}" contains forbidden URL scheme`);
+      if (op.insert_attrs !== undefined) {
+        if (op.insert_attrs === null || typeof op.insert_attrs !== 'object' || Array.isArray(op.insert_attrs)) {
+          errors.push(`${path}: InsertNode insert_attrs must be a flat string dictionary`);
+        } else {
+          for (const rawKey of Object.getOwnPropertyNames(op.insert_attrs)) {
+            if (!Object.prototype.hasOwnProperty.call(op.insert_attrs, rawKey)) continue;
+            const v = (op.insert_attrs as Record<string, unknown>)[rawKey];
+            const lk = rawKey.trim().toLowerCase();
+            if (
+              !lk ||
+              FORBIDDEN_PROTO_ATTR_KEYS.has(rawKey) ||
+              FORBIDDEN_PROTO_ATTR_KEYS.has(lk) ||
+              lk.startsWith('on') ||
+              lk === 'style' ||
+              lk === 'srcdoc'
+            ) {
+              errors.push(`${path}: InsertNode attribute "${lk}" is strictly forbidden`);
+              continue;
+            }
+            if (!ALLOWED_INSERT_ATTR_NAMES.has(lk)) {
+              errors.push(`${path}: InsertNode attribute "${lk}" is outside closed allow-list`);
+              continue;
+            }
+            if (typeof v !== 'string') {
+              errors.push(`${path}: InsertNode attribute "${lk}" must be a primitive string (nested objects forbidden)`);
+              continue;
+            }
+            if (lk === 'class') {
+              const tokens = v.trim().split(/\s+/).filter(Boolean);
+              if (tokens.some((tok) => !tok.startsWith('ugk-'))) {
+                errors.push(`${path}: InsertNode class tokens must use the "ugk-" prefix`);
+              }
+            }
+            inspectDestinationOrResourceAttr(
+              `InsertNode.${lk}`,
+              v,
+              path,
+              errors,
+              tag === 'a' || lk === 'href' || lk === 'src'
+            );
           }
         }
+      }
+      if (typeof op.text === 'string' && MARKUP_OR_SCRIPT_RE.test(op.text)) {
+        errors.push(`${path}: InsertNode text must not contain executable markup or inline handlers`);
       }
       break;
     }
     case 'ReplaceImage': {
       if (!op.image_src || FORBIDDEN_URL_SCHEME_RE.test(op.image_src)) {
         errors.push(`${path}: ReplaceImage requires a safe allow-listed image_src`);
+      } else {
+        inspectDestinationOrResourceAttr('ReplaceImage.image_src', op.image_src, path, errors, false);
       }
       if (!op.image_alt || !op.image_width || !op.image_height) {
         errors.push(`${path}: ReplaceImage requires alt, explicit width, and explicit height`);
@@ -274,6 +356,13 @@ export function detectPrivacyRelaxation(
     );
   }
 
+  if (
+    prev.allow_cmp_opt_in_from_default_off !== true &&
+    next.allow_cmp_opt_in_from_default_off === true
+  ) {
+    reasons.push('allow_cmp_opt_in_from_default_off enabled');
+  }
+
   const nextProtected = new Set(next.protected_regions);
   for (const reg of prev.protected_regions) {
     if (!nextProtected.has(reg)) {
@@ -319,11 +408,22 @@ export function resolveEffectiveConsentMode(params: {
   readonly originDeclared?: ConsentMode;
   readonly loaderDataCap?: ConsentMode;
   readonly cmpResolved?: ConsentMode | 'unknown';
+  readonly allowCmpOptInFromDefaultOff?: boolean;
   readonly minorsFlag?: boolean;
   readonly disclosureVerified: boolean;
   readonly subjectToJpExternalTransmissionRule?: boolean;
 }): ConsentMode {
   if (params.cmpResolved === 'unknown') {
+    return 'off';
+  }
+
+  // Hard site kill/off: CMP must NEVER escalate above 'off' unless signed bundle explicitly permits it (H-09)
+  if (params.siteDefault === 'off' && params.allowCmpOptInFromDefaultOff !== true) {
+    return 'off';
+  }
+
+  // Online loader emergency tightening to 'off' cannot be overridden by CMP
+  if (params.loaderDataCap === 'off') {
     return 'off';
   }
 
@@ -340,7 +440,8 @@ export function resolveEffectiveConsentMode(params: {
     CONSENT_MODE_RANK[current] < CONSENT_MODE_RANK[strictest] ? current : strictest
   );
 
-  // Explicit CMP consent overrides region ladder, EXCEPT minors & missing disclosure ceilings
+  // Explicit CMP consent overrides region ladder (when siteDefault !== 'off' or allowCmpOptInFromDefaultOff === true),
+  // EXCEPT minors & missing disclosure ceilings
   if (params.cmpResolved !== undefined) {
     effective = params.cmpResolved;
   }

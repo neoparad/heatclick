@@ -524,4 +524,120 @@ describe('lib/link/linkage — Explicit N:M Link Grants, 3 Binding Paths, Ed2551
     });
     expect(postRevokeVerify.ok).toBe(false);
   });
+
+  test('Wave 8 Regressions (H-17, H-24): blocks IPv4-mapped IPv6 hex/NAT64/6to4/octal/integer SSRF + missing well_known_file IP, and blocks stale/replayed Passkey grant activations', () => {
+    // H-17: Canonical 128-bit IPv4/IPv6 SSRF parser
+    expect(isPrivateOrReservedIp('::ffff:7f00:1')).toBe(true);
+    expect(isPrivateOrReservedIp('::ffff:a9fe:a9fe')).toBe(true);
+    expect(isPrivateOrReservedIp('0:0:0:0:0:ffff:7f00:1')).toBe(true);
+    expect(isPrivateOrReservedIp('64:ff9b::169.254.169.254')).toBe(true);
+    expect(isPrivateOrReservedIp('2002:7f00:0001::1')).toBe(true);
+    expect(isPrivateOrReservedIp('0177.0.0.1')).toBe(true);
+    expect(isPrivateOrReservedIp('2130706433')).toBe(true);
+    expect(isPrivateOrReservedIp('0x7f000001')).toBe(true);
+    expect(isPrivateOrReservedIp('93.184.216.34')).toBe(false);
+    expect(isPrivateOrReservedIp('2606:2800:220:1:248:1893:25c8:1946')).toBe(false);
+
+    const svc = new LinkGrantService();
+    const now = new Date('2026-11-20T12:00:00Z');
+    const grant = svc.createDraftGrant({
+      tenantId: 'tenant_a',
+      siteId: 'site_ssrf',
+      primaryHost: 'example-a.jp',
+      hostPatterns: ['example-a.jp'],
+      payer: 'ugoki_ledger',
+      caps: { monthlyCreditsCap: 10000, dailyExternalSpendCapUsd: 10, maxConcurrentJobs: 2, maxUrlsPerInlineJob: 50 },
+      bindingPath: 'provisioned',
+      reviewBy: '2027-05-20T00:00:00Z',
+      now,
+    });
+
+    // well_known_file WITHOUT resolvedIp must fail closed!
+    const missingIpRes = svc.recordSideDomainProof({
+      grantId: grant.grantId,
+      side: 'ugoki',
+      check: {
+        host: 'example-a.jp',
+        method: 'well_known_file',
+        outcome: 'verified',
+        observedToken: grant.proofToken,
+        checkedAt: now.toISOString(),
+      },
+    });
+    expect(missingIpRes.ok).toBe(false);
+    if (!missingIpRes.ok) expect(missingIpRes.code).toBe('SSRF_GUARD_BLOCKED');
+
+    // Hex IPv4-mapped IPv6 metadata IP must fail closed!
+    const mappedIpRes = svc.recordSideDomainProof({
+      grantId: grant.grantId,
+      side: 'ugoki',
+      check: {
+        host: 'example-a.jp',
+        method: 'well_known_file',
+        outcome: 'verified',
+        observedToken: grant.proofToken,
+        resolvedIp: '::ffff:a9fe:a9fe',
+        checkedAt: now.toISOString(),
+      },
+    });
+    expect(mappedIpRes.ok).toBe(false);
+
+    // Valid public IP succeeds
+    expect(
+      svc.recordSideDomainProof({
+        grantId: grant.grantId,
+        side: 'ugoki',
+        check: {
+          host: 'example-a.jp',
+          method: 'well_known_file',
+          outcome: 'verified',
+          observedToken: grant.proofToken,
+          resolvedIp: '93.184.216.34',
+          checkedAt: now.toISOString(),
+        },
+      }).ok
+    ).toBe(true);
+    svc.completeProvisionedBinding({
+      grantId: grant.grantId,
+      provisionedCrawlAccountRef: 'crawl_fed_ssrf',
+      crawlProofCheck: {
+        host: 'example-a.jp',
+        method: 'dns_txt',
+        outcome: 'verified',
+        observedToken: grant.proofToken,
+        checkedAt: now.toISOString(),
+      },
+    });
+
+    // H-24: Stale (> 5 min) Passkey assertion rejected
+    const stalePk = makeActivationPasskey(grant, new Date(now.getTime() - 10 * 60_000));
+    const staleRes = svc.approveAndActivateGrant({
+      grantId: grant.grantId,
+      principal: OWNER_SESSION,
+      passkeyAssertion: stalePk,
+      now,
+    });
+    expect(staleRes.ok).toBe(false);
+    if (!staleRes.ok) expect(staleRes.code).toBe('PASSKEY_ASSERTION_STALE');
+
+    // Fresh Passkey succeeds once, replay fails
+    const freshPk = makeActivationPasskey(grant, now);
+    expect(
+      svc.approveAndActivateGrant({
+        grantId: grant.grantId,
+        principal: OWNER_SESSION,
+        passkeyAssertion: freshPk,
+        now,
+      }).ok
+    ).toBe(true);
+
+    // Replaying exact assertion on another grant (if signedChallengeHash/credentialId reused) is tracked
+    const replayAttempt = svc.approveAndActivateGrant({
+      grantId: grant.grantId,
+      principal: OWNER_SESSION,
+      passkeyAssertion: freshPk,
+      now,
+    });
+    expect(replayAttempt.ok).toBe(false);
+  });
 });

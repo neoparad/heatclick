@@ -429,4 +429,72 @@ describe('lib/link/scheduler — 5-Class Priority Queue, Starvation Guard, Confo
     expect(surgeReport.tiers.find((t) => t.tier === 'identity')?.meets2xGate).toBe(true);
     expect(surgeReport.tiers.find((t) => t.tier === 'enrichment')?.meets2xGate).toBe(false);
   });
+
+  test('Wave 8 Regression (L-03): maxRetainedHistoryEntries bounds completed jobs, reservations, and receipts without dropping active queued jobs', () => {
+    const crawlPair = generateEd25519KeyPair('exec_bound_k1');
+    const scheduler = new LinkScheduler({
+      expectedConformance: EXPECTED_CONFORMANCE,
+      maxRetainedHistoryEntries: 5,
+    });
+    scheduler.registerGrantBudget({
+      grantId: 'lgr_bound',
+      tenantId: 'tenant_a',
+      payer: 'ugoki_ledger',
+      monthlyCreditsCap: 50000,
+      dailyExternalSpendCapUsd: 100,
+    });
+    scheduler.registerExecutor({
+      executorId: 'crawl_bound',
+      kind: 'crawl_pool',
+      supportedJobKinds: ['crawl_http'],
+      conformance: EXPECTED_CONFORMANCE,
+      publicKeyPem: crawlPair.publicKeyPem,
+      signerKid: crawlPair.kid,
+      maxConcurrency: 5,
+      dailyRenderCapacity: 10000,
+      healthy: true,
+      currentInFlight: 0,
+    });
+
+    const t0 = new Date('2026-11-20T12:00:00Z');
+    const jobIds: string[] = [];
+    for (let i = 0; i < 22; i += 1) {
+      const sub = scheduler.submitJob({
+        grantId: 'lgr_bound',
+        tenantId: 'tenant_a',
+        siteId: 's1',
+        planId: `plan_${i}`,
+        window: 'w1',
+        kind: 'crawl_http',
+        targets: [`https://a.jp/${i}`],
+        now: new Date(t0.getTime() + i * 1000),
+      });
+      expect(sub.ok).toBe(true);
+      if (!sub.ok) return;
+      jobIds.push(sub.job.jobId);
+
+      const disp = scheduler.dispatchNext(new Date(t0.getTime() + i * 1000));
+      expect(disp.dispatched).toBe(true);
+
+      const rcpt = signUsageReceipt({
+        receiptId: `rcpt_bound_${i}`,
+        jobId: sub.job.jobId,
+        grantId: 'lgr_bound',
+        executorId: 'crawl_bound',
+        kind: 'crawl_http',
+        units: 1,
+        credits: 1,
+        externalSpendUsd: 0,
+        scheduleHash: sub.job.scheduleHash,
+        issuedAt: new Date(t0.getTime() + i * 1000).toISOString(),
+        signerKid: crawlPair.kid,
+        privateKeyPem: crawlPair.privateKeyPem,
+      });
+      expect(scheduler.settleUsageReceipt(rcpt, new Date(t0.getTime() + i * 1000)).ok).toBe(true);
+    }
+
+    // Oldest completed job was evicted (min cap = 16) while most recent completed job remains accessible
+    expect(scheduler.getJob(jobIds[0]!)).toBeUndefined();
+    expect(scheduler.getJob(jobIds[21]!)).toBeDefined();
+  });
 });

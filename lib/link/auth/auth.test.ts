@@ -823,4 +823,128 @@ describe('lib/link/auth — Account Plane, 4 Key Kinds, OAuth 2.1, Risk Classes 
     expect(gateway.auditLog.getAll().length).toBeGreaterThanOrEqual(10);
     expect(gateway.auditLog.verifyChain()).toEqual({ valid: true });
   });
+
+  test('Wave 8 Regressions (C-13, H-24, L-03): R4 rejects bogus passkeyApprovalId, enforces cumulative daily subject delete cap, requires verified passkey on site/tenant wipe, cascades OEM key revocation, and bounds state maps', () => {
+    const { registry, gateway, now, ownerSessionPrincipal } = buildFixture();
+    const { rawKey } = registry.issueSecretKey({
+      tenantId: 'tenant_a',
+      principalId: 'agent_a',
+      scopes: ['privacy:delete', 'sites:manage'],
+      constraints: {
+        senderConstrainedThumbprint: 'mtls_del',
+        dailyDeleteSubjectsCap: 3,
+      },
+      now,
+    });
+    const ver = registry.verifySecretKey(rawKey, { senderThumbprint: 'mtls_del', now });
+    expect(ver.ok).toBe(true);
+    if (!ver.ok) return;
+
+    // C-13a: Cumulative daily subject delete cap across calls (2 subjects ok, +2 subjects = 4 > 3 -> rejected unless real passkey approval!)
+    const firstDel = gateway.authorize({
+      principal: ver.principal,
+      action: 'privacy.delete',
+      riskClass: 'R4',
+      requiredScope: 'privacy:delete',
+      resource: { type: 'site', id: 'site_a1', tenantId: 'tenant_a', siteId: 'site_a1' },
+      destruction: { scope: 'subject', subjectIds: ['u1', 'u2'], reason: 'req1' },
+      now,
+    });
+    expect(firstDel.allowed).toBe(true);
+
+    // Bogus passkeyApprovalId: "dummy" MUST NOT bypass daily cap!
+    const bogusBypass = gateway.authorize({
+      principal: ver.principal,
+      action: 'privacy.delete',
+      riskClass: 'R4',
+      requiredScope: 'privacy:delete',
+      resource: { type: 'site', id: 'site_a1', tenantId: 'tenant_a', siteId: 'site_a1' },
+      passkeyApprovalId: 'dummy',
+      destruction: { scope: 'subject', subjectIds: ['u3', 'u4'], reason: 'req2' },
+      now,
+    });
+    expect(bogusBypass.allowed).toBe(false);
+    expect(bogusBypass.code).toBe('APPROVAL_NOT_FOUND');
+
+    // C-13b: Site/tenant destruction ALWAYS requires verified single-use passkey approval even without daily cap
+    const siteWipeNoPasskey = gateway.authorize({
+      principal: ver.principal,
+      action: 'sites.destroy',
+      riskClass: 'R4',
+      requiredScope: 'sites:manage',
+      resource: { type: 'site', id: 'site_a1', tenantId: 'tenant_a', siteId: 'site_a1' },
+      destruction: { scope: 'site', reason: 'wipe attempt' },
+      now,
+    });
+    expect(siteWipeNoPasskey.allowed).toBe(false);
+
+    const wipeDiff = { scope: 'site', siteId: 'site_a1' };
+    const wipeApr = gateway.createPasskeyApproval({
+      principal: ownerSessionPrincipal,
+      siteId: 'site_a1',
+      action: 'sites.destroy',
+      renderedDiff: wipeDiff,
+      passkeyAssertion: {
+        credentialId: 'pk_owner_wipe',
+        userVerification: true,
+        signedChallengeHash: computeActionAndDiffHash('sites.destroy', wipeDiff).combinedHash,
+        assertedAt: now.toISOString(),
+        signatureVerified: true,
+      },
+      now,
+    });
+    expect(wipeApr.ok).toBe(true);
+    if (!wipeApr.ok) return;
+
+    const siteWipeApproved = gateway.authorize({
+      principal: ver.principal,
+      action: 'sites.destroy',
+      riskClass: 'R4',
+      requiredScope: 'sites:manage',
+      resource: { type: 'site', id: 'site_a1', tenantId: 'tenant_a', siteId: 'site_a1' },
+      renderedDiff: wipeDiff,
+      passkeyApprovalId: wipeApr.approval.approvalId,
+      destruction: { scope: 'site', reason: 'approved wipe' },
+      now,
+    });
+    expect(siteWipeApproved.allowed).toBe(true);
+
+    // H-24: Revoking parent OEM key immediately invalidates already-exchanged child token!
+    const { rawKey: oemKey, record: oemRec } = registry.issueOemKey({
+      orgId: 'org_oem',
+      managementTenantId: 'tenant_oem_mgmt',
+      delegableScopes: ['analytics:read'],
+      now,
+    });
+    const ex = registry.exchangeOemTokenForChild({
+      rawOemKey: oemKey,
+      childTenantId: 'tenant_oem_child',
+      actorSub: 'op_1',
+      requestedScopes: ['analytics:read'],
+      now,
+    });
+    expect(ex.ok).toBe(true);
+    if (!ex.ok) return;
+    expect(registry.verifyOemExchangedToken(ex.token, { now }).ok).toBe(true);
+    expect(registry.revokeOemKey(oemRec.keyId)).toEqual({
+      revoked: true,
+      invalidatedChildTokens: 1,
+    });
+    expect(registry.verifyOemExchangedToken(ex.token, { now }).ok).toBe(false);
+
+    // L-03: Bounded gateway state maps evict expired/oldest entries without throwing
+    const smallGateway = new AuthorizationGateway({ maxStateMapEntries: 4 });
+    for (let i = 0; i < 10; i += 1) {
+      const r = smallGateway.authorize({
+        principal: ver.principal,
+        action: 'decisions.kill',
+        riskClass: 'R1',
+        requiredScope: 'sites:manage',
+        idempotencyKey: `idem_bound_${i}`,
+        resource: { type: 'site', id: 'site_a1', tenantId: 'tenant_a', siteId: 'site_a1' },
+        now: new Date(now.getTime() + i * 1000),
+      });
+      expect(r.allowed).toBe(true);
+    }
+  });
 });

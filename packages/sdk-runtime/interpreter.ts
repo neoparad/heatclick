@@ -37,6 +37,7 @@ export interface InverseOpRecord {
   readonly kind: RuntimePatchOp['kind'];
   readonly previousValue: string | boolean | undefined;
   readonly propOrAttrName?: string;
+  readonly prevAttributes?: Readonly<Record<string, string | undefined>>;
 }
 
 const ALLOWED_RUNTIME_STYLE_PROPS = new Set([
@@ -53,6 +54,42 @@ const ALLOWED_RUNTIME_STYLE_PROPS = new Set([
 ]);
 
 const ALLOWED_RUNTIME_ATTRS = new Set(['aria-label', 'title', 'data-ugk-variant']);
+
+const FORBIDDEN_PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function hasOwn(obj: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function isSafeStyleProp(prop: string): boolean {
+  if (!prop || FORBIDDEN_PROTO_KEYS.has(prop) || FORBIDDEN_PROTO_KEYS.has(prop.toLowerCase())) {
+    return false;
+  }
+  return ALLOWED_RUNTIME_STYLE_PROPS.has(prop);
+}
+
+function isSafeAttrName(name: string): boolean {
+  if (!name) return false;
+  const lower = name.trim().toLowerCase();
+  if (
+    FORBIDDEN_PROTO_KEYS.has(name) ||
+    FORBIDDEN_PROTO_KEYS.has(lower) ||
+    lower.startsWith('on') ||
+    lower === 'srcdoc' ||
+    lower === 'style'
+  ) {
+    return false;
+  }
+  return ALLOWED_RUNTIME_ATTRS.has(name);
+}
+
+function isUnsafeStyleValue(value: string): boolean {
+  return /url\s*\(|expression\s*\(|@import|javascript:|vbscript:|data:/i.test(value);
+}
+
+function isUnsafeAttrValue(value: string): boolean {
+  return /^\s*(?:javascript|data|vbscript|blob)\s*:/i.test(value);
+}
 
 export interface AppliedPatchHandle {
   readonly applied: boolean;
@@ -97,7 +134,7 @@ export function applyClosedGrammarPatch(
       });
       el.textContent = op.text;
     } else if (op.kind === 'set_style') {
-      if (!ALLOWED_RUNTIME_STYLE_PROPS.has(op.prop) || /url\s*\(|expression\s*\(|javascript:/i.test(op.value)) {
+      if (!isSafeStyleProp(op.prop) || isUnsafeStyleValue(op.value)) {
         rollbackClosedGrammarPatch(dom, inverses);
         return { applied: false, inverseOps: [], skippedReason: `FORBIDDEN_STYLE:${op.prop}` };
       }
@@ -106,7 +143,7 @@ export function applyClosedGrammarPatch(
         targetMatchKey: op.targetMatchKey,
         kind: 'set_style',
         propOrAttrName: op.prop,
-        previousValue: el.styles[op.prop],
+        previousValue: hasOwn(el.styles, op.prop) ? el.styles[op.prop] : undefined,
       });
       el.styles[op.prop] = op.value;
     } else if (op.kind === 'hide') {
@@ -118,7 +155,7 @@ export function applyClosedGrammarPatch(
       });
       el.hidden = true;
     } else if (op.kind === 'set_attribute') {
-      if (!ALLOWED_RUNTIME_ATTRS.has(op.name)) {
+      if (!isSafeAttrName(op.name) || isUnsafeAttrValue(op.value)) {
         rollbackClosedGrammarPatch(dom, inverses);
         return { applied: false, inverseOps: [], skippedReason: `FORBIDDEN_ATTR:${op.name}` };
       }
@@ -127,7 +164,7 @@ export function applyClosedGrammarPatch(
         targetMatchKey: op.targetMatchKey,
         kind: 'set_attribute',
         propOrAttrName: op.name,
-        previousValue: el.attributes[op.name],
+        previousValue: hasOwn(el.attributes, op.name) ? el.attributes[op.name] : undefined,
       });
       el.attributes[op.name] = op.value;
     }
@@ -138,6 +175,8 @@ export function applyClosedGrammarPatch(
 
 /**
  * Reverts every applied operation in strict reverse order using stored inverse records.
+ * Enforces `Object.prototype.hasOwnProperty.call` and rejects prototype pollution keys
+ * (`__proto__`, `constructor`, `prototype`) and forbidden attributes (`on*`, `srcdoc`, `style`).
  */
 export function rollbackClosedGrammarPatch(
   dom: RuntimeDomAdapter,
@@ -149,6 +188,30 @@ export function rollbackClosedGrammarPatch(
     const matches = dom.findByMatchKey(inv.targetMatchKey);
     if (matches.length !== 1) continue;
     const el = matches[0];
+    if (el.protectedRegion) continue;
+
+    if (inv.prevAttributes && typeof inv.prevAttributes === 'object') {
+      let anyAttrRestored = false;
+      for (const attrKey of Object.getOwnPropertyNames(inv.prevAttributes)) {
+        if (!hasOwn(inv.prevAttributes, attrKey) || !isSafeAttrName(attrKey)) {
+          continue;
+        }
+        const prevVal = inv.prevAttributes[attrKey];
+        if (prevVal === undefined) {
+          if (hasOwn(el.attributes, attrKey)) {
+            delete el.attributes[attrKey];
+          }
+          anyAttrRestored = true;
+        } else if (typeof prevVal === 'string' && !isUnsafeAttrValue(prevVal)) {
+          el.attributes[attrKey] = prevVal;
+          anyAttrRestored = true;
+        }
+      }
+      if (anyAttrRestored) {
+        reverted += 1;
+        continue;
+      }
+    }
 
     if (inv.kind === 'replace_text' && typeof inv.previousValue === 'string') {
       el.textContent = inv.previousValue;
@@ -157,19 +220,27 @@ export function rollbackClosedGrammarPatch(
       el.hidden = inv.previousValue;
       reverted += 1;
     } else if (inv.kind === 'set_style' && inv.propOrAttrName) {
+      if (!isSafeStyleProp(inv.propOrAttrName)) continue;
       if (inv.previousValue === undefined) {
-        delete el.styles[inv.propOrAttrName];
-      } else {
-        el.styles[inv.propOrAttrName] = String(inv.previousValue);
+        if (hasOwn(el.styles, inv.propOrAttrName)) {
+          delete el.styles[inv.propOrAttrName];
+        }
+        reverted += 1;
+      } else if (typeof inv.previousValue === 'string' && !isUnsafeStyleValue(inv.previousValue)) {
+        el.styles[inv.propOrAttrName] = inv.previousValue;
+        reverted += 1;
       }
-      reverted += 1;
     } else if (inv.kind === 'set_attribute' && inv.propOrAttrName) {
+      if (!isSafeAttrName(inv.propOrAttrName)) continue;
       if (inv.previousValue === undefined) {
-        delete el.attributes[inv.propOrAttrName];
-      } else {
-        el.attributes[inv.propOrAttrName] = String(inv.previousValue);
+        if (hasOwn(el.attributes, inv.propOrAttrName)) {
+          delete el.attributes[inv.propOrAttrName];
+        }
+        reverted += 1;
+      } else if (typeof inv.previousValue === 'string' && !isUnsafeAttrValue(inv.previousValue)) {
+        el.attributes[inv.propOrAttrName] = inv.previousValue;
+        reverted += 1;
       }
-      reverted += 1;
     }
   }
   return reverted;

@@ -333,24 +333,37 @@ export class WarehouseBatchExporter {
       this.exportedExternalWindows.set(winKey, history);
 
       const minK = config.externalMinCellK ?? getDefaultExternalMinCellK();
-      const eligibleIndices: Array<{ readonly rowId: string; readonly count: number }> = [];
-
+      const rowsByWindowSlice = new Map<string, ExportableAnalyticsRow[]>();
       for (const row of isolatedRows) {
-        const unitCount = row.cellUnitCount ?? 0;
-        if (unitCount < minK) {
-          suppressedRowIds.add(row.rowId);
-          suppressedCellsCount += 1;
-        } else {
-          eligibleIndices.push({ rowId: row.rowId, count: unitCount });
-        }
+        const sliceKey = `${row.windowStartIso}\u0000${row.windowEndIso}\u0000${row.lane}`;
+        const list = rowsByWindowSlice.get(sliceKey) ?? [];
+        list.push(row);
+        rowsByWindowSlice.set(sliceKey, list);
       }
 
-      // Complementary suppression against differencing: if exactly 1 cell was suppressed,
-      // also suppress the next-smallest cell so (total - visible) cannot reconstruct the suppressed cell!
-      if (suppressedCellsCount === 1 && eligibleIndices.length > 0) {
-        eligibleIndices.sort((a, b) => a.count - b.count);
-        suppressedRowIds.add(eligibleIndices[0]!.rowId);
-        complementarySuppressedCount = 1;
+      // Complementary suppression evaluated independently per (windowStart, windowEnd, lane) slice (M-06)
+      for (const sliceRows of rowsByWindowSlice.values()) {
+        let sliceSuppressedCount = 0;
+        const sliceEligible: Array<{ readonly rowId: string; readonly count: number }> = [];
+
+        for (const row of sliceRows) {
+          const unitCount = row.cellUnitCount ?? 0;
+          if (unitCount < minK) {
+            suppressedRowIds.add(row.rowId);
+            suppressedCellsCount += 1;
+            sliceSuppressedCount += 1;
+          } else {
+            sliceEligible.push({ rowId: row.rowId, count: unitCount });
+          }
+        }
+
+        // If exactly 1 cell in this window/date slice was suppressed, suppress the next-smallest sibling
+        // in the SAME slice so `(slice_total - slice_visible)` cannot reconstruct the suppressed cell!
+        if (sliceSuppressedCount === 1 && sliceEligible.length > 0) {
+          sliceEligible.sort((a, b) => a.count - b.count || a.rowId.localeCompare(b.rowId));
+          suppressedRowIds.add(sliceEligible[0]!.rowId);
+          complementarySuppressedCount += 1;
+        }
       }
     }
 

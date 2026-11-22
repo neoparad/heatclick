@@ -21,6 +21,7 @@ import {
   settleConversionRevenue,
   signEcWebhookPayload,
   signOfflineAffiliateAllowlist,
+  studentT975Critical,
   type DailyClickReconciliationRow,
   type EcSkuFullPayload,
   type OfflineAffiliateAllowlistPayload,
@@ -719,5 +720,411 @@ describe('Physical EC Catalog (§8.13), Member Suppression Epoch & Product Extra
       exact_match: true,
     }))
     expect(evaluateProductExtractionGate(tooFew).status).toBe('insufficient_data')
+  })
+})
+
+// ===========================================================================
+// Wave 8 Adversarial Regression Tests: [H-27], [H-28], [M-09], [L-03]
+// ===========================================================================
+
+describe('Wave 8 Adversarial Regressions: [H-27] EC Catalog Integrity, Atomic Rollback & Stale-Price Guard', () => {
+  const PROD_SECRET = 'ec-prod-secret-w8'
+  const ORDER_SECRET = 'ec-order-secret-w8'
+
+  const makeSku = (overrides: Partial<EcSkuFullPayload> = {}): EcSkuFullPayload => ({
+    sku_id: 'sku_1',
+    parent_product_id: 'prod_1',
+    sku_version: 1,
+    title: 'テスト商品',
+    product_url: 'https://shop.example.jp/p/1',
+    image_url: 'https://shop.example.jp/img/1.jpg',
+    in_stock: true,
+    stock_quantity: 10,
+    published: true,
+    sale_start_at: null,
+    sale_end_at: null,
+    price: 5000,
+    currency: 'JPY',
+    category: 'gear',
+    brand: 'Acme',
+    durability: 'durable',
+    repurchase_cycle_days: null,
+    sensitive_category: false,
+    gross_margin: 1500,
+    updated_at: '2026-11-20T12:00:00Z',
+    ...overrides,
+  })
+
+  test('[H-27] rejects divergent raw_body vs DTO in SKU delta & order webhooks, rejects updated_at regression, and clears null gross_margin with 0 boost', () => {
+    const ec = new EcCatalogService({
+      products_write_secret: PROD_SECRET,
+      orders_write_secret: ORDER_SECRET,
+      stock_freshness_ttl_ms: 86_400_000,
+      price_freshness_ttl_ms: 3600_000, // 1h price TTL
+      heartbeat_ttl_ms: 86_400_000,
+    })
+
+    const signedSku = makeSku({ sku_id: 'sku_1', sku_version: 1, in_stock: false })
+    const rawBody = JSON.stringify(signedSku)
+    const ts = 1795176000
+    const sig = signEcWebhookPayload({
+      tenant_id: 't1',
+      site_id: 's1',
+      scope: 'products:write',
+      timestamp_sec: ts,
+      raw_body: rawBody,
+      secret: PROD_SECRET,
+    })
+
+    // Attacker signs raw_body with in_stock=false while passing req.sku with in_stock=true -> 400!
+    const spoofedDto = ec.ingestSkuDeltaWebhook(
+      {
+        tenant_id: 't1',
+        site_id: 's1',
+        event_id: 'ev_spoof',
+        sku: { ...signedSku, in_stock: true },
+        raw_body: rawBody,
+        auth: { scope: 'products:write', timestamp_sec: ts, signature: sig },
+      },
+      '2026-11-20T12:00:05Z',
+    )
+    expect(spoofedDto.http_status).toBe(400)
+    expect(spoofedDto.reason).toBe('raw_body_sku_payload_mismatch')
+
+    // Valid feed ingest with gross_margin=1500
+    expect(
+      ec.ingestFullProductFeed({
+        tenant_id: 't1',
+        site_id: 's1',
+        synced_at: '2026-11-20T12:00:00Z',
+        items: [makeSku({ sku_id: 'sku_1', sku_version: 2, gross_margin: 1500, updated_at: '2026-11-20T12:00:00Z' })],
+      }).http_status,
+    ).toBe(200)
+    expect(ec.computeConservativeMarginBoost('t1', 's1', 'sku_1')).toBeGreaterThan(0)
+
+    // Regressing updated_at (11:00 < 12:00) rejected even if sku_version=3 > 2!
+    const regressed = makeSku({
+      sku_id: 'sku_1',
+      sku_version: 3,
+      in_stock: false,
+      updated_at: '2026-11-20T11:00:00Z',
+    })
+    const regBody = JSON.stringify(regressed)
+    const regRes = ec.ingestSkuDeltaWebhook(
+      {
+        tenant_id: 't1',
+        site_id: 's1',
+        event_id: 'ev_regress_ts',
+        sku: regressed,
+        raw_body: regBody,
+        auth: {
+          scope: 'products:write',
+          timestamp_sec: ts,
+          signature: signEcWebhookPayload({
+            tenant_id: 't1',
+            site_id: 's1',
+            scope: 'products:write',
+            timestamp_sec: ts,
+            raw_body: regBody,
+            secret: PROD_SECRET,
+          }),
+        },
+      },
+      '2026-11-20T12:01:00Z',
+    )
+    expect(regRes.stale_version_ignored).toBe(true)
+    expect(ec.evaluateParentProductState('t1', 's1', 'prod_1', '2026-11-20T12:01:00Z').available).toBe(true)
+
+    // Updating SKU with gross_margin: null clears prior margin and returns conservative 0 boost (no NaN!)
+    const nullMarginSku = makeSku({
+      sku_id: 'sku_1',
+      sku_version: 3,
+      gross_margin: null,
+      updated_at: '2026-11-20T12:02:00Z',
+    })
+    const nmBody = JSON.stringify(nullMarginSku)
+    expect(
+      ec.ingestSkuDeltaWebhook(
+        {
+          tenant_id: 't1',
+          site_id: 's1',
+          event_id: 'ev_null_margin',
+          sku: nullMarginSku,
+          raw_body: nmBody,
+          auth: {
+            scope: 'products:write',
+            timestamp_sec: ts,
+            signature: signEcWebhookPayload({
+              tenant_id: 't1',
+              site_id: 's1',
+              scope: 'products:write',
+              timestamp_sec: ts,
+              raw_body: nmBody,
+              secret: PROD_SECRET,
+            }),
+          },
+        },
+        '2026-11-20T12:02:00Z',
+      ).applied,
+    ).toBe(true)
+    expect(ec.getServerOnlyGrossMargin('t1', 's1', 'sku_1')).toBeNull()
+    expect(ec.computeConservativeMarginBoost('t1', 's1', 'sku_1')).toBe(0)
+  })
+
+  test('[H-27] enforces stale-price guard per representative sellable SKU (never unmasked by sold-out sibling) & atomic rollback on 503 feed failure', () => {
+    const strongStore = new InMemoryStrongUnavailableStore()
+    const ec = new EcCatalogService({
+      products_write_secret: PROD_SECRET,
+      orders_write_secret: ORDER_SECRET,
+      strong_store: strongStore,
+      stock_freshness_ttl_ms: 24 * 3600_000, // 24h stock TTL
+      price_freshness_ttl_ms: 3600_000, // 1h price TTL
+      heartbeat_ttl_ms: 24 * 3600_000,
+    })
+
+    // Sellable SKU updated 2h ago (stock fresh, PRICE STALE > 1h!), while sold-out sibling updated 1m ago (price fresh)
+    ec.ingestFullProductFeed({
+      tenant_id: 't1',
+      site_id: 's1',
+      synced_at: '2026-11-20T12:00:00Z',
+      items: [
+        makeSku({
+          sku_id: 'sku_sellable_stale_price',
+          sku_version: 1,
+          in_stock: true,
+          price: 9999,
+          updated_at: '2026-11-20T10:00:00Z', // 2h old -> stale price!
+        }),
+        makeSku({
+          sku_id: 'sku_soldout_fresh_ts',
+          sku_version: 1,
+          in_stock: false,
+          price: 12000,
+          updated_at: '2026-11-20T11:59:00Z', // 1m old, OUT OF STOCK!
+        }),
+      ],
+    })
+
+    const state = ec.evaluateParentProductState('t1', 's1', 'prod_1', '2026-11-20T12:00:00Z')
+    expect(state.available).toBe(true)
+    expect(state.hide_price).toBe(true)
+    expect(state.price_sensitive_recommendation_eligible).toBe(false)
+    const proj = ec.toBrowserProductProjection('t1', 's1', 'prod_1', '2026-11-20T12:00:00Z')!
+    expect(proj.price).toBeNull()
+
+    // Full feed 503 failure MUST roll back mutated SKUs, margins, and gap state atomically
+    strongStore.failNextCommit = true
+    const failedFeed = ec.ingestFullProductFeed({
+      tenant_id: 't1',
+      site_id: 's1',
+      synced_at: '2026-11-20T12:10:00Z',
+      items: [
+        makeSku({
+          sku_id: 'sku_sellable_stale_price',
+          sku_version: 5,
+          in_stock: false,
+          gross_margin: 99_999,
+          updated_at: '2026-11-20T12:10:00Z',
+        }),
+      ],
+    })
+    expect(failedFeed.http_status).toBe(503)
+    expect(ec.getServerOnlyGrossMargin('t1', 's1', 'sku_sellable_stale_price')).toBe(1500)
+    expect(ec.evaluateParentProductState('t1', 's1', 'prod_1', '2026-11-20T12:05:00Z').available).toBe(true)
+  })
+})
+
+describe('Wave 8 Adversarial Regressions: [H-28] Member Monotonic Epoch & Pre-Insert Deletion Tombstone', () => {
+  test('[H-28] blocks stale data_epoch regression on active member and blocks pre-first-insert deletion resurrection by slow workers', () => {
+    const store = new EcMemberSummaryStore()
+
+    // Delete member BEFORE any summary was ever inserted!
+    const tomb = store.deleteMember({
+      tenant_id: 't1',
+      site_id: 's1',
+      member_key: 'mem_predeleted',
+      suppressed_at: '2026-11-20T12:00:00Z',
+    })
+    expect(tomb.suppression_epoch).toBeGreaterThanOrEqual(1)
+
+    // Slow in-flight worker trying to insert first summary (epoch 1) -> REJECTED!
+    const res1 = store.upsertSummary({
+      tenant_id: 't1',
+      site_id: 's1',
+      member_key: 'mem_predeleted',
+      data_epoch: 1,
+      write_source: 'nightly_summary_rebuild',
+      recent_purchased_product_ids: ['p1'],
+      category_affinity: {},
+      upcoming_repurchase_product_ids: [],
+      excluded_product_ids: [],
+      source_retention_expires_at: '2027-11-20T00:00:00Z',
+      updated_at: '2026-11-20T12:05:00Z',
+    })
+    expect(res1.accepted).toBe(false)
+    expect(res1.rejection_reason).toBe('rejected_by_suppression_epoch')
+
+    // Even a slow worker with high data_epoch=10 carrying a pre-deletion timestamp (11:59 <= 12:00) -> REJECTED!
+    const resPreTs = store.applyOrderNotification({
+      tenant_id: 't1',
+      site_id: 's1',
+      member_key: 'mem_predeleted',
+      order_status: 'placed',
+      product_ids: ['p1'],
+      data_epoch: 10,
+      occurred_at: '2026-11-20T11:59:59Z',
+    })
+    expect(resPreTs.accepted).toBe(false)
+    expect(resPreTs.rejection_reason).toBe('rejected_by_suppression_epoch')
+
+    // Active member at epoch 3 rejects stale regression write at epoch 2
+    expect(
+      store.upsertSummary({
+        tenant_id: 't1',
+        site_id: 's1',
+        member_key: 'mem_active',
+        data_epoch: 3,
+        write_source: 'nightly_summary_rebuild',
+        recent_purchased_product_ids: ['p_new'],
+        category_affinity: {},
+        upcoming_repurchase_product_ids: [],
+        excluded_product_ids: [],
+        source_retention_expires_at: '2027-11-20T00:00:00Z',
+        updated_at: '2026-11-20T12:00:00Z',
+      }).accepted,
+    ).toBe(true)
+
+    const staleWrite = store.upsertSummary({
+      tenant_id: 't1',
+      site_id: 's1',
+      member_key: 'mem_active',
+      data_epoch: 2,
+      write_source: 'historical_order_backfill',
+      recent_purchased_product_ids: ['p_old'],
+      category_affinity: {},
+      upcoming_repurchase_product_ids: [],
+      excluded_product_ids: [],
+      source_retention_expires_at: '2027-11-20T00:00:00Z',
+      updated_at: '2026-11-20T12:10:00Z',
+    })
+    expect(staleWrite.accepted).toBe(false)
+    expect(staleWrite.rejection_reason).toBe('stale_data_epoch')
+  })
+})
+
+describe('Wave 8 Adversarial Regressions: [M-09] join.G13 Statistical Rigor & [L-03] Bounded Webhook Caches', () => {
+  test('[M-09] excludes 0/0 inactive days, enforces non-zero Rule-of-Three CI floor on identical series, uses exact t_{0.975, n-1}, and fails when own_clicks=0', () => {
+    expect(studentT975Critical(13)).toBeCloseTo(2.160369, 5)
+
+    // 10 active days + 6 padded 0/0 days -> days_included = 10 < 14 -> insufficient_data!
+    const paddedRows: DailyClickReconciliationRow[] = []
+    for (let d = 1; d <= 16; d++) {
+      paddedRows.push({
+        tenant_id: 't1',
+        site_id: 's1',
+        network_id: 'a8',
+        device_class: 'desktop',
+        date: `2026-11-${String(d).padStart(2, '0')}`,
+        own_clicks: d <= 10 ? 25 : 0,
+        network_clicks: d <= 10 ? 25 : 0,
+      })
+    }
+    const paddedRes = evaluateJoinG13Gate({
+      tenant_id: 't1',
+      site_id: 's1',
+      network_id: 'a8',
+      device_class: 'desktop',
+      rows: paddedRows,
+    })
+    expect(paddedRes.days_included).toBe(10)
+    expect(paddedRes.inactive_zero_days_excluded).toBe(6)
+    expect(paddedRes.status).toBe('insufficient_data')
+
+    // 14 days with identical own === net === 20 (d_i === 0) -> CI MUST still have non-zero width!
+    const zeroDiffRows: DailyClickReconciliationRow[] = Array.from({ length: 14 }, (_, i) => ({
+      tenant_id: 't1',
+      site_id: 's1',
+      network_id: 'a8',
+      device_class: 'desktop',
+      date: `2026-11-${String(i + 1).padStart(2, '0')}`,
+      own_clicks: 20,
+      network_clicks: 20,
+    }))
+    const zeroDiffRes = evaluateJoinG13Gate({
+      tenant_id: 't1',
+      site_id: 's1',
+      network_id: 'a8',
+      device_class: 'desktop',
+      rows: zeroDiffRows,
+    })
+    expect(zeroDiffRes.status).toBe('pass')
+    expect(zeroDiffRes.ci95_upper! - zeroDiffRes.ci95_lower!).toBeGreaterThan(0.01)
+
+    // Ratio direction: own_clicks = 0, network_clicks = 280 across 14 days -> ratio = 0 -> status = 'fail' (NOT insufficient_data!)
+    const brokenOwnRows: DailyClickReconciliationRow[] = Array.from({ length: 14 }, (_, i) => ({
+      tenant_id: 't1',
+      site_id: 's1',
+      network_id: 'a8',
+      device_class: 'desktop',
+      date: `2026-11-${String(i + 1).padStart(2, '0')}`,
+      own_clicks: 0,
+      network_clicks: 20,
+    }))
+    const brokenRes = evaluateJoinG13Gate({
+      tenant_id: 't1',
+      site_id: 's1',
+      network_id: 'a8',
+      device_class: 'desktop',
+      rows: brokenOwnRows,
+    })
+    expect(brokenRes.status).toBe('fail')
+    expect(brokenRes.ratio).toBe(0)
+  })
+
+  test('[L-03] bounds processedEventIds and orders caches via LRU cap and TTL eviction', () => {
+    const ORD_SEC = 'ord-sec-l03'
+    const ec = new EcCatalogService({
+      products_write_secret: 'prod-sec-l03',
+      orders_write_secret: ORD_SEC,
+      max_dedupe_entries: 3,
+      dedupe_ttl_ms: 60_000,
+      max_order_log_entries: 3,
+      order_log_ttl_ms: 60_000,
+    })
+
+    for (let i = 1; i <= 5; i++) {
+      const occurredAt = new Date(Date.parse('2026-11-20T12:00:00Z') + i * 1000).toISOString()
+      const payload = {
+        order_event_id: `oev_${i}`,
+        order_id: `ord_${i}`,
+        order_status: 'placed' as const,
+        items: [{ product_id: 'p1', sku_id: 's1', quantity: 1, unit_price: 1000 }],
+        occurred_at: occurredAt,
+      }
+      const rawBody = JSON.stringify(payload)
+      const ts = 1795176000 + i
+      const res = ec.ingestOrderNotification({
+        tenant_id: 't1',
+        site_id: 's1',
+        ...payload,
+        raw_body: rawBody,
+        auth: {
+          scope: 'orders:write',
+          timestamp_sec: ts,
+          signature: signEcWebhookPayload({
+            tenant_id: 't1',
+            site_id: 's1',
+            scope: 'orders:write',
+            timestamp_sec: ts,
+            raw_body: rawBody,
+            secret: ORD_SEC,
+          }),
+        },
+      })
+      expect(res.http_status).toBe(200)
+    }
+
+    expect(ec.getDedupeCacheSize()).toBeLessThanOrEqual(3)
+    expect(ec.getOrderLogSize()).toBeLessThanOrEqual(3)
   })
 })

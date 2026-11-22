@@ -15,9 +15,12 @@ export {
   type Measured,
 } from './brand';
 export {
+  DEFAULT_UNTRUSTED_MAX_CHARS,
+  HARD_CAP_UNTRUSTED_MAX_CHARS,
   UNTRUSTED_SOURCES,
   wrapUntrusted,
   isUntrustedValue,
+  isStrictSafeHttpUrl,
   detectUntrustedStringLeaks,
   assertNoUntrustedStringLeaks,
   type UntrustedSource,

@@ -24,6 +24,7 @@ import {
   type PrivacyDisclosureRecord,
 } from '../../../packages/contract/schema';
 import {
+  IdentityKeyRegistry,
   generateEd25519KeyPair,
   mintPublicKey,
   type Ed25519KeyPair,
@@ -61,8 +62,11 @@ export interface SelfServeProvisionedWorkspace {
   readonly storageTier: StorageTier;
   readonly retentionMonths: number;
   readonly publicKey: string;
+  /** Returned ONCE at `provisionWorkspace`; stored workspaces retain ONLY `secretKeyHash` in `IdentityKeyRegistry` (H-20). */
   readonly secretKey: string;
+  readonly secretKeyHash: string;
   readonly keyId: string;
+  readonly sriIntegrity: string;
   readonly installSnippetHtml: string;
   readonly disclosureRecord: PrivacyDisclosureRecord;
   readonly disclosureVerificationState: 'missing' | 'declared' | 'verified';
@@ -97,33 +101,88 @@ function makeSlugRef(hostname: string): string {
   return `${cleaned || 'site'}_${suffix}`;
 }
 
+const PINNED_SDK_RELEASE_VERSION = '2.0.0';
+const PINNED_SDK_BUNDLE_SRI_SHA384 = crypto
+  .createHash('sha384')
+  .update(`ugokilink-sdk-runtime@${PINNED_SDK_RELEASE_VERSION}`, 'utf8')
+  .digest('base64');
+
 export class SelfServeOnboardingOrchestrator {
   private readonly signingKeyPair: Ed25519KeyPair;
+  private readonly identityRegistry: IdentityKeyRegistry;
   private readonly workspaces = new Map<string, SelfServeProvisionedWorkspace>();
 
-  public constructor(options?: { readonly signingKeyPair?: Ed25519KeyPair }) {
+  public constructor(options?: {
+    readonly signingKeyPair?: Ed25519KeyPair;
+    readonly identityRegistry?: IdentityKeyRegistry;
+  }) {
     this.signingKeyPair = options?.signingKeyPair ?? generateEd25519KeyPair('k_selfserve_v1');
+    this.identityRegistry =
+      options?.identityRegistry ??
+      new IdentityKeyRegistry({
+        pepperVersion: 'v1',
+        pepperSecret: crypto.randomBytes(32).toString('hex'),
+      });
   }
 
   public getPublicSigningKeyPem(): string {
     return this.signingKeyPair.publicKeyPem;
   }
 
+  public getIdentityKeyRegistry(): IdentityKeyRegistry {
+    return this.identityRegistry;
+  }
+
+  public getStoredWorkspace(siteId: string): SelfServeProvisionedWorkspace | undefined {
+    return this.workspaces.get(siteId);
+  }
+
   /**
    * Executes unmanned signup -> tenant/site creation -> Ed25519 public & secret
-   * key minting -> single-block 5-minute snippet + JP disclosure generation ->
-   * `onboarding_verify` token issuance.
+   * key minting (storing ONLY peppered HMAC in `IdentityKeyRegistry`, never plaintext) ->
+   * pinned SRI 5-minute snippet + JP disclosure generation -> `onboarding_verify` token issuance (H-20).
    */
   public provisionWorkspace(
     input: SelfServeSignupInput
   ): SelfServeProvisionedWorkspace {
     const nowMs = input.nowMs ?? Date.now();
+    const nowDate = new Date(nowMs);
+    const orgId = `org_${crypto.randomBytes(6).toString('hex')}`;
     const tenantId = `ten_${crypto.randomBytes(6).toString('hex')}`;
     const siteId = `site_${crypto.randomBytes(6).toString('hex')}`;
+    const ownerPrincipalId = `usr_owner_${crypto.randomBytes(6).toString('hex')}`;
     const siteRef = makeSlugRef(input.hostname);
     const storageRegion: DataRegion = input.storageRegion ?? 'jp';
     const storageTier: StorageTier = input.storageTier ?? 'tier1_link_managed';
     const retentionMonths = input.retentionMonths ?? 13;
+
+    this.identityRegistry.registerOrg({
+      orgId,
+      type: 'direct',
+      name: input.organizationName,
+      createdAt: nowDate.toISOString(),
+    });
+    this.identityRegistry.registerTenant({
+      tenantId,
+      orgId,
+      name: input.organizationName,
+      planScopes: ['analytics:read', 'analytics:export', 'sites:manage', 'usage:read'],
+      delegationPolicy: {
+        allowedOemScopes: [],
+        maxExchangedTokenTtlSec: 900,
+        allowOemAccess: false,
+      },
+      revocationEpoch: 1,
+      createdAt: nowDate.toISOString(),
+    });
+    this.identityRegistry.registerPrincipal({
+      principalId: ownerPrincipalId,
+      tenantId,
+      orgId,
+      kind: 'human',
+      role: 'owner',
+      passkeyEnrolled: false,
+    });
 
     const publicKey = mintPublicKey({
       env: 'live',
@@ -131,8 +190,17 @@ export class SelfServeOnboardingOrchestrator {
       version: 'v1',
       privateKeyPem: this.signingKeyPair.privateKeyPem,
     });
-    const keyId = `key_${crypto.randomBytes(8).toString('hex')}`;
-    const secretKey = `ugk_sec_live_${keyId}_${crypto.randomBytes(24).toString('base64url')}`;
+
+    const issuedSecret = this.identityRegistry.issueSecretKey({
+      tenantId,
+      principalId: ownerPrincipalId,
+      scopes: ['analytics:read', 'analytics:export', 'sites:manage', 'usage:read'],
+      constraints: { siteIds: [siteId] },
+      now: nowDate,
+    });
+    const keyId = issuedSecret.record.keyId;
+    const secretKey = issuedSecret.rawKey;
+    const secretKeyHash = issuedSecret.record.secretHash;
 
     const disclosureRecord = generatePrivacyDisclosure(CANONICAL_SCHEMA, {
       siteName: input.siteName,
@@ -152,9 +220,16 @@ export class SelfServeOnboardingOrchestrator {
       expiresAtMs: nowMs + 30 * 60 * 1000,
     };
 
+    const sriIntegrity = `sha384-${PINNED_SDK_BUNDLE_SRI_SHA384}`;
+    const manifestPubKeyPin = crypto
+      .createHash('sha256')
+      .update(this.signingKeyPair.publicKeyPem, 'utf8')
+      .digest('hex')
+      .slice(0, 32);
+
     const installSnippetHtml = [
-      `<!-- UGOKI LINK v2 5-Minute Single-Block Snippet (Signed Release Manifest) -->`,
-      `<script async src="https://cdn.ugokilink.invalid/l/${publicKey}.js" data-ugk-region="${storageRegion}" data-ugk-disclosure-sha="${disclosureRecord.contentSha256.slice(0, 16)}"></script>`,
+      `<!-- UGOKI LINK v2 Pinned SRI Single-Block Snippet (v${PINNED_SDK_RELEASE_VERSION}) -->`,
+      `<script async src="https://cdn.ugokilink.invalid/sdk/v${PINNED_SDK_RELEASE_VERSION}/ugk-loader.min.js" integrity="${sriIntegrity}" crossorigin="anonymous" data-ugk-site-key="${publicKey}" data-ugk-manifest-pubkey="${manifestPubKeyPin}" data-ugk-region="${storageRegion}" data-ugk-disclosure-sha="${disclosureRecord.contentSha256.slice(0, 16)}"></script>`,
     ].join('\n');
 
     const liveDo = new SiteLiveDurableObject({
@@ -165,7 +240,8 @@ export class SelfServeOnboardingOrchestrator {
 
     const disclosureVerificationState = input.policyUrl ? 'declared' : 'missing';
 
-    const workspace: SelfServeProvisionedWorkspace = {
+    // Persist ONLY redacted secret marker + HMAC digest in workspace state (H-20: never retain plaintext secretKey)
+    const persistedWorkspace: SelfServeProvisionedWorkspace = {
       tenantId,
       siteId,
       siteRef,
@@ -173,8 +249,10 @@ export class SelfServeOnboardingOrchestrator {
       storageTier,
       retentionMonths,
       publicKey,
-      secretKey,
+      secretKey: '[REDACTED_ONE_TIME_ISSUED]',
+      secretKeyHash,
       keyId,
+      sriIntegrity,
       installSnippetHtml,
       disclosureRecord,
       disclosureVerificationState,
@@ -185,8 +263,13 @@ export class SelfServeOnboardingOrchestrator {
       liveDo,
     };
 
-    this.workspaces.set(siteId, workspace);
-    return workspace;
+    this.workspaces.set(siteId, persistedWorkspace);
+
+    // Return one-time plaintext `secretKey` ONLY to the immediate caller of `provisionWorkspace`
+    return {
+      ...persistedWorkspace,
+      secretKey,
+    };
   }
 
   /**

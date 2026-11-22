@@ -38,7 +38,10 @@ import {
   type ProductDurabilityKind,
 } from '../../revenue/ec-catalog';
 import type { EcMemberSummary, EcMemberSummaryStore } from '../../revenue/ec-member-store';
-import { sampleFullPlackettLuceOrdering } from './recommender';
+import {
+  computePlackettLuceMarginalInclusionProbs,
+  sampleFullPlackettLuceOrdering,
+} from './recommender';
 
 export type EcPlacement = 'product_page' | 'cart' | 'home' | 'post_purchase' | 'article';
 
@@ -198,7 +201,10 @@ export interface EcServerDecisionLog {
     readonly product_id: string;
     readonly position: number;
     readonly conditional_display_prob: number;
+    readonly slot_cond_prob: number;
+    readonly display_prob: number;
   }[];
+  readonly marginal_display_probs_by_item: Readonly<Record<string, number>>;
   readonly member_history_joined: boolean;
   readonly member_fallback_reason: string | null;
 }
@@ -389,12 +395,25 @@ export function runEcRecommendation(params: {
   const postDrop = fullOrdering.filter((entry) => !lastSecSet.has(entry.item.id));
   const shown = postDrop.slice(0, Math.max(0, params.top_k));
 
-  // Compute exact conditional Plackett-Luce probabilities on the post-drop surviving set
+  // Compute BOTH conditional step probability `slot_cond_prob` AND true marginal top-K
+  // inclusion probability `display_prob` on the post-drop surviving set ([M-13])
+  const postDropMarginalProbs = computePlackettLuceMarginalInclusionProbs(
+    postDrop.map((e) => e.weight),
+    Math.max(0, params.top_k),
+    params.seed_key
+  );
+  const marginalByItem: Record<string, number> = {};
+  for (let i = 0; i < postDrop.length; i += 1) {
+    marginalByItem[postDrop[i].item.id] = Number((postDropMarginalProbs[i] ?? 0).toFixed(6));
+  }
+
   let remWeight = postDrop.reduce((s, e) => s + e.weight, 0);
   const displayedLog: Array<{
     readonly product_id: string;
     readonly position: number;
     readonly conditional_display_prob: number;
+    readonly slot_cond_prob: number;
+    readonly display_prob: number;
   }> = [];
 
   const browserItems: EcBrowserSafeRecommendedItem[] = [];
@@ -402,11 +421,15 @@ export function runEcRecommendation(params: {
     const entry = shown[i];
     const condProb = remWeight > 0 ? entry.weight / remWeight : 0;
     remWeight = Math.max(0, remWeight - entry.weight);
+    const roundedCond = Number(condProb.toFixed(6));
+    const roundedMarginal = Number((postDropMarginalProbs[i] ?? 0).toFixed(6));
 
     displayedLog.push({
       product_id: entry.item.id,
       position: i + 1,
-      conditional_display_prob: Number(condProb.toFixed(6)),
+      conditional_display_prob: roundedCond,
+      slot_cond_prob: roundedCond,
+      display_prob: roundedMarginal,
     });
 
     const p = entry.item.product;
@@ -439,6 +462,7 @@ export function runEcRecommendation(params: {
         .filter((e) => lastSecSet.has(e.item.id))
         .map((e) => e.item.id),
       displayed_items: displayedLog,
+      marginal_display_probs_by_item: marginalByItem,
       member_history_joined: memberSummary !== null,
       member_fallback_reason: memberFallbackReason,
     },

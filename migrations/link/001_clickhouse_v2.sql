@@ -1,6 +1,6 @@
 -- ============================================================================
 -- UGOKI LINK v2 — Generated ClickHouse DDL (schema v2.0.0)
--- Deletion Plan Hash: 034b649a67b3d3f56f1471827699d7e69baacdb9cf6360d9caf2e5fb91591860
+-- Deletion Plan Hash: 165924f413a3272a7c66be027976bcfedb93c80dbeacd6ba6532152fecec0ce6
 -- DO NOT EDIT MANUALLY. Regenerate from packages/contract/schema/canonical.ts
 -- ============================================================================
 -- Table: access_bot_lt (Verified crawler/fetcher observations (zero visitor data, kept until tenant exit, STORE A1).)
@@ -20,8 +20,8 @@ ORDER BY (tenant_id, site_id, month_utc, verified_actor_id, url_id, req_uid_hash
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000;
 
 -- Dual-layer ClickHouse tenant isolation row policies for access_bot_lt (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_access_bot_lt_tenant_permissive ON access_bot_lt AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_access_bot_lt_tenant_restrictive ON access_bot_lt AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_access_bot_lt_tenant_permissive ON access_bot_lt AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_access_bot_lt_tenant_restrictive ON access_bot_lt AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: access_obs (Append-only server/CDN request observations with E/T/P address classes (D-25).)
 -- Retention: 35d_access_t | Deletion: by_req_uid
@@ -41,14 +41,14 @@ CREATE TABLE IF NOT EXISTS access_obs (
   raw_ua_class_e Nullable(String) COMMENT 'Raw UA retained ONLY on class-E automation evidence rows [pii=raw_ua_bot_only;deletable=false]'
 )
 ENGINE = ReplacingMergeTree()
-PARTITION BY exp_week
+PARTITION BY toYYYYMMDD(day_edge)
 ORDER BY (tenant_id, site_id, day_edge, capture_path, req_uid, sub)
 TTL day_edge + INTERVAL 35 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for access_obs (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_access_obs_tenant_permissive ON access_obs AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_access_obs_tenant_restrictive ON access_obs AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_access_obs_tenant_permissive ON access_obs AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_access_obs_tenant_restrictive ON access_obs AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: access_verdict (Recomputable actor verification verdicts keyed identically to access_obs.)
 -- Retention: 35d_access_t | Deletion: by_req_uid
@@ -66,14 +66,14 @@ CREATE TABLE IF NOT EXISTS access_verdict (
   verification_result LowCardinality(String) COMMENT 'Verification result [pii=none;deletable=false]'
 )
 ENGINE = ReplacingMergeTree(verdict_rev)
-PARTITION BY exp_week
+PARTITION BY toYYYYMMDD(day_edge)
 ORDER BY (tenant_id, site_id, day_edge, capture_path, req_uid, sub)
 TTL day_edge + INTERVAL 35 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for access_verdict (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_access_verdict_tenant_permissive ON access_verdict AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_access_verdict_tenant_restrictive ON access_verdict AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_access_verdict_tenant_permissive ON access_verdict AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_access_verdict_tenant_restrictive ON access_verdict AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: conversion_fact (Versioned conversion labels and revenue grain attributions (D-18).)
 -- Retention: site_class | Deletion: by_pv_key
@@ -96,8 +96,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for conversion_fact (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_conversion_fact_tenant_permissive ON conversion_fact AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_conversion_fact_tenant_restrictive ON conversion_fact AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_conversion_fact_tenant_permissive ON conversion_fact AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_conversion_fact_tenant_restrictive ON conversion_fact AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: decision_features_v1 (Point-in-time ML feature record logged widely at decision time (D-17).)
 -- Retention: site_class | Deletion: by_unit_key
@@ -121,8 +121,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for decision_features_v1 (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_decision_features_v1_tenant_permissive ON decision_features_v1 AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_decision_features_v1_tenant_restrictive ON decision_features_v1 AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_decision_features_v1_tenant_permissive ON decision_features_v1 AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_decision_features_v1_tenant_restrictive ON decision_features_v1 AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: decision_log (Single authoritative decision record for experiments, holdouts, and ML policies (D-17).)
 -- Retention: site_class | Deletion: by_unit_key
@@ -154,8 +154,49 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for decision_log (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_decision_log_tenant_permissive ON decision_log AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_decision_log_tenant_restrictive ON decision_log AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_decision_log_tenant_permissive ON decision_log AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_decision_log_tenant_restrictive ON decision_log AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+
+-- Table: dim_pages (Normalized urlkey/2 page structural dimension (zero visitor data, §6.2 / §11.11 #7).)
+-- Retention: tenant_lifetime | Deletion: not_applicable_non_personal
+CREATE TABLE IF NOT EXISTS dim_pages (
+  tenant_id LowCardinality(String) COMMENT 'Tenant boundary key [pii=none;deletable=false]',
+  site_id LowCardinality(String) COMMENT 'Site boundary key [pii=none;deletable=false]',
+  page_id UInt64 COMMENT 'urlkey/2 page identifier [pii=none;deletable=false]',
+  page_url_key String COMMENT 'Normalized urlkey/2 path [pii=none;deletable=false]',
+  observed_at DateTime COMMENT 'First/latest structural observation UTC [pii=none;deletable=false]',
+  snapshot_ts DateTime COMMENT 'Structural snapshot timestamp UTC [pii=none;deletable=false]',
+  def_ver UInt32 COMMENT 'Dimension definition version [pii=none;deletable=false]'
+)
+ENGINE = ReplacingMergeTree(def_ver)
+PARTITION BY toYYYYMM(observed_at)
+ORDER BY (tenant_id, site_id, page_id)
+SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000;
+
+-- Dual-layer ClickHouse tenant isolation row policies for dim_pages (§5.6 / STORE M7)
+CREATE ROW POLICY IF NOT EXISTS rp_dim_pages_tenant_permissive ON dim_pages AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_dim_pages_tenant_restrictive ON dim_pages AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+
+-- Table: dim_sections (Structural page section fingerprint dimension (zero visitor data, §6.2 / §11.11 #7).)
+-- Retention: tenant_lifetime | Deletion: not_applicable_non_personal
+CREATE TABLE IF NOT EXISTS dim_sections (
+  tenant_id LowCardinality(String) COMMENT 'Tenant boundary key [pii=none;deletable=false]',
+  site_id LowCardinality(String) COMMENT 'Site boundary key [pii=none;deletable=false]',
+  page_id UInt64 COMMENT 'urlkey/2 page identifier [pii=none;deletable=false]',
+  sec_fp UInt64 COMMENT 'Section structural fingerprint [pii=none;deletable=false]',
+  ordinal_index UInt16 COMMENT 'DOM ordinal index [pii=none;deletable=false]',
+  observed_at DateTime COMMENT 'Observation timestamp UTC [pii=none;deletable=false]',
+  snapshot_ts DateTime COMMENT 'Snapshot timestamp UTC [pii=none;deletable=false]',
+  def_ver UInt32 COMMENT 'Dimension definition version [pii=none;deletable=false]'
+)
+ENGINE = ReplacingMergeTree(def_ver)
+PARTITION BY toYYYYMM(observed_at)
+ORDER BY (tenant_id, site_id, page_id, sec_fp)
+SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000;
+
+-- Dual-layer ClickHouse tenant isolation row policies for dim_sections (§5.6 / STORE M7)
+CREATE ROW POLICY IF NOT EXISTS rp_dim_sections_tenant_permissive ON dim_sections AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_dim_sections_tenant_restrictive ON dim_sections AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: events_v2 (Immutable numbered log items keyed by (pv_id, log_i).)
 -- Retention: site_class | Deletion: by_pv_key
@@ -182,8 +223,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for events_v2 (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_events_v2_tenant_permissive ON events_v2 AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_events_v2_tenant_restrictive ON events_v2 AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_events_v2_tenant_permissive ON events_v2 AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_events_v2_tenant_restrictive ON events_v2 AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: exposure_log (Single authoritative exposure lifecycle record (trigger/render/visible/suppressed/probe, D-17).)
 -- Retention: site_class | Deletion: by_unit_key
@@ -208,8 +249,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for exposure_log (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_exposure_log_tenant_permissive ON exposure_log AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_exposure_log_tenant_restrictive ON exposure_log AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_exposure_log_tenant_permissive ON exposure_log AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_exposure_log_tenant_restrictive ON exposure_log AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: frame_log (Frame header log for gap analysis, post-ack echo checks, and closure 1.)
 -- Retention: site_class | Deletion: by_pv_key
@@ -244,8 +285,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for frame_log (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_frame_log_tenant_permissive ON frame_log AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_frame_log_tenant_restrictive ON frame_log AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_frame_log_tenant_permissive ON frame_log AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_frame_log_tenant_restrictive ON frame_log AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: frame_payload (Hot copy of raw frame bytes (timeline items stripped) for rebuild_pv.)
 -- Retention: site_class | Deletion: by_pv_key
@@ -267,8 +308,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for frame_payload (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_frame_payload_tenant_permissive ON frame_payload AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_frame_payload_tenant_restrictive ON frame_payload AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_frame_payload_tenant_permissive ON frame_payload AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_frame_payload_tenant_restrictive ON frame_payload AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: frame_quarantine (Encrypted decode_quarantine (7-day TTL, no API route, covered by deletion, D-28).)
 -- Retention: 7d_quarantine | Deletion: quarantine_7d_delete
@@ -276,6 +317,7 @@ CREATE TABLE IF NOT EXISTS frame_quarantine (
   tenant_id LowCardinality(String) COMMENT 'Tenant boundary key [pii=none;deletable=false]',
   site_id LowCardinality(String) COMMENT 'Site boundary key [pii=none;deletable=false]',
   received_day Date COMMENT 'Receipt day (7d TTL) [pii=none;deletable=false]',
+  quarantine_id UUID COMMENT 'Deterministic non-nullable quarantine record UUID [pii=none;deletable=false]',
   pv_id Nullable(UUID) COMMENT 'PV id if decodable [pii=pv_linkable;deletable=true]',
   seq UInt32 COMMENT 'Sequence if decodable [pii=none;deletable=false]',
   reason LowCardinality(String) COMMENT 'Quarantine reason code [pii=none;deletable=false]',
@@ -283,13 +325,13 @@ CREATE TABLE IF NOT EXISTS frame_quarantine (
 )
 ENGINE = MergeTree()
 PARTITION BY toYYYYMMDD(received_day)
-ORDER BY (tenant_id, site_id, received_day, pv_id, seq)
+ORDER BY (tenant_id, site_id, received_day, quarantine_id, seq)
 TTL received_day + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for frame_quarantine (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_frame_quarantine_tenant_permissive ON frame_quarantine AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_frame_quarantine_tenant_restrictive ON frame_quarantine AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_frame_quarantine_tenant_permissive ON frame_quarantine AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_frame_quarantine_tenant_restrictive ON frame_quarantine AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: handoff (Server-Timing document request to PV handoff join (D-1 / D-4 / D-25).)
 -- Retention: site_class | Deletion: by_pv_key
@@ -308,8 +350,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for handoff (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_handoff_tenant_permissive ON handoff AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_handoff_tenant_restrictive ON handoff AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_handoff_tenant_permissive ON handoff AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_handoff_tenant_restrictive ON handoff AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: identity_link (Tenant-rekeyed member HMAC to visitor key mapping (with key_version for safe rotation deletion).)
 -- Retention: site_class | Deletion: by_subject_row
@@ -329,8 +371,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for identity_link (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_identity_link_tenant_permissive ON identity_link AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_identity_link_tenant_restrictive ON identity_link AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_identity_link_tenant_permissive ON identity_link AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_identity_link_tenant_restrictive ON identity_link AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: live_tail (Exact last-minutes queries by server receipt minute (2-day TTL).)
 -- Retention: 2d_live_tail | Deletion: by_pv_key
@@ -350,8 +392,8 @@ TTL minute_recv + INTERVAL 2 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for live_tail (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_live_tail_tenant_permissive ON live_tail AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_live_tail_tenant_restrictive ON live_tail AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_live_tail_tenant_permissive ON live_tail AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_live_tail_tenant_restrictive ON live_tail AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: page_view_state (Mergeable cumulative register state per PV (idempotent under duplicates/reordering).)
 -- Retention: site_class | Deletion: by_pv_key
@@ -387,8 +429,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for page_view_state (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_page_view_state_tenant_permissive ON page_view_state AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_page_view_state_tenant_restrictive ON page_view_state AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_page_view_state_tenant_permissive ON page_view_state AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_page_view_state_tenant_restrictive ON page_view_state AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: pv_by_session (Session-ordered PV index for journeys and funnels.)
 -- Retention: site_class | Deletion: by_session_key
@@ -408,8 +450,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for pv_by_session (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_pv_by_session_tenant_permissive ON pv_by_session AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_pv_by_session_tenant_restrictive ON pv_by_session AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_pv_by_session_tenant_permissive ON pv_by_session AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_pv_by_session_tenant_restrictive ON pv_by_session AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: pv_by_visitor (Primary erasure lookup index and visitor-ordered history.)
 -- Retention: site_class | Deletion: by_visitor_key
@@ -431,8 +473,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for pv_by_visitor (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_pv_by_visitor_tenant_permissive ON pv_by_visitor AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_pv_by_visitor_tenant_restrictive ON pv_by_visitor AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_pv_by_visitor_tenant_permissive ON pv_by_visitor AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_pv_by_visitor_tenant_restrictive ON pv_by_visitor AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: pv_fact (Sealed collapsed PV fact row per build_seq for ML marts and exact rollups.)
 -- Retention: site_class | Deletion: by_pv_key
@@ -465,8 +507,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for pv_fact (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_pv_fact_tenant_permissive ON pv_fact AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_pv_fact_tenant_restrictive ON pv_fact AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_pv_fact_tenant_permissive ON pv_fact AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_pv_fact_tenant_restrictive ON pv_fact AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: pv_index (Single-writer loader placement authority and PV header index.)
 -- Retention: site_class | Deletion: by_pv_key
@@ -497,8 +539,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 1024, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for pv_index (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_pv_index_tenant_permissive ON pv_index AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_pv_index_tenant_restrictive ON pv_index AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_pv_index_tenant_permissive ON pv_index AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_pv_index_tenant_restrictive ON pv_index AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: pv_sequence (Coarse integer section-token sequence (<=64 tokens per PV, 30d until D-11R clause b).)
 -- Retention: 30d_timeline | Deletion: by_pv_key
@@ -513,14 +555,100 @@ CREATE TABLE IF NOT EXISTS pv_sequence (
   section_tokens Array(UInt64) COMMENT 'Up to 64 integer sec_fp tokens [pii=none;deletable=false]'
 )
 ENGINE = ReplacingMergeTree(seq_def_version)
-PARTITION BY exp_week
+PARTITION BY toYYYYMMDD(pv_hour)
 ORDER BY (tenant_id, site_id, pv_hour, url_id, pv_id)
 TTL pv_hour + INTERVAL 30 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for pv_sequence (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_pv_sequence_tenant_permissive ON pv_sequence AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_pv_sequence_tenant_restrictive ON pv_sequence AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_pv_sequence_tenant_permissive ON pv_sequence AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_pv_sequence_tenant_restrictive ON pv_sequence AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+
+-- Table: rollup_element_hourly (Sealed hourly element-activation human rollup (zero person-linkable identifiers, §5.3 / §11.11 #7).)
+-- Retention: site_class | Deletion: not_applicable_aggregate
+CREATE TABLE IF NOT EXISTS rollup_element_hourly (
+  tenant_id LowCardinality(String) COMMENT 'Tenant boundary key [pii=none;deletable=false]',
+  site_id LowCardinality(String) COMMENT 'Site boundary key [pii=none;deletable=false]',
+  pv_hour DateTime COMMENT 'Placement PV hour UTC [pii=none;deletable=false]',
+  bucket_start DateTime COMMENT 'Hour bucket start alias [pii=none;deletable=false]',
+  page_id UInt64 COMMENT 'urlkey/2 page identifier [pii=none;deletable=false]',
+  el_fp UInt64 COMMENT 'Element structural fingerprint [pii=none;deletable=false]',
+  activations UInt64 COMMENT 'Element activation count [pii=none;deletable=false]',
+  build_seq UInt64 COMMENT 'Sealed rollup generation sequence [pii=none;deletable=false]'
+)
+ENGINE = ReplacingMergeTree(build_seq)
+PARTITION BY toYYYYMM(pv_hour)
+ORDER BY (tenant_id, site_id, pv_hour, page_id, el_fp)
+SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000;
+
+-- Dual-layer ClickHouse tenant isolation row policies for rollup_element_hourly (§5.6 / STORE M7)
+CREATE ROW POLICY IF NOT EXISTS rp_rollup_element_hourly_tenant_permissive ON rollup_element_hourly AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_rollup_element_hourly_tenant_restrictive ON rollup_element_hourly AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+
+-- Table: rollup_page_hourly (Sealed hourly page-level human rollup (zero person-linkable identifiers; rebuilt on erasure, §5.3 / §11.11 #7).)
+-- Retention: site_class | Deletion: not_applicable_aggregate
+CREATE TABLE IF NOT EXISTS rollup_page_hourly (
+  tenant_id LowCardinality(String) COMMENT 'Tenant boundary key [pii=none;deletable=false]',
+  site_id LowCardinality(String) COMMENT 'Site boundary key [pii=none;deletable=false]',
+  pv_hour DateTime COMMENT 'Placement PV hour UTC [pii=none;deletable=false]',
+  bucket_start DateTime COMMENT 'Hour bucket start alias [pii=none;deletable=false]',
+  page_id UInt64 COMMENT 'urlkey/2 page identifier [pii=none;deletable=false]',
+  pvs UInt64 COMMENT 'Sealed human PV count [pii=none;deletable=false]',
+  pv_count UInt64 COMMENT 'Sealed human PV count alias [pii=none;deletable=false]',
+  sum_vis_ms UInt64 COMMENT 'Summed visible dwell ms [pii=none;deletable=false]',
+  sum_scroll_max_px UInt64 COMMENT 'Summed max scroll px [pii=none;deletable=false]',
+  build_seq UInt64 COMMENT 'Sealed rollup generation sequence [pii=none;deletable=false]'
+)
+ENGINE = ReplacingMergeTree(build_seq)
+PARTITION BY toYYYYMM(pv_hour)
+ORDER BY (tenant_id, site_id, pv_hour, page_id)
+SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000;
+
+-- Dual-layer ClickHouse tenant isolation row policies for rollup_page_hourly (§5.6 / STORE M7)
+CREATE ROW POLICY IF NOT EXISTS rp_rollup_page_hourly_tenant_permissive ON rollup_page_hourly AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_rollup_page_hourly_tenant_restrictive ON rollup_page_hourly AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+
+-- Table: rollup_section_hourly (Sealed hourly section-level human rollup (zero person-linkable identifiers, §5.3 / §11.11 #7).)
+-- Retention: site_class | Deletion: not_applicable_aggregate
+CREATE TABLE IF NOT EXISTS rollup_section_hourly (
+  tenant_id LowCardinality(String) COMMENT 'Tenant boundary key [pii=none;deletable=false]',
+  site_id LowCardinality(String) COMMENT 'Site boundary key [pii=none;deletable=false]',
+  pv_hour DateTime COMMENT 'Placement PV hour UTC [pii=none;deletable=false]',
+  bucket_start DateTime COMMENT 'Hour bucket start alias [pii=none;deletable=false]',
+  page_id UInt64 COMMENT 'urlkey/2 page identifier [pii=none;deletable=false]',
+  sec_fp UInt64 COMMENT 'Section structural fingerprint [pii=none;deletable=false]',
+  reach_pvs UInt64 COMMENT 'Section reach PV count [pii=none;deletable=false]',
+  sum_vis_ms UInt64 COMMENT 'Section summed visible dwell ms [pii=none;deletable=false]',
+  build_seq UInt64 COMMENT 'Sealed rollup generation sequence [pii=none;deletable=false]'
+)
+ENGINE = ReplacingMergeTree(build_seq)
+PARTITION BY toYYYYMM(pv_hour)
+ORDER BY (tenant_id, site_id, pv_hour, page_id, sec_fp)
+SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000;
+
+-- Dual-layer ClickHouse tenant isolation row policies for rollup_section_hourly (§5.6 / STORE M7)
+CREATE ROW POLICY IF NOT EXISTS rp_rollup_section_hourly_tenant_permissive ON rollup_section_hourly AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_rollup_section_hourly_tenant_restrictive ON rollup_section_hourly AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+
+-- Table: rollup_site_daily (Sealed daily site-level rollup (zero person-linkable identifiers, §5.3 / §11.11 #7).)
+-- Retention: site_class | Deletion: not_applicable_aggregate
+CREATE TABLE IF NOT EXISTS rollup_site_daily (
+  tenant_id LowCardinality(String) COMMENT 'Tenant boundary key [pii=none;deletable=false]',
+  site_id LowCardinality(String) COMMENT 'Site boundary key [pii=none;deletable=false]',
+  day_local Date COMMENT 'Site local calendar day [pii=none;deletable=false]',
+  pvs UInt64 COMMENT 'Total sealed human PVs [pii=none;deletable=false]',
+  conversions UInt64 COMMENT 'Total conversions [pii=none;deletable=false]',
+  loss_frames UInt64 COMMENT 'Total loss-ledger frame count [pii=none;deletable=false]',
+  build_seq UInt64 COMMENT 'Sealed rollup generation sequence [pii=none;deletable=false]'
+)
+ENGINE = ReplacingMergeTree(build_seq)
+PARTITION BY toYYYYMM(day_local)
+ORDER BY (tenant_id, site_id, day_local)
+SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000;
+
+-- Dual-layer ClickHouse tenant isolation row policies for rollup_site_daily (§5.6 / STORE M7)
+CREATE ROW POLICY IF NOT EXISTS rp_rollup_site_daily_tenant_permissive ON rollup_site_daily AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_rollup_site_daily_tenant_restrictive ON rollup_site_daily AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: session_index (Session placement authority for the loader.)
 -- Retention: site_class | Deletion: by_session_key
@@ -538,8 +666,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for session_index (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_session_index_tenant_permissive ON session_index AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_session_index_tenant_restrictive ON session_index AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_session_index_tenant_permissive ON session_index AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_session_index_tenant_restrictive ON session_index AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: session_period (Exact distinct sessions per built period.)
 -- Retention: site_class | Deletion: by_session_key
@@ -558,8 +686,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for session_period (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_session_period_tenant_permissive ON session_period AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_session_period_tenant_restrictive ON session_period AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_session_period_tenant_permissive ON session_period AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_session_period_tenant_restrictive ON session_period AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: stat_cell_lt (Long-lived generalised statistics cells with n >= k (default 50, STORE M8).)
 -- Retention: long_lived_generalised | Deletion: not_applicable_aggregate
@@ -577,8 +705,8 @@ ORDER BY (tenant_id, site_id, lattice_node, period_start)
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000;
 
 -- Dual-layer ClickHouse tenant isolation row policies for stat_cell_lt (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_stat_cell_lt_tenant_permissive ON stat_cell_lt AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_stat_cell_lt_tenant_restrictive ON stat_cell_lt AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_stat_cell_lt_tenant_permissive ON stat_cell_lt AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_stat_cell_lt_tenant_restrictive ON stat_cell_lt AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: trajectories (Integer-only Tier-1 kinematic timeline and verified-agent traces (30-day drop, ZERO string columns, D-11R/tel.G14).)
 -- Retention: 30d_timeline | Deletion: by_pv_key
@@ -603,8 +731,8 @@ TTL pv_hour + INTERVAL 30 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for trajectories (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_trajectories_tenant_permissive ON trajectories AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_trajectories_tenant_restrictive ON trajectories AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_trajectories_tenant_permissive ON trajectories AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_trajectories_tenant_restrictive ON trajectories AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: unit_ledger (Per-unit experiment read-out and deletion index for decision/exposure/conversion rows.)
 -- Retention: site_class | Deletion: by_unit_key
@@ -625,8 +753,8 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for unit_ledger (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_unit_ledger_tenant_permissive ON unit_ledger AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_unit_ledger_tenant_restrictive ON unit_ledger AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_unit_ledger_tenant_permissive ON unit_ledger AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_unit_ledger_tenant_restrictive ON unit_ledger AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: usage_day (Sealed daily billable PV and byte meters (no identifiers; survives subject deletion, D-29).)
 -- Retention: tenant_lifetime | Deletion: not_applicable_non_personal
@@ -645,8 +773,8 @@ ORDER BY (tenant_id, site_id, day_utc, build_seq)
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000;
 
 -- Dual-layer ClickHouse tenant isolation row policies for usage_day (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_usage_day_tenant_permissive ON usage_day AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_usage_day_tenant_restrictive ON usage_day AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_usage_day_tenant_permissive ON usage_day AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_usage_day_tenant_restrictive ON usage_day AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
 
 -- Table: visitor_period (Exact distinct visitors per built period.)
 -- Retention: site_class | Deletion: by_visitor_key
@@ -665,5 +793,20 @@ TTL exp_week + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for visitor_period (§5.6 / STORE M7)
-CREATE ROW POLICY IF NOT EXISTS rp_visitor_period_tenant_permissive ON visitor_period AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
-CREATE ROW POLICY IF NOT EXISTS rp_visitor_period_tenant_restrictive ON visitor_period AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_visitor_period_tenant_permissive ON visitor_period AS PERMISSIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+CREATE ROW POLICY IF NOT EXISTS rp_visitor_period_tenant_restrictive ON visitor_period AS RESTRICTIVE FOR SELECT USING substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;
+
+-- Public View: v_site_hourly (Public read-only hourly site summary view over rollup_page_hourly (§11.11 #7))
+CREATE VIEW IF NOT EXISTS v_site_hourly AS SELECT tenant_id, site_id, pv_hour, sum(pvs) AS pvs, sum(sum_vis_ms) AS sum_vis_ms, sum(sum_scroll_max_px) AS sum_scroll_max_px FROM rollup_page_hourly GROUP BY tenant_id, site_id, pv_hour;
+
+-- Public View: v_page_hourly (Public read-only hourly page summary view over rollup_page_hourly (§11.11 #7))
+CREATE VIEW IF NOT EXISTS v_page_hourly AS SELECT tenant_id, site_id, pv_hour, bucket_start, page_id, pvs, pv_count, sum_vis_ms, sum_scroll_max_px FROM rollup_page_hourly;
+
+-- Public View: v_conversion_daily (Public read-only daily conversion view over rollup_site_daily (§11.11 #7))
+CREATE VIEW IF NOT EXISTS v_conversion_daily AS SELECT tenant_id, site_id, day_local, pvs, conversions FROM rollup_site_daily;
+
+-- Public View: v_loss_ledger_daily (Public read-only daily telemetry loss-ledger view over rollup_site_daily (§11.11 #7))
+CREATE VIEW IF NOT EXISTS v_loss_ledger_daily AS SELECT tenant_id, site_id, day_local, pvs, loss_frames FROM rollup_site_daily;
+
+-- Public View: v_actor_daily (Public read-only verified crawler/actor monthly-daily summary view over access_bot_lt (§11.11 #7))
+CREATE VIEW IF NOT EXISTS v_actor_daily AS SELECT tenant_id, site_id, month_utc AS day_local, verified_actor_id, count() AS requests FROM access_bot_lt GROUP BY tenant_id, site_id, month_utc, verified_actor_id;

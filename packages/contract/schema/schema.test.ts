@@ -683,4 +683,83 @@ describe('Bundle 1-A: Single Authoritative Contract Schema & Deterministic Gener
       ).toBe(true);
     });
   });
+
+  describe('Wave 8 Regressions (C-14, H-15, H-18)', () => {
+    it('C-14: frame_quarantine uses non-nullable quarantine_id in ORDER BY, CH DDL emits 33 tables + 5 public v_* views + SHA256 row policies, and PG DDL emits both PERMISSIVE and RESTRICTIVE RLS', () => {
+      const fq = CANONICAL_SCHEMA.tables.find((t) => t.name === 'frame_quarantine');
+      expect(fq).toBeDefined();
+      expect(fq!.orderBy).toEqual(['tenant_id', 'site_id', 'received_day', 'quarantine_id', 'seq']);
+      const qidCol = fq!.columns.find((c) => c.name === 'quarantine_id');
+      expect(qidCol?.clickhouseType).toBe('UUID');
+
+      const ch = generateClickHouseDdl(CANONICAL_SCHEMA);
+      expect(ch.tableCount).toBe(33);
+      expect(ch.sql).toContain("substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '')");
+      for (const viewName of [
+        'v_site_hourly',
+        'v_page_hourly',
+        'v_conversion_daily',
+        'v_loss_ledger_daily',
+        'v_actor_daily',
+      ]) {
+        expect(ch.sql).toContain(`CREATE VIEW IF NOT EXISTS ${viewName} AS`);
+      }
+
+      const pg = generatePostgresDdl(CANONICAL_SCHEMA);
+      const permissive = pg.sql.match(/AS PERMISSIVE USING/g) ?? [];
+      const restrictive = pg.sql.match(/AS RESTRICTIVE USING/g) ?? [];
+      expect(permissive).toHaveLength(pg.tableCount);
+      expect(restrictive).toHaveLength(pg.tableCount);
+    });
+
+    it('H-15: ingest validator recomputes chk on clamped partial-accept frames while keeping stateIncomplete=true on bad incoming chk, and deletion plan covers all 14 external stores', () => {
+      const codec = createSdkFrameCodec(CANONICAL_SCHEMA);
+      const validator = createIngestValidator(CANONICAL_SCHEMA);
+      const oversized = buildValidFrame({
+        state: {
+          ...buildValidFrame().state,
+          scroll_max_px: 99_999_999, // exceeds 200000 ceiling -> clamped on partial accept
+        },
+      });
+      const res = validator.validateIngestFrame(oversized);
+      expect(res.accepted).toBe(true);
+      expect(res.partial).toBe(true);
+      expect(res.sanitizedFrame).not.toBeNull();
+      expect(res.sanitizedFrame!.state.scroll_max_px).toBe(1_000_000);
+      expect(codec.verifyChecksum(res.sanitizedFrame!)).toBe(true);
+      expect(res.stateIncomplete).toBe(false);
+
+      // Corrupt incoming checksum -> partial accept still produces valid downstream chk while flagging stateIncomplete=true
+      const badChkFrame = { ...oversized, chk: (oversized.chk ^ 0xff) >>> 0 };
+      const resBadChk = validator.validateIngestFrame(badChkFrame);
+      expect(resBadChk.sanitizedFrame).not.toBeNull();
+      expect(codec.verifyChecksum(resBadChk.sanitizedFrame!)).toBe(true);
+      expect(resBadChk.stateIncomplete).toBe(true);
+
+      const plan = generateDeletionPlan(CANONICAL_SCHEMA);
+      expect(plan.externalStoreEntries).toHaveLength(14);
+      const extKinds = plan.externalStoreEntries.map((s) => s.storeKind);
+      expect(extKinds).toEqual(
+        expect.arrayContaining([
+          'r2_screen_replay',
+          'r2_surge_spill',
+          'segment_customer_attributes',
+          'ec_order_summary',
+          'heatmap_png_cache',
+          'ask_query_cache',
+        ])
+      );
+    });
+
+    it('H-18: pv_sequence, access_obs, and access_verdict use daily toYYYYMMDD(...) partitions aligned with TTL', () => {
+      for (const [name, expectedPart] of [
+        ['pv_sequence', 'toYYYYMMDD(pv_hour)'],
+        ['access_obs', 'toYYYYMMDD(day_edge)'],
+        ['access_verdict', 'toYYYYMMDD(day_edge)'],
+      ] as const) {
+        const tbl = CANONICAL_SCHEMA.tables.find((t) => t.name === name);
+        expect(tbl?.partitionBy).toBe(expectedPart);
+      }
+    });
+  });
 });

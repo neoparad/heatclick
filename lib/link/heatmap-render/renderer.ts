@@ -71,6 +71,32 @@ function makePngChunk(type: string, data: Uint8Array): Uint8Array {
 
 const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
+export const MAX_HEATMAP_PNG_DIMENSION = 4096
+
+export function assertValidPngDimensions(width: number, height: number): void {
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    width < 1 ||
+    height < 1 ||
+    width > MAX_HEATMAP_PNG_DIMENSION ||
+    height > MAX_HEATMAP_PNG_DIMENSION
+  ) {
+    throw new Error(
+      `Invalid PNG dimensions ${String(width)}x${String(height)}: width and height must be integers in [1, ${MAX_HEATMAP_PNG_DIMENSION}]`,
+    )
+  }
+}
+
+export function escapeXmlAttr(value: string | number): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 /**
  * 外部ネイティブ依存ゼロの決定論的 RGBA8 PNG エンコーダ。
  * `tIME` や乱数を含まないため、同一ピクセル配列から常にバイト単位で同一の PNG を出力する。
@@ -80,7 +106,8 @@ export function encodeDeterministicRgbaPng(
   height: number,
   rgba: Uint8Array,
 ): Uint8Array {
-  if (width <= 0 || height <= 0 || rgba.length !== width * height * 4) {
+  assertValidPngDimensions(width, height)
+  if (rgba.length !== width * height * 4) {
     throw new Error(`Invalid RGBA buffer dimensions: ${width}x${height} (len=${rgba.length})`)
   }
 
@@ -147,8 +174,9 @@ export interface RedactedScreenshotResult {
  */
 export function redactScreenshotRegions(screenshot: LabScreenshotInput): RedactedScreenshotResult {
   assertLabOnlyScreenshot(screenshot)
-  const w = Math.max(1, Math.floor(screenshot.width))
-  const h = Math.max(1, Math.floor(screenshot.height))
+  assertValidPngDimensions(screenshot.width, screenshot.height)
+  const w = screenshot.width
+  const h = screenshot.height
   const rgba = new Uint8Array(w * h * 4)
 
   if (screenshot.rgba_pixels && screenshot.rgba_pixels.length === w * h * 4) {
@@ -360,6 +388,7 @@ export function renderDeterministicHeatmapImage(params: {
     rgba = new Uint8Array(redacted.rgba)
     redactionCount = redacted.redaction_count
   } else {
+    assertValidPngDimensions(w, h)
     rgba = new Uint8Array(w * h * 4)
     for (let i = 0; i < w * h; i++) {
       const idx = i * 4
@@ -453,7 +482,10 @@ function drawClickOverlay(
   h: number,
   clicks: readonly HeatmapClickPointInput[],
 ): void {
-  const validClicks = clicks.filter((c) => c.status === 'ok' && c.click_count > 0)
+  const validClicks = clicks.filter(
+    (c): c is HeatmapClickPointInput & { readonly click_count: number } =>
+      c.status === 'ok' && typeof c.click_count === 'number' && c.click_count > 0,
+  )
   const maxClicks = Math.max(1, ...validClicks.map((c) => c.click_count))
   const radius = Math.max(6, Math.round(Math.min(w, h) * 0.04))
 
@@ -517,24 +549,24 @@ function buildDeterministicSvg(
   clicks: readonly HeatmapClickPointInput[],
 ): string {
   const parts: string[] = [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" data-render-kind="${renderKind}" data-heatmap-kind="${kind}">`,
-    `<rect x="0" y="0" width="${w}" height="${h}" fill="#f8fafc"/>`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${escapeXmlAttr(w)}" height="${escapeXmlAttr(h)}" viewBox="0 0 ${escapeXmlAttr(w)} ${escapeXmlAttr(h)}" data-render-kind="${escapeXmlAttr(renderKind)}" data-heatmap-kind="${escapeXmlAttr(kind)}">`,
+    `<rect x="0" y="0" width="${escapeXmlAttr(w)}" height="${escapeXmlAttr(h)}" fill="#f8fafc"/>`,
   ]
   if (renderKind !== 'http_fetch_diagram') {
     for (const s of sections) {
       const y = Math.floor(s.top_ratio * h)
       const bh = Math.max(4, Math.floor(s.height_ratio * h))
       parts.push(
-        `<rect x="8" y="${y}" width="${w - 16}" height="${bh}" fill="rgba(59,130,246,0.22)" stroke="#334155" data-sec-fp="${s.sec_fp}" data-status="${s.status}"/>`,
+        `<rect x="8" y="${escapeXmlAttr(y)}" width="${escapeXmlAttr(w - 16)}" height="${escapeXmlAttr(bh)}" fill="rgba(59,130,246,0.22)" stroke="#334155" data-sec-fp="${escapeXmlAttr(s.sec_fp)}" data-status="${escapeXmlAttr(s.status)}"/>`,
       )
     }
     if (kind === 'click') {
       for (const c of clicks) {
-        if (c.status !== 'ok') continue
+        if (c.status !== 'ok' || typeof c.click_count !== 'number') continue
         const cx = Math.round((c.box_x + c.box_w * c.rel_x) * w)
         const cy = Math.round((c.box_y + c.box_h * c.rel_y) * h)
         parts.push(
-          `<circle cx="${cx}" cy="${cy}" r="8" fill="rgba(239,68,68,0.65)" data-el-fp="${c.el_fp}" data-count="${c.click_count}"/>`,
+          `<circle cx="${escapeXmlAttr(cx)}" cy="${escapeXmlAttr(cy)}" r="8" fill="rgba(239,68,68,0.65)" data-el-fp="${escapeXmlAttr(c.el_fp)}" data-count="${escapeXmlAttr(c.click_count)}"/>`,
         )
       }
     }

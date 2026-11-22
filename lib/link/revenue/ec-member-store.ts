@@ -43,19 +43,29 @@ export type MemberWriteSource =
 export interface MemberWriteResult {
   readonly accepted: boolean
   readonly summary: EcMemberSummary | null
-  readonly rejection_reason?: 'rejected_by_suppression_epoch' | 'retention_expired'
+  readonly rejection_reason?:
+    | 'rejected_by_suppression_epoch'
+    | 'stale_data_epoch'
+    | 'retention_expired'
 }
 
 export class EcMemberSummaryStore {
   private readonly summaries = new Map<string, EcMemberSummary>()
   private readonly suppressions = new Map<string, MemberSuppressionMark>()
+  private readonly siteMaxEpoch = new Map<string, number>()
 
   private key(tenantId: string, siteId: string, memberKey: string): string {
     return `${tenantId}|${siteId}|${memberKey}`
   }
 
+  private siteKey(tenantId: string, siteId: string): string {
+    return `${tenantId}|${siteId}`
+  }
+
   /**
    * 削除依頼・同意撤回時に強い整合性ストアへ利用停止印 (`suppression_epoch`) を即時確定し要約を削除する。
+   * 初回書込到着前の事前削除 (pre-insert deletion tombstone) でもサイト最高世代+1 と削除時刻を記録し、
+   * 実行中の遅延ワーカーによる復活 (resurrection) を完全阻止する (§8.13 #6)。
    */
   recordMemberSuppression(params: {
     readonly tenant_id: string
@@ -67,9 +77,15 @@ export class EcMemberSummaryStore {
     readonly explicit_epoch?: number
   }): MemberSuppressionMark {
     const k = this.key(params.tenant_id, params.site_id, params.member_key)
+    const sk = this.siteKey(params.tenant_id, params.site_id)
     const prevMark = this.suppressions.get(k)
     const prevSummary = this.summaries.get(k)
-    const currentMax = Math.max(prevMark?.suppression_epoch ?? 0, prevSummary?.generation_epoch ?? 0)
+    const siteHighWater = this.siteMaxEpoch.get(sk) ?? 0
+    const currentMax = Math.max(
+      prevMark?.suppression_epoch ?? 0,
+      prevSummary?.generation_epoch ?? 0,
+      siteHighWater,
+    )
     const nextEpoch = Math.max(currentMax + 1, params.explicit_epoch ?? currentMax + 1)
 
     const mark: MemberSuppressionMark = Object.freeze({
@@ -82,8 +98,28 @@ export class EcMemberSummaryStore {
     })
 
     this.suppressions.set(k, mark)
+    this.siteMaxEpoch.set(sk, Math.max(siteHighWater, nextEpoch))
     this.summaries.delete(k)
     return mark
+  }
+
+  /** Alias for `recordMemberSuppression` (`deletion_request` default). */
+  deleteMember(params: {
+    readonly tenant_id: string
+    readonly site_id: string
+    readonly member_key: string
+    readonly suppressed_at: string
+    readonly reason?: MemberSuppressionMark['reason']
+    readonly explicit_epoch?: number
+  }): MemberSuppressionMark {
+    return this.recordMemberSuppression({
+      tenant_id: params.tenant_id,
+      site_id: params.site_id,
+      member_key: params.member_key,
+      reason: params.reason ?? 'deletion_request',
+      suppressed_at: params.suppressed_at,
+      explicit_epoch: params.explicit_epoch,
+    })
   }
 
   getSuppressionMark(
@@ -94,9 +130,18 @@ export class EcMemberSummaryStore {
     return this.suppressions.get(this.key(tenantId, siteId, memberKey)) ?? null
   }
 
-  private isSuppressedEpoch(k: string, dataEpoch: number): boolean {
+  private isSuppressedWrite(k: string, dataEpoch: number, writeTimestampIso: string): boolean {
     const mark = this.suppressions.get(k)
-    return mark !== undefined && dataEpoch <= mark.suppression_epoch
+    if (!mark) return false
+    if (!Number.isInteger(dataEpoch) || dataEpoch <= mark.suppression_epoch) {
+      return true
+    }
+    const writeMs = Date.parse(writeTimestampIso)
+    const supMs = Date.parse(mark.suppressed_at)
+    if (!Number.isFinite(writeMs) || (Number.isFinite(supMs) && writeMs <= supMs)) {
+      return true
+    }
+    return false
   }
 
   /**
@@ -117,9 +162,18 @@ export class EcMemberSummaryStore {
     readonly updated_at: string
   }): MemberWriteResult {
     const k = this.key(params.tenant_id, params.site_id, params.member_key)
+    const sk = this.siteKey(params.tenant_id, params.site_id)
 
-    // Guard 1: Reject stale epoch across rebuild / replay / backfill / backup restore (§8.13 #6)
-    if (this.isSuppressedEpoch(k, params.data_epoch)) {
+    if (!Number.isInteger(params.data_epoch) || params.data_epoch < 1) {
+      return Object.freeze({
+        accepted: false,
+        summary: null,
+        rejection_reason: 'stale_data_epoch',
+      })
+    }
+
+    // Guard 1: Reject suppressed epoch OR pre-deletion timestamp across rebuild / replay / backfill / backup restore (§8.13 #6)
+    if (this.isSuppressedWrite(k, params.data_epoch, params.updated_at)) {
       return Object.freeze({
         accepted: false,
         summary: null,
@@ -127,8 +181,30 @@ export class EcMemberSummaryStore {
       })
     }
 
-    // Guard 2: Never extend retention_expires_at past existing source deadline
+    // Guard 2: Monotonic data_epoch — NEVER regress an existing active member summary to an older epoch!
     const existing = this.summaries.get(k)
+    if (existing) {
+      if (params.data_epoch < existing.generation_epoch) {
+        return Object.freeze({
+          accepted: false,
+          summary: null,
+          rejection_reason: 'stale_data_epoch',
+        })
+      }
+      if (
+        params.data_epoch === existing.generation_epoch &&
+        params.write_source !== 'order_notification' &&
+        Date.parse(params.updated_at) < Date.parse(existing.updated_at)
+      ) {
+        return Object.freeze({
+          accepted: false,
+          summary: null,
+          rejection_reason: 'stale_data_epoch',
+        })
+      }
+    }
+
+    // Guard 3: Never extend retention_expires_at past existing source deadline
     const effectiveRetention =
       existing &&
       Date.parse(existing.retention_expires_at) < Date.parse(params.source_retention_expires_at)
@@ -160,6 +236,7 @@ export class EcMemberSummaryStore {
     })
 
     this.summaries.set(k, summary)
+    this.siteMaxEpoch.set(sk, Math.max(this.siteMaxEpoch.get(sk) ?? 0, params.data_epoch))
     return Object.freeze({ accepted: true, summary })
   }
 
@@ -177,7 +254,7 @@ export class EcMemberSummaryStore {
     readonly default_retention_days?: number
   }): MemberWriteResult {
     const k = this.key(params.tenant_id, params.site_id, params.member_key)
-    if (this.isSuppressedEpoch(k, params.data_epoch)) {
+    if (this.isSuppressedWrite(k, params.data_epoch, params.occurred_at)) {
       return Object.freeze({
         accepted: false,
         summary: null,
@@ -186,6 +263,13 @@ export class EcMemberSummaryStore {
     }
 
     const existing = this.summaries.get(k)
+    if (existing && params.data_epoch < existing.generation_epoch) {
+      return Object.freeze({
+        accepted: false,
+        summary: null,
+        rejection_reason: 'stale_data_epoch',
+      })
+    }
     const retentionDays = params.default_retention_days ?? 395
     const fallbackRetention = new Date(
       Date.parse(params.occurred_at) + retentionDays * 24 * 60 * 60 * 1000,
@@ -246,7 +330,7 @@ export class EcMemberSummaryStore {
       return Object.freeze({ summary: null, fallback_reason: 'no_summary' })
     }
 
-    if (this.isSuppressedEpoch(k, summary.generation_epoch)) {
+    if (this.isSuppressedWrite(k, summary.generation_epoch, summary.updated_at)) {
       return Object.freeze({ summary: null, fallback_reason: 'member_suppressed' })
     }
 

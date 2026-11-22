@@ -444,4 +444,53 @@ describe('lib/link/migration/calibration (±5% tel.G18 & tel.G17)', () => {
     });
     expect(fail.passed).toBe(false);
   });
+
+  test('Wave 8 Regressions (M-05): tel.G17 two-sided TOST rejects spurious v3 conversion inflation, and runLegacyBridge preserves 0-scroll bounce/click/vital PVs', () => {
+    // Inflated v3 conversions (220 vs 100 on 2000 PVs) MUST fail two-sided equivalence!
+    const inflated = evaluateConversionParityG17({
+      cvKey: 'purchase',
+      bothArmPvs: 2000,
+      v2Conversions: 100,
+      v3Conversions: 220,
+    });
+    expect(inflated.passed).toBe(false);
+    expect(inflated.reason).toContain('outside equivalence margin');
+
+    // 0-scroll session with click + conversion + vital MUST NOT be dropped from bridgedPvs!
+    const cutoffMs = Date.UTC(2025, 10, 1, 0, 0, 0);
+    const bounceRes = runLegacyBridge({
+      scrollRows: [],
+      clickRows: [
+        {
+          legacyEventId: 'clk-bounce-1',
+          tenantId: 't1',
+          siteId: 's1',
+          sessionId: 'sess-zero-scroll',
+          urlKey: 'example.com/instant-cta',
+          occurredAtMs: cutoffMs + 5000,
+          elementSelector: '#instant-buy',
+          elementText: 'Buy',
+          href: 'https://example.com/pay',
+        },
+      ],
+      vitalRows: [
+        {
+          tenantId: 't1',
+          siteId: 's1',
+          sessionId: 'sess-zero-scroll',
+          urlKey: 'example.com/instant-cta',
+          occurredAtMs: cutoffMs + 1000,
+          lcpMs: 950,
+        },
+      ],
+      conversionRules: [
+        { cvKey: 'instant_buy', ruleVersion: 1, selectorIncludes: '#instant-buy' },
+      ],
+      retentionCutoffMs: cutoffMs,
+    });
+    expect(bounceRes.bridgedPvs).toHaveLength(1);
+    expect(bounceRes.bridgedPvs[0]?.directMeasured.maxScrollY).toBe(0);
+    expect(bounceRes.bridgedPvs[0]?.directMeasured.conversionCount).toBe(1);
+    expect(bounceRes.bridgedPvs[0]?.recovered.webVitals.lcpMs).toBe(950);
+  });
 });

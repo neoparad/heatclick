@@ -649,3 +649,131 @@ describe('Directed Timestamped URL Alias Graph (alias-graph.ts)', () => {
     expect(post.hops).toHaveLength(0)
   })
 })
+
+// ===========================================================================
+// 6. [M-11] & [L-04] Wave 8 Adversarial Regressions
+// ===========================================================================
+
+describe('Wave 8 Regressions: [M-11] full_render Lifecycle & [L-04] Zero-SD Dwell CI Floor', () => {
+  test('[M-11] matchPvToSnapshot accepts canonical full_render snapshots for visual_layout and drift triggers upgrade identity snapshots to full_render', () => {
+    const fullRenderSnap = buildSnapshotFromHtml(SAMPLE_HTML, { job_class: 'full_render' })
+    const identityRenderSnap = buildSnapshotFromHtml(SAMPLE_HTML, { job_class: 'identity_render' })
+    const sec0 = fullRenderSnap.segmenter_output!.sections[0]
+    const el0 = fullRenderSnap.segmenter_output!.elements[0]
+
+    const pv: PvFingerprintBundle = {
+      tenant_id: 'tenant_a',
+      site_id: 'site_1',
+      page_id: 'page_1',
+      pv_id: 'pv_m11',
+      variant_set_key: 'default',
+      observed_at: '2026-11-20T10:02:00.000Z',
+      dom_state: 'ok',
+      skel_fp: fullRenderSnap.skel_fp,
+      css_fp: 'css_v1',
+      head_fp: fullRenderSnap.head_fp,
+      links_fp: fullRenderSnap.segmenter_output!.links_fp?.combined ?? null,
+      res_fp: fullRenderSnap.res_fp,
+      slot_fp: 'slot_v1',
+      sections: [{ sec_fp: sec0.sec_fp, body_fp: sec0.body_fp, body_digest_128: sec0.body_digest_128 }],
+      element_fps: [el0.el_fp],
+    }
+
+    // 1) Canonical job_class: 'full_render' matches visual_layout!
+    const fullMatch = matchPvToSnapshot({
+      pv,
+      snapshot: fullRenderSnap,
+      fact_class: 'visual_layout',
+      measured_geometry_drift_G: 0.03,
+    })
+    expect(fullMatch.matched).toBe(true)
+    expect(fullMatch.snapshot_id).toBe(fullRenderSnap.snapshot_id)
+
+    // 2) Canonical job_class: 'identity_render' refuses visual_layout
+    const idMiss = matchPvToSnapshot({
+      pv,
+      snapshot: identityRenderSnap,
+      fact_class: 'visual_layout',
+      measured_geometry_drift_G: 0.03,
+    })
+    expect(idMiss.matched).toBe(false)
+    expect(idMiss.reason).toBe('visual_requires_full_render')
+
+    // 3) Unseen page (lab_snapshot: null) with field layout/CSS triggers initial full_render
+    const fieldGeom: LayoutGeometryMap = {
+      doc_h_px: 1200,
+      sections: [{ sec_fp: sec0.sec_fp, ordinal: 0, top_px: 0, height_px: 400 }],
+    }
+    const initialDecision = evaluateDriftAndRenderTrigger({
+      tenant_id: 'tenant_a',
+      site_id: 'site_1',
+      page_id: 'page_1',
+      variant_set_key: 'default',
+      field_skel_fp: fullRenderSnap.skel_fp!,
+      field_css_fp: 'css_v1',
+      field_slot_fp: 'slot_v1',
+      field_unknown_body_fps: [],
+      field_layout: fieldGeom,
+      lab_snapshot: null,
+    })
+    expect(initialDecision.action).toBe('full_render')
+    expect(initialDecision.trigger_reasons).toContain('initial_full_render_no_snapshot')
+
+    // 4) Existing identity_render snapshot upgrades to full_render once skel_fp matches so visual facts become reachable
+    const upgradeDecision = evaluateDriftAndRenderTrigger({
+      tenant_id: 'tenant_a',
+      site_id: 'site_1',
+      page_id: 'page_1',
+      variant_set_key: 'default',
+      field_skel_fp: fullRenderSnap.skel_fp!,
+      field_css_fp: 'css_v1',
+      field_slot_fp: 'slot_v1',
+      field_unknown_body_fps: [],
+      field_layout: fieldGeom,
+      lab_snapshot: {
+        snapshot_id: 'snap_id_only',
+        job_class: 'identity_render',
+        skel_fp: fullRenderSnap.skel_fp,
+        css_fp: 'css_v1',
+        slot_fp: 'slot_v1',
+        css_volatile: false,
+        layout: null,
+      },
+    })
+    expect(upgradeDecision.action).toBe('full_render')
+    expect(upgradeDecision.trigger_reasons).toContain('upgrade_identity_snapshot_to_full_render')
+    expect(upgradeDecision.visual_facts_valid).toBe(false)
+  })
+
+  test('[L-04] computePooledDwellTime enforces positive SD/quantization floor and Student-t critical values so sd_ms = 0 never yields a zero-width CI', () => {
+    // 1) Small sample with identical quantized readings (n=4, sd_ms=0):
+    //    MUST NOT short-circuit to a degenerate [5000, 5000] zero-width interval!
+    const smallZeroSd = computePooledDwellTime({
+      tenant_id: 'tenant_a',
+      page: { tenant_id: 'tenant_a', n: 4, mean_ms: 5000, sd_ms: 0 },
+      site: { tenant_id: 'tenant_a', n: 200, mean_ms: 8000, sd_ms: 3000 },
+    })
+    expect(smallZeroSd.used_partial_pooling).toBe(true)
+    expect(smallZeroSd.interval.upper).toBeGreaterThan(smallZeroSd.interval.lower)
+    expect(smallZeroSd.relative_half_width).toBeGreaterThan(0)
+
+    // 2) Even when every level reports sd_ms = 0 (including high-n direct path), interval width is strictly positive
+    const allZeroSd = computePooledDwellTime({
+      tenant_id: 'tenant_a',
+      page: { tenant_id: 'tenant_a', n: 100, mean_ms: 5000, sd_ms: 0 },
+      site: { tenant_id: 'tenant_a', n: 500, mean_ms: 5000, sd_ms: 0 },
+    })
+    expect(allZeroSd.interval.upper - allZeroSd.interval.lower).toBeGreaterThan(0)
+    expect(allZeroSd.relative_half_width).toBeGreaterThan(0)
+
+    // 3) Small-sample Student-t (df = 2, t = 4.3027) prevents premature unpooled sufficiency that z = 1.96 would falsely pass
+    //    For n=3, mean=10000, sd=1800: z-half = 1.96 * 1800/sqrt(3) = 2037 (20.4% <= 25%),
+    //    whereas exact t-half = 4.3027 * 1800/sqrt(3) = 4471 (44.7% > 25%) -> must pool!
+    const smallSampleT = computePooledDwellTime({
+      tenant_id: 'tenant_a',
+      page: { tenant_id: 'tenant_a', n: 3, mean_ms: 10000, sd_ms: 1800 },
+      site: { tenant_id: 'tenant_a', n: 400, mean_ms: 9500, sd_ms: 3200 },
+    })
+    expect(smallSampleT.used_partial_pooling).toBe(true)
+  })
+})

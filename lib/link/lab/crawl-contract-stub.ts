@@ -12,7 +12,14 @@
  * - 軽い取得でも登録済みアフィリエイトホストへの転送・リクエストを厳禁とする (§6.5 / R-9)
  */
 
-import { createHash, createHmac } from 'node:crypto'
+import {
+  createHash,
+  createHmac,
+  sign as cryptoSign,
+  timingSafeEqual,
+  verify as cryptoVerify,
+  type KeyObject,
+} from 'node:crypto'
 
 import {
   SEGMENTER_CONTENT_HASH,
@@ -27,6 +34,7 @@ import {
   DeterministicHtmlRenderDriver,
   SecondaryLabRenderer,
   evaluateLabNetworkRequest,
+  isFullRenderJobClass,
   type DeterministicPageFixture,
   type ForcedVariantSpec,
   type LabBlocklistRegistry,
@@ -61,8 +69,13 @@ export type IssueInputFamily =
   | 'el_fp'
   | 'headers_asof'
 
+export const DEFAULT_STUB_GRANT_SECRET = 'stub-local-test-signing-key'
+
 export interface LinkGrantAssertion {
   readonly link_grant_id: string
+  /** Optional tenant/site binding included in canonical cryptographic signature payload when present */
+  readonly tenant_id?: string
+  readonly site_id?: string
   /** Issued at UTC ISO-8601; lifetime must be <= 300s (§11.2 / R-2) */
   readonly issued_at: string
   readonly expires_at: string
@@ -224,21 +237,81 @@ export interface CrawlContractClient {
 }
 
 // ---------------------------------------------------------------------------
-// Link Grant Assertion Validator (§11.2 / R-2)
+// Link Grant Assertion Signer & Cryptographic Validator (§11.2 / R-2)
 // ---------------------------------------------------------------------------
+
+export function canonicalizeLinkGrantPayload(
+  grant: Omit<LinkGrantAssertion, 'signature'>,
+): string {
+  return JSON.stringify({
+    v: 'link-grant/2',
+    link_grant_id: grant.link_grant_id,
+    tenant_id: grant.tenant_id ?? null,
+    site_id: grant.site_id ?? null,
+    issued_at: grant.issued_at,
+    expires_at: grant.expires_at,
+    scopes: [...grant.scopes].sort(),
+    host_patterns: [...grant.host_patterns].map((p) => p.trim().toLowerCase()).sort(),
+  })
+}
+
+export function signLinkGrantAssertion(
+  grantWithoutSig: Omit<LinkGrantAssertion, 'signature'>,
+  key?:
+    | { readonly kind: 'hmac'; readonly secret: string | Buffer }
+    | { readonly kind: 'ed25519'; readonly privateKey: KeyObject },
+): LinkGrantAssertion {
+  const payload = canonicalizeLinkGrantPayload(grantWithoutSig)
+  let signature: string
+  if (key?.kind === 'ed25519') {
+    const sigBuf = cryptoSign(null, Buffer.from(payload, 'utf8'), key.privateKey)
+    signature = `ed25519:${sigBuf.toString('base64')}`
+  } else {
+    const secret = key?.kind === 'hmac' ? key.secret : DEFAULT_STUB_GRANT_SECRET
+    const macHex = createHmac('sha256', secret).update(payload, 'utf8').digest('hex')
+    signature = `hmac-sha256:${macHex}`
+  }
+  return Object.freeze({
+    ...grantWithoutSig,
+    signature,
+  })
+}
+
+function hostMatchesGrantPattern(hostname: string, pattern: string): boolean {
+  const h = hostname.trim().toLowerCase()
+  const p = pattern.trim().toLowerCase()
+  if (!h || !p) return false
+  if (p.startsWith('*.')) {
+    const suffix = p.slice(1) // ".example.jp"
+    return h.endsWith(suffix) && h.length > suffix.length
+  }
+  return h === p
+}
+
+export interface LinkGrantVerificationContext {
+  readonly tenant_id?: string
+  readonly site_id?: string
+  readonly target_urls?: readonly string[]
+  readonly hmac_secret?: string | Buffer
+  readonly ed25519_public_key?: KeyObject | null
+}
 
 export function assertValidLinkGrant(
   grant: LinkGrantAssertion,
   requiredScope: LinkGrantAssertion['scopes'][number],
   now: Date,
+  context?: LinkGrantVerificationContext,
 ): void {
   if (!grant.link_grant_id?.trim() || !grant.signature?.trim()) {
     throw new Error('LinkGrantAssertion requires link_grant_id and signature')
   }
   const issuedMs = Date.parse(grant.issued_at)
   const expiresMs = Date.parse(grant.expires_at)
-  if (Number.isNaN(issuedMs) || Number.isNaN(expiresMs)) {
+  if (!Number.isFinite(issuedMs) || !Number.isFinite(expiresMs)) {
     throw new Error('LinkGrantAssertion timestamps must be valid UTC ISO-8601')
+  }
+  if (expiresMs <= issuedMs) {
+    throw new Error('LinkGrantAssertion expires_at must be strictly after issued_at')
   }
   if (expiresMs - issuedMs > 300_000) {
     throw new Error('LinkGrantAssertion lifetime must not exceed 300 seconds (§11.2 / R-2)')
@@ -246,9 +319,77 @@ export function assertValidLinkGrant(
   if (now.getTime() > expiresMs) {
     throw new Error('LinkGrantAssertion has expired')
   }
+  if (now.getTime() < issuedMs - 60_000) {
+    throw new Error('LinkGrantAssertion is not yet valid (issued_at in the future)')
+  }
   if (!grant.scopes.includes(requiredScope)) {
     throw new Error(`LinkGrantAssertion missing required scope "${requiredScope}"`)
   }
+  if (!Array.isArray(grant.host_patterns) || grant.host_patterns.length === 0) {
+    throw new Error('LinkGrantAssertion requires at least one host_pattern')
+  }
+
+  if (grant.tenant_id !== undefined && context?.tenant_id !== undefined && grant.tenant_id !== context.tenant_id) {
+    throw new Error('LinkGrantAssertion tenant_id mismatch')
+  }
+  if (grant.site_id !== undefined && context?.site_id !== undefined && grant.site_id !== context.site_id) {
+    throw new Error('LinkGrantAssertion site_id mismatch')
+  }
+
+  if (context?.target_urls && context.target_urls.length > 0) {
+    for (const rawUrl of context.target_urls) {
+      let host: string
+      try {
+        host = new URL(rawUrl).hostname.toLowerCase()
+      } catch {
+        throw new Error(`Invalid target URL "${rawUrl}" for LinkGrantAssertion host check`)
+      }
+      if (!grant.host_patterns.some((pat) => hostMatchesGrantPattern(host, pat))) {
+        throw new Error(
+          `LinkGrantAssertion host_patterns do not authorize target host "${host}"`,
+        )
+      }
+    }
+  }
+
+  // Cryptographic signature verification (Ed25519 or HMAC-SHA256)
+  const payload = canonicalizeLinkGrantPayload(grant)
+  const sig = grant.signature.trim()
+  if (sig.startsWith('ed25519:')) {
+    if (!context?.ed25519_public_key) {
+      throw new Error('LinkGrantAssertion Ed25519 signature cannot be verified without public key')
+    }
+    const b64 = sig.slice('ed25519:'.length)
+    let verified = false
+    try {
+      verified = cryptoVerify(
+        null,
+        Buffer.from(payload, 'utf8'),
+        context.ed25519_public_key,
+        Buffer.from(b64, 'base64'),
+      )
+    } catch {
+      verified = false
+    }
+    if (!verified) {
+      throw new Error('LinkGrantAssertion cryptographic signature verification failed (Ed25519)')
+    }
+    return
+  }
+
+  if (sig.startsWith('hmac-sha256:')) {
+    const providedHex = sig.slice('hmac-sha256:'.length)
+    const secret = context?.hmac_secret ?? DEFAULT_STUB_GRANT_SECRET
+    const expectedHex = createHmac('sha256', secret).update(payload, 'utf8').digest('hex')
+    const a = Buffer.from(providedHex, 'utf8')
+    const b = Buffer.from(expectedHex, 'utf8')
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      throw new Error('LinkGrantAssertion cryptographic signature verification failed (HMAC)')
+    }
+    return
+  }
+
+  throw new Error('LinkGrantAssertion signature format invalid or unverified')
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +434,7 @@ export class DeterministicCrawlContractStub implements CrawlContractClient {
   private readonly blocklist: LabBlocklistRegistry
   private readonly now: () => Date
   private readonly webhookSecret: string
+  private readonly grantPublicKey: KeyObject | null
   private eventSeq = 0
 
   constructor(options?: {
@@ -300,15 +442,34 @@ export class DeterministicCrawlContractStub implements CrawlContractClient {
     readonly blocklist?: LabBlocklistRegistry
     readonly snapshotStore?: LabSnapshotStore
     readonly webhookSecret?: string
+    readonly grantPublicKey?: KeyObject | null
   }) {
     this.now = options?.now ?? (() => new Date())
     this.blocklist = options?.blocklist ?? DEFAULT_LAB_BLOCKLIST
     this.snapshotStore = options?.snapshotStore ?? new LabSnapshotStore()
-    this.webhookSecret = options?.webhookSecret ?? 'stub-local-test-signing-key'
+    this.webhookSecret = options?.webhookSecret ?? DEFAULT_STUB_GRANT_SECRET
+    this.grantPublicKey = options?.grantPublicKey ?? null
     this.renderer = new SecondaryLabRenderer({
       driver: this.driver,
       now: this.now,
       defaultBlocklist: this.blocklist,
+    })
+  }
+
+  private verifyGrant(
+    grant: LinkGrantAssertion,
+    requiredScope: LinkGrantAssertion['scopes'][number],
+    nowDate: Date,
+    tenantId: string,
+    siteId: string,
+    targetUrls: readonly string[],
+  ): void {
+    assertValidLinkGrant(grant, requiredScope, nowDate, {
+      tenant_id: tenantId,
+      site_id: siteId,
+      target_urls: targetUrls,
+      hmac_secret: this.webhookSecret,
+      ed25519_public_key: this.grantPublicKey,
     })
   }
 
@@ -330,7 +491,14 @@ export class DeterministicCrawlContractStub implements CrawlContractClient {
       throw new Error('tenant_id and site_id are required')
     }
     const nowDate = this.now()
-    assertValidLinkGrant(request.link_grant, 'url:probe', nowDate)
+    this.verifyGrant(
+      request.link_grant,
+      'url:probe',
+      nowDate,
+      request.tenant_id,
+      request.site_id,
+      request.urls,
+    )
 
     if (request.urls.length > MAX_URL_PROBE_BATCH) {
       throw new Error(`url:probe accepts at most ${MAX_URL_PROBE_BATCH} URLs per call (R-9)`)
@@ -466,7 +634,14 @@ export class DeterministicCrawlContractStub implements CrawlContractClient {
       throw new Error('tenant_id and site_id are required')
     }
     const nowDate = this.now()
-    assertValidLinkGrant(request.link_grant, 'structure:render', nowDate)
+    this.verifyGrant(
+      request.link_grant,
+      'structure:render',
+      nowDate,
+      request.tenant_id,
+      request.site_id,
+      request.urls,
+    )
 
     if (request.urls.length > MAX_STRUCTURE_RENDER_BATCH) {
       throw new Error(`structure:render accepts at most ${MAX_STRUCTURE_RENDER_BATCH} URLs per call (R-6)`)
@@ -512,7 +687,14 @@ export class DeterministicCrawlContractStub implements CrawlContractClient {
       throw new Error('tenant_id and site_id are required')
     }
     const nowDate = this.now()
-    assertValidLinkGrant(request.link_grant, 'probe:run', nowDate)
+    this.verifyGrant(
+      request.link_grant,
+      'probe:run',
+      nowDate,
+      request.tenant_id,
+      request.site_id,
+      [request.url],
+    )
 
     const urlKey = computeUrlKeyV2(request.url)
     const seeded = this.pages.get(request.url)
@@ -643,8 +825,18 @@ export class DeterministicCrawlContractStub implements CrawlContractClient {
     readonly link_grant: LinkGrantAssertion
     readonly url: string
   }): Promise<{ readonly status: 'ok' | 'not_collected'; readonly issues: readonly CatalogIssueRow[] }> {
+    if (!params.tenant_id?.trim() || !params.site_id?.trim()) {
+      throw new Error('tenant_id and site_id are required')
+    }
     const nowDate = this.now()
-    assertValidLinkGrant(params.link_grant, 'structure:identity', nowDate)
+    this.verifyGrant(
+      params.link_grant,
+      'structure:identity',
+      nowDate,
+      params.tenant_id,
+      params.site_id,
+      [params.url],
+    )
 
     const urlKey = computeUrlKeyV2(params.url)
     const seeded = this.pages.get(params.url)
@@ -748,8 +940,18 @@ export class DeterministicCrawlContractStub implements CrawlContractClient {
     readonly job_class?: RenderJobClass
     readonly is_pre_change_baseline?: boolean
   }): Promise<ImmutableSnapshotExportResponse> {
+    if (!params.tenant_id?.trim() || !params.site_id?.trim()) {
+      throw new Error('tenant_id and site_id are required')
+    }
     const nowDate = this.now()
-    assertValidLinkGrant(params.link_grant, 'structure:render', nowDate)
+    this.verifyGrant(
+      params.link_grant,
+      'structure:render',
+      nowDate,
+      params.tenant_id,
+      params.site_id,
+      [params.url],
+    )
 
     const seeded = this.pages.get(params.url)
     if (!seeded) {
@@ -786,7 +988,9 @@ export class DeterministicCrawlContractStub implements CrawlContractClient {
       source_job_id: params.source_job_id,
       analysis_gen: params.analysis_gen ?? 1,
       export_gen: params.export_gen ?? 1,
-      dataset_kind: jobClass === 'full' ? 'structure_snapshot_v2' : 'structure_identity_v1',
+      dataset_kind: isFullRenderJobClass(jobClass)
+        ? 'structure_snapshot_v2'
+        : 'structure_identity_v1',
       contract_ver: CRAWL_CONTRACT_VERSION,
     }
 

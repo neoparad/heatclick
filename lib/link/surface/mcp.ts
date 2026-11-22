@@ -11,9 +11,14 @@
  *   - Routes every MCP invocation through the exact same `SurfacePipeline` as REST
  */
 
-import type { FieldProvenance, RiskClass } from '@/lib/link/auth';
+import type { FieldProvenance, RiskClass, VerifiedPrincipal } from '@/lib/link/auth';
 import { OPERATION_CATALOG, type OperationSpec } from './openapi';
-import type { SurfaceExecutionResult, SurfaceInvocation, SurfacePipeline } from './pipeline';
+import {
+  BoundedTtlMap,
+  type SurfaceExecutionResult,
+  type SurfaceInvocation,
+  type SurfacePipeline,
+} from './pipeline';
 
 // =========================================================================
 // 1. Client Display Limits & Residual Risk Disclosure (§11.7)
@@ -195,15 +200,41 @@ export class LinkMcpServer {
   private readonly pipeline: SurfacePipeline;
   private readonly allTools: ReadonlyArray<McpToolDefinition>;
   private readonly toolByName = new Map<string, McpToolDefinition>();
-  /** Per-session enabled deferred tool names (`clientSessionId -> Set<toolName>`). */
-  private readonly enabledDeferred = new Map<string, Set<string>>();
+  /**
+   * Bounded + TTL per-tenant/principal/session enabled deferred tool names (`[C-01]` & `[L-03]`).
+   * Keyed strictly by `${tenantId}:${principalId}:${sessionId}` for authenticated HTTP/MCP calls.
+   */
+  private readonly enabledDeferred: BoundedTtlMap<Set<string>>;
 
-  constructor(pipeline: SurfacePipeline, catalog: ReadonlyArray<OperationSpec> = OPERATION_CATALOG) {
+  constructor(
+    pipeline: SurfacePipeline,
+    catalog: ReadonlyArray<OperationSpec> = OPERATION_CATALOG,
+    options?: { readonly maxSessions?: number; readonly sessionTtlMs?: number }
+  ) {
     this.pipeline = pipeline;
     this.allTools = generateMcpToolsFromOpenApi(catalog);
     for (const tool of this.allTools) {
       this.toolByName.set(tool.name, tool);
     }
+    this.enabledDeferred = new BoundedTtlMap<Set<string>>({
+      maxEntries: options?.maxSessions ?? 2_048,
+      ttlMs: options?.sessionTtlMs ?? 3_600_000,
+    });
+  }
+
+  public static buildScopedSessionKey(
+    principal: Pick<VerifiedPrincipal, 'tenantId' | 'principalId'> | undefined,
+    rawSessionId?: string
+  ): string {
+    const sid = rawSessionId?.trim() || 'default';
+    if (!principal) {
+      return `local:${sid}`;
+    }
+    return `${principal.tenantId}:${principal.principalId}:${sid}`;
+  }
+
+  public getActiveSessionCount(now: Date = new Date()): number {
+    return this.enabledDeferred.getActiveCount(now.getTime());
   }
 
   public getAllToolCount(): number {
@@ -215,21 +246,28 @@ export class LinkMcpServer {
   }
 
   /**
-   * Lists visible tools for a given client family & session:
+   * Lists visible tools for a given client family & tenant/principal-scoped session:
    *   - Respects per-client eager cap for R0/R1 tools
    *   - ALWAYS keeps every high-risk (R2+) tool exposed individually (never collapsed!)
-   *   - Includes any deferred tools explicitly enabled via `enableTool()`
+   *   - Includes any deferred tools explicitly enabled via `enableTool()` for THIS principal+session only
    */
   public listVisibleTools(params: {
     readonly clientFamily: McpClientFamily;
     readonly sessionId?: string;
+    readonly principal?: Pick<VerifiedPrincipal, 'tenantId' | 'principalId'>;
+    readonly now?: Date;
   }): {
     readonly visibleTools: ReadonlyArray<McpToolDefinition>;
     readonly deferredCount: number;
     readonly totalRegistered: number;
   } {
+    const nowMs = (params.now ?? new Date()).getTime();
     const cap = MCP_CLIENT_EAGER_LIMITS[params.clientFamily];
-    const enabledSet = params.sessionId ? this.enabledDeferred.get(params.sessionId) : undefined;
+    const scopedKey =
+      params.sessionId || params.principal
+        ? LinkMcpServer.buildScopedSessionKey(params.principal, params.sessionId)
+        : undefined;
+    const enabledSet = scopedKey ? this.enabledDeferred.get(scopedKey, nowMs) : undefined;
 
     const highRiskTools = this.allTools.filter((t) => t.individualHighRiskTool);
     const lowRiskSorted = this.allTools
@@ -265,16 +303,169 @@ export class LinkMcpServer {
   }
 
   /**
-   * Enables a deferred tool for the current MCP session so it appears in subsequent `tools/list`.
+   * Enables a deferred tool for the current `(tenantId, principalId, sessionId)` MCP session
+   * so it appears in subsequent `tools/list` for THAT principal only.
    */
-  public enableTool(sessionId: string, toolName: string): { readonly ok: boolean; readonly reason?: string } {
+  public enableTool(
+    sessionId: string,
+    toolName: string,
+    principal?: Pick<VerifiedPrincipal, 'tenantId' | 'principalId'>,
+    now?: Date
+  ): { readonly ok: boolean; readonly reason?: string } {
     if (!this.toolByName.has(toolName)) {
       return { ok: false, reason: `Unknown MCP tool: ${toolName}` };
     }
-    const set = this.enabledDeferred.get(sessionId) ?? new Set<string>();
+    const nowMs = (now ?? new Date()).getTime();
+    const scopedKey = LinkMcpServer.buildScopedSessionKey(principal, sessionId);
+    const set = this.enabledDeferred.get(scopedKey, nowMs) ?? new Set<string>();
     set.add(toolName);
-    this.enabledDeferred.set(sessionId, set);
+    this.enabledDeferred.set(scopedKey, set, nowMs);
     return { ok: true };
+  }
+
+  /**
+   * Mandatory authenticated MCP RPC entrypoint (`[C-01]`):
+   * Verifies Bearer token via `IdentityKeyRegistry` + `AuthorizationGateway` on EVERY MCP method
+   * (`tools/list`, `tools/search`, `tools/enable`, `tools/call`) and scopes session state by
+   * `(principal.tenantId, principal.principalId, sessionId)`.
+   */
+  public handleAuthenticatedRpc(params: {
+    readonly method: string;
+    readonly body?: Readonly<Record<string, unknown>>;
+    readonly bearerToken?: string;
+    readonly sessionPrincipal?: VerifiedPrincipal;
+    readonly dpopThumbprint?: string;
+    readonly clientIp?: string;
+    readonly callerSuppliedTenantId?: string;
+    readonly now?: Date;
+  }): SurfaceExecutionResult {
+    const now = params.now ?? new Date();
+    const body = params.body ?? {};
+
+    // Step 1: Require valid non-browser Bearer credential on ALL MCP endpoints ([C-01])
+    const auth = this.pipeline.authenticateCaller({
+      bearerToken: params.bearerToken,
+      sessionPrincipal: params.sessionPrincipal,
+      clientIp: params.clientIp,
+      dpopThumbprint: params.dpopThumbprint,
+      forbidPublicBrowserKey: true,
+      now,
+    });
+    if (!auth.ok) {
+      return {
+        httpStatus: auth.httpStatus,
+        headers: { 'Cache-Control': 'no-store' },
+        error: { code: auth.code, message: auth.reason },
+      };
+    }
+    const principal = auth.principal;
+
+    if (params.method === 'tools/call') {
+      const toolName = typeof body.toolName === 'string' ? body.toolName : '';
+      const args =
+        body.arguments !== null && typeof body.arguments === 'object' && !Array.isArray(body.arguments)
+          ? (body.arguments as Record<string, unknown>)
+          : {};
+      return this.callTool({
+        toolName,
+        arguments: args,
+        sessionPrincipal: principal,
+        dpopThumbprint: params.dpopThumbprint,
+        clientIp: params.clientIp,
+        now,
+      });
+    }
+
+    // Step 2: Authorize MCP discovery/enable through AuthorizationGateway (catches foreign tenant probes & audit logs)
+    const callerTenant =
+      params.callerSuppliedTenantId ??
+      (typeof body.tenant_id === 'string' ? body.tenant_id : undefined) ??
+      (typeof body.tenantId === 'string' ? body.tenantId : undefined);
+
+    const authz = this.pipeline.gateway.authorize({
+      principal,
+      action: `mcp:${params.method || 'unknown'}`,
+      riskClass: 'R0',
+      resource: {
+        type: 'tenant',
+        id: principal.tenantId,
+        tenantId: principal.tenantId,
+      },
+      callerSuppliedTenantId: callerTenant,
+      now,
+    });
+    if (!authz.allowed) {
+      return {
+        httpStatus: authz.httpStatus,
+        headers: { 'Cache-Control': 'no-store' },
+        error: {
+          code: authz.code,
+          message: authz.reason,
+          auditEntryId: authz.auditEntryId,
+        },
+      };
+    }
+
+    // Step 3: Enforce rate limit on MCP discovery/enable calls
+    const rate = this.pipeline.rateLimiter.consume(
+      `mcp:${principal.tenantId}:${principal.credentialId}`,
+      1,
+      now
+    );
+    if (!rate.allowed) {
+      return {
+        httpStatus: 429,
+        headers: {
+          'Cache-Control': 'no-store',
+          'Retry-After': String(rate.retryAfterSec),
+        },
+        error: {
+          code: 'RATE_LIMIT_EXCEEDED',
+          message: 'MCP rate limit exceeded',
+          auditEntryId: authz.auditEntryId,
+        },
+      };
+    }
+
+    if (params.method === 'tools/list') {
+      const rawFamily = typeof body.clientFamily === 'string' ? body.clientFamily : 'generic_mcp';
+      const clientFamily: McpClientFamily =
+        rawFamily === 'claude_desktop' || rawFamily === 'cursor' || rawFamily === 'chatgpt'
+          ? rawFamily
+          : 'generic_mcp';
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined;
+      return {
+        httpStatus: 200,
+        headers: { 'Cache-Control': 'no-store', 'X-UGOKI-Audit-Id': authz.auditEntryId },
+        rawBody: this.listVisibleTools({ clientFamily, sessionId, principal, now }),
+      };
+    }
+
+    if (params.method === 'tools/search') {
+      const q = typeof body.query === 'string' ? body.query : '';
+      return {
+        httpStatus: 200,
+        headers: { 'Cache-Control': 'no-store', 'X-UGOKI-Audit-Id': authz.auditEntryId },
+        rawBody: { tools: this.searchTools(q) },
+      };
+    }
+
+    if (params.method === 'tools/enable') {
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : 'default';
+      const toolName = typeof body.toolName === 'string' ? body.toolName : '';
+      const res = this.enableTool(sessionId, toolName, principal, now);
+      return {
+        httpStatus: res.ok ? 200 : 404,
+        headers: { 'Cache-Control': 'no-store', 'X-UGOKI-Audit-Id': authz.auditEntryId },
+        rawBody: res,
+      };
+    }
+
+    return {
+      httpStatus: 400,
+      headers: { 'Cache-Control': 'no-store' },
+      error: { code: 'UNKNOWN_MCP_METHOD', message: `Unsupported MCP method "${params.method}"` },
+    };
   }
 
   /**
@@ -290,6 +481,24 @@ export class LinkMcpServer {
     readonly clientIp?: string;
     readonly now?: Date;
   }): SurfaceExecutionResult {
+    // Authenticate BEFORE revealing whether a deferred/internal tool exists or reading site config ([C-01])
+    const now = params.now ?? new Date();
+    const auth = this.pipeline.authenticateCaller({
+      bearerToken: params.bearerToken,
+      sessionPrincipal: params.sessionPrincipal,
+      clientIp: params.clientIp,
+      dpopThumbprint: params.dpopThumbprint,
+      forbidPublicBrowserKey: true,
+      now,
+    });
+    if (!auth.ok) {
+      return {
+        httpStatus: auth.httpStatus,
+        headers: { 'Cache-Control': 'no-store' },
+        error: { code: auth.code, message: auth.reason },
+      };
+    }
+
     const tool = this.toolByName.get(params.toolName);
     if (!tool) {
       return {
@@ -300,7 +509,12 @@ export class LinkMcpServer {
     }
 
     const args = params.arguments ?? {};
-    const siteId = typeof args.siteId === 'string' ? args.siteId : undefined;
+    const siteId =
+      typeof args.siteId === 'string'
+        ? args.siteId
+        : typeof args.site_id === 'string'
+          ? args.site_id
+          : undefined;
     const callerSuppliedTenantId =
       typeof args.tenantId === 'string'
         ? args.tenantId
@@ -333,8 +547,7 @@ export class LinkMcpServer {
     return this.pipeline.execute({
       operationId: tool.operationId,
       channel: 'mcp',
-      bearerToken: params.bearerToken,
-      sessionPrincipal: params.sessionPrincipal,
+      sessionPrincipal: auth.principal,
       dpopThumbprint: params.dpopThumbprint,
       clientIp: params.clientIp,
       callerSuppliedTenantId,
@@ -346,7 +559,7 @@ export class LinkMcpServer {
       autonomyEnvelopeId:
         typeof args.autonomyEnvelopeId === 'string' ? args.autonomyEnvelopeId : undefined,
       fieldProvenance: mappedFieldProvenance,
-      now: params.now,
+      now,
     });
   }
 }

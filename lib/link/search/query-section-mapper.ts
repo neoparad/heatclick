@@ -42,6 +42,33 @@ export interface RankedSectionCandidate {
   readonly combined_score: number
 }
 
+/** Simultaneous 95% Bonferroni normal critical value z_{1 - 0.05 / (2 * 2)} = Phi^{-1}(0.9875) */
+const Z_SIMULTANEOUS_2_95 = 2.241402727604947
+
+function wilsonBounds(
+  successes: number,
+  trials: number,
+  z = Z_SIMULTANEOUS_2_95,
+): { readonly lower: number; readonly upper: number } {
+  if (!Number.isFinite(trials) || trials <= 0) {
+    return { lower: 0, upper: 1 }
+  }
+  const k = Math.min(trials, Math.max(0, successes))
+  if (k === 0) {
+    const z2 = z * z
+    return { lower: 0, upper: Math.min(1, z2 / (trials + z2)) }
+  }
+  const p = k / trials
+  const z2 = z * z
+  const denom = 1 + z2 / trials
+  const center = p + z2 / (2 * trials)
+  const half = z * Math.sqrt((p * (1 - p) + z2 / (4 * trials)) / trials)
+  return {
+    lower: Math.max(0, (center - half) / denom),
+    upper: Math.min(1, (center + half) / denom),
+  }
+}
+
 export interface QuerySectionMappingResult {
   readonly query: string
   readonly status: 'matched' | 'no_clear_answer_section'
@@ -52,6 +79,7 @@ export interface QuerySectionMappingResult {
   readonly margin: number | null
   readonly min_score_threshold: number
   readonly min_margin_threshold: number
+  readonly gate_blocked_reason?: string | null
   readonly rankings: readonly RankedSectionCandidate[]
 }
 
@@ -153,10 +181,27 @@ export function mapQueryToAnswerSection(params: {
   readonly min_score_threshold?: number
   readonly min_margin_threshold?: number
   readonly rrf_k?: number
+  readonly gate_join_g14_passed?: boolean
 }): QuerySectionMappingResult {
   const minScore = params.min_score_threshold ?? 0.35
   const minMargin = params.min_margin_threshold ?? 0.08
   const rrfK = params.rrf_k ?? 10
+
+  if (params.gate_join_g14_passed === false) {
+    return Object.freeze({
+      query: params.query,
+      status: 'no_clear_answer_section',
+      best_section_uid: null,
+      best_sec_fp: null,
+      top1_score: null,
+      top2_score: null,
+      margin: null,
+      min_score_threshold: minScore,
+      min_margin_threshold: minMargin,
+      gate_blocked_reason: 'join.G14_unmet',
+      rankings: Object.freeze([]),
+    })
+  }
 
   if (params.candidates.length === 0) {
     return Object.freeze({
@@ -169,6 +214,7 @@ export function mapQueryToAnswerSection(params: {
       margin: null,
       min_score_threshold: minScore,
       min_margin_threshold: minMargin,
+      gate_blocked_reason: null,
       rankings: Object.freeze([]),
     })
   }
@@ -221,6 +267,7 @@ export function mapQueryToAnswerSection(params: {
     margin,
     min_score_threshold: minScore,
     min_margin_threshold: minMargin,
+    gate_blocked_reason: null,
     rankings: Object.freeze(rankings),
   })
 }
@@ -234,23 +281,26 @@ export const MAX_INFORMATIVE_QUERY_BOUND_WIDTH = 0.3
 export interface QueryReachAnalysisResult {
   readonly query: string
   readonly section_uid: string
+  readonly gate_join_g14_passed: boolean
   /** (a) Overall Google landing reach rate on this page (`observed`) */
   readonly page_google_reach: {
     readonly rate: number
     readonly google_landing_pvs: number
     readonly evidence: 'observed'
   }
-  /** (b) Assumption-free Fréchet / Manski bounds for query q (`inferred`) */
+  /** (b) Finite-sample valid outer Fréchet / Manski bounds for query q (`inferred`) */
   readonly assumption_free_bounds: {
     readonly query_landing_share: number
     readonly lower: number
     readonly upper: number
+    readonly point_lower: number
+    readonly point_upper: number
     readonly width: number
     readonly is_narrow: boolean
     readonly evidence: 'inferred'
     readonly method: 'frechet_manski_no_assumptions'
   }
-  /** (c) Statistical model estimate — emitted ONLY when uninformative-prior width <= 0.30 */
+  /** (c) Statistical model estimate — emitted ONLY when join.G14 passes AND uninformative-prior width <= 0.30 */
   readonly statistical_model_estimate: {
     readonly status: 'ok' | 'insufficient_data'
     readonly estimate: number | null
@@ -275,23 +325,40 @@ export function computeQueryReachOutputs(params: {
     readonly uninformative_prior_upper: number
   } | null
   readonly max_width?: number
+  readonly gate_join_g14_passed?: boolean
 }): QueryReachAnalysisResult {
   const maxWidth = params.max_width ?? MAX_INFORMATIVE_QUERY_BOUND_WIDTH
+  const g14Passed = params.gate_join_g14_passed !== false
   const R = Math.min(1, Math.max(0, params.page_google_reach_rate))
   const sQ =
     params.total_page_gsc_clicks > 0
       ? Math.min(1, Math.max(0, params.query_gsc_clicks / params.total_page_gsc_clicks))
       : 0
 
-  // Exact Fréchet / Manski assumption-free bounds:
-  // Since R = s_q * R_q + (1 - s_q) * R_{-q} with R_{-q} in [0, 1]:
-  //   R_q >= (R - (1 - s_q)) / s_q  and  R_q <= R / s_q
-  const lower = sQ > 0 ? Math.max(0, (R - (1 - sQ)) / sQ) : 0
-  const upper = sQ > 0 ? Math.min(1, R / sQ) : 1
+  // Infinite-sample plug-in Fréchet / Manski bounds (reported for reference only)
+  const pointLower = sQ > 0 ? Math.max(0, (R - (1 - sQ)) / sQ) : 0
+  const pointUpper = sQ > 0 ? Math.min(1, R / sQ) : 1
+
+  // Finite-sample valid outer Fréchet / Manski bounds over simultaneous 95% Wilson rectangle [R_L, R_U] x [s_L, s_U]:
+  //   min_{(r,s)} max(0, (r - (1 - s)) / s) is achieved at (R_L, s_L)
+  //   max_{(r,s)} min(1, r / s)             is achieved at (R_U, s_L)
+  const nPv = Math.max(0, Math.floor(params.page_google_landing_pvs))
+  const nGsc = Math.max(0, Math.floor(params.total_page_gsc_clicks))
+  const reachCi = wilsonBounds(R * nPv, nPv)
+  const shareCi = wilsonBounds(params.query_gsc_clicks, nGsc)
+
+  const lower =
+    !g14Passed || nPv <= 0 || nGsc <= 0 || shareCi.lower <= 0
+      ? 0
+      : Math.max(0, (reachCi.lower - (1 - shareCi.lower)) / shareCi.lower)
+  const upper =
+    !g14Passed || nPv <= 0 || nGsc <= 0 || shareCi.lower <= 0
+      ? 1
+      : Math.min(1, reachCi.upper / shareCi.lower)
   const width = Math.max(0, upper - lower)
 
   let modelBlock: QueryReachAnalysisResult['statistical_model_estimate']
-  if (!params.model_estimate) {
+  if (!g14Passed) {
     modelBlock = Object.freeze({
       status: 'insufficient_data',
       estimate: null,
@@ -299,7 +366,19 @@ export function computeQueryReachOutputs(params: {
       uninformative_prior_upper: null,
       width: null,
       evidence: 'inferred',
-      suppression_reason: 'no_model_fit_available',
+      suppression_reason: 'join.G14_unmet',
+    })
+  } else if (!params.model_estimate || nPv < 30 || nGsc < 30) {
+    modelBlock = Object.freeze({
+      status: 'insufficient_data',
+      estimate: null,
+      uninformative_prior_lower: null,
+      uninformative_prior_upper: null,
+      width: null,
+      evidence: 'inferred',
+      suppression_reason: !params.model_estimate
+        ? 'no_model_fit_available'
+        : 'sample_size_below_minimum_30',
     })
   } else {
     const mWidth = Math.max(
@@ -333,6 +412,7 @@ export function computeQueryReachOutputs(params: {
   return Object.freeze({
     query: params.query,
     section_uid: params.section_uid,
+    gate_join_g14_passed: g14Passed,
     page_google_reach: Object.freeze({
       rate: R,
       google_landing_pvs: params.page_google_landing_pvs,
@@ -342,8 +422,10 @@ export function computeQueryReachOutputs(params: {
       query_landing_share: sQ,
       lower,
       upper,
+      point_lower: pointLower,
+      point_upper: pointUpper,
       width,
-      is_narrow: width <= maxWidth,
+      is_narrow: g14Passed && width <= maxWidth,
       evidence: 'inferred',
       method: 'frechet_manski_no_assumptions',
     }),

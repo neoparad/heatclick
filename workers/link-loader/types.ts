@@ -46,6 +46,7 @@ export interface PvIndexRow {
   readonly skelFp: string;
   readonly variantKey: string;
   readonly firstFrameReceivedAtMs: number;
+  readonly excludeFromHumanRollups?: boolean;
 }
 
 export interface ArgMaxRegister<T> {
@@ -144,6 +145,15 @@ export interface MergedPvState {
   readonly logConflictCount: number;
   readonly visitorId: string | null;
   readonly sessionId: string | null;
+  readonly excludeFromHumanRollups?: boolean;
+}
+
+export interface DeletionTombstoneSpec {
+  readonly tenantId: string;
+  readonly siteId: string;
+  readonly pvIds?: readonly string[];
+  readonly visitorKeys?: readonly string[];
+  readonly memberHashes?: readonly string[];
 }
 
 export interface FrameLogRow {

@@ -234,8 +234,11 @@ describe('Query -> Answer Section Mapper & Assumption-Free Bounds (§6.6)', () =
     })
     expect(dominant.page_google_reach.evidence).toBe('observed')
     expect(dominant.assumption_free_bounds.evidence).toBe('inferred')
-    expect(dominant.assumption_free_bounds.lower).toBeCloseTo(0.6 / 0.9, 5)
-    expect(dominant.assumption_free_bounds.upper).toBeCloseTo(0.7 / 0.9, 5)
+    expect(dominant.assumption_free_bounds.point_lower).toBeCloseTo(0.6 / 0.9, 5)
+    expect(dominant.assumption_free_bounds.point_upper).toBeCloseTo(0.7 / 0.9, 5)
+    // Finite-sample simultaneous Wilson outer Fréchet bounds strictly contain the plug-in bounds while staying narrow at N=1000!
+    expect(dominant.assumption_free_bounds.lower).toBeLessThan(dominant.assumption_free_bounds.point_lower)
+    expect(dominant.assumption_free_bounds.upper).toBeGreaterThan(dominant.assumption_free_bounds.point_upper)
     expect(dominant.assumption_free_bounds.is_narrow).toBe(true)
     expect(dominant.statistical_model_estimate.status).toBe('ok')
 
@@ -494,8 +497,12 @@ describe('AI Search Probe, Eligibility Ledger, D-13 Guard, Citation Bracketing &
       probe_fetched_and_cited_count: 25, // P(cited|fetched) = 0.25
     })
     expect(bracket.evidence).toBe('inferred')
-    expect(bracket.wild_citations_lower).toBeCloseTo(250, 4)
-    expect(bracket.wild_citations_upper).toBeCloseTo(500, 4)
+    expect(bracket.upper_identifiable).toBe(true)
+    expect(bracket.point_wild_citations_lower).toBeCloseTo(250, 4)
+    expect(bracket.point_wild_citations_upper).toBeCloseTo(500, 4)
+    // Conservative simultaneous Wilson CIs widen [lower, upper] strictly around [250, 500]
+    expect(bracket.wild_citations_lower).toBeLessThan(250)
+    expect(bracket.wild_citations_upper!).toBeGreaterThan(500)
 
     const lift = computeReferrerlessAiTrafficLift({
       visits_in_30m_after_fetch: 120,
@@ -600,5 +607,107 @@ describe('AI Search Probe, Eligibility Ledger, D-13 Guard, Citation Bracketing &
     })
     expect(rolledBack.auto_rollback_triggered).toBe(true)
     expect(rolledBack.evidence_level).toBe('observed')
+  })
+})
+
+// ===========================================================================
+// Wave 8 Adversarial Regression Tests: [M-10] Finite-Sample Fréchet Bounds, Conservative Citation CIs & join.G14/act.G25 Gates
+// ===========================================================================
+
+describe('Wave 8 Adversarial Regressions: [M-10] Finite-Sample Search & Citation Statistical Rigor', () => {
+  test('[M-10] n=1 PV/click never produces zero-width Fréchet bounds, and join.G14=false blocks answer-section claims & model estimates', () => {
+    const tinySample = computeQueryReachOutputs({
+      query: '単発流入語',
+      section_uid: 'sec_1',
+      page_google_reach_rate: 1.0,
+      page_google_landing_pvs: 1,
+      query_gsc_clicks: 1,
+      total_page_gsc_clicks: 1,
+      model_estimate: { point: 0.99, uninformative_prior_lower: 0.95, uninformative_prior_upper: 1.0 },
+    })
+    // Point plug-in would give [1, 1] (width 0), whereas finite-sample outer Wilson Fréchet bounds MUST stay wide!
+    expect(tinySample.assumption_free_bounds.width).toBeGreaterThan(0.7)
+    expect(tinySample.assumption_free_bounds.is_narrow).toBe(false)
+    expect(tinySample.statistical_model_estimate.status).toBe('insufficient_data')
+
+    // join.G14 unmet blocks mapQueryToAnswerSection and computeQueryReachOutputs
+    const g14BlockedMap = mapQueryToAnswerSection({
+      query: '解約方法',
+      query_embedding: [0, 1, 0],
+      gate_join_g14_passed: false,
+      candidates: [
+        {
+          section_uid: 'sec_cancel',
+          sec_fp: 'fp_2',
+          body_fp: 'b2',
+          heading_text: '解約方法',
+          body_text: '解約方法のご案内',
+          embedding: [0, 1, 0],
+        },
+      ],
+    })
+    expect(g14BlockedMap.status).toBe('no_clear_answer_section')
+    expect(g14BlockedMap.best_section_uid).toBeNull()
+    expect(g14BlockedMap.gate_blocked_reason).toBe('join.G14_unmet')
+
+    const g14BlockedReach = computeQueryReachOutputs({
+      query: 'メイン検索語',
+      section_uid: 'sec_1',
+      page_google_reach_rate: 0.7,
+      page_google_landing_pvs: 5000,
+      query_gsc_clicks: 4800,
+      total_page_gsc_clicks: 5000,
+      gate_join_g14_passed: false,
+      model_estimate: { point: 0.7, uninformative_prior_lower: 0.65, uninformative_prior_upper: 0.75 },
+    })
+    expect(g14BlockedReach.assumption_free_bounds.is_narrow).toBe(false)
+    expect(g14BlockedReach.statistical_model_estimate.status).toBe('insufficient_data')
+    expect(g14BlockedReach.statistical_model_estimate.suppression_reason).toBe('join.G14_unmet')
+  })
+
+  test('[M-10] computeCitationBracketing returns wild_citations_upper=null (never 0.05 floor) when P(fetched|cited) CI includes 0 or act.G25 fails', () => {
+    // 0 fetched among 30 cited probes -> lower CI of P(fetched|cited) is 0 -> upper bound is UNIDENTIFIABLE (null, NOT 20x!)
+    const zeroFetchCited = computeCitationBracketing({
+      wild_server_fetches: 500,
+      probe_cited_count: 30,
+      probe_cited_and_fetched_count: 0,
+      probe_fetched_count: 100,
+      probe_fetched_and_cited_count: 20,
+    })
+    expect(zeroFetchCited.upper_identifiable).toBe(false)
+    expect(zeroFetchCited.wild_citations_upper).toBeNull()
+
+    // act.G25=false blocks both citation bracketing and 'proven' randomization upgrade
+    const g25BlockedBracket = computeCitationBracketing({
+      wild_server_fetches: 500,
+      probe_cited_count: 50,
+      probe_cited_and_fetched_count: 30,
+      probe_fetched_count: 100,
+      probe_fetched_and_cited_count: 30,
+      gate_act_g25_passed: false,
+    })
+    expect(g25BlockedBracket.upper_identifiable).toBe(false)
+    expect(g25BlockedBracket.wild_citations_upper).toBeNull()
+
+    // Vacuous 0/0 units or act.G25=false cannot yield 'proven'
+    expect(
+      evaluateEligibilityRandomizationOutcome({
+        paired_directories: 6,
+        observed_units: 0,
+        planner_required_units: 0,
+        search_traffic_change_ratio: 0,
+        indexed_pages_change_ratio: 0,
+      }).evidence_level,
+    ).toBe('observed')
+    expect(
+      evaluateEligibilityRandomizationOutcome({
+        paired_directories: 6,
+        observed_units: 600,
+        planner_required_units: 500,
+        search_traffic_change_ratio: 0,
+        indexed_pages_change_ratio: 0,
+        gate_act_g25_passed: false,
+      }).evidence_level,
+    ).toBe('observed')
   })
 })

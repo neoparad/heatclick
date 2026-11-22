@@ -160,22 +160,58 @@ export interface AuthorizationGatewayOptions {
   readonly auditLog?: AuditLogStore;
   readonly approvalBaseUrl?: string;
   readonly failSafeStopMaxPerMinute?: number;
+  /** Maximum bounded entries per in-memory state map before oldest/expired eviction (L-03). */
+  readonly maxStateMapEntries?: number;
+}
+
+function setBoundedMap<K, V>(
+  map: Map<K, V>,
+  key: K,
+  value: V,
+  maxEntries: number,
+  canEvictFirst?: (entry: V) => boolean
+): void {
+  if (map.has(key)) {
+    map.delete(key);
+  } else if (map.size >= maxEntries) {
+    let evicted = false;
+    if (canEvictFirst) {
+      for (const [k, v] of map.entries()) {
+        if (canEvictFirst(v)) {
+          map.delete(k);
+          evicted = true;
+          break;
+        }
+      }
+    }
+    if (!evicted) {
+      const oldestKey = map.keys().next().value;
+      if (oldestKey !== undefined) {
+        map.delete(oldestKey);
+      }
+    }
+  }
+  map.set(key, value);
 }
 
 export class AuthorizationGateway {
   public readonly auditLog: AuditLogStore;
   private readonly approvalBaseUrl: string;
   private readonly failSafeStopMaxPerMinute: number;
+  private readonly maxStateMapEntries: number;
 
   private readonly approvals = new Map<string, PasskeyApprovalRecord>();
   private readonly envelopes = new Map<string, AutonomyEnvelope>();
   private readonly destructions = new Map<string, DestructionRequestRecord>();
   private readonly stopRateLog = new Map<string, number[]>();
+  private readonly dailySubjectDeleteCounts = new Map<string, number>();
+  private readonly consumedAssertionIds = new Map<string, number>();
 
   constructor(options: AuthorizationGatewayOptions = {}) {
     this.auditLog = options.auditLog ?? new AuditLogStore();
     this.approvalBaseUrl = options.approvalBaseUrl ?? 'https://console.ugokilink.invalid/approvals';
     this.failSafeStopMaxPerMinute = options.failSafeStopMaxPerMinute ?? 30;
+    this.maxStateMapEntries = Math.max(16, options.maxStateMapEntries ?? 10_000);
   }
 
   // ---- Interactive Passkey Approval Minting (Rejects Bearer/API/MCP!) ----
@@ -243,7 +279,13 @@ export class AuthorizationGateway {
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
     };
-    this.approvals.set(approvalId, record);
+    setBoundedMap(
+      this.approvals,
+      approvalId,
+      record,
+      this.maxStateMapEntries,
+      (v) => Boolean(v.consumedAt) || Date.parse(v.expiresAt) <= now.getTime()
+    );
 
     this.auditLog.append({
       timestamp: now.toISOString(),
@@ -386,7 +428,13 @@ export class AuthorizationGateway {
       active: true,
     };
 
-    this.envelopes.set(envelopeId, envelope);
+    setBoundedMap(
+      this.envelopes,
+      envelopeId,
+      envelope,
+      this.maxStateMapEntries,
+      (v) => !v.active || Boolean(v.terminatedBy)
+    );
     return { ok: true, envelope };
   }
 
@@ -715,38 +763,69 @@ export class AuthorizationGateway {
         };
       }
       recent.push(now.getTime());
-      this.stopRateLog.set(key, recent);
+      setBoundedMap(this.stopRateLog, key, recent, this.maxStateMapEntries);
       return this.allow(req, now, 'R1_FAIL_SAFE_STOP_ALLOWED');
     }
 
     return this.allow(req, now, 'R1_DRAFT_ALLOWED');
   }
 
+  private consumeVerifiedPasskeyApproval(
+    req: AuthorizationRequest,
+    approvalId: string,
+    actionPayload: unknown,
+    now: Date,
+    approvalUrl: string
+  ):
+    | { readonly ok: true; readonly approval: PasskeyApprovalRecord }
+    | { readonly ok: false; readonly decision: AuthorizationDecision } {
+    const { actionHash, renderedDiffHash } = computeActionAndDiffHash(req.action, actionPayload);
+    const apr = this.approvals.get(approvalId);
+    if (
+      !apr ||
+      apr.tenantId !== req.principal.tenantId ||
+      (req.resource.siteId && apr.siteId !== '*' && apr.siteId !== req.resource.siteId)
+    ) {
+      return { ok: false, decision: this.denyPending(req, now, 'APPROVAL_NOT_FOUND', approvalUrl) };
+    }
+    if (apr.consumedAt) {
+      return {
+        ok: false,
+        decision: this.denyPending(req, now, 'APPROVAL_ALREADY_CONSUMED', approvalUrl),
+      };
+    }
+    if (new Date(apr.expiresAt).getTime() <= now.getTime()) {
+      return { ok: false, decision: this.denyPending(req, now, 'APPROVAL_EXPIRED', approvalUrl) };
+    }
+    if (apr.actionHash !== actionHash || apr.renderedDiffHash !== renderedDiffHash) {
+      return {
+        ok: false,
+        decision: this.denyPending(req, now, 'APPROVAL_DIFF_MISMATCH', approvalUrl),
+      };
+    }
+    apr.consumedAt = now.toISOString();
+    return { ok: true, approval: apr };
+  }
+
   private enforceR2(req: AuthorizationRequest, now: Date): AuthorizationDecision {
-    const { actionHash, renderedDiffHash } = computeActionAndDiffHash(req.action, req.renderedDiff);
+    const { renderedDiffHash } = computeActionAndDiffHash(req.action, req.renderedDiff);
     const approvalUrl = `${this.approvalBaseUrl}?tenant=${encodeURIComponent(req.principal.tenantId)}&action=${encodeURIComponent(req.action)}&diff=${renderedDiffHash.slice(0, 16)}`;
 
     // Path A: Valid single-use human passkey approval record
     if (req.passkeyApprovalId) {
-      const apr = this.approvals.get(req.passkeyApprovalId);
-      if (
-        !apr ||
-        apr.tenantId !== req.principal.tenantId ||
-        (req.resource.siteId && apr.siteId !== req.resource.siteId)
-      ) {
-        return this.denyPending(req, now, 'APPROVAL_NOT_FOUND', approvalUrl);
+      const consumed = this.consumeVerifiedPasskeyApproval(
+        req,
+        req.passkeyApprovalId,
+        req.renderedDiff,
+        now,
+        approvalUrl
+      );
+      if (!consumed.ok) {
+        return consumed.decision;
       }
-      if (apr.consumedAt) {
-        return this.denyPending(req, now, 'APPROVAL_ALREADY_CONSUMED', approvalUrl);
-      }
-      if (new Date(apr.expiresAt).getTime() <= now.getTime()) {
-        return this.denyPending(req, now, 'APPROVAL_EXPIRED', approvalUrl);
-      }
-      if (apr.actionHash !== actionHash || apr.renderedDiffHash !== renderedDiffHash) {
-        return this.denyPending(req, now, 'APPROVAL_DIFF_MISMATCH', approvalUrl);
-      }
-      apr.consumedAt = now.toISOString();
-      return this.allow(req, now, 'R2_APPROVED_BY_PASSKEY', { approvalId: apr.approvalId });
+      return this.allow(req, now, 'R2_APPROVED_BY_PASSKEY', {
+        approvalId: consumed.approval.approvalId,
+      });
     }
 
     // Path B: Active Autonomy Envelope + sender-constrained credential
@@ -903,29 +982,64 @@ export class AuthorizationGateway {
       return this.deny403(req, now, 'DESTRUCTION_SPEC_REQUIRED', 'R4 destruction requires scope and reason');
     }
 
-    // Bulk subject deletion above key cap requires passkey approval
+    const diffPayload = req.renderedDiff !== undefined ? req.renderedDiff : dest;
+    const { combinedHash, renderedDiffHash } = computeActionAndDiffHash(req.action, diffPayload);
+    const approvalUrl = `${this.approvalBaseUrl}?tenant=${encodeURIComponent(req.principal.tenantId)}&action=${encodeURIComponent(req.action)}&diff=${renderedDiffHash.slice(0, 16)}`;
+
     const subjectCount = dest.subjectIds?.length ?? 0;
+    const dayUtc = now.toISOString().slice(0, 10);
+    const dailyKey = `${req.principal.tenantId}\u0000${req.principal.credentialId}\u0000${dayUtc}`;
+    const usedToday = this.dailySubjectDeleteCounts.get(dailyKey) ?? 0;
     const dailyCap = req.principal.constraints?.dailyDeleteSubjectsCap;
-    if (
+
+    const overDailySubjectCap =
       dest.scope === 'subject' &&
       dailyCap !== undefined &&
-      subjectCount > dailyCap &&
-      !req.passkeyApprovalId
-    ) {
-      const { renderedDiffHash } = computeActionAndDiffHash(req.action, dest);
-      const approvalUrl = `${this.approvalBaseUrl}?tenant=${encodeURIComponent(req.principal.tenantId)}&action=${encodeURIComponent(req.action)}&diff=${renderedDiffHash.slice(0, 16)}`;
-      return this.denyPending(req, now, 'R4_BULK_DELETION_EXCEEDS_KEY_CAP', approvalUrl);
+      usedToday + subjectCount > dailyCap;
+
+    const isSiteOrTenantDestruction = dest.scope === 'site' || dest.scope === 'tenant';
+    const requiresVerifiedPasskey =
+      isSiteOrTenantDestruction || overDailySubjectCap || req.passkeyApprovalId !== undefined;
+
+    if (requiresVerifiedPasskey) {
+      if (req.passkeyApprovalId !== undefined) {
+        if (!req.passkeyApprovalId.trim()) {
+          return this.denyPending(req, now, 'APPROVAL_NOT_FOUND', approvalUrl);
+        }
+        const consumed = this.consumeVerifiedPasskeyApproval(
+          req,
+          req.passkeyApprovalId,
+          diffPayload,
+          now,
+          approvalUrl
+        );
+        if (!consumed.ok) {
+          return consumed.decision;
+        }
+      } else if (
+        req.principal.credentialKind === 'session_cookie' &&
+        (req.principal.role === 'owner' || req.principal.role === 'admin') &&
+        req.passkeyAssertion
+      ) {
+        const assertionCheck = this.verifyPasskeyAssertion(req.passkeyAssertion, combinedHash, now);
+        if (!assertionCheck.ok) {
+          return this.denyPending(req, now, assertionCheck.code, approvalUrl);
+        }
+      } else {
+        const pendingCode = overDailySubjectCap
+          ? 'R4_BULK_DELETION_EXCEEDS_KEY_CAP'
+          : 'R4_SITE_TENANT_DESTRUCTION_REQUIRES_APPROVAL';
+        return this.denyPending(req, now, pendingCode, approvalUrl);
+      }
     }
 
-    // Site/tenant deletion requires owner/admin or passkey approval
-    if (
-      (dest.scope === 'site' || dest.scope === 'tenant') &&
-      req.principal.credentialKind !== 'session_cookie' &&
-      !req.passkeyApprovalId
-    ) {
-      const { renderedDiffHash } = computeActionAndDiffHash(req.action, dest);
-      const approvalUrl = `${this.approvalBaseUrl}?tenant=${encodeURIComponent(req.principal.tenantId)}&action=${encodeURIComponent(req.action)}&diff=${renderedDiffHash.slice(0, 16)}`;
-      return this.denyPending(req, now, 'R4_SITE_TENANT_DESTRUCTION_REQUIRES_APPROVAL', approvalUrl);
+    if (dest.scope === 'subject' && subjectCount > 0) {
+      setBoundedMap(
+        this.dailySubjectDeleteCounts,
+        dailyKey,
+        usedToday + subjectCount,
+        this.maxStateMapEntries
+      );
     }
 
     const requestId = `del_${crypto.randomBytes(10).toString('hex')}`;
@@ -945,7 +1059,13 @@ export class AuthorizationGateway {
       scheduledAt: now.toISOString(),
       undoWindowEndsAt,
     };
-    this.destructions.set(requestId, record);
+    setBoundedMap(
+      this.destructions,
+      requestId,
+      record,
+      this.maxStateMapEntries,
+      (v) => v.state !== 'scheduled' || Date.parse(v.undoWindowEndsAt) <= now.getTime()
+    );
 
     const entry = this.auditLog.append({
       timestamp: now.toISOString(),
@@ -1075,6 +1195,15 @@ export class AuthorizationGateway {
         reason: 'Passkey assertion does not cover hash(action, rendered_diff)',
       };
     }
+    const replayKey = `${assertion.credentialId}\u0000${assertion.signedChallengeHash}\u0000${assertion.assertedAt}`;
+    if (this.consumedAssertionIds.has(replayKey)) {
+      return {
+        ok: false,
+        code: 'PASSKEY_ASSERTION_REPLAYED',
+        reason: 'Passkey assertion has already been consumed',
+      };
+    }
+    setBoundedMap(this.consumedAssertionIds, replayKey, now.getTime(), this.maxStateMapEntries);
     return { ok: true };
   }
 

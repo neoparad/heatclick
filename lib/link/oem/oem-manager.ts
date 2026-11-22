@@ -435,6 +435,27 @@ export class OemPartnerManager {
       };
     }
 
+    if (!args.principal.effectiveScopes.has('analytics:export')) {
+      return {
+        ok: false,
+        status: 'forbidden',
+        httpStatus: 403,
+        reason: 'missing_scope: analytics:export required for OEM child data export',
+      };
+    }
+
+    if (
+      args.principal.allowedSiteIds !== null &&
+      !args.principal.allowedSiteIds.includes(args.siteId)
+    ) {
+      return {
+        ok: false,
+        status: 'forbidden',
+        httpStatus: 403,
+        reason: 'site_not_in_credential_allowlist',
+      };
+    }
+
     const res = await this.oemWarehouseExporter.exportBatch({
       config: {
         exportId: args.exportId,
@@ -485,6 +506,62 @@ export class OemPartnerManager {
 
   public getChildUsage(childTenantId: string): OemChildUsageEntry | undefined {
     return this.childUsage.get(childTenantId);
+  }
+
+  /**
+   * Immediately revokes an OEM partner key AND invalidates all active child exchanged tokens (H-24).
+   */
+  public revokeOemPartnerKey(
+    oemKeyId: string,
+    managementTenantId: string,
+    now: Date = new Date()
+  ): { readonly revoked: boolean; readonly invalidatedChildTokens: number } {
+    const res = this.registry.revokeOemKey(oemKeyId, now);
+    this.auditLog.append({
+      timestamp: now.toISOString(),
+      tenantId: managementTenantId,
+      targetTenantId: managementTenantId,
+      principalId: `oem_mgmt:${oemKeyId}`,
+      credentialKind: 'ugk_oem',
+      credentialId: oemKeyId,
+      action: 'oem.partner.revoke_key',
+      riskClass: 'R4',
+      resourceType: 'oem_key',
+      resourceId: oemKeyId,
+      outcome: res.revoked ? 'allow' : 'deny_404',
+      reason: res.revoked
+        ? `oem_key_revoked_cascaded_${res.invalidatedChildTokens}_child_tokens`
+        : 'oem_key_not_found',
+    });
+    return res;
+  }
+
+  /**
+   * Immediately revokes a child tenant's OEM delegation relationship AND invalidates
+   * all active exchanged child tokens for that child tenant (H-24).
+   */
+  public revokeChildDelegation(
+    childTenantId: string,
+    now: Date = new Date()
+  ): { readonly revoked: boolean; readonly invalidatedChildTokens: number } {
+    const res = this.registry.revokeOemChildRelationship(childTenantId);
+    this.auditLog.append({
+      timestamp: now.toISOString(),
+      tenantId: childTenantId,
+      targetTenantId: childTenantId,
+      principalId: `tenant:${childTenantId}`,
+      credentialKind: 'session_cookie',
+      credentialId: childTenantId,
+      action: 'oem.child_tenant.revoke_delegation',
+      riskClass: 'R4',
+      resourceType: 'child_tenant',
+      resourceId: childTenantId,
+      outcome: res.revoked ? 'allow' : 'deny_404',
+      reason: res.revoked
+        ? `child_delegation_revoked_cascaded_${res.invalidatedChildTokens}_child_tokens`
+        : 'child_tenant_not_found',
+    });
+    return res;
   }
 
   public getAuditLog(): AuditLogStore {

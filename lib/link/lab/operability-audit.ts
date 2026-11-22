@@ -439,6 +439,35 @@ export function runOperabilityAudit(
     unlock: 'Run full lab render with layout geometry & occlusion checks for >= 95% of conversion-path elements',
   }
 
+  const noElementsGate: UnmetGate = {
+    id: 'no_conversion_path_elements',
+    required: 1,
+    observed: 0,
+    reason: 'no_conversion_path_elements',
+    unlock: 'render_page_with_conversion_elements',
+  }
+
+  const wrapDataNumerics = (node: unknown): unknown => {
+    if (typeof node === 'number' && Number.isFinite(node)) {
+      return metric(node)
+    }
+    if (node === null || node === undefined || typeof node !== 'object') {
+      return node
+    }
+    if (Array.isArray(node)) {
+      return node.map((item) => wrapDataNumerics(item))
+    }
+    const obj = node as Record<string, unknown>
+    if (obj.__untrusted === true || obj.__verified_metric === true) {
+      return node
+    }
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(obj)) {
+      out[k] = wrapDataNumerics(v)
+    }
+    return out
+  }
+
   const measures: Record<string, MeasureInput<VerifiedNumericLeaf>> = {
     conversion_elements_audited: {
       value: metric(total),
@@ -452,7 +481,7 @@ export function runOperabilityAudit(
       value: total === 0 ? null : metric(threeChannelCoverage),
       unit: 'ratio',
       status: total === 0 ? 'not_applicable' : 'ok',
-      ...(total === 0 ? { reason: 'no_conversion_path_elements' } : {}),
+      ...(total === 0 ? { reason: 'no_conversion_path_elements', unmet_gates: [noElementsGate] } : {}),
       evidence: observedEvidence,
       sample: total === 0 ? null : { n: total, unit_kind: 'conversion_element' },
       interval: null,
@@ -461,7 +490,7 @@ export function runOperabilityAudit(
       value: total === 0 ? null : metric(Number((a11yOkCount / total).toFixed(4))),
       unit: 'ratio',
       status: total === 0 ? 'not_applicable' : 'ok',
-      ...(total === 0 ? { reason: 'no_conversion_path_elements' } : {}),
+      ...(total === 0 ? { reason: 'no_conversion_path_elements', unmet_gates: [noElementsGate] } : {}),
       evidence: observedEvidence,
       sample: total === 0 ? null : { n: total, unit_kind: 'conversion_element' },
       interval: null,
@@ -470,7 +499,7 @@ export function runOperabilityAudit(
       value: total === 0 ? null : metric(Number((domOkCount / total).toFixed(4))),
       unit: 'ratio',
       status: total === 0 ? 'not_applicable' : 'ok',
-      ...(total === 0 ? { reason: 'no_conversion_path_elements' } : {}),
+      ...(total === 0 ? { reason: 'no_conversion_path_elements', unmet_gates: [noElementsGate] } : {}),
       evidence: observedEvidence,
       sample: total === 0 ? null : { n: total, unit_kind: 'conversion_element' },
       interval: null,
@@ -482,6 +511,7 @@ export function runOperabilityAudit(
             unit: 'ratio',
             status: 'not_applicable',
             reason: 'no_conversion_path_elements',
+            unmet_gates: [noElementsGate],
             evidence: observedEvidence,
             sample: null,
             interval: null,
@@ -595,7 +625,7 @@ export function runOperabilityAudit(
       skel_fp: render.segmenter_output.skel_fp,
       segmenter_hash: render.segmenter_hash,
       gate_act_g19_passed: gateActG19Passed,
-      elements: assessments,
+      elements: wrapDataNumerics(assessments),
     },
   })
 

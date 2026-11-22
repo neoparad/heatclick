@@ -22,6 +22,7 @@ export {
   ALLOWED_INSERTABLE_TAGS,
   FORBIDDEN_HOST_TAGS,
   ALLOWED_SET_ATTR_NAMES,
+  ALLOWED_INSERT_ATTR_NAMES,
   ALLOWED_STYLE_PROPERTIES,
   validateClosedGrammarAction,
   validateAffiliateBindingsAgainstOfflineAllowlist,
@@ -32,6 +33,11 @@ export {
 } from './grammar-validator';
 export {
   SignerPolicyError,
+  SignerCasConflictError,
+  InMemoryBundleStateStore,
+  SignerService,
+  computeRelaxationDiffSha256,
+  createSignedRelaxationApproval,
   signReleaseManifest,
   verifyReleaseManifest,
   signConfigBundle,

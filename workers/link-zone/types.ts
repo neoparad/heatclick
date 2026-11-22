@@ -78,6 +78,7 @@ export interface ZoneObservationRecord {
 }
 
 export interface ZoneSelfTestReport {
+  readonly status: 'ok';
   readonly release_hash: string;
   readonly abi: number;
   readonly conformance_passed: boolean;
@@ -95,6 +96,14 @@ export interface ZoneSelfTestReport {
   };
 }
 
+export interface ZonePublicSelfTestResponse {
+  readonly status: 'ok';
+  readonly abi: number;
+  readonly conformance_passed: boolean;
+  readonly delivery_before_capture: true;
+  readonly watchdog_remove_p95_target_s: 180;
+}
+
 export interface VerifiedLabToken {
   readonly run_id: string;
   readonly purpose: 'render' | 'install_probe' | 'canary_visit' | 'preflight' | 'agent_run' | 'panel';
@@ -107,6 +116,11 @@ export interface ZoneWorkerDeps {
   readonly abi: number;
   /** Per-site integrity secret `ugk_edge_*`; sub-keys are derived per function (D-24). */
   readonly edgeIntegritySecret: string;
+  /**
+   * Optional dedicated diagnostic token required on `/_ugk/selftest` ([L-05]).
+   * Defaults to the derived `selftestToken` sub-key from `edgeIntegritySecret`.
+   */
+  readonly selftestDiagnosticToken?: string;
   readonly modules: ZoneModuleConfig;
   readonly budgets?: Partial<ZoneBudgetConfig>;
   /** Default 0.01 (1% bypass comparison arm, `del.zone_passthrough_share`). */

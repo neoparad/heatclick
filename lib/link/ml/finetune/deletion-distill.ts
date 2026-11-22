@@ -28,6 +28,7 @@ import {
   type Int8ModelArtifactPayload,
   type SignedInt8ModelArtifact,
 } from '../foundation/int8-tree-runtime';
+import { scanDeepProhibitedProvenance } from './dataset-builder';
 
 export const EXCLUSION_SLA_MS = 24 * 3_600_000; // 24 hours (§8.14)
 export const DELETION_CERTIFICATE_SLA_MS = 14 * 86_400_000; // 14 days (§8.14)
@@ -251,13 +252,18 @@ export function distillInHouseModelToInt8Classifier(params: {
     throw new Error('Invariant broken: Decision D-31b must remain permanently prohibited');
   }
 
-  // HARD TEACHER GUARD: NEVER allow Jev as teacher!
+  // HARD TEACHER GUARD ([M-18]): Unbounded-depth explicit stack scan over teacher & params!
+  const deepScan = scanDeepProhibitedProvenance(params.teacher);
   if (
     params.teacher.origin === 'jev_external_service' ||
     params.teacher.derived_from_jev === true ||
-    /jev/i.test(params.teacher.teacher_id)
+    /jev/i.test(params.teacher.teacher_id) ||
+    deepScan.hasJevProvenance ||
+    deepScan.hasJevTeacher
   ) {
-    throw new JevTeacherProhibitedError(params.teacher.teacher_id);
+    throw new JevTeacherProhibitedError(
+      params.teacher.teacher_id || deepScan.matchedJevDetail || 'jev'
+    );
   }
 
   // Ensure license & notice from the teacher/base model are bundled in the distributed classifier

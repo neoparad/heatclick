@@ -11,12 +11,12 @@
  *    explicitly naming every unreachable class and §5.12 external-export status
  */
 
+import * as crypto from 'node:crypto';
 import { getConstant } from '../../../packages/contract/ledgers';
 import {
   assertDeletionPlanCoverage,
   CANONICAL_SCHEMA,
   generateDeletionPlan,
-  sha256Hex,
   type DeletionPlan,
   type DeletionTableEntry,
   type ExternalStoreDeletionSpec,
@@ -27,6 +27,22 @@ export type DeletionSubjectKind =
   | 'member_hash'
   | 'external_id'
   | 'ga_client_id';
+
+/**
+ * Canonical RFC 2104 HMAC-SHA256 subject identifier digest shared between
+ * identity ingestion and 14-day subject erasure (`H-19`).
+ */
+export function computeTenantSubjectHmac(
+  secretSalt: string,
+  tenantId: string,
+  subjectKind: DeletionSubjectKind,
+  rawSubjectValue: string
+): string {
+  return crypto
+    .createHmac('sha256', secretSalt)
+    .update(`${tenantId}:${subjectKind}:${rawSubjectValue}`, 'utf8')
+    .digest('hex');
+}
 
 export type DeletionRequestState =
   | 'scheduled'
@@ -131,8 +147,11 @@ export class TenantKeyVersionRegistry {
     const versions = this.getSearchableKeyVersions(tenantId);
     return versions.map((kv) => ({
       keyVersion: kv.keyVersion,
-      hmacHex: sha256Hex(
-        `ugk-hmac-v${kv.keyVersion}:${tenantId}:${kv.secretSalt}:${subjectKind}:${rawSubjectValue}`
+      hmacHex: computeTenantSubjectHmac(
+        kv.secretSalt,
+        tenantId,
+        subjectKind,
+        rawSubjectValue
       ),
     }));
   }
@@ -275,6 +294,68 @@ export interface DeletionStoreAdapter {
   }): Promise<readonly ExportSinkDeletionNotification[]>;
 }
 
+export interface DownstreamDeletionSinks {
+  purgeLiveDurableObject?(args: {
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly unitIds: readonly string[];
+    readonly pvIds: readonly string[];
+    readonly keyedDigests: readonly KeyedSubjectDigest[];
+    readonly deletionEpoch: number;
+    readonly nowMs: number;
+  }): Promise<number> | number;
+
+  purgeContinuousStreams?(args: {
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly keyedDigests: readonly KeyedSubjectDigest[];
+    readonly deletionEpoch: number;
+    readonly nowMs: number;
+  }): Promise<number> | number;
+
+  purgeEcOrderSummary?(args: {
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly resolvedKeys: ResolvedSubjectKeys;
+    readonly keyedDigests: readonly KeyedSubjectDigest[];
+    readonly deletionEpoch: number;
+    readonly nowMs: number;
+  }): Promise<number> | number;
+
+  purgeHeatmapCache?(args: {
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly pvHoursMs: readonly number[];
+    readonly deletionEpoch: number;
+    readonly nowMs: number;
+  }): Promise<number> | number;
+
+  purgeAskAndMlFeatureCache?(args: {
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly deletionEpoch: number;
+    readonly nowMs: number;
+  }): Promise<number> | number;
+
+  registerWalReplayTombstones?(args: {
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly pvIds: readonly string[];
+    readonly keyedDigests: readonly KeyedSubjectDigest[];
+    readonly deletionEpoch: number;
+    readonly purgedAtMs: number;
+  }): Promise<void> | void;
+}
+
+export interface DownstreamPurgeSummary {
+  readonly liveDoUnitsPurged: number;
+  readonly continuousStreamItemsPurged: number;
+  readonly ecOrderSummariesPurged: number;
+  readonly heatmapCacheEntriesPurged: number;
+  readonly askAndMlCacheEntriesPurged: number;
+  readonly walReplayTombstonesRegistered: boolean;
+}
+
 export interface DeletionCertificate {
   readonly certificateVersion: 1;
   readonly requestId: string;
@@ -299,6 +380,7 @@ export interface DeletionCertificate {
   readonly externalStoreResults: readonly ExternalStoreDeletionResult[];
   readonly exportNotifications: readonly ExportSinkDeletionNotification[];
   readonly unreachableClasses: DeletionPlan['unreachableClasses'];
+  readonly downstreamPurgeSummary?: DownstreamPurgeSummary;
 }
 
 export interface DeletionRequestRecord {
@@ -337,6 +419,14 @@ interface InternalRequestState {
   externalStoreResults: readonly ExternalStoreDeletionResult[];
   exportNotifications: readonly ExportSinkDeletionNotification[];
   keyVersionsSearched: readonly number[];
+  downstreamSummary: {
+    liveDoUnitsPurged: number;
+    continuousStreamItemsPurged: number;
+    ecOrderSummariesPurged: number;
+    heatmapCacheEntriesPurged: number;
+    askAndMlCacheEntriesPurged: number;
+    walReplayTombstonesRegistered: boolean;
+  };
 }
 
 export class DeletionExecutionEngine {
@@ -352,7 +442,8 @@ export class DeletionExecutionEngine {
 
   public constructor(
     private readonly storeAdapter: DeletionStoreAdapter,
-    private readonly keyRegistry: TenantKeyVersionRegistry
+    private readonly keyRegistry: TenantKeyVersionRegistry,
+    private readonly downstreamSinks?: DownstreamDeletionSinks
   ) {
     this.plan = generateDeletionPlan(CANONICAL_SCHEMA);
     assertDeletionPlanCoverage(CANONICAL_SCHEMA, this.plan);
@@ -436,6 +527,14 @@ export class DeletionExecutionEngine {
       externalStoreResults: [],
       exportNotifications: [],
       keyVersionsSearched: keyedDigests.map((d) => d.keyVersion),
+      downstreamSummary: {
+        liveDoUnitsPurged: 0,
+        continuousStreamItemsPurged: 0,
+        ecOrderSummariesPurged: 0,
+        heatmapCacheEntriesPurged: 0,
+        askAndMlCacheEntriesPurged: 0,
+        walReplayTombstonesRegistered: false,
+      },
     });
 
     return record;
@@ -463,6 +562,29 @@ export class DeletionExecutionEngine {
       keyedDigests: internal.keyedDigests,
       deletionEpoch: internal.record.deletionEpoch,
     });
+
+    if (this.downstreamSinks?.purgeLiveDurableObject) {
+      const n = await this.downstreamSinks.purgeLiveDurableObject({
+        tenantId: internal.record.tenantId,
+        siteId: internal.record.siteId,
+        unitIds: [],
+        pvIds: [],
+        keyedDigests: internal.keyedDigests,
+        deletionEpoch: internal.record.deletionEpoch,
+        nowMs,
+      });
+      internal.downstreamSummary.liveDoUnitsPurged += n;
+    }
+    if (this.downstreamSinks?.purgeContinuousStreams) {
+      const n = await this.downstreamSinks.purgeContinuousStreams({
+        tenantId: internal.record.tenantId,
+        siteId: internal.record.siteId,
+        keyedDigests: internal.keyedDigests,
+        deletionEpoch: internal.record.deletionEpoch,
+        nowMs,
+      });
+      internal.downstreamSummary.continuousStreamItemsPurged += n;
+    }
 
     internal.ecMemberDeleted = maskOutcome.ecMemberSummaryDeleted;
     internal.edgeCachePurged = maskOutcome.edgeCacheKeysPurged;
@@ -604,6 +726,60 @@ export class DeletionExecutionEngine {
       nowMs,
     });
 
+    if (this.downstreamSinks?.purgeLiveDurableObject) {
+      const n = await this.downstreamSinks.purgeLiveDurableObject({
+        tenantId: internal.record.tenantId,
+        siteId: internal.record.siteId,
+        unitIds: resolvedKeys.unitIds,
+        pvIds: resolvedKeys.pvIds,
+        keyedDigests,
+        deletionEpoch: internal.record.deletionEpoch,
+        nowMs,
+      });
+      internal.downstreamSummary.liveDoUnitsPurged += n;
+    }
+    if (this.downstreamSinks?.purgeEcOrderSummary) {
+      const n = await this.downstreamSinks.purgeEcOrderSummary({
+        tenantId: internal.record.tenantId,
+        siteId: internal.record.siteId,
+        resolvedKeys,
+        keyedDigests,
+        deletionEpoch: internal.record.deletionEpoch,
+        nowMs,
+      });
+      internal.downstreamSummary.ecOrderSummariesPurged += n;
+    }
+    if (this.downstreamSinks?.purgeHeatmapCache) {
+      const n = await this.downstreamSinks.purgeHeatmapCache({
+        tenantId: internal.record.tenantId,
+        siteId: internal.record.siteId,
+        pvHoursMs: resolvedKeys.touchedPvHoursMs,
+        deletionEpoch: internal.record.deletionEpoch,
+        nowMs,
+      });
+      internal.downstreamSummary.heatmapCacheEntriesPurged += n;
+    }
+    if (this.downstreamSinks?.purgeAskAndMlFeatureCache) {
+      const n = await this.downstreamSinks.purgeAskAndMlFeatureCache({
+        tenantId: internal.record.tenantId,
+        siteId: internal.record.siteId,
+        deletionEpoch: internal.record.deletionEpoch,
+        nowMs,
+      });
+      internal.downstreamSummary.askAndMlCacheEntriesPurged += n;
+    }
+    if (this.downstreamSinks?.registerWalReplayTombstones) {
+      await this.downstreamSinks.registerWalReplayTombstones({
+        tenantId: internal.record.tenantId,
+        siteId: internal.record.siteId,
+        pvIds: resolvedKeys.pvIds,
+        keyedDigests,
+        deletionEpoch: internal.record.deletionEpoch,
+        purgedAtMs: nowMs,
+      });
+      internal.downstreamSummary.walReplayTombstonesRegistered = true;
+    }
+
     internal.tableResults = tableResults;
     internal.externalStoreResults = externalStoreResults;
     internal.exportNotifications = exportNotifications;
@@ -668,6 +844,7 @@ export class DeletionExecutionEngine {
       externalStoreResults: [...internal.externalStoreResults],
       exportNotifications: [...internal.exportNotifications],
       unreachableClasses: [...this.plan.unreachableClasses],
+      downstreamPurgeSummary: { ...internal.downstreamSummary },
     };
 
     // Redact raw subject identifier once certified

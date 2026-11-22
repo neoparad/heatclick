@@ -19,10 +19,14 @@ import {
   type SerializedResponseEnvelope,
   type VerifiedNumericLeaf,
 } from '../../packages/contract/response';
-import { CANONICAL_SCHEMA } from '../../packages/contract/schema';
+import {
+  CANONICAL_SCHEMA,
+  normalizeCollectionLane,
+} from '../../packages/contract/schema';
 import type { DataRegion } from '../link-wal';
 import {
   InMemoryDurableObjectState,
+  type AcceptedLiveLane,
   type DurableObjectStateLike,
   type LiveIngestEvent,
   type LiveMinuteBucketSnapshot,
@@ -31,6 +35,14 @@ import {
   type OnboardingVerifyVisitRecord,
   type TelemetryLane,
 } from './types';
+
+export function resolveLiveTelemetryLane(raw: AcceptedLiveLane | string): TelemetryLane {
+  if (raw === 'visual_replay') return 'visual_replay';
+  const canonical = normalizeCollectionLane(raw);
+  if (canonical === 'standard') return 'standard_telemetry';
+  if (canonical === 'customer_defined') return 'customer_events';
+  return 'visual_replay';
+}
 
 export const LIVE_WINDOW_MINUTES = 30;
 export const MINUTE_MS = 60_000;
@@ -78,7 +90,7 @@ export interface LiveIngestReceipt {
 
 export interface LiveQueryOptions {
   readonly nowMs?: number;
-  readonly laneFilter?: TelemetryLane;
+  readonly laneFilter?: AcceptedLiveLane;
   readonly includePerMinuteSeries?: boolean;
 }
 
@@ -201,12 +213,27 @@ export class SiteLiveDurableObject {
    */
   public ingest(event: LiveIngestEvent, nowMs = event.receivedAtMs): LiveIngestReceipt {
     const minuteStartMs = floorMinuteMs(event.receivedAtMs);
+    let normalizedLane: TelemetryLane;
+    try {
+      normalizedLane = resolveLiveTelemetryLane(event.lane);
+    } catch {
+      return {
+        accepted: false,
+        routedTo: 'rejected_scope',
+        lane: 'standard_telemetry',
+        minuteStartMs,
+        deduplicated: false,
+        excludedFromHumanTotals: true,
+        excludedFromBillablePvs: true,
+        reason: `Invalid collection lane: ${String(event.lane)}`,
+      };
+    }
 
     if (event.tenantId !== this.tenantId || event.siteId !== this.siteId) {
       return {
         accepted: false,
         routedTo: 'rejected_scope',
-        lane: event.lane,
+        lane: normalizedLane,
         minuteStartMs,
         deduplicated: false,
         excludedFromHumanTotals: true,
@@ -219,7 +246,7 @@ export class SiteLiveDurableObject {
       return {
         accepted: false,
         routedTo: 'rejected_scope',
-        lane: event.lane,
+        lane: normalizedLane,
         minuteStartMs,
         deduplicated: false,
         excludedFromHumanTotals: true,
@@ -237,6 +264,32 @@ export class SiteLiveDurableObject {
     const hasLabMarker = Boolean(event.labToken) || Boolean(event.labRunId);
     if (hasLabMarker) {
       const token = event.labToken;
+      if (token) {
+        if (token.tenantId !== this.tenantId || token.siteId !== this.siteId) {
+          return {
+            accepted: false,
+            routedTo: 'rejected_scope',
+            lane: normalizedLane,
+            minuteStartMs,
+            deduplicated: false,
+            excludedFromHumanTotals: true,
+            excludedFromBillablePvs: true,
+            reason: 'lab_token_tenant_or_site_mismatch',
+          };
+        }
+        if (token.expiresAtMs <= nowMs) {
+          return {
+            accepted: false,
+            routedTo: 'rejected_scope',
+            lane: normalizedLane,
+            minuteStartMs,
+            deduplicated: false,
+            excludedFromHumanTotals: true,
+            excludedFromBillablePvs: true,
+            reason: 'lab_token_expired',
+          };
+        }
+      }
       const isOnboarding = token?.purpose === 'onboarding_verify';
       const dedupeKey = `${token?.tokenId ?? event.labRunId ?? 'lab'}:${event.unitId}`;
       const alreadySeen = bucket.labExcludedIds.has(dedupeKey);
@@ -251,7 +304,7 @@ export class SiteLiveDurableObject {
           tenantId: this.tenantId,
           siteId: this.siteId,
           unitId: event.unitId,
-          lane: event.lane,
+          lane: normalizedLane,
           consentMode: event.consentMode,
           occurredAtMs,
           observedAtMs: nowMs,
@@ -264,7 +317,7 @@ export class SiteLiveDurableObject {
         return {
           accepted: true,
           routedTo: 'onboarding_verify_lane',
-          lane: event.lane,
+          lane: normalizedLane,
           minuteStartMs,
           deduplicated: alreadySeen,
           excludedFromHumanTotals: true,
@@ -279,7 +332,7 @@ export class SiteLiveDurableObject {
       return {
         accepted: true,
         routedTo: 'lab_lane',
-        lane: event.lane,
+        lane: normalizedLane,
         minuteStartMs,
         deduplicated: alreadySeen,
         excludedFromHumanTotals: true,
@@ -292,7 +345,7 @@ export class SiteLiveDurableObject {
       return {
         accepted: false,
         routedTo: 'rejected_scope',
-        lane: event.lane,
+        lane: normalizedLane,
         minuteStartMs,
         deduplicated: false,
         excludedFromHumanTotals: true,
@@ -301,8 +354,8 @@ export class SiteLiveDurableObject {
       };
     }
 
-    // 3. Route strictly by lane (never mix lanes!)
-    if (event.lane === 'standard_telemetry') {
+    // 3. Route strictly by normalized lane (never mix lanes!)
+    if (normalizedLane === 'standard_telemetry') {
       const existingPv = this.pvStates.get(event.unitId);
       const billableNow = isBillableTrust(event.trust) && !event.abuseHold;
 
@@ -324,7 +377,7 @@ export class SiteLiveDurableObject {
         return {
           accepted: true,
           routedTo: 'human_lane',
-          lane: event.lane,
+          lane: normalizedLane,
           minuteStartMs,
           deduplicated: false,
           excludedFromHumanTotals: false,
@@ -352,7 +405,7 @@ export class SiteLiveDurableObject {
       return {
         accepted: true,
         routedTo: 'human_lane',
-        lane: event.lane,
+        lane: normalizedLane,
         minuteStartMs: existingPv.firstMinuteMs,
         deduplicated: true,
         excludedFromHumanTotals: false,
@@ -360,13 +413,13 @@ export class SiteLiveDurableObject {
       };
     }
 
-    if (event.lane === 'customer_events') {
+    if (normalizedLane === 'customer_events') {
       const seen = bucket.customerEventIds.has(event.unitId);
       bucket.customerEventIds.add(event.unitId);
       return {
         accepted: true,
         routedTo: 'human_lane',
-        lane: event.lane,
+        lane: normalizedLane,
         minuteStartMs,
         deduplicated: seen,
         excludedFromHumanTotals: false,
@@ -380,12 +433,38 @@ export class SiteLiveDurableObject {
     return {
       accepted: true,
       routedTo: 'human_lane',
-      lane: event.lane,
+      lane: normalizedLane,
       minuteStartMs,
       deduplicated: seen,
       excludedFromHumanTotals: false,
       excludedFromBillablePvs: true,
     };
+  }
+
+  /**
+   * Immediately purges deleted subject PV / event / replay IDs from the 30-minute
+   * live Durable Object sliding window (H-19).
+   */
+  public purgeSubjectUnits(unitIds: ReadonlySet<string> | readonly string[]): number {
+    const targets = unitIds instanceof Set ? unitIds : new Set(unitIds);
+    let purged = 0;
+    for (const id of targets) {
+      if (this.pvStates.delete(id)) {
+        purged += 1;
+      }
+    }
+    for (const bucket of this.buckets.values()) {
+      for (const id of targets) {
+        const hadStd = bucket.standardPvIds.delete(id);
+        bucket.standardBillablePvIds.delete(id);
+        const hadCust = bucket.customerEventIds.delete(id);
+        const hadRep = bucket.visualReplayIds.delete(id);
+        if ((hadCust || hadRep) && !hadStd) {
+          purged += 1;
+        }
+      }
+    }
+    return purged;
   }
 
   /**
@@ -485,7 +564,9 @@ export class SiteLiveDurableObject {
       kid: `edge_live_${this.storageRegion}`,
     });
 
-    const laneFilter = options.laneFilter;
+    const laneFilter = options.laneFilter
+      ? resolveLiveTelemetryLane(options.laneFilter)
+      : undefined;
     const measures: Record<string, MeasureInput<VerifiedNumericLeaf>> = {};
 
     if (!laneFilter || laneFilter === 'standard_telemetry') {
@@ -590,6 +671,26 @@ export class SiteLiveDurableObject {
         ? 0
         : totalLabExcluded / (totalHumanDenominator + totalLabExcluded);
 
+    const dataRef = makeEvidenceRef('live_window_series', LIVE_WINDOW_MINUTES);
+    const brandLiveDataNumbers = (value: unknown): unknown => {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return createDataLayerMetric(value, dataRef.ref_id, {
+          createdAt: windowEndIso,
+        });
+      }
+      if (Array.isArray(value)) {
+        return value.map((item) => brandLiveDataNumbers(item));
+      }
+      if (value !== null && typeof value === 'object') {
+        const out: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+          out[k] = brandLiveDataNumbers(v);
+        }
+        return out;
+      }
+      return value;
+    };
+
     const envelope = buildResponseEnvelope({
       window: {
         start: windowStartIso,
@@ -623,14 +724,14 @@ export class SiteLiveDurableObject {
         collection_gen: 'v3',
       },
       measures,
-      data: {
+      data: brandLiveDataNumbers({
         window_minutes: LIVE_WINDOW_MINUTES,
         lane_separation_enforced: true,
         lab_excluded_events: totalLabExcluded,
         ...(options.includePerMinuteSeries !== false
           ? { per_minute: bucketSnapshots }
           : {}),
-      },
+      }),
     });
 
     const serverProcessingMs = Number((nowPerfMs() - tStart).toFixed(3));

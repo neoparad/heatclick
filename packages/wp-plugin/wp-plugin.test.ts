@@ -4,6 +4,8 @@ import { generateEd25519KeyPair, sha256Hex } from '../../workers/link-signer';
 import {
   WpPluginEngine,
   auditPhpPluginSource,
+  computeWpLocalApprovalDigest,
+  normalizeWpHomeUrl,
   sanitizeWpKsesPost,
   signWpCommand,
 } from './contract';
@@ -551,5 +553,293 @@ describe('packages/wp-plugin — WordPress Companion Plugin Protocol & del.D20 C
     expect(humanEditsPreserved).toBe(humanEditsTotal); // 0 lost human edits
     expect(humanEditConflictsCaught).toBe(humanEditsTotal);
     expect(exactRestores + humanEditConflictsCaught + lockRefusals).toBe(59);
+  });
+
+  test('[C-17] rejects cloud self-asserted owner_wp_admin_confirmed and requires unconsumed local wp_options approval digest within TTL', async () => {
+    const keyPair = await generateEd25519KeyPair();
+    const engine = new WpPluginEngine({
+      pinnedPubKeys: new Map([['k1', keyPair.publicKey]]),
+      tenantId: 'ten_c17',
+      siteId: 'site_c17',
+      homeUrl: 'https://shop.example.jp/',
+      ownerPolicy: {
+        local_stop: false,
+        allowed_auto_classes: ['cta_copy'],
+        daily_apply_cap: 10,
+        require_admin_confirmation_classes: ['touch_indexable_seo', 'change_outbound_hosts', 'price'],
+      },
+    });
+
+    const beforeHtml = '<p><a href="https://shop.example.jp/item">公式を見る</a></p>';
+    const beforeSha = await sha256Hex(beforeHtml);
+    const mod = '2026-11-20T00:00:00.000Z';
+    engine.seedPost({
+      post_id: 777,
+      permalink: '/item-777/',
+      content: beforeHtml,
+      modified_gmt: mod,
+      edit_lock_user_id: null,
+    });
+
+    // 1. Compromised cloud payload sets `owner_wp_admin_confirmed: true` AND claims `cta_copy`
+    // while changing outbound host to an external site -> MUST BE REJECTED (403)!
+    const replacement = '<a href="https://evil-affiliate.example.org/steal">公式を見る</a>';
+    const afterHtml = `<p>${replacement}</p>`;
+    const afterSha = await sha256Hex(afterHtml);
+
+    const cloudBypassEnv = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 1,
+        not_after: futureIso,
+        tenant_id: 'ten_c17',
+        site_id: 'site_c17',
+        home_url: 'https://shop.example.jp',
+        post_id: 777,
+        promotion_id: 'promo_c17_bypass',
+        change_class: 'cta_copy',
+        owner_wp_admin_confirmed: true, // cloud self-assertion MUST NOT be trusted!
+        expected_content_sha256: beforeSha,
+        expected_modified_gmt: mod,
+        byte_start: 3,
+        byte_end: beforeHtml.length - 4,
+        replacement_html: replacement,
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    const bypassRes = await engine.handleSignedCommand(cloudBypassEnv);
+    expect(bypassRes.status).toBe(403);
+    expect(bypassRes.error).toBe('owner_local_policy_requires_admin_confirmation');
+    expect(engine.getPost(777)?.content).toBe(beforeHtml);
+
+    // 2. Local approval without manage_options or without WP nonce -> rejected
+    expect(
+      (
+        await engine.recordLocalWpAdminApproval({
+          hasManageOptionsCapability: false,
+          wpAdminNonceVerified: true,
+          postId: 777,
+          beforeSha256: beforeSha,
+          afterSha256: afterSha,
+          commandSeq: 2,
+        })
+      ).ok
+    ).toBe(false);
+    expect(
+      (
+        await engine.recordLocalWpAdminApproval({
+          hasManageOptionsCapability: true,
+          wpAdminNonceVerified: false,
+          postId: 777,
+          beforeSha256: beforeSha,
+          afterSha256: afterSha,
+          commandSeq: 2,
+        })
+      ).ok
+    ).toBe(false);
+
+    // 3. Genuine local WP-Admin approval (manage_options + WP nonce) for seq=2 + exact before/after SHA-256 -> succeeds once!
+    const nowMs = Date.now();
+    const localApprove = await engine.recordLocalWpAdminApproval({
+      hasManageOptionsCapability: true,
+      wpAdminNonceVerified: true,
+      postId: 777,
+      beforeSha256: beforeSha,
+      afterSha256: afterSha,
+      commandSeq: 2,
+      ttlMs: 300_000,
+      nowMs,
+    });
+    expect(localApprove.ok).toBe(true);
+    expect(localApprove.digest).toBe(
+      await computeWpLocalApprovalDigest({
+        siteId: 'site_c17',
+        postId: 777,
+        beforeSha256: beforeSha,
+        afterSha256: afterSha,
+        commandSeq: 2,
+      })
+    );
+
+    const approvedEnv = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 2,
+        not_after: futureIso,
+        tenant_id: 'ten_c17',
+        site_id: 'site_c17',
+        home_url: 'https://shop.example.jp',
+        post_id: 777,
+        promotion_id: 'promo_c17_2key',
+        change_class: 'change_outbound_hosts',
+        expected_content_sha256: beforeSha,
+        expected_modified_gmt: mod,
+        byte_start: 3,
+        byte_end: beforeHtml.length - 4,
+        replacement_html: replacement,
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    const approvedRes = await engine.handleSignedCommand(approvedEnv, nowMs + 1000);
+    expect(approvedRes.status).toBe(200);
+    expect(engine.getPost(777)?.content).toBe(afterHtml);
+
+    // 4. Static PHP audit rejects any re-introduction of `$payload['owner_wp_admin_confirmed']`
+    const phpPath = path.join(__dirname, 'ugokilink-companion.php');
+    const phpSource = fs.readFileSync(phpPath, 'utf8');
+    const poisonedPhp = `${phpSource}\n<?php $x = $payload['owner_wp_admin_confirmed']; ?>`;
+    expect(auditPhpPluginSource(poisonedPhp).passed).toBe(false);
+  });
+
+  test('[H-08] verifies site_id/home_url BEFORE advancing seq, enforces canonical JSON & 64-byte sig guard, preserves human edit locks, and resets daily_apply_cap per UTC day', async () => {
+    const keyPair = await generateEd25519KeyPair();
+    const siteB = new WpPluginEngine({
+      pinnedPubKeys: new Map([['k1', keyPair.publicKey]]),
+      tenantId: 'ten_1',
+      siteId: 'site_b',
+      homeUrl: 'https://SiteB.Example.jp/',
+      ownerPolicy: {
+        local_stop: false,
+        allowed_auto_classes: ['cta_copy'],
+        daily_apply_cap: 1,
+        require_admin_confirmation_classes: [],
+      },
+    });
+    expect(normalizeWpHomeUrl('https://SiteB.Example.jp/')).toBe('https://siteb.example.jp');
+
+    // 1. Cross-site replay with huge seq=999999 signed by valid key MUST fail 403 BEFORE advancing Site B's lastSeq!
+    const crossSiteEnv = await signWpCommand(
+      {
+        command: 'capabilities',
+        seq: 999_999,
+        not_after: futureIso,
+        tenant_id: 'ten_1',
+        site_id: 'site_a',
+        home_url: 'https://sitea.example.jp',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    const crossRes = await siteB.handleSignedCommand(crossSiteEnv);
+    expect(crossRes.status).toBe(403);
+    expect(crossRes.error).toBe('site_binding_mismatch');
+    expect(siteB.getLastSeq()).toBe(0); // NOT poisoned to 999999!
+
+    // 2. Malformed short/corrupt signature returns 401 (never 500 throw)
+    const shortSigRes = await siteB.handleSignedCommand({
+      ...crossSiteEnv,
+      signature_b64: 'YWJj', // 3 bytes != 64 bytes
+    });
+    expect(shortSigRes.status).toBe(401);
+    expect(shortSigRes.error).toBe('malformed_signature');
+
+    // 3. Site B's legitimate seq=1 still works because cross-site replay did not advance lastSeq
+    const html = '<p>Hello</p>';
+    const sha = await sha256Hex(html);
+    siteB.seedPost({
+      post_id: 88,
+      permalink: '/p88/',
+      content: html,
+      modified_gmt: '2026-11-20T00:00:00.000Z',
+      edit_lock_user_id: 99, // Human editor #99 holds lock!
+    });
+
+    // Human editor's lock MUST NOT be deleted when apply refuses with 409 edit_lock_active
+    const lockedEnv = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 1,
+        not_after: futureIso,
+        tenant_id: 'ten_1',
+        site_id: 'site_b',
+        home_url: 'https://siteb.example.jp/',
+        post_id: 88,
+        change_class: 'cta_copy',
+        expected_content_sha256: sha,
+        expected_modified_gmt: '2026-11-20T00:00:00.000Z',
+        byte_start: 3,
+        byte_end: 8,
+        replacement_html: 'World',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    const lockRes = await siteB.handleSignedCommand(lockedEnv, Date.parse('2026-11-20T10:00:00Z'));
+    expect(lockRes.status).toBe(409);
+    expect(siteB.getPost(88)?.edit_lock_user_id).toBe(99); // Human lock intact!
+
+    // Release human lock, apply on UTC Day 1 (uses 1/1 daily_apply_cap), 2nd apply on Day 1 -> 429, next UTC Day 2 -> 200!
+    siteB.setPostEditLock(88, null);
+    const day1Apply = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 2,
+        not_after: '2026-11-25T00:00:00.000Z',
+        tenant_id: 'ten_1',
+        site_id: 'site_b',
+        home_url: 'https://siteb.example.jp',
+        post_id: 88,
+        change_class: 'cta_copy',
+        expected_content_sha256: sha,
+        expected_modified_gmt: '2026-11-20T00:00:00.000Z',
+        byte_start: 3,
+        byte_end: 8,
+        replacement_html: 'World',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    expect(
+      (await siteB.handleSignedCommand(day1Apply, Date.parse('2026-11-20T12:00:00Z'))).status
+    ).toBe(200);
+
+    const postDay1 = siteB.getPost(88)!;
+    const day1OverCap = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 3,
+        not_after: '2026-11-25T00:00:00.000Z',
+        tenant_id: 'ten_1',
+        site_id: 'site_b',
+        home_url: 'https://siteb.example.jp',
+        post_id: 88,
+        change_class: 'cta_copy',
+        expected_content_sha256: await sha256Hex(postDay1.content),
+        expected_modified_gmt: postDay1.modified_gmt,
+        byte_start: 3,
+        byte_end: 8,
+        replacement_html: 'Again',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    expect(
+      (await siteB.handleSignedCommand(day1OverCap, Date.parse('2026-11-20T18:00:00Z'))).status
+    ).toBe(429);
+
+    const day2Apply = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 4,
+        not_after: '2026-11-25T00:00:00.000Z',
+        tenant_id: 'ten_1',
+        site_id: 'site_b',
+        home_url: 'https://siteb.example.jp',
+        post_id: 88,
+        change_class: 'cta_copy',
+        expected_content_sha256: await sha256Hex(postDay1.content),
+        expected_modified_gmt: postDay1.modified_gmt,
+        byte_start: 3,
+        byte_end: 8,
+        replacement_html: 'Day2!',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    expect(
+      (await siteB.handleSignedCommand(day2Apply, Date.parse('2026-11-21T01:00:00Z'))).status
+    ).toBe(200);
   });
 });

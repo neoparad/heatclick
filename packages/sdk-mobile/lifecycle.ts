@@ -1,20 +1,26 @@
 /**
- * UGOKI LINK v2 — Mobile SDK Lifecycle, Bounded Offline Queue & Immediate Consent-Revocation Wipe
+ * UGOKI LINK v2 — Mobile SDK Lifecycle, Bounded Offline Queue, Pre-Enqueue Trait Drop
+ * & Consent-Downgrade Re-Filter / Immediate Wipe
  *
  * Implements Master Architecture v2 §11.11 item 5 & lane separation rules:
  *   - Screen-name-based transitions (`screen_view`) with `section_join: 'not_applicable'`
  *     and `actor_instrument: 'mobile_app_integrity'`
- *   - Background transition immediately halts active screen timers & flushes permitted buffered frames
+ *   - Drops unapproved `traits` BEFORE enqueuing into memory/disk queue ([H-16])
+ *   - `setConsent` downgrades immediately purge disallowed queued events and strip identifiers
+ *     (`off` wipes 100% of queued events; `cookieless` strips `vid`/`sid`/`traits` and drops
+ *     identity/replay events) ([H-16])
  *   - Bounded offline queue enforcing `maxEvents`, `maxBytes`, and `maxRetentionMs` TTL with
- *     explicit loss-ledger accounting (no silent drops)
- *   - Consent revocation (`revokeConsent()` / mode `'off'`) IMMEDIATELY zeroes the offline queue
- *     WITHOUT transmitting a single queued event
- *   - Enforces consent-mode × purpose matrix (`identify`/`alias`/`group` require `member_link` and are
- *     blocked in `off`, `cookieless`, and `stats_exempt`)
+ *     explicit loss-ledger accounting
  */
 
 import crypto from 'node:crypto';
-import { CANONICAL_SCHEMA, type ConsentMode, type ConsentPurpose } from '@/packages/contract/schema';
+import {
+  CANONICAL_SCHEMA,
+  normalizeCollectionLane,
+  type ConsentMode,
+  type ConsentPurpose,
+} from '@/packages/contract/schema';
+import { isPiiShapedValue } from '@/packages/contract/urlkey';
 import {
   DEFAULT_MOBILE_OFFLINE_CONFIG,
   type MobileDataLane,
@@ -25,6 +31,93 @@ import {
   type MobileSegmentCallType,
 } from './types';
 
+const MOBILE_CONSENT_RANK: Readonly<Record<ConsentMode, number>> = {
+  off: 0,
+  cookieless: 1,
+  stats_exempt: 2,
+  session: 3,
+  full: 4,
+};
+
+const MODE_DISALLOWED_PURPOSES: Readonly<Record<ConsentMode, ReadonlySet<ConsentPurpose>>> = {
+  off: new Set<ConsentPurpose>([
+    'member_link',
+    'timeline',
+    'page_content',
+    'site_search',
+    'ads',
+    'automation_detection',
+    'pool',
+    'experiment',
+    'personalise',
+    'screen_replay',
+  ]),
+  cookieless: new Set<ConsentPurpose>(['member_link', 'timeline', 'ads', 'screen_replay']),
+  stats_exempt: new Set<ConsentPurpose>([
+    'member_link',
+    'timeline',
+    'ads',
+    'pool',
+    'personalise',
+    'screen_replay',
+  ]),
+  session: new Set<ConsentPurpose>(['member_link']),
+  full: new Set<ConsentPurpose>([]),
+};
+
+const COOKIELESS_STRIP_KEYS = new Set([
+  'vid',
+  'visitorId',
+  'visitor_id',
+  'sid',
+  'sessionId',
+  'session_id',
+  'anonymousId',
+  'anonymous_id',
+  'userId',
+  'user_id',
+  'previousId',
+  'previous_id',
+  'groupId',
+  'group_id',
+  'memberHash',
+  'member_hash',
+  'traits',
+]);
+
+const STATS_EXEMPT_STRIP_KEYS = new Set([
+  'sid',
+  'sessionId',
+  'session_id',
+  'userId',
+  'user_id',
+  'previousId',
+  'previous_id',
+  'groupId',
+  'group_id',
+  'memberHash',
+  'member_hash',
+  'traits',
+]);
+
+const SESSION_PERSISTENT_ID_KEYS = new Set(['vid', 'visitorId', 'visitor_id']);
+const MEMBER_LINK_KEYS = new Set([
+  'userId',
+  'user_id',
+  'previousId',
+  'previous_id',
+  'groupId',
+  'group_id',
+  'memberHash',
+  'member_hash',
+  'traits',
+]);
+
+export interface MobileQueuePersistenceLike {
+  save(events: ReadonlyArray<MobileEnvelopeEvent>): void;
+  clear(): void;
+}
+
 export interface MobileRuntimeOptions {
   readonly platform: MobilePlatform;
   readonly tenantId: string;
@@ -32,9 +125,87 @@ export interface MobileRuntimeOptions {
   readonly consentMode: ConsentMode;
   readonly consentPurposes: ReadonlyArray<ConsentPurpose>;
   readonly consentGeneration?: number;
+  readonly allowedTraitKeys?: ReadonlyArray<string>;
   readonly offlineConfig?: Partial<MobileOfflineQueueConfig>;
   readonly online?: boolean;
+  readonly persistence?: MobileQueuePersistenceLike;
   readonly onTransmit?: (batch: ReadonlyArray<MobileEnvelopeEvent>) => boolean;
+}
+
+function filterAllowedPurposes(
+  mode: ConsentMode,
+  purposes: ReadonlyArray<ConsentPurpose>
+): Set<ConsentPurpose> {
+  const disallowed = MODE_DISALLOWED_PURPOSES[mode];
+  const out = new Set<ConsentPurpose>();
+  for (const p of purposes) {
+    if (!disallowed.has(p)) {
+      out.add(p);
+    }
+  }
+  return out;
+}
+
+function sanitizePayloadForConsentAndTraits(
+  rawPayload: Readonly<Record<string, unknown>>,
+  mode: ConsentMode,
+  purposes: ReadonlySet<ConsentPurpose>,
+  allowedTraitKeys: ReadonlySet<string>
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  const hasMemberLink = purposes.has('member_link');
+
+  for (const [key, val] of Object.entries(rawPayload)) {
+    if (mode === 'cookieless' && COOKIELESS_STRIP_KEYS.has(key)) {
+      continue;
+    }
+    if (mode === 'stats_exempt' && STATS_EXEMPT_STRIP_KEYS.has(key)) {
+      continue;
+    }
+    if (mode === 'session' && SESSION_PERSISTENT_ID_KEYS.has(key)) {
+      continue;
+    }
+    if (!hasMemberLink && MEMBER_LINK_KEYS.has(key)) {
+      continue;
+    }
+
+    if (key === 'traits') {
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        const cleanTraits: Record<string, string | number | boolean> = {};
+        let droppedTraitsCount = 0;
+        for (const [tk, tv] of Object.entries(val as Record<string, unknown>)) {
+          if (!allowedTraitKeys.has(tk)) {
+            droppedTraitsCount += 1;
+            continue;
+          }
+          if (typeof tv === 'string') {
+            if (isPiiShapedValue(tv)) {
+              droppedTraitsCount += 1;
+              continue;
+            }
+            cleanTraits[tk] = tv;
+          } else if (typeof tv === 'number' && Number.isFinite(tv)) {
+            cleanTraits[tk] = tv;
+          } else if (typeof tv === 'boolean') {
+            cleanTraits[tk] = tv;
+          } else {
+            droppedTraitsCount += 1;
+          }
+        }
+        if (Object.keys(cleanTraits).length > 0) {
+          sanitized.traits = cleanTraits;
+        }
+        if (droppedTraitsCount > 0) {
+          sanitized.droppedTraitsCount = droppedTraitsCount;
+        }
+      }
+      continue;
+    }
+
+    sanitized[key] = val;
+  }
+
+  return sanitized;
 }
 
 export class MobileSdkSessionRuntime {
@@ -45,8 +216,10 @@ export class MobileSdkSessionRuntime {
   private consentMode: ConsentMode;
   private consentPurposes: Set<ConsentPurpose>;
   private consentGeneration: number;
+  private readonly allowedTraitKeys: ReadonlySet<string>;
   private readonly offlineConfig: MobileOfflineQueueConfig;
   private online: boolean;
+  private readonly persistence?: MobileQueuePersistenceLike;
   private readonly onTransmit?: (batch: ReadonlyArray<MobileEnvelopeEvent>) => boolean;
 
   private activeScreenName: string | null = null;
@@ -69,13 +242,15 @@ export class MobileSdkSessionRuntime {
     this.tenantId = opts.tenantId;
     this.siteId = opts.siteId;
     this.consentMode = opts.consentMode;
-    this.consentPurposes = new Set(opts.consentPurposes);
+    this.consentPurposes = filterAllowedPurposes(opts.consentMode, opts.consentPurposes);
     this.consentGeneration = opts.consentGeneration ?? 1;
+    this.allowedTraitKeys = new Set(opts.allowedTraitKeys ?? []);
     this.offlineConfig = {
       ...DEFAULT_MOBILE_OFFLINE_CONFIG,
       ...(opts.offlineConfig ?? {}),
     };
     this.online = opts.online ?? true;
+    this.persistence = opts.persistence;
     this.onTransmit = opts.onTransmit;
   }
 
@@ -103,6 +278,10 @@ export class MobileSdkSessionRuntime {
     return this.queue.length;
   }
 
+  public getQueuedEvents(): ReadonlyArray<MobileEnvelopeEvent> {
+    return [...this.queue];
+  }
+
   public getQueuedBytes(): number {
     return this.queuedBytes;
   }
@@ -115,12 +294,108 @@ export class MobileSdkSessionRuntime {
     return { ...this.lossLedger };
   }
 
+  private syncPersistence(): void {
+    if (!this.persistence) return;
+    if (this.consentMode === 'off' || this.consentMode === 'cookieless' || this.queue.length === 0) {
+      this.persistence.clear();
+    } else {
+      this.persistence.save([...this.queue]);
+    }
+  }
+
   public setOnline(online: boolean, nowMs: number = Date.now()): number {
     this.online = online;
     if (online) {
       return this.flush(nowMs);
     }
     return 0;
+  }
+
+  /**
+   * Updates consent dynamically ([H-16]):
+   * - Switching to `'off'` immediately wipes 100% of queued events from memory + disk with zero send.
+   * - Downgrading (`full` -> `session` / `stats_exempt` / `cookieless` or revoking purposes)
+   *   immediately purges queued events that require higher consent (`identify`/`group`/`alias`/replay)
+   *   and strips disallowed identifiers (`vid`/`sid`/`traits`) from remaining queued events!
+   */
+  public setConsent(
+    nextMode: ConsentMode,
+    nextPurposes: ReadonlyArray<ConsentPurpose> = []
+  ): { readonly purgedCount: number; readonly remainingCount: number } {
+    if (nextMode === 'off') {
+      const wipe = this.revokeConsent();
+      return { purgedCount: wipe.wipedQueuedEvents, remainingCount: 0 };
+    }
+
+    const prevMode = this.consentMode;
+    const prevPurposes = new Set(this.consentPurposes);
+    const filteredPurposes = filterAllowedPurposes(nextMode, nextPurposes);
+
+    const isDowngrade =
+      MOBILE_CONSENT_RANK[nextMode] < MOBILE_CONSENT_RANK[prevMode] ||
+      [...prevPurposes].some((p) => !filteredPurposes.has(p));
+
+    this.consentMode = nextMode;
+    this.consentPurposes = filteredPurposes;
+    this.consentGeneration += 1;
+
+    if (!isDowngrade || this.queue.length === 0) {
+      this.syncPersistence();
+      return { purgedCount: 0, remainingCount: this.queue.length };
+    }
+
+    const kept: MobileEnvelopeEvent[] = [];
+    let purgedCount = 0;
+    let totalBytes = 0;
+
+    for (const ev of this.queue) {
+      const isIdentityCall =
+        ev.callType === 'identify' || ev.callType === 'alias' || ev.callType === 'group';
+      if (
+        isIdentityCall &&
+        (nextMode === 'cookieless' ||
+          nextMode === 'stats_exempt' ||
+          !filteredPurposes.has('member_link'))
+      ) {
+        purgedCount += 1;
+        this.lossLedger.droppedRevokedConsent += 1;
+        continue;
+      }
+
+      if (
+        ev.lane === 'screen_replay' &&
+        ((nextMode !== 'full' && nextMode !== 'session') || !filteredPurposes.has('screen_replay'))
+      ) {
+        purgedCount += 1;
+        this.lossLedger.droppedRevokedConsent += 1;
+        continue;
+      }
+
+      const scrubbedPayload = sanitizePayloadForConsentAndTraits(
+        ev.payload,
+        nextMode,
+        filteredPurposes,
+        this.allowedTraitKeys
+      );
+      const updatedBase = {
+        ...ev,
+        consentMode: nextMode,
+        consentPurposes: [...filteredPurposes],
+        consentGeneration: this.consentGeneration,
+        payload: scrubbedPayload,
+      };
+      const { serializedBytes: _oldBytes, ...withoutBytes } = updatedBase;
+      void _oldBytes;
+      const newBytes = Buffer.byteLength(JSON.stringify(withoutBytes), 'utf8');
+      kept.push({ ...withoutBytes, serializedBytes: newBytes });
+      totalBytes += newBytes;
+    }
+
+    this.queue = kept;
+    this.queuedBytes = totalBytes;
+    this.syncPersistence();
+
+    return { purgedCount, remainingCount: this.queue.length };
   }
 
   /**
@@ -138,8 +413,13 @@ export class MobileSdkSessionRuntime {
     this.lossLedger.droppedRevokedConsent += wiped;
     this.queue = [];
     this.queuedBytes = 0;
+    this.persistence?.clear();
 
     return { wipedQueuedEvents: wiped, transmittedDuringWipe: 0 };
+  }
+
+  public optOut(): { readonly wipedQueuedEvents: number; readonly transmittedDuringWipe: 0 } {
+    return this.revokeConsent();
   }
 
   /**
@@ -210,7 +490,7 @@ export class MobileSdkSessionRuntime {
 
   /**
    * Segment-compatible 6 call types (`identify`, `page`, `screen`, `track`, `group`, `alias`)
-   * with strict consent-mode × purpose enforcement (§11.11 lane separation).
+   * with strict consent-mode × purpose enforcement & pre-enqueue unapproved `traits` drop (§11.11 / [H-16]).
    */
   public recordSegmentCall(
     callType: MobileSegmentCallType,
@@ -246,7 +526,7 @@ export class MobileSdkSessionRuntime {
   }
 
   private enqueueEvent(params: {
-    readonly lane: MobileDataLane;
+    readonly lane: MobileDataLane | 'session_replay' | 'custom_event';
     readonly callType: MobileSegmentCallType | 'screen_view';
     readonly screenName: string | null;
     readonly payload: Readonly<Record<string, unknown>>;
@@ -257,13 +537,26 @@ export class MobileSdkSessionRuntime {
       return null;
     }
 
+    const canonicalLane = normalizeCollectionLane(params.lane);
+    if (!canonicalLane) {
+      return null;
+    }
+
     this.pruneExpiredOffline(params.nowMs);
+
+    // [H-16] Drop unapproved `traits` and disallowed consent identifiers BEFORE enqueuing to memory or disk!
+    const sanitizedPayload = sanitizePayloadForConsentAndTraits(
+      params.payload,
+      this.consentMode,
+      this.consentPurposes,
+      this.allowedTraitKeys
+    );
 
     const eventId = `mob_${crypto.randomBytes(8).toString('hex')}`;
     const base = {
       eventId,
       platform: this.platform,
-      lane: params.lane,
+      lane: canonicalLane,
       callType: params.callType,
       tenantId: this.tenantId,
       siteId: this.siteId,
@@ -275,7 +568,7 @@ export class MobileSdkSessionRuntime {
       consentPurposes: [...this.consentPurposes],
       consentGeneration: this.consentGeneration,
       occurredAtMs: params.nowMs,
-      payload: params.payload,
+      payload: sanitizedPayload,
     };
     const serializedBytes = Buffer.byteLength(JSON.stringify(base), 'utf8');
     const event: MobileEnvelopeEvent = { ...base, serializedBytes };
@@ -299,6 +592,7 @@ export class MobileSdkSessionRuntime {
 
     this.queue.push(event);
     this.queuedBytes += serializedBytes;
+    this.syncPersistence();
 
     return event;
   }
@@ -311,6 +605,9 @@ export class MobileSdkSessionRuntime {
       this.queuedBytes = Math.max(0, this.queuedBytes - expired.serializedBytes);
       this.lossLedger.droppedExpired += 1;
       pruned += 1;
+    }
+    if (pruned > 0) {
+      this.syncPersistence();
     }
     return pruned;
   }
@@ -331,6 +628,7 @@ export class MobileSdkSessionRuntime {
     this.transmittedEvents.push(...batch);
     this.queue = [];
     this.queuedBytes = 0;
+    this.syncPersistence();
     return batch.length;
   }
 }

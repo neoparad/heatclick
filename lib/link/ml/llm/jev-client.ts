@@ -71,26 +71,57 @@ const AGGREGATE_STATS_KEYS = new Set([
   'cluster_stats',
 ]);
 
-function inspectJevPayload(obj: unknown, depth = 0): void {
-  if (depth > 6 || obj === null || obj === undefined || typeof obj !== 'object') return;
-  if (Array.isArray(obj)) {
-    for (const item of obj) inspectJevPayload(item, depth + 1);
-    return;
-  }
-  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-    if (v !== undefined && v !== null) {
-      if (VISITOR_KEYS.has(k)) {
-        throw new JevProhibitedPayloadError('visitor_data', [k]);
-      }
-      if (SEARCH_QUERY_KEYS.has(k)) {
-        throw new JevProhibitedPayloadError('search_query', [k]);
-      }
-      if (AGGREGATE_STATS_KEYS.has(k)) {
-        throw new JevProhibitedPayloadError('aggregate_stats', [k]);
-      }
+const MAX_JEV_PAYLOAD_SCAN_NODES = 100_000;
+
+/**
+ * [M-18] Unbounded-depth iterative stack traversal (`WeakSet` cycle guard + 100,000-node fail-closed cap)
+ * ensuring deeply nested visitor data, search queries, or aggregate stats at depth 20+ ALWAYS throw
+ * `JevProhibitedPayloadError`.
+ */
+function inspectJevPayload(root: unknown): void {
+  if (root === null || root === undefined || typeof root !== 'object') return;
+  const visited = new WeakSet<object>();
+  const stack: unknown[] = [root];
+  let scannedNodes = 0;
+
+  while (stack.length > 0) {
+    const curr = stack.pop();
+    if (curr === null || curr === undefined || typeof curr !== 'object') {
+      continue;
     }
-    if (typeof v === 'object' && v !== null) {
-      inspectJevPayload(v, depth + 1);
+    if (visited.has(curr)) {
+      continue;
+    }
+    visited.add(curr);
+    scannedNodes += 1;
+    if (scannedNodes > MAX_JEV_PAYLOAD_SCAN_NODES) {
+      throw new JevProhibitedPayloadError('visitor_data', ['__payload_node_limit_exceeded_100000__']);
+    }
+
+    if (Array.isArray(curr)) {
+      for (let i = curr.length - 1; i >= 0; i -= 1) {
+        stack.push(curr[i]);
+      }
+      continue;
+    }
+
+    const rec = curr as Record<string, unknown>;
+    for (const k of Object.keys(rec)) {
+      const v = rec[k];
+      if (v !== undefined && v !== null) {
+        if (VISITOR_KEYS.has(k)) {
+          throw new JevProhibitedPayloadError('visitor_data', [k]);
+        }
+        if (SEARCH_QUERY_KEYS.has(k)) {
+          throw new JevProhibitedPayloadError('search_query', [k]);
+        }
+        if (AGGREGATE_STATS_KEYS.has(k)) {
+          throw new JevProhibitedPayloadError('aggregate_stats', [k]);
+        }
+        if (typeof v === 'object') {
+          stack.push(v);
+        }
+      }
     }
   }
 }

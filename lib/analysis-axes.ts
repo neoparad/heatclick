@@ -30,7 +30,7 @@ analysisAxes.set('cv_behavior_diff', {
   name: 'CV vs 非CV 行動差分',
   description: 'CVした人としなかった人の行動パターンの違いを抽出',
   category: 'conversion',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'event_sequenceからCVに至る典型パターンを抽出し、3-5個のペルソナに分類してください。各ペルソナの特徴と推奨施策を出力してください。',
   cost: 'heavy',
   query: `
@@ -44,7 +44,7 @@ analysisAxes.set('cv_behavior_diff', {
       count(CASE WHEN event_type = 'click' THEN 1 END) as total_clicks,
       count(CASE WHEN event_type IN ('rage_click','dead_click') THEN 1 END) as friction_clicks
     FROM clickinsight.events
-    WHERE site_id = {site_id:String}
+    WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
     GROUP BY session_id
     ORDER BY converted DESC
     LIMIT 1000
@@ -56,17 +56,17 @@ analysisAxes.set('element_cv_contribution', {
   name: '要素レベルCV寄与度',
   description: 'CVした人がクリックした要素のランキング',
   category: 'conversion',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'CVに寄与している要素と、寄与していない要素を比較し、CTAの改善提案を出してください。',
   cost: 'medium',
   query: `
     SELECT element_text, element_href, element_tag_name,
       count() as click_count, uniq(session_id) as unique_sessions
     FROM clickinsight.events
-    WHERE site_id = {site_id:String} AND event_type = 'click'
+    WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND event_type = 'click'
       AND session_id IN (
         SELECT DISTINCT session_id FROM clickinsight.events
-        WHERE conversion_type IS NOT NULL AND site_id = {site_id:String}
+        WHERE conversion_type IS NOT NULL AND tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       )
     GROUP BY element_text, element_href, element_tag_name
     ORDER BY unique_sessions DESC LIMIT 30
@@ -78,7 +78,7 @@ analysisAxes.set('multi_session_cv', {
   name: 'マルチセッションCV分析',
   description: '何回目の訪問でCVに至るか',
   category: 'conversion',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'CVまでの訪問回数の分布から、リマーケティング戦略と初回/再訪のLP切り替え提案を出してください。',
   cost: 'medium',
   query: `
@@ -87,10 +87,10 @@ analysisAxes.set('multi_session_cv', {
     FROM (
       SELECT session_id, user_id,
         row_number() OVER (PARTITION BY user_id ORDER BY min(timestamp)) as session_rank
-      FROM clickinsight.events WHERE site_id = {site_id:String}
+      FROM clickinsight.events WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
         AND session_id IN (
           SELECT DISTINCT session_id FROM clickinsight.events
-          WHERE conversion_type IS NOT NULL AND site_id = {site_id:String}
+          WHERE conversion_type IS NOT NULL AND tenant_id = {tenant_id:String} AND site_id = {site_id:String}
         )
       GROUP BY session_id, user_id
     )
@@ -103,7 +103,7 @@ analysisAxes.set('lp_source_cv', {
   name: 'LP×流入元×CV',
   description: 'ランディングページと流入元の組み合わせ別CVR',
   category: 'conversion',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'CVRが高い/低いLP×流入元の組み合わせを特定し、広告費の再配分と各LPの改善提案を出してください。',
   cost: 'medium',
   query: `
@@ -117,7 +117,7 @@ analysisAxes.set('lp_source_cv', {
         any(utm_source) as utm_source, any(utm_medium) as utm_medium,
         max(conversion_type IS NOT NULL) as converted,
         max(conversion_value) as conversion_value
-      FROM clickinsight.events WHERE site_id = {site_id:String}
+      FROM clickinsight.events WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       GROUP BY session_id
     )
     GROUP BY landing_page, utm_source, utm_medium
@@ -133,7 +133,7 @@ analysisAxes.set('image_cv_correlation', {
   name: '画像視認×CV相関',
   description: 'CVした人としなかった人の画像ごとの視認時間差',
   category: 'engagement',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'CVとの相関が強い画像を特定し、配置変更・差し替え・強調の具体的提案を出してください。',
   cost: 'medium',
   query: `
@@ -145,10 +145,10 @@ analysisAxes.set('image_cv_correlation', {
     FROM clickinsight.image_visibility iv
     JOIN (
       SELECT session_id, max(conversion_type IS NOT NULL) as converted
-      FROM clickinsight.events WHERE site_id = {site_id:String}
+      FROM clickinsight.events WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       GROUP BY session_id
     ) e ON iv.session_id = e.session_id
-    WHERE iv.site_id = {site_id:String}
+    WHERE iv.tenant_id = {tenant_id:String} AND iv.site_id = {site_id:String}
     GROUP BY iv.image_src, iv.image_alt
     HAVING cv_sessions + noncv_sessions >= 5
     ORDER BY cv_avg_ms - noncv_avg_ms DESC LIMIT 30
@@ -160,7 +160,7 @@ analysisAxes.set('video_cv_correlation', {
   name: '動画視聴×CV',
   description: '動画の視聴到達地点別CVR',
   category: 'engagement',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: '動画のどの地点まで見るとCVRが跳ね上がるかを特定し、動画の長さ・CTAオーバーレイ位置の提案を出してください。',
   cost: 'medium',
   query: `
@@ -171,10 +171,10 @@ analysisAxes.set('video_cv_correlation', {
     FROM clickinsight.video_events ve
     JOIN (
       SELECT session_id, max(conversion_type IS NOT NULL) as converted
-      FROM clickinsight.events WHERE site_id = {site_id:String}
+      FROM clickinsight.events WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       GROUP BY session_id
     ) e ON ve.session_id = e.session_id
-    WHERE ve.site_id = {site_id:String} AND ve.event_type = 'video_milestone'
+    WHERE ve.tenant_id = {tenant_id:String} AND ve.site_id = {site_id:String} AND ve.event_type = 'video_milestone'
     GROUP BY ve.video_src, ve.video_milestone
     ORDER BY ve.video_src, ve.video_milestone
   `,
@@ -185,7 +185,7 @@ analysisAxes.set('reading_area_cv', {
   name: '熟読エリア×CV',
   description: 'ページのどの部分を熟読するとCVに繋がるか',
   category: 'engagement',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'CVした人が熟読したセクションを特定し、そのコンテンツの強化・位置変更の提案を出してください。',
   cost: 'medium',
   query: `
@@ -199,7 +199,7 @@ analysisAxes.set('reading_area_cv', {
       SELECT url, read_y, read_duration, session_id,
         max(conversion_type IS NOT NULL) OVER (PARTITION BY session_id) as converted
       FROM clickinsight.events
-      WHERE site_id = {site_id:String} AND event_type = 'read_area' AND read_y > 0
+      WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND event_type = 'read_area' AND read_y > 0
     )
     GROUP BY url, y_zone
     HAVING cv_sessions >= 3
@@ -212,7 +212,7 @@ analysisAxes.set('content_type_effectiveness', {
   name: 'コンテンツタイプ別効果',
   description: 'テキスト熟読・画像視認・動画視聴のどれがCVに効くか',
   category: 'engagement',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'テキスト/画像/動画のどのコンテンツタイプがCVに最も寄与しているかを判定し、コンテンツ制作リソースの配分提案を出してください。',
   cost: 'heavy',
   query: `
@@ -222,7 +222,7 @@ analysisAxes.set('content_type_effectiveness', {
     FROM (
       SELECT session_id, sum(read_duration) as total_ms,
         max(conversion_type IS NOT NULL) as converted
-      FROM clickinsight.events WHERE site_id = {site_id:String} AND event_type = 'read_area'
+      FROM clickinsight.events WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND event_type = 'read_area'
       GROUP BY session_id
     )
     UNION ALL
@@ -232,8 +232,8 @@ analysisAxes.set('content_type_effectiveness', {
       SELECT iv.session_id, sum(iv.visible_duration_ms) as total_ms,
         max(e.conversion_type IS NOT NULL) as converted
       FROM clickinsight.image_visibility iv
-      JOIN clickinsight.events e ON iv.session_id = e.session_id AND e.site_id = {site_id:String}
-      WHERE iv.site_id = {site_id:String}
+      JOIN clickinsight.events e ON iv.session_id = e.session_id AND e.tenant_id = {tenant_id:String} AND e.site_id = {site_id:String}
+      WHERE iv.tenant_id = {tenant_id:String} AND iv.site_id = {site_id:String}
       GROUP BY iv.session_id
     )
     UNION ALL
@@ -243,8 +243,8 @@ analysisAxes.set('content_type_effectiveness', {
       SELECT ve.session_id, sum(ve.video_played_ms) as total_ms,
         max(e.conversion_type IS NOT NULL) as converted
       FROM clickinsight.video_events ve
-      JOIN clickinsight.events e ON ve.session_id = e.session_id AND e.site_id = {site_id:String}
-      WHERE ve.site_id = {site_id:String}
+      JOIN clickinsight.events e ON ve.session_id = e.session_id AND e.tenant_id = {tenant_id:String} AND e.site_id = {site_id:String}
+      WHERE ve.tenant_id = {tenant_id:String} AND ve.site_id = {site_id:String}
       GROUP BY ve.session_id
     )
   `,
@@ -255,7 +255,7 @@ analysisAxes.set('cta_visibility_clickrate', {
   name: 'CTA可視性×クリック率',
   description: '見えているのにクリックされていないCTA/バナーの検出',
   category: 'engagement',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: '可視時間が長いのにクリック率が低い要素を特定し、コピー・デザイン・配置の改善提案を出してください。',
   cost: 'light',
   query: `
@@ -266,7 +266,7 @@ analysisAxes.set('cta_visibility_clickrate', {
       count() as total,
       countIf(element_clicked = 1) / greatest(count(), 1) * 100 as click_rate
     FROM clickinsight.element_visibility
-    WHERE site_id = {site_id:String}
+    WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
     GROUP BY element_selector, element_text
     HAVING total >= 10
     ORDER BY avg_visible_ms DESC LIMIT 30
@@ -278,7 +278,7 @@ analysisAxes.set('atf_vs_btf', {
   name: 'ファーストビュー vs ビロウザフォールド',
   description: 'ページ上部と下部の滞在時間比率',
   category: 'engagement',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'ATF滞在率が高すぎるページは重要コンテンツが埋もれている。低すぎるページはファーストビューが弱い。改善提案を出してください。',
   cost: 'medium',
   query: `
@@ -287,7 +287,7 @@ analysisAxes.set('atf_vs_btf', {
       sumIf(read_duration, read_y > viewport_height) as btf_ms,
       sumIf(read_duration, read_y <= viewport_height) / greatest(sumIf(read_duration, read_y <= viewport_height) + sumIf(read_duration, read_y > viewport_height), 1) * 100 as atf_pct
     FROM clickinsight.events
-    WHERE site_id = {site_id:String} AND event_type = 'read_area' AND read_y > 0
+    WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND event_type = 'read_area' AND read_y > 0
     GROUP BY url
     HAVING atf_ms + btf_ms > 5000
     ORDER BY atf_pct DESC LIMIT 30
@@ -301,7 +301,7 @@ analysisAxes.set('form_friction', {
   name: 'フォーム離脱摩擦ポイント',
   description: 'どのフォームフィールドで離脱しているか',
   category: 'friction',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: '離脱率が高いフィールドを特定し、削除・任意化・自動入力の提案を出してください。',
   cost: 'light',
   query: `
@@ -311,7 +311,7 @@ analysisAxes.set('form_friction', {
       countIf(event_type = 'form_submit') as submit_count,
       countIf(event_type = 'form_abandon') / greatest(countIf(event_type = 'form_abandon') + countIf(event_type = 'form_submit'), 1) * 100 as abandon_rate
     FROM clickinsight.form_interactions
-    WHERE site_id = {site_id:String}
+    WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
     GROUP BY form_id, field_name, field_type
     HAVING abandon_count + submit_count >= 5
     ORDER BY abandon_rate DESC LIMIT 30
@@ -323,7 +323,7 @@ analysisAxes.set('rage_dead_clicks', {
   name: 'rage/dead clickマップ',
   description: 'UI摩擦が集中している箇所',
   category: 'friction',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'rage clickはUI不満の指標、dead clickはクリッカブルに見える非インタラクティブ要素の指標。具体的なUI修正提案を出してください。',
   cost: 'light',
   query: `
@@ -332,7 +332,7 @@ analysisAxes.set('rage_dead_clicks', {
       countIf(event_type = 'rage_click') as rage_count,
       countIf(event_type = 'dead_click') as dead_count
     FROM clickinsight.events
-    WHERE site_id = {site_id:String} AND event_type IN ('rage_click', 'dead_click')
+    WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND event_type IN ('rage_click', 'dead_click')
     GROUP BY url, element_text, element_tag_name, y_zone
     HAVING rage_count >= 2 OR dead_count >= 3
     ORDER BY rage_count + dead_count DESC LIMIT 30
@@ -344,7 +344,7 @@ analysisAxes.set('confusion_scrolling', {
   name: '迷い行動検出',
   description: '上下スクロールの往復が多いページ（情報設計の問題）',
   category: 'friction',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: '上下往復が多い箇所は情報の配置順序やナビゲーションに問題がある。具体的なレイアウト改善提案を出してください。',
   cost: 'heavy',
   query: `
@@ -359,7 +359,7 @@ analysisAxes.set('confusion_scrolling', {
         SELECT url, session_id, scroll_y,
           leadInFrame(scroll_y, 1) OVER (PARTITION BY session_id ORDER BY timestamp) as neighbor_y
         FROM clickinsight.events
-        WHERE site_id = {site_id:String} AND event_type = 'scroll'
+        WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND event_type = 'scroll'
       )
       WHERE neighbor_y > 0
       GROUP BY url, session_id
@@ -375,7 +375,7 @@ analysisAxes.set('cta_hesitation', {
   name: 'CTAクリック迷い時間',
   description: 'ページ到着からCTAクリックまでの平均時間',
   category: 'friction',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: '迷い時間が長いCTAは、直前のコンテンツが不安を解消できていない。CTA直前に安心材料（保証・実績・FAQ）を配置する提案を出してください。',
   cost: 'heavy',
   query: `
@@ -388,10 +388,10 @@ analysisAxes.set('cta_hesitation', {
       FROM clickinsight.events e
       JOIN (
         SELECT session_id, url, min(timestamp) as first_view
-        FROM clickinsight.events WHERE event_type IN ('pageview','page_view') AND site_id = {site_id:String}
+        FROM clickinsight.events WHERE event_type IN ('pageview','page_view') AND tenant_id = {tenant_id:String} AND site_id = {site_id:String}
         GROUP BY session_id, url
       ) pv ON e.session_id = pv.session_id AND e.url = pv.url
-      WHERE e.site_id = {site_id:String}
+      WHERE e.tenant_id = {tenant_id:String} AND e.site_id = {site_id:String}
         AND e.event_type = 'click' AND e.element_tag_name IN ('a', 'button')
     )
     WHERE time_to_click > 0 AND time_to_click < 600
@@ -408,7 +408,7 @@ analysisAxes.set('new_vs_returning', {
   name: '新規 vs リピーター',
   description: '新規訪問とリピート訪問の行動差分',
   category: 'persona',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: '新規とリピーターの行動差から、それぞれに最適化されたLPやコンテンツの提案を出してください。',
   cost: 'medium',
   query: `
@@ -426,7 +426,7 @@ analysisAxes.set('new_vs_returning', {
         max(scroll_percentage) as max_scroll,
         dateDiff('second', min(timestamp), max(timestamp)) as session_sec,
         count() OVER (PARTITION BY user_id) as visit_count
-      FROM clickinsight.events WHERE site_id = {site_id:String}
+      FROM clickinsight.events WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       GROUP BY session_id, user_id
     )
     GROUP BY user_type
@@ -438,7 +438,7 @@ analysisAxes.set('scroll_speed_persona', {
   name: 'スクロール速度ペルソナ',
   description: '速読者/精読者/通常の3群に分類',
   category: 'persona',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'skimmerはビジュアル重視のLP、careful_readerはテキスト詳細型のLPが適している。各群のCVRから最適なコンテンツ戦略を提案してください。',
   cost: 'heavy',
   query: `
@@ -459,7 +459,7 @@ analysisAxes.set('scroll_speed_persona', {
           lagInFrame(scroll_y, 1) OVER (PARTITION BY session_id ORDER BY timestamp) as prev_y,
           dateDiff('millisecond', lagInFrame(timestamp, 1) OVER (PARTITION BY session_id ORDER BY timestamp), timestamp) as diff_ms
         FROM clickinsight.events
-        WHERE site_id = {site_id:String} AND event_type = 'scroll'
+        WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND event_type = 'scroll'
       )
       WHERE prev_y > 0 AND diff_ms > 0
       GROUP BY session_id
@@ -475,7 +475,7 @@ analysisAxes.set('source_behavior_cv', {
   name: '流入元×行動×CV',
   description: '広告/オーガニック/SNS別の行動パターンとCVR',
   category: 'traffic',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: '流入元ごとの行動差から、各チャネルに最適化されたLPバリアントの提案を出してください。',
   cost: 'light',
   query: `
@@ -490,7 +490,7 @@ analysisAxes.set('source_behavior_cv', {
         max(scroll_percentage) as max_scroll,
         dateDiff('second', min(timestamp), max(timestamp)) as session_sec,
         count(CASE WHEN event_type = 'click' THEN 1 END) as total_clicks
-      FROM clickinsight.events WHERE site_id = {site_id:String}
+      FROM clickinsight.events WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       GROUP BY session_id
     )
     GROUP BY utm_source, utm_medium
@@ -504,7 +504,7 @@ analysisAxes.set('hourly_pattern', {
   name: '時間帯パターン',
   description: '時間帯別のCVRと行動パターン',
   category: 'traffic',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: '時間帯別CVRから最適な広告配信時間、コンテンツ更新タイミングの提案を出してください。',
   cost: 'light',
   query: `
@@ -518,7 +518,7 @@ analysisAxes.set('hourly_pattern', {
         max(conversion_type IS NOT NULL) as converted,
         max(scroll_percentage) as max_scroll,
         dateDiff('second', min(timestamp), max(timestamp)) as session_sec
-      FROM clickinsight.events WHERE site_id = {site_id:String}
+      FROM clickinsight.events WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       GROUP BY session_id
     )
     GROUP BY hour_of_day ORDER BY hour_of_day
@@ -530,7 +530,7 @@ analysisAxes.set('weekday_device_cv', {
   name: '曜日×デバイス×CV',
   description: '曜日とデバイスの組み合わせ別CVR',
   category: 'traffic',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'CVRが高い/低い曜日×デバイスの組み合わせから、デバイス別LP最適化と広告配信スケジュールの提案を出してください。',
   cost: 'light',
   query: `
@@ -540,7 +540,7 @@ analysisAxes.set('weekday_device_cv', {
     FROM (
       SELECT session_id, multiIf(any(viewport_width) >= 1024, 'desktop', any(viewport_width) >= 768, 'tablet', 'mobile') as device_type,
         min(timestamp) as min_ts, max(conversion_type IS NOT NULL) as converted
-      FROM clickinsight.events WHERE site_id = {site_id:String}
+      FROM clickinsight.events WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       GROUP BY session_id
     )
     GROUP BY day_of_week, device_type
@@ -555,7 +555,7 @@ analysisAxes.set('page_journey', {
   name: 'ページ遷移ジャーニー',
   description: 'CVした人の典型的なページ遷移パターン',
   category: 'persona',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'CVした人の遷移パターンから典型的なカスタマージャーニーを3-5パターン抽出し、各ジャーニーの特徴と離脱ポイント、改善提案を出してください。',
   cost: 'heavy',
   query: `
@@ -568,10 +568,10 @@ analysisAxes.set('page_journey', {
         SELECT session_id, url, timestamp,
           row_number() OVER (PARTITION BY session_id ORDER BY timestamp) as step
         FROM clickinsight.events
-        WHERE site_id = {site_id:String} AND event_type IN ('pageview','page_view')
+        WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND event_type IN ('pageview','page_view')
           AND session_id IN (
             SELECT DISTINCT session_id FROM clickinsight.events
-            WHERE conversion_type IS NOT NULL AND site_id = {site_id:String}
+            WHERE conversion_type IS NOT NULL AND tenant_id = {tenant_id:String} AND site_id = {site_id:String}
           )
       )
       GROUP BY session_id
@@ -592,7 +592,7 @@ analysisAxes.set('cannibalization_behavior', {
   name: 'カニバリゼーション行動検出',
   description: 'GSCで同一クエリに複数ページがランクインし、ユーザーがそれらのページ間を往復している行動を検出',
   category: 'seo',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: '同一クエリで複数ページがランクインしているケースを特定し、ページ統合すべきか・差別化すべきかを判断してください。往復行動が多いページペアはユーザーが混乱しています。統合/リダイレクト/コンテンツ差別化の具体的提案を出してください。',
   cost: 'heavy',
   query: `
@@ -600,7 +600,7 @@ analysisAxes.set('cannibalization_behavior', {
       SELECT query, groupArray(page) as pages, count() as page_count,
         sum(clicks) as total_clicks, avg(position) as avg_position
       FROM clickinsight.gsc_data
-      WHERE site_id = {site_id:String}
+      WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       GROUP BY query
       HAVING page_count >= 2
       ORDER BY total_clicks DESC
@@ -620,7 +620,7 @@ analysisAxes.set('cannibalization_behavior', {
         pp.query, pp.page_a, pp.page_b, pp.total_clicks, pp.avg_position,
         count(DISTINCT e.session_id) as sessions_visiting_both
       FROM page_pairs pp
-      JOIN clickinsight.events e ON e.site_id = {site_id:String}
+      JOIN clickinsight.events e ON e.tenant_id = {tenant_id:String} AND e.site_id = {site_id:String}
         AND (e.url = pp.page_a OR e.url = pp.page_b)
         AND e.event_type IN ('pageview', 'page_view')
       GROUP BY pp.query, pp.page_a, pp.page_b, pp.total_clicks, pp.avg_position
@@ -642,7 +642,7 @@ analysisAxes.set('cognitive_load_score', {
   name: '認知負荷スコア',
   description: 'スクロール速度の不安定さ、rage/dead click密度、上下往復頻度から、ページごとの認知負荷を0-100でスコア化',
   category: 'cognitive',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'cognitive_load_scoreが高いページはユーザーが混乱しています。スコアの内訳（scroll_instability, friction_density, confusion_rate）を見て、最も寄与している要因ごとに改善提案を出してください。scroll_instability高→情報の密度が高すぎるか視覚的ノイズが多い。friction_density高→クリッカブルに見える非インタラクティブ要素がある。confusion_rate高→情報の順序が直感に反している。',
   cost: 'heavy',
   query: `
@@ -685,7 +685,7 @@ analysisAxes.set('cognitive_load_score', {
             timestamp
           ) as time_diff_ms
         FROM clickinsight.events
-        WHERE site_id = {site_id:String}
+        WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
           AND event_type IN ('scroll', 'click', 'rage_click', 'dead_click')
       )
       WHERE time_diff_ms > 0
@@ -706,7 +706,7 @@ analysisAxes.set('attention_competition', {
   name: '注目の競合（同一画面CTA競合）',
   description: '同一セッションで同時に可視だった複数の要素のうち、どちらがクリックされたかを分析。要素間の勝敗マトリクスを生成',
   category: 'engagement',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: '同一画面内で可視性が高いのにクリックされない要素は、隣接する要素に注目を奪われています。勝っている要素と負けている要素の対比から、CTAの配置・サイズ・色・コピーの改善提案を出してください。特にwin_rateが低い要素は「見えているのに無視されている」ため、視覚的な差別化が必要です。',
   cost: 'medium',
   query: `
@@ -724,10 +724,10 @@ analysisAxes.set('attention_competition', {
     JOIN clickinsight.element_visibility loser
       ON winner.session_id = loser.session_id
       AND winner.page_url = loser.page_url
-      AND winner.site_id = loser.site_id
+      AND winner.tenant_id = loser.tenant_id AND winner.site_id = loser.site_id
       AND winner.element_selector < loser.element_selector
       AND abs(toInt32(winner.element_y) - toInt32(loser.element_y)) < 800
-    WHERE winner.site_id = {site_id:String}
+    WHERE winner.tenant_id = {tenant_id:String} AND loser.tenant_id = {tenant_id:String} AND winner.site_id = {site_id:String}
       AND winner.max_visible_ratio > 0.5
       AND loser.max_visible_ratio > 0.5
     GROUP BY winner_selector, winner_text, loser_selector, loser_text
@@ -744,7 +744,7 @@ analysisAxes.set('query_intent_page_match', {
   name: '検索意図×ページ行動一致度',
   description: 'GSCクエリを意図分類（情報型/比較型/購入型/ナビ型）し、ランディングページ上の行動が意図に適合しているかを判定',
   category: 'seo',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: '各ページの主要クエリ意図と実際の行動を比較してください。intent_typeが「transactional」なのにCVRが低い場合、CTAが弱いか到達コストが高い。「informational」なのにスクロール深度が浅い場合、コンテンツが期待に応えていない。意図と行動のミスマッチが大きいページから優先的に改善提案を出してください。query_samplesを参考に具体的なクエリを引用してください。',
   cost: 'heavy',
   query: `
@@ -766,7 +766,7 @@ analysisAxes.set('query_intent_page_match', {
           'informational'
         ) as intent_type
       FROM clickinsight.gsc_data
-      WHERE site_id = {site_id:String}
+      WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       GROUP BY page, query
     ),
     page_intent AS (
@@ -787,7 +787,7 @@ analysisAxes.set('query_intent_page_match', {
         countIf(event_type = 'click') / greatest(uniq(session_id), 1) as clicks_per_session,
         countIf(event_type IN ('rage_click', 'dead_click')) / greatest(uniq(session_id), 1) as friction_per_session
       FROM clickinsight.events
-      WHERE site_id = {site_id:String}
+      WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       GROUP BY url
       HAVING sessions >= 5
     )
@@ -822,7 +822,7 @@ analysisAxes.set('session_replay_priority', {
   name: 'セッション録画優先スコア',
   description: 'rage click・confusion scrolling・CV直前離脱・フォーム放棄の有無でセッションをスコアリングし、分析者が見るべき録画を優先順位付け',
   category: 'meta',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'priority_scoreが高いセッションは問題行動が集中しています。上位5セッションのスコア内訳を分析し、共通するUX問題のパターンを抽出してください。rage_clickが多いセッションはUI問題、high_scroll_confusion_rateは情報設計問題、near_miss_cvは最もCVに近かったのに逃したユーザーです。各パターンに対する改善提案を出してください。',
   cost: 'medium',
   query: `
@@ -866,7 +866,7 @@ analysisAxes.set('session_replay_priority', {
     FROM (
       SELECT *, lagInFrame(scroll_y, 1) OVER (PARTITION BY session_id ORDER BY timestamp) as prev_y
       FROM clickinsight.events
-      WHERE site_id = {site_id:String}
+      WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
     ) e
     GROUP BY e.session_id
     HAVING total_events >= 5 AND duration_sec >= 3
@@ -882,7 +882,7 @@ analysisAxes.set('engagement_decay_curve', {
   name: 'エンゲージメント減衰曲線',
   description: 'ページの上部から下部へ100px区切りでエンゲージメント強度（滞在時間×クリック密度）をプロットし、急落するポイント（コンテンツの壁）を検出',
   category: 'content',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'engagement_intensityが急落するy_zone（drop_rate > 40%）はコンテンツの壁です。その位置のコンテンツを確認し、壁の原因（退屈なテキストブロック、無関係な画像、CTAの欠如）と改善案を出してください。逆にintensityが急上昇するゾーンは「注目コンテンツ」です。それをページ上部に移動する提案も検討してください。',
   cost: 'medium',
   query: `
@@ -904,12 +904,12 @@ analysisAxes.set('engagement_decay_curve', {
       -- 熟読データ
       SELECT session_id, url, read_y as y_position, read_duration as engagement_ms, 0 as click_count
       FROM clickinsight.events
-      WHERE site_id = {site_id:String} AND event_type = 'read_area' AND read_y > 0
+      WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND event_type = 'read_area' AND read_y > 0
       UNION ALL
       -- クリックデータ
       SELECT session_id, url, click_y as y_position, 0 as engagement_ms, 1 as click_count
       FROM clickinsight.events
-      WHERE site_id = {site_id:String} AND event_type IN ('click', 'rage_click', 'dead_click') AND click_y > 0
+      WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND event_type IN ('click', 'rage_click', 'dead_click') AND click_y > 0
     )
     GROUP BY url, y_zone
     HAVING sessions >= 3
@@ -924,7 +924,7 @@ analysisAxes.set('internal_link_effectiveness', {
   name: '内部リンク効果測定',
   description: 'クリックされた内部リンクごとに、遷移先でのCV率・滞在時間・スクロール深度を算出し、内部リンクのROIを可視化',
   category: 'seo',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'cv_rateが高い内部リンクは「ゴールデンリンク」です。これらのリンクの視認性・配置をさらに強化してください。逆にclick_countが多いのにcv_rateが0のリンクは、遷移先ページに問題があります。遷移先のコンテンツ改善 or リンク先の変更を提案してください。click_rateが低い内部リンクはアンカーテキストやデザインの見直しが必要です。',
   cost: 'medium',
   query: `
@@ -933,7 +933,7 @@ analysisAxes.set('internal_link_effectiveness', {
         session_id, url as source_page, element_href as target_page,
         element_text as link_text, timestamp as click_time
       FROM clickinsight.events
-      WHERE site_id = {site_id:String}
+      WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
         AND event_type = 'click'
         AND element_tag_name = 'a'
         AND element_href != ''
@@ -951,7 +951,7 @@ analysisAxes.set('internal_link_effectiveness', {
       FROM link_clicks lc
       JOIN clickinsight.events e
         ON e.session_id = lc.session_id
-        AND e.site_id = {site_id:String}
+        AND e.tenant_id = {tenant_id:String} AND e.site_id = {site_id:String}
         AND e.timestamp > lc.click_time
       GROUP BY lc.source_page, lc.target_page, lc.link_text, lc.session_id
     )
@@ -977,7 +977,7 @@ analysisAxes.set('zero_click_content_audit', {
   name: 'ゼロクリックコンテンツ判定',
   description: 'クリックが発生せず熟読のみで離脱するページを検出し、GSCクエリの意図と照合して「情報提供の成功」か「CV導線の失敗」かを判定',
   category: 'seo',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'primary_intentが「informational」でzero_click_rateが高いページは情報提供に成功している可能性があります（ただしCVにつなげる余地はある）。primary_intentが「transactional」「comparison」なのにzero_click_rateが高いページはCTA不足・CTA位置の問題です。後者を優先的に改善してください。avg_read_msが高いのにクリックゼロのページは「読ませているのに逃がしている」最ももったいないケースです。',
   cost: 'heavy',
   query: `
@@ -996,7 +996,7 @@ analysisAxes.set('zero_click_content_audit', {
           sumIf(read_duration, event_type = 'read_area') as total_read_ms,
           max(scroll_percentage) as max_scroll
         FROM clickinsight.events
-        WHERE site_id = {site_id:String}
+        WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
         GROUP BY session_id, url
       )
       GROUP BY url
@@ -1017,7 +1017,7 @@ analysisAxes.set('zero_click_content_audit', {
           'informational'
         ) as primary_intent
       FROM clickinsight.gsc_data
-      WHERE site_id = {site_id:String}
+      WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       GROUP BY page
     )
     SELECT
@@ -1045,7 +1045,7 @@ analysisAxes.set('exit_intent_pattern', {
   name: '離脱予兆パターン',
   description: '離脱したセッションの最後の3アクションのパターンを分類し、離脱防止施策の最適タイミングを算出',
   category: 'friction',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: '離脱パターンを分類し、各パターンに対する介入施策を提案してください。rapid_scroll_up（ページ上部に高速リターン）はブラウザバック直前で、ポップアップの最適タイミング。slow_fade（クリック・スクロール頻度の急減少）はコンテンツへの興味喪失で、関連コンテンツの表示が有効。friction_exit（rage/dead click後の即離脱）はUI修正が必要。各パターンの発生ページと頻度を考慮して優先順位をつけてください。',
   cost: 'heavy',
   query: `
@@ -1058,7 +1058,7 @@ analysisAxes.set('exit_intent_pattern', {
         SELECT session_id, url, event_type, scroll_y, timestamp,
           row_number() OVER (PARTITION BY session_id ORDER BY timestamp DESC) as rn
         FROM clickinsight.events
-        WHERE site_id = {site_id:String}
+        WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       )
       WHERE rn <= 5
       GROUP BY session_id, url
@@ -1105,7 +1105,7 @@ analysisAxes.set('price_sensitivity_signal', {
   name: '価格感度シグナル',
   description: '料金・価格関連セクションでの行動パターンから、価格がCVブロッカーになっているかを定量判定',
   category: 'conversion',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'price_hesitation_scoreが高いページは価格がCVの障壁になっています。要素ごとの分析を確認してください。pricing_dwell_ratioが高い（料金セクション滞在比率が全体の30%超）は価格への過度な注目。revisit_countが2以上は料金の再確認行動。confusion_near_pricingが高いは料金体系の複雑さ。post_pricing_exit_rateが高いは価格を見てすぐ離脱。各パターンに対し、安心材料の追加・価格表のシンプル化・無料トライアル訴求強化などの施策を提案してください。',
   cost: 'medium',
   query: `
@@ -1115,7 +1115,7 @@ analysisAxes.set('price_sensitivity_signal', {
         scroll_y, click_y, read_y, read_duration,
         element_text, element_id, element_class_name
       FROM clickinsight.events
-      WHERE site_id = {site_id:String}
+      WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
         AND (
           lower(element_text) LIKE '%料金%'
           OR lower(element_text) LIKE '%価格%'
@@ -1158,7 +1158,7 @@ analysisAxes.set('price_sensitivity_signal', {
           sumIf(read_duration, event_type = 'read_area') as total_read_ms,
           max(conversion_type IS NOT NULL) as converted
         FROM clickinsight.events
-        WHERE site_id = {site_id:String}
+        WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
         GROUP BY session_id, url
       ) s ON pe.session_id = s.session_id AND pe.url = s.url
       GROUP BY pe.url, pe.session_id, s.total_events, s.total_read_ms
@@ -1197,7 +1197,7 @@ analysisAxes.set('persona_behavior_profile', {
   name: '行動ベースペルソナプロファイル',
   description: 'セッション単位で行動特徴量を抽出。スクロール速度・熟読傾向・クリックパターン・摩擦度・CV有無・流入元・検索意図を統合したプロファイルを生成',
   category: 'persona',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: `以下のセッション行動プロファイルデータから、3-5個の行動ベースペルソナを自動生成してください。
 
 【ペルソナ生成ルール】
@@ -1241,7 +1241,7 @@ analysisAxes.set('persona_behavior_profile', {
         max(conversion_type IS NOT NULL AND conversion_type != '') as converted
 
       FROM clickinsight.events
-      WHERE site_id = {site_id:String}
+      WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
       GROUP BY session_id
       HAVING duration_sec >= 3 AND (total_clicks + scroll_events) >= 2
     )
@@ -1301,7 +1301,7 @@ analysisAxes.set('persona_query_intent', {
   name: 'ペルソナ×検索意図マッピング',
   description: 'ランディングページの主要GSCクエリ意図を分類し、行動ペルソナの流入経路に検索意図を紐付ける',
   category: 'persona',
-  requiredParams: ['site_id'],
+  requiredParams: ['tenant_id', 'site_id'],
   aiPromptHint: 'persona_behavior_profileの各behavior_typeのtop_landing_pagesと、このデータのpage別intent分布を突き合わせてください。各ペルソナがどの検索意図で流入しているかを特定し、ペルソナ像をより具体化してください。',
   cost: 'medium',
   query: `
@@ -1333,7 +1333,7 @@ analysisAxes.set('persona_query_intent', {
       topK(5)(query) as sample_queries
 
     FROM clickinsight.gsc_data
-    WHERE site_id = {site_id:String}
+    WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
     GROUP BY page
     HAVING total_clicks >= 3
     ORDER BY total_clicks DESC
@@ -1353,9 +1353,14 @@ export async function executeAxis(
   const axis = analysisAxes.get(axisId)
   if (!axis) return null
 
-  // 必須パラメータの検証
+  // 必須パラメータの検証 (fail-closed: 空白文字のみの tenant_id / site_id も拒否)
+  if (typeof params.tenant_id !== 'string' || params.tenant_id.trim() === '') {
+    throw new Error('Missing required parameter: tenant_id')
+  }
   for (const p of axis.requiredParams) {
-    if (!params[p]) throw new Error(`Missing required parameter: ${p}`)
+    if (typeof params[p] !== 'string' || params[p].trim() === '') {
+      throw new Error(`Missing required parameter: ${p}`)
+    }
   }
 
   const result = await clickhouse.query({
@@ -1373,6 +1378,12 @@ export async function executeAllAxes(
   clickhouse: ClickHouseClient,
   params: Record<string, string>
 ): Promise<Map<string, { axis: AnalysisAxis; data: Record<string, unknown>[] }>> {
+  if (typeof params.tenant_id !== 'string' || params.tenant_id.trim() === '') {
+    throw new Error('Missing required parameter: tenant_id')
+  }
+  if (typeof params.site_id !== 'string' || params.site_id.trim() === '') {
+    throw new Error('Missing required parameter: site_id')
+  }
   const results = new Map()
   const entries = Array.from(analysisAxes.entries())
 

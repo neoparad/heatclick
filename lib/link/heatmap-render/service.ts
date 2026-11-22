@@ -34,7 +34,9 @@ import {
   type MeasureStatus,
   type ResidencyBlock,
   type SerializedResponseEnvelope,
+  type UnmetGate,
   type UntrustedValue,
+  type VerifiedNumericLeaf,
 } from '@/packages/contract/response'
 import { computeUrlKeyV2 } from '@/packages/contract/urlkey'
 
@@ -43,7 +45,11 @@ import {
   type ModelInferredDisclosureHeader,
 } from './actor-experiment'
 import { evaluateHeatmapConsentEligibility } from './consent-matrix'
-import { decideHeatmapRenderKind, renderDeterministicHeatmapImage } from './renderer'
+import {
+  assertValidPngDimensions,
+  decideHeatmapRenderKind,
+  renderDeterministicHeatmapImage,
+} from './renderer'
 import {
   assertValidHeatmapDisplayLabel,
   computeReproducibilityHash,
@@ -88,6 +94,10 @@ export interface AuthCheckResult {
 // ---------------------------------------------------------------------------
 
 export const EXTERNAL_PARTY_MIN_CELL_K = 10
+export const DEFAULT_MAX_OVERLAPPING_EXTERNAL_QUERIES = 8
+
+const ISO_EXPLICIT_TZ_RE = /(?:Z|[+-]\d{2}:\d{2})$/
+const UTC_DAY_MS = 86_400_000
 
 export interface DisclosureCheckInput {
   readonly principal_id: string
@@ -114,17 +124,26 @@ export interface DisclosureCheckResult {
   readonly reason: string
 }
 
-function isCalendarAlignedIsoRange(startIso: string, endIso: string): boolean {
+export function isCalendarAlignedIsoRange(startIso: string, endIso: string): boolean {
+  if (!ISO_EXPLICIT_TZ_RE.test(startIso) || !ISO_EXPLICIT_TZ_RE.test(endIso)) {
+    return false
+  }
   const s = new Date(startIso)
   const e = new Date(endIso)
-  if (Number.isNaN(s.getTime()) || Number.isNaN(e.getTime()) || e <= s) return false
+  const startMs = s.getTime()
+  const endMs = e.getTime()
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return false
+  const spanMs = endMs - startMs
+  if (spanMs < UTC_DAY_MS || spanMs % UTC_DAY_MS !== 0) return false
   return (
     s.getUTCHours() === 0 &&
     s.getUTCMinutes() === 0 &&
     s.getUTCSeconds() === 0 &&
+    s.getUTCMilliseconds() === 0 &&
     e.getUTCHours() === 0 &&
     e.getUTCMinutes() === 0 &&
-    e.getUTCSeconds() === 0
+    e.getUTCSeconds() === 0 &&
+    e.getUTCMilliseconds() === 0
   )
 }
 
@@ -135,28 +154,356 @@ function symmetricDifferenceSize(a: ReadonlySet<string>, b: ReadonlySet<string>)
   return diff
 }
 
+function sanitizeSuppressedSection(s: HeatmapSectionMetricInput): HeatmapSectionMetricInput {
+  return Object.freeze({
+    ...s,
+    reach_rate: null,
+    dwell_center40_ms: null,
+    reach_pvs: null,
+    dwell_pvs: null,
+    ...(s.cta_clicks !== undefined ? { cta_clicks: null } : {}),
+    ...(s.sample_size !== undefined ? { sample_size: null } : {}),
+    ...(s.pooling_weight !== undefined ? { pooling_weight: null } : {}),
+    status: 'suppressed',
+  })
+}
+
+function sanitizeSuppressedClick(c: HeatmapClickPointInput): HeatmapClickPointInput {
+  return Object.freeze({
+    ...c,
+    click_count: null,
+    ...(c.sample_size !== undefined ? { sample_size: null } : {}),
+    status: 'suppressed',
+  })
+}
+
+/**
+ * Computes Reduced Row Echelon Form (RREF) of an m x n real matrix in-place on a copy.
+ * Returns { rref, pivotCols, rank }.
+ */
+function computeRref(matrix: readonly (readonly number[])[]): {
+  readonly rref: number[][]
+  readonly pivotCols: number[]
+  readonly rank: number
+} {
+  const m = matrix.length
+  const n = m > 0 ? matrix[0].length : 0
+  const a = matrix.map((row) => [...row])
+  const pivotCols: number[] = []
+  const eps = 1e-9
+  let lead = 0
+
+  for (let r = 0; r < m && lead < n; r++) {
+    let i = r
+    while (lead < n) {
+      i = r
+      let maxAbs = Math.abs(a[r][lead])
+      for (let k = r + 1; k < m; k++) {
+        const v = Math.abs(a[k][lead])
+        if (v > maxAbs) {
+          maxAbs = v
+          i = k
+        }
+      }
+      if (maxAbs > eps) break
+      lead++
+    }
+    if (lead >= n) break
+
+    if (i !== r) {
+      const tmp = a[r]
+      a[r] = a[i]
+      a[i] = tmp
+    }
+    const piv = a[r][lead]
+    for (let j = lead; j < n; j++) a[r][j] /= piv
+    for (let k = 0; k < m; k++) {
+      if (k === r) continue
+      const factor = a[k][lead]
+      if (Math.abs(factor) <= eps) continue
+      for (let j = lead; j < n; j++) {
+        a[k][j] -= factor * a[r][j]
+      }
+    }
+    pivotCols.push(lead)
+    lead++
+  }
+
+  return { rref: a, pivotCols, rank: pivotCols.length }
+}
+
+/**
+ * Multi-query linear-combination differencing detector (Denning-Schlorer tracker):
+ * Partitions observed subjects across queries Q_1..Q_m into disjoint Venn atoms A_1..A_r
+ * with exact counts w_j = |A_j| and binary incidence matrix M (m x r).
+ * Blocks if ANY non-zero linear combination v = c^T M in row(M) isolates a support S
+ * whose total subject count sum_{j in supp(v)} w_j < k (10).
+ */
+function detectLinearSubjectCombinationLeak(
+  subjectSets: readonly ReadonlySet<string>[],
+  minK: number,
+): string | null {
+  const m = subjectSets.length
+  if (m < 2) return null
+
+  const allSubjects = new Set<string>()
+  for (const s of subjectSets) {
+    for (const id of s) allSubjects.add(id)
+  }
+  if (allSubjects.size === 0) return null
+
+  // Group subjects into disjoint Venn atoms by bitmask signature across the m queries
+  const atomWeightsBySig = new Map<string, { weight: number; col: number[] }>()
+  for (const subj of allSubjects) {
+    const col = new Array<number>(m)
+    for (let i = 0; i < m; i++) {
+      col[i] = subjectSets[i].has(subj) ? 1 : 0
+    }
+    const sig = col.join('')
+    const existing = atomWeightsBySig.get(sig)
+    if (existing) {
+      existing.weight += 1
+    } else {
+      atomWeightsBySig.set(sig, { weight: 1, col })
+    }
+  }
+
+  const atoms = [...atomWeightsBySig.values()]
+  const r = atoms.length
+  const M: number[][] = Array.from({ length: m }, () => new Array<number>(r).fill(0))
+  for (let j = 0; j < r; j++) {
+    for (let i = 0; i < m; i++) {
+      M[i][j] = atoms[j].col[i]
+    }
+  }
+
+  const eps = 1e-9
+  const supportWeight = (vec: readonly number[]): number => {
+    let w = 0
+    for (let j = 0; j < vec.length; j++) {
+      if (Math.abs(vec[j]) > eps) w += atoms[j].weight
+    }
+    return w
+  }
+
+  const fullRref = computeRref(M)
+  for (let i = 0; i < fullRref.rank; i++) {
+    const w = supportWeight(fullRref.rref[i])
+    if (w > 0 && w < minK) {
+      return `differencing_attack_blocked:linear_combination_support=${w}<${minK}`
+    }
+  }
+
+  // Necessary condition for ANY combination supported solely on atoms of weight < minK:
+  // rank(M_{:, largeCols}) < rank(M)
+  const smallCols: number[] = []
+  const largeCols: number[] = []
+  let totalSmallWeight = 0
+  for (let j = 0; j < r; j++) {
+    if (atoms[j].weight < minK) {
+      smallCols.push(j)
+      totalSmallWeight += atoms[j].weight
+    } else {
+      largeCols.push(j)
+    }
+  }
+  if (smallCols.length === 0) return null
+
+  const extractSubmatrixRank = (cols: readonly number[]): number => {
+    if (cols.length === 0) return 0
+    const sub = M.map((row) => cols.map((c) => row[c]))
+    return computeRref(sub).rank
+  }
+
+  const largeRank = extractSubmatrixRank(largeCols)
+  if (largeRank >= fullRref.rank) {
+    // Zero non-trivial vectors in row(M) are supported inside smallCols!
+    return null
+  }
+
+  if (totalSmallWeight < minK) {
+    return `differencing_attack_blocked:linear_subspace_small_atoms=${totalSmallWeight}<${minK}`
+  }
+
+  // Check singletons and pairs of small atoms directly via exact rank drop:
+  // rank(M_{:, S^c}) < rank(M) iff a non-zero query combination has support inside S.
+  for (let a = 0; a < smallCols.length; a++) {
+    const colA = smallCols[a]
+    const comp = Array.from({ length: r }, (_, idx) => idx).filter((idx) => idx !== colA)
+    if (extractSubmatrixRank(comp) < fullRref.rank) {
+      return `differencing_attack_blocked:isolated_atom_weight=${atoms[colA].weight}<${minK}`
+    }
+    for (let b = a + 1; b < smallCols.length; b++) {
+      const colB = smallCols[b]
+      const pairWeight = atoms[colA].weight + atoms[colB].weight
+      if (pairWeight >= minK) continue
+      const compPair = Array.from({ length: r }, (_, idx) => idx).filter(
+        (idx) => idx !== colA && idx !== colB,
+      )
+      if (extractSubmatrixRank(compPair) < fullRref.rank) {
+        return `differencing_attack_blocked:isolated_pair_weight=${pairWeight}<${minK}`
+      }
+    }
+  }
+
+  // Also eliminate largeCols first by putting largeCols on the left of [M_large | M_small]
+  // so rows >= largeRank form an exact RREF basis of the subspace supported solely on smallCols.
+  const orderedCols = [...largeCols, ...smallCols]
+  const orderedWeights = orderedCols.map((c) => atoms[c].weight)
+  const orderedM = M.map((row) => orderedCols.map((c) => row[c]))
+  const subRref = computeRref(orderedM)
+  for (let i = largeRank; i < subRref.rank; i++) {
+    let w = 0
+    for (let j = 0; j < orderedCols.length; j++) {
+      if (Math.abs(subRref.rref[i][j]) > eps) w += orderedWeights[j]
+    }
+    if (w > 0 && w < minK) {
+      return `differencing_attack_blocked:small_subspace_basis_weight=${w}<${minK}`
+    }
+  }
+
+  return null
+}
+
+/**
+ * Multi-window interval differencing detector when subject_ids are unavailable:
+ * Partitions all same-segment query intervals [s_i, e_i) into elementary atomic time slices
+ * and checks RREF of [M_time | totals] for any isolated sub-window residual < k (10).
+ */
+function detectWindowIntervalDifferencingLeak(
+  windows: ReadonlyArray<{ readonly startMs: number; readonly endMs: number; readonly total: number }>,
+  minK: number,
+): string | null {
+  const m = windows.length
+  if (m < 2) return null
+
+  // Pairwise structural checks on overlapping windows
+  for (let i = 0; i < m - 1; i++) {
+    const a = windows[i]
+    const b = windows[m - 1]
+    const overlaps = a.startMs < b.endMs && b.startMs < a.endMs
+    if (!overlaps) continue
+    const aContainsB = a.startMs <= b.startMs && a.endMs >= b.endMs
+    const bContainsA = b.startMs <= a.startMs && b.endMs >= a.endMs
+    if (!aContainsB && !bContainsA) {
+      // Partially sliding window without subject_ids cannot bound symmetric difference (e.g. equal totals)
+      return 'differencing_attack_blocked:sliding_window_without_subject_ids'
+    }
+    const diff = Math.abs(a.total - b.total)
+    if (diff < minK) {
+      return `differencing_attack_blocked:nested_window_diff=${diff}<${minK}`
+    }
+  }
+
+  // Elementary time slice decomposition + RREF across 2+ windows (catches 3+ window subtractions!)
+  const endpoints = [...new Set(windows.flatMap((w) => [w.startMs, w.endMs]))].sort((x, y) => x - y)
+  const sliceCount = endpoints.length - 1
+  if (sliceCount <= 0) return null
+
+  const aug: number[][] = windows.map((w) => {
+    const row = new Array<number>(sliceCount + 1).fill(0)
+    for (let k = 0; k < sliceCount; k++) {
+      if (w.startMs <= endpoints[k] && endpoints[k + 1] <= w.endMs) {
+        row[k] = 1
+      }
+    }
+    row[sliceCount] = w.total
+    return row
+  })
+
+  // Compute RREF on the left `sliceCount` columns while carrying the augmented RHS column
+  const mRows = aug.length
+  const a = aug.map((r) => [...r])
+  const eps = 1e-9
+  let lead = 0
+  let rank = 0
+  for (let r = 0; r < mRows && lead < sliceCount; r++) {
+    let i = r
+    while (lead < sliceCount) {
+      i = r
+      let maxAbs = Math.abs(a[r][lead])
+      for (let k = r + 1; k < mRows; k++) {
+        const v = Math.abs(a[k][lead])
+        if (v > maxAbs) {
+          maxAbs = v
+          i = k
+        }
+      }
+      if (maxAbs > eps) break
+      lead++
+    }
+    if (lead >= sliceCount) break
+    if (i !== r) {
+      const tmp = a[r]
+      a[r] = a[i]
+      a[i] = tmp
+    }
+    const piv = a[r][lead]
+    for (let j = lead; j <= sliceCount; j++) a[r][j] /= piv
+    for (let k = 0; k < mRows; k++) {
+      if (k === r) continue
+      const factor = a[k][lead]
+      if (Math.abs(factor) <= eps) continue
+      for (let j = lead; j <= sliceCount; j++) {
+        a[k][j] -= factor * a[r][j]
+      }
+    }
+    rank++
+    lead++
+  }
+
+  for (let r = 0; r < rank; r++) {
+    const rhs = Math.abs(a[r][sliceCount])
+    if (rhs < minK - eps) {
+      return `differencing_attack_blocked:window_linear_residual=${Math.round(rhs)}<${minK}`
+    }
+  }
+
+  return null
+}
+
+interface DisclosureLedgerEntry {
+  readonly principal_id: string
+  readonly segment_id: string
+  readonly period_start_ms: number
+  readonly period_end_ms: number
+  readonly has_subjects: boolean
+  readonly subjects: ReadonlySet<string>
+  readonly total: number
+}
+
 export class HeatmapDisclosureGuard {
-  /** Tracks prior disclosed subject sets per (principal, tenant, site, page) to stop differencing attacks */
-  private readonly history = new Map<
-    string,
-    Array<{ readonly segment_id: string; readonly subjects: ReadonlySet<string>; readonly total: number }>
-  >()
+  private readonly maxOverlappingQueries: number
+  /** Tracks prior disclosed external-party queries per (tenant, site, page) to stop single- & colluding-principal differencing attacks */
+  private readonly history = new Map<string, DisclosureLedgerEntry[]>()
+
+  constructor(options?: { readonly max_overlapping_queries?: number }) {
+    this.maxOverlappingQueries =
+      options?.max_overlapping_queries ?? DEFAULT_MAX_OVERLAPPING_EXTERNAL_QUERIES
+  }
 
   evaluate(input: DisclosureCheckInput): DisclosureCheckResult {
-    // Same-site owner export follows §5.12 without third-party k=10 suppression
+    // Same-site owner export follows §5.12 without third-party k=10 suppression,
+    // while still scrubbing any pre-suppressed cells so raw counts never leak on status='suppressed'.
     if (input.audience === 'site_owner') {
+      const ownerSections = input.sections.map((s) =>
+        s.status === 'suppressed' ? sanitizeSuppressedSection(s) : s,
+      )
+      const ownerClicks = input.clicks.map((c) =>
+        c.status === 'suppressed' ? sanitizeSuppressedClick(c) : c,
+      )
       return Object.freeze({
         allowed: true,
         blocked_differencing_attack: false,
         non_calendar_period_rejected: false,
         suppressed_cell_count: 0,
-        sections: input.sections,
-        clicks: input.clicks,
+        sections: Object.freeze(ownerSections),
+        clicks: Object.freeze(ownerClicks),
         reason: 'site_owner_self_access',
       })
     }
 
-    // External party rule 1: strict calendar-aligned UTC period (§11.3 / §11.12)
+    // External party rule 1: strict calendar-aligned UTC day period (§11.3 / §11.12)
     if (!isCalendarAlignedIsoRange(input.period_start, input.period_end)) {
       return Object.freeze({
         allowed: false,
@@ -182,29 +529,112 @@ export class HeatmapDisclosureGuard {
       })
     }
 
-    // External party rule 3: Sequential overlapping-segment differencing attack defense!
-    const hKey = `${input.principal_id}|${input.tenant_id}|${input.site_id}|${input.page_url_key}`
-    const prior = this.history.get(hKey) ?? []
+    const currStartMs = Date.parse(input.period_start)
+    const currEndMs = Date.parse(input.period_end)
     const currentSet = input.subject_ids ? new Set(input.subject_ids) : null
+    const hasCurrentSubjects = currentSet !== null
 
-    for (const prev of prior) {
-      if (prev.segment_id === input.segment_id) continue
-      if (currentSet && prev.subjects.size > 0) {
-        const symDiff = symmetricDifferenceSize(prev.subjects, currentSet)
-        if (symDiff > 0 && symDiff < EXTERNAL_PARTY_MIN_CELL_K) {
-          return Object.freeze({
-            allowed: false,
-            blocked_differencing_attack: true,
-            non_calendar_period_rejected: false,
-            suppressed_cell_count: input.sections.length + input.clicks.length,
-            sections: Object.freeze([]),
-            clicks: Object.freeze([]),
-            reason: `differencing_attack_blocked:symmetric_diff=${symDiff}<${EXTERNAL_PARTY_MIN_CELL_K}`,
-          })
+    // External party rule 3: Sequential & multi-query overlapping differencing attack defense!
+    const hKey = `${input.tenant_id}|${input.site_id}|${input.page_url_key}`
+    const prior = this.history.get(hKey) ?? []
+
+    const isExactRepeat = prior.some(
+      (prev) =>
+        prev.segment_id === input.segment_id &&
+        prev.period_start_ms === currStartMs &&
+        prev.period_end_ms === currEndMs &&
+        prev.total === input.total_units &&
+        prev.has_subjects === hasCurrentSubjects &&
+        (!currentSet ||
+          (prev.subjects.size === currentSet.size &&
+            symmetricDifferenceSize(prev.subjects, currentSet) === 0)),
+    )
+
+    if (!isExactRepeat) {
+      const overlappingPrior = prior.filter(
+        (prev) => prev.period_start_ms < currEndMs && currStartMs < prev.period_end_ms,
+      )
+      if (overlappingPrior.length >= this.maxOverlappingQueries) {
+        return Object.freeze({
+          allowed: false,
+          blocked_differencing_attack: true,
+          non_calendar_period_rejected: false,
+          suppressed_cell_count: input.sections.length + input.clicks.length,
+          sections: Object.freeze([]),
+          clicks: Object.freeze([]),
+          reason: `differencing_attack_blocked:overlapping_query_budget_exceeded>${this.maxOverlappingQueries}`,
+        })
+      }
+
+      // 3a. Pairwise checks across prior queries (NEVER skip simply because segment_id matches!)
+      for (const prev of prior) {
+        const windowsOverlap = prev.period_start_ms < currEndMs && currStartMs < prev.period_end_ms
+        if (currentSet && prev.has_subjects) {
+          const symDiff = symmetricDifferenceSize(prev.subjects, currentSet)
+          if (symDiff < EXTERNAL_PARTY_MIN_CELL_K) {
+            return Object.freeze({
+              allowed: false,
+              blocked_differencing_attack: true,
+              non_calendar_period_rejected: false,
+              suppressed_cell_count: input.sections.length + input.clicks.length,
+              sections: Object.freeze([]),
+              clicks: Object.freeze([]),
+              reason: `differencing_attack_blocked:symmetric_diff=${symDiff}<${EXTERNAL_PARTY_MIN_CELL_K}`,
+            })
+          }
+        } else if (windowsOverlap) {
+          if (prev.segment_id !== input.segment_id) {
+            // Without subject_ids on overlapping windows, different segments (including equal-cardinality swaps |S1|=|S2|=50) cannot prove |S1 △ S2| >= 10
+            return Object.freeze({
+              allowed: false,
+              blocked_differencing_attack: true,
+              non_calendar_period_rejected: false,
+              suppressed_cell_count: input.sections.length + input.clicks.length,
+              sections: Object.freeze([]),
+              clicks: Object.freeze([]),
+              reason: 'differencing_attack_blocked:overlapping_segments_require_subject_ids',
+            })
+          }
         }
-      } else {
-        const countDiff = Math.abs(prev.total - input.total_units)
-        if (countDiff > 0 && countDiff < EXTERNAL_PARTY_MIN_CELL_K) {
+      }
+
+      // 3b. Multi-query (3+ queries) linear-combination tracker over subject sets
+      if (currentSet) {
+        const priorSets = prior.filter((p) => p.has_subjects).map((p) => p.subjects)
+        if (priorSets.length >= 1) {
+          const linearLeak = detectLinearSubjectCombinationLeak(
+            [...priorSets, currentSet],
+            EXTERNAL_PARTY_MIN_CELL_K,
+          )
+          if (linearLeak) {
+            return Object.freeze({
+              allowed: false,
+              blocked_differencing_attack: true,
+              non_calendar_period_rejected: false,
+              suppressed_cell_count: input.sections.length + input.clicks.length,
+              sections: Object.freeze([]),
+              clicks: Object.freeze([]),
+              reason: linearLeak,
+            })
+          }
+        }
+      }
+
+      // 3c. Same-segment calendar-window shifting & multi-window subtraction tracker
+      const sameSegmentPrior = prior.filter((p) => p.segment_id === input.segment_id)
+      if (sameSegmentPrior.length >= 1 && (!currentSet || sameSegmentPrior.some((p) => !p.has_subjects))) {
+        const windowLeak = detectWindowIntervalDifferencingLeak(
+          [
+            ...sameSegmentPrior.map((p) => ({
+              startMs: p.period_start_ms,
+              endMs: p.period_end_ms,
+              total: p.total,
+            })),
+            { startMs: currStartMs, endMs: currEndMs, total: input.total_units },
+          ],
+          EXTERNAL_PARTY_MIN_CELL_K,
+        )
+        if (windowLeak) {
           return Object.freeze({
             allowed: false,
             blocked_differencing_attack: true,
@@ -212,81 +642,133 @@ export class HeatmapDisclosureGuard {
             suppressed_cell_count: input.sections.length + input.clicks.length,
             sections: Object.freeze([]),
             clicks: Object.freeze([]),
-            reason: `differencing_attack_blocked:count_diff=${countDiff}<${EXTERNAL_PARTY_MIN_CELL_K}`,
+            reason: windowLeak,
           })
         }
       }
     }
 
-    // External party rule 4: Primary cell suppression (<10) + Secondary complementary suppression
+    // External party rule 4: Primary cell suppression (<10) + Greedy secondary complementary suppression
+    // Ensures BOTH suppressed cell count >= 2 AND combined suppressed reach/dwell/click mass >= 10,
+    // AND scrubs ALL raw counts (reach_pvs, dwell_pvs, cta_clicks, sample_size, click_count) to null!
     let suppressedCount = 0
-    const primarySuppressedSections = new Set<number>()
+    const suppressedSections = new Set<number>()
     input.sections.forEach((s, idx) => {
-      if (s.reach_pvs < EXTERNAL_PARTY_MIN_CELL_K || s.dwell_pvs < EXTERNAL_PARTY_MIN_CELL_K) {
-        primarySuppressedSections.add(idx)
+      const reach = s.reach_pvs ?? 0
+      const dwell = s.dwell_pvs ?? 0
+      const ctaTooSmall = s.cta_clicks !== undefined && s.cta_clicks !== null && s.cta_clicks < EXTERNAL_PARTY_MIN_CELL_K
+      const sampleTooSmall = s.sample_size !== undefined && s.sample_size !== null && s.sample_size < EXTERNAL_PARTY_MIN_CELL_K
+      if (
+        s.status === 'suppressed' ||
+        reach < EXTERNAL_PARTY_MIN_CELL_K ||
+        dwell < EXTERNAL_PARTY_MIN_CELL_K ||
+        ctaTooSmall ||
+        sampleTooSmall
+      ) {
+        suppressedSections.add(idx)
       }
     })
-    // Complementary suppression: if exactly 1 section cell is suppressed, suppress the next smallest too so total cannot leak it!
-    if (primarySuppressedSections.size === 1 && input.sections.length >= 2) {
-      let minIdx = -1
-      let minPvs = Infinity
-      input.sections.forEach((s, idx) => {
-        if (!primarySuppressedSections.has(idx) && s.reach_pvs < minPvs) {
-          minPvs = s.reach_pvs
-          minIdx = idx
+
+    if (suppressedSections.size > 0 && input.sections.length >= 2) {
+      const sumSuppressed = () => {
+        let reachSum = 0
+        let dwellSum = 0
+        for (const idx of suppressedSections) {
+          reachSum += input.sections[idx].reach_pvs ?? 0
+          dwellSum += input.sections[idx].dwell_pvs ?? 0
         }
-      })
-      if (minIdx !== -1) primarySuppressedSections.add(minIdx)
+        return { reachSum, dwellSum }
+      }
+      while (suppressedSections.size < input.sections.length) {
+        const { reachSum, dwellSum } = sumSuppressed()
+        if (
+          suppressedSections.size >= 2 &&
+          reachSum >= EXTERNAL_PARTY_MIN_CELL_K &&
+          dwellSum >= EXTERNAL_PARTY_MIN_CELL_K
+        ) {
+          break
+        }
+        let minIdx = -1
+        let minPvs = Infinity
+        input.sections.forEach((s, idx) => {
+          if (suppressedSections.has(idx)) return
+          const score = Math.min(s.reach_pvs ?? 0, s.dwell_pvs ?? 0)
+          if (score < minPvs) {
+            minPvs = score
+            minIdx = idx
+          }
+        })
+        if (minIdx === -1) break
+        suppressedSections.add(minIdx)
+      }
     }
 
     const safeSections = input.sections.map((s, idx): HeatmapSectionMetricInput => {
-      if (primarySuppressedSections.has(idx)) {
+      if (suppressedSections.has(idx)) {
         suppressedCount++
-        return Object.freeze({
-          ...s,
-          reach_rate: null,
-          dwell_center40_ms: null,
-          status: 'suppressed',
-        })
+        return sanitizeSuppressedSection(s)
       }
       return s
     })
 
-    const primarySuppressedClicks = new Set<number>()
+    const suppressedClicks = new Set<number>()
     input.clicks.forEach((c, idx) => {
-      if (c.click_count < EXTERNAL_PARTY_MIN_CELL_K) primarySuppressedClicks.add(idx)
+      const cnt = c.click_count ?? 0
+      const sampleTooSmall =
+        c.sample_size !== undefined && c.sample_size !== null && c.sample_size < EXTERNAL_PARTY_MIN_CELL_K
+      if (c.status === 'suppressed' || cnt < EXTERNAL_PARTY_MIN_CELL_K || sampleTooSmall) {
+        suppressedClicks.add(idx)
+      }
     })
-    if (primarySuppressedClicks.size === 1 && input.clicks.length >= 2) {
-      let minIdx = -1
-      let minCnt = Infinity
-      input.clicks.forEach((c, idx) => {
-        if (!primarySuppressedClicks.has(idx) && c.click_count < minCnt) {
-          minCnt = c.click_count
-          minIdx = idx
+
+    if (suppressedClicks.size > 0 && input.clicks.length >= 2) {
+      const sumClickCounts = () => {
+        let sum = 0
+        for (const idx of suppressedClicks) {
+          sum += input.clicks[idx].click_count ?? 0
         }
-      })
-      if (minIdx !== -1) primarySuppressedClicks.add(minIdx)
+        return sum
+      }
+      while (suppressedClicks.size < input.clicks.length) {
+        if (suppressedClicks.size >= 2 && sumClickCounts() >= EXTERNAL_PARTY_MIN_CELL_K) {
+          break
+        }
+        let minIdx = -1
+        let minCnt = Infinity
+        input.clicks.forEach((c, idx) => {
+          if (suppressedClicks.has(idx)) return
+          const cnt = c.click_count ?? 0
+          if (cnt < minCnt) {
+            minCnt = cnt
+            minIdx = idx
+          }
+        })
+        if (minIdx === -1) break
+        suppressedClicks.add(minIdx)
+      }
     }
 
     const safeClicks = input.clicks.map((c, idx): HeatmapClickPointInput => {
-      if (primarySuppressedClicks.has(idx)) {
+      if (suppressedClicks.has(idx)) {
         suppressedCount++
-        return Object.freeze({
-          ...c,
-          click_count: 0,
-          status: 'suppressed',
-        })
+        return sanitizeSuppressedClick(c)
       }
       return c
     })
 
-    // Record query into differencing guard ledger
-    prior.push({
-      segment_id: input.segment_id,
-      subjects: currentSet ?? new Set(),
-      total: input.total_units,
-    })
-    this.history.set(hKey, prior)
+    // Record query into differencing guard ledger (unless exact idempotent repeat)
+    if (!isExactRepeat) {
+      prior.push({
+        principal_id: input.principal_id,
+        segment_id: input.segment_id,
+        period_start_ms: currStartMs,
+        period_end_ms: currEndMs,
+        has_subjects: hasCurrentSubjects,
+        subjects: currentSet ?? new Set(),
+        total: input.total_units,
+      })
+      this.history.set(hKey, prior)
+    }
 
     return Object.freeze({
       allowed: true,
@@ -340,10 +822,15 @@ export interface HeatmapRenderRequest {
   readonly sdk_capability: HeatmapSdkCapability
   readonly custom_event_mapped_to_page_version_position?: boolean
   readonly requested_metric_keys?: readonly string[]
+  readonly requested_input_features?: ReadonlyArray<{
+    readonly key: string
+    readonly provenance: 'observed' | 'derived_deterministic' | 'model_inferred'
+  }>
   readonly model_inferred_header?: {
     readonly likelihood_ratio: number
     readonly fpr_upper_bound: number
     readonly certificate_id: string
+    readonly certified?: boolean
     readonly ai_probability?: never
   } | null
   /** One or more unit datasets (when versions/variants changed in period, split per unit!) */
@@ -403,9 +890,18 @@ interface StoredArtifactEntry {
   readonly tenant_id: string
   readonly site_id: string
   readonly page_url_key: string
+  readonly audience: 'site_owner' | 'external_party'
+  readonly disclosure_input: DisclosureCheckInput
   readonly png_bytes: Uint8Array | null
   readonly deletion_epoch: number
   readonly build_seq: number
+}
+
+interface InvalidatedArtifactTombstone {
+  readonly tenant_id: string
+  readonly site_id: string
+  readonly page_url_key: string
+  readonly reason: 'artifact_invalidated_by_deletion' | 'artifact_invalidated_by_rebuild'
 }
 
 export class HeatmapRenderService {
@@ -417,6 +913,7 @@ export class HeatmapRenderService {
   private readonly buildSeqs = new Map<string, number>() // tenant|site|url -> seq
   private readonly artifactsById = new Map<string, StoredArtifactEntry>()
   private readonly artifactsByReproHash = new Map<string, StoredArtifactEntry>()
+  private readonly invalidatedArtifactTombstones = new Map<string, InvalidatedArtifactTombstone>()
   private readonly tenantPixelsUsed = new Map<string, number>()
   private readonly principalActiveJobs = new Map<string, number>()
 
@@ -446,7 +943,7 @@ export class HeatmapRenderService {
   }
 
   /**
-   * 削除イベント発生時: 世代を進めて派生画像・キャッシュを即時失効する (§11.12)。
+   * 削除イベント発生時: 世代を進めて派生画像・キャッシュ・ID保持エントリを即時物理消去する (§11.12)。
    */
   invalidateOnDeletion(tenantId: string, siteId: string, pageUrlOrKey: string): number {
     const urlKey = pageUrlOrKey.includes('://')
@@ -455,12 +952,17 @@ export class HeatmapRenderService {
     const pk = this.pageScopeKey(tenantId, siteId, urlKey)
     const nextEpoch = (this.deletionEpochs.get(pk) ?? 0) + 1
     this.deletionEpochs.set(pk, nextEpoch)
-    this.evictStaleArtifacts(tenantId, siteId, urlKey)
+    this.evictStaleArtifacts(tenantId, siteId, urlKey, 'artifact_invalidated_by_deletion')
     return nextEpoch
   }
 
+  /** Alias for deletion event notification (§11.12). */
+  recordDeletionEvent(tenantId: string, siteId: string, pageUrlOrKey: string): number {
+    return this.invalidateOnDeletion(tenantId, siteId, pageUrlOrKey)
+  }
+
   /**
-   * 集計再構築 (`build_seq` 更新) 時: 派生画像・キャッシュを即時失効する (§11.12)。
+   * 集計再構築 (`build_seq` 更新) 時: 派生画像・キャッシュ・ID保持エントリを即時物理消去する (§11.12)。
    */
   invalidateOnRebuild(tenantId: string, siteId: string, pageUrlOrKey: string): number {
     const urlKey = pageUrlOrKey.includes('://')
@@ -469,18 +971,58 @@ export class HeatmapRenderService {
     const pk = this.pageScopeKey(tenantId, siteId, urlKey)
     const nextSeq = (this.buildSeqs.get(pk) ?? 1) + 1
     this.buildSeqs.set(pk, nextSeq)
-    this.evictStaleArtifacts(tenantId, siteId, urlKey)
+    this.evictStaleArtifacts(tenantId, siteId, urlKey, 'artifact_invalidated_by_rebuild')
     return nextSeq
   }
 
-  private evictStaleArtifacts(tenantId: string, siteId: string, urlKey: string): void {
+  /** Alias for explicit or incremental build_seq update (§11.12). */
+  recordRebuildSeq(
+    tenantId: string,
+    siteId: string,
+    pageUrlOrKey: string,
+    explicitSeq?: number,
+  ): number {
+    const urlKey = pageUrlOrKey.includes('://')
+      ? computeUrlKeyV2(pageUrlOrKey).url_key_v2
+      : pageUrlOrKey
+    const pk = this.pageScopeKey(tenantId, siteId, urlKey)
+    const cur = this.buildSeqs.get(pk) ?? 1
+    const nextSeq = explicitSeq !== undefined && explicitSeq > cur ? explicitSeq : cur + 1
+    this.buildSeqs.set(pk, nextSeq)
+    this.evictStaleArtifacts(tenantId, siteId, urlKey, 'artifact_invalidated_by_rebuild')
+    return nextSeq
+  }
+
+  private evictStaleArtifacts(
+    tenantId: string,
+    siteId: string,
+    urlKey: string,
+    reason: 'artifact_invalidated_by_deletion' | 'artifact_invalidated_by_rebuild',
+  ): void {
     for (const [hash, entry] of this.artifactsByReproHash.entries()) {
       if (
         entry.tenant_id === tenantId &&
         entry.site_id === siteId &&
         entry.page_url_key === urlKey
       ) {
+        entry.png_bytes?.fill(0)
         this.artifactsByReproHash.delete(hash)
+      }
+    }
+    for (const [id, entry] of this.artifactsById.entries()) {
+      if (
+        entry.tenant_id === tenantId &&
+        entry.site_id === siteId &&
+        entry.page_url_key === urlKey
+      ) {
+        entry.png_bytes?.fill(0)
+        this.artifactsById.delete(id)
+        this.invalidatedArtifactTombstones.set(id, {
+          tenant_id: tenantId,
+          site_id: siteId,
+          page_url_key: urlKey,
+          reason,
+        })
       }
     }
   }
@@ -601,11 +1143,12 @@ export class HeatmapRenderService {
   }
 
   /**
-   * 保存済み成果物の取得（毎回認証＋削除/再集計世代の再確認）。
+   * 保存済み成果物の取得（毎回認証＋Audience隔離＋差分防御＋削除/再集計世代の再確認）。
    */
   fetchArtifactById(params: {
     readonly principal: HeatmapFetchPrincipal | null
     readonly artifact_id: string
+    readonly target_site_id?: string
     readonly signed_url_token_only?: boolean
     readonly now_iso: string
   }): {
@@ -614,8 +1157,36 @@ export class HeatmapRenderService {
     readonly png_bytes: Uint8Array | null
     readonly reason: string
   } {
+    // 1. Check unauthenticated / signed_url_token_only FIRST to prevent artifact existence oracle!
+    if (params.signed_url_token_only || !params.principal) {
+      const reason = params.signed_url_token_only
+        ? 'signed_url_only_prohibited'
+        : 'unauthenticated_request'
+      this.auditLog.append({
+        timestamp: params.now_iso,
+        tenantId: 'anonymous',
+        targetTenantId: 'unknown',
+        principalId: 'anonymous',
+        credentialKind: 'ugk_pub',
+        credentialId: 'none',
+        action: 'heatmap.fetch_artifact',
+        riskClass: 'R0',
+        resourceType: 'heatmap_artifact',
+        resourceId: params.artifact_id,
+        outcome: 'deny_401',
+        reason,
+      })
+      return Object.freeze({
+        http_status: 401,
+        artifact: null,
+        png_bytes: null,
+        reason,
+      })
+    }
+
     const entry = this.artifactsById.get(params.artifact_id)
-    if (!entry) {
+    const tombstone = !entry ? this.invalidatedArtifactTombstones.get(params.artifact_id) : undefined
+    if (!entry && !tombstone) {
       return Object.freeze({
         http_status: 404,
         artifact: null,
@@ -624,10 +1195,13 @@ export class HeatmapRenderService {
       })
     }
 
+    const targetTenantId = entry ? entry.tenant_id : tombstone!.tenant_id
+    const targetSiteId = entry ? entry.site_id : tombstone!.site_id
+
     const auth = this.authorizeArtifactFetch({
       principal: params.principal,
-      target_tenant_id: entry.tenant_id,
-      target_site_id: entry.site_id,
+      target_tenant_id: targetTenantId,
+      target_site_id: targetSiteId,
       action: 'heatmap.fetch_artifact',
       resource_id: params.artifact_id,
       signed_url_token_only: params.signed_url_token_only,
@@ -642,27 +1216,108 @@ export class HeatmapRenderService {
       })
     }
 
-    // Re-check deletion_epoch & build_seq on every fetch (and before pending job publish!)
-    const pk = this.pageScopeKey(entry.tenant_id, entry.site_id, entry.page_url_key)
-    const curDelEpoch = this.deletionEpochs.get(pk) ?? 0
-    const curBuildSeq = this.buildSeqs.get(pk) ?? 1
-    if (entry.deletion_epoch < curDelEpoch || entry.build_seq < curBuildSeq) {
-      this.artifactsById.delete(params.artifact_id)
+    if (params.target_site_id !== undefined && params.target_site_id !== targetSiteId) {
+      this.auditLog.append({
+        timestamp: params.now_iso,
+        tenantId: params.principal.tenant_id,
+        targetTenantId,
+        principalId: params.principal.principal_id,
+        credentialKind: 'ugk_sec',
+        credentialId: params.principal.principal_id,
+        action: 'heatmap.fetch_artifact',
+        riskClass: 'R0',
+        resourceType: 'heatmap_artifact',
+        resourceId: params.artifact_id,
+        outcome: 'deny_403',
+        reason: 'target_site_id_mismatch',
+      })
+      return Object.freeze({
+        http_status: 403,
+        artifact: null,
+        png_bytes: null,
+        reason: 'target_site_id_mismatch',
+      })
+    }
+
+    if (tombstone) {
       return Object.freeze({
         http_status: 410,
         artifact: null,
         png_bytes: null,
-        reason:
-          entry.deletion_epoch < curDelEpoch
-            ? 'artifact_invalidated_by_deletion'
-            : 'artifact_invalidated_by_rebuild',
+        reason: tombstone.reason,
       })
+    }
+
+    // Re-check deletion_epoch & build_seq on every fetch (and before pending job publish!)
+    const pk = this.pageScopeKey(entry!.tenant_id, entry!.site_id, entry!.page_url_key)
+    const curDelEpoch = this.deletionEpochs.get(pk) ?? 0
+    const curBuildSeq = this.buildSeqs.get(pk) ?? 1
+    if (entry!.deletion_epoch < curDelEpoch || entry!.build_seq < curBuildSeq) {
+      const reason =
+        entry!.deletion_epoch < curDelEpoch
+          ? 'artifact_invalidated_by_deletion'
+          : 'artifact_invalidated_by_rebuild'
+      entry!.png_bytes?.fill(0)
+      this.artifactsById.delete(params.artifact_id)
+      this.invalidatedArtifactTombstones.set(params.artifact_id, {
+        tenant_id: entry!.tenant_id,
+        site_id: entry!.site_id,
+        page_url_key: entry!.page_url_key,
+        reason,
+      })
+      return Object.freeze({
+        http_status: 410,
+        artifact: null,
+        png_bytes: null,
+        reason,
+      })
+    }
+
+    // Audience isolation: external_party MUST NEVER read an unredacted site_owner artifact!
+    if (params.principal.audience === 'external_party') {
+      if (entry!.audience !== 'external_party') {
+        this.auditLog.append({
+          timestamp: params.now_iso,
+          tenantId: params.principal.tenant_id,
+          targetTenantId,
+          principalId: params.principal.principal_id,
+          credentialKind: 'ugk_sec',
+          credentialId: params.principal.principal_id,
+          action: 'heatmap.fetch_artifact',
+          riskClass: 'R0',
+          resourceType: 'heatmap_artifact',
+          resourceId: params.artifact_id,
+          outcome: 'deny_403',
+          reason: 'audience_mismatch_redaction_required',
+        })
+        return Object.freeze({
+          http_status: 403,
+          artifact: null,
+          png_bytes: null,
+          reason: 'audience_mismatch_redaction_required',
+        })
+      }
+
+      // Re-verify sequential differencing guard for external_party fetches
+      const fetchDisclosure = this.disclosureGuard.evaluate({
+        ...entry!.disclosure_input,
+        principal_id: params.principal.principal_id,
+        audience: 'external_party',
+      })
+      if (!fetchDisclosure.allowed) {
+        return Object.freeze({
+          http_status: 403,
+          artifact: null,
+          png_bytes: null,
+          reason: fetchDisclosure.reason,
+        })
+      }
     }
 
     return Object.freeze({
       http_status: 200,
-      artifact: entry.artifact,
-      png_bytes: entry.png_bytes,
+      artifact: entry!.artifact,
+      png_bytes: entry!.png_bytes,
       reason: 'ok',
     })
   }
@@ -695,7 +1350,13 @@ export class HeatmapRenderService {
       return this.errorResponse(errStatus, auth.reason, req, urlKey, lane)
     }
 
-    // 3. Cost & abuse reservation BEFORE work (§11.12)
+    // 3. Validate PNG dimensions BEFORE pixel budget arithmetic & cost reservation (§11.12)
+    for (const d of req.unit_datasets) {
+      if (d.screenshot) {
+        assertValidPngDimensions(d.screenshot.width, d.screenshot.height)
+      }
+    }
+
     if (req.unit_datasets.length > this.limits.max_images_per_request) {
       return this.errorResponse(429, 'max_images_per_request_exceeded', req, urlKey, lane)
     }
@@ -719,6 +1380,7 @@ export class HeatmapRenderService {
       kind: req.kind,
       verdict_version: req.verdict_version,
       requested_metric_keys: req.requested_metric_keys,
+      input_feature_provenances: req.requested_input_features,
       model_inferred_header: req.model_inferred_header,
     })
     if (!actorPolicy.allowed) {
@@ -765,47 +1427,17 @@ export class HeatmapRenderService {
         ).map((txt) => wrapUntrusted(txt, 'heatmap_text'))
 
         const unitKeyStr = serializeHeatmapUnitKey(dataset.unit)
-        const metricsDigest = createHash('sha256')
-          .update(
-            JSON.stringify({
-              dom_state: dataset.dom_state,
-              drift_G: dataset.measured_geometry_drift_G,
-              claim_gate_passed: dataset.claim_gate_passed,
-              has_verified_field_layout: dataset.has_verified_field_layout,
-              is_auth_page: Boolean(dataset.is_authenticated_or_personalized_page),
-              pending_job_id: dataset.lab_render_pending_job_id ?? null,
-              screenshot_provenance: dataset.screenshot?.provenance ?? null,
-              sections: dataset.sections,
-              clicks: dataset.clicks,
-              http: dataset.http_fetch_metrics ?? null,
-              consent: consentEval.status,
-              audience: principal.audience,
-            }),
-          )
-          .digest('hex')
-        const reproHash = computeReproducibilityHash(
-          dataset.unit,
-          req.kind,
-          req.actor_bucket,
-          dataset.repro_inputs,
-          metricsDigest,
-        )
-
-        // Reuse cached deterministic artifact if exact same reproHash & current generation!
-        const cached = this.artifactsByReproHash.get(
-          `${req.tenant_id}|${req.site_id}|${principal.audience}|${reproHash}`,
-        )
-        if (
-          cached &&
-          cached.deletion_epoch === curDelEpoch &&
-          cached.build_seq === curBuildSeq
-        ) {
-          artifacts.push(Object.freeze({ ...cached.artifact, cache_hit: true }))
-          continue
+        const reproScope = {
+          tenant_id: req.tenant_id,
+          site_id: req.site_id,
+          audience: principal.audience,
+          period_start: req.period_start,
+          period_end: req.period_end,
+          segment_id: req.segment_id,
         }
 
-        // Unified disclosure & differencing attack check
-        const disclosure = this.disclosureGuard.evaluate({
+        // Unified disclosure & differencing attack check MUST run BEFORE any cache lookup!
+        const disclosureInput: DisclosureCheckInput = {
           principal_id: principal.principal_id,
           tenant_id: req.tenant_id,
           site_id: req.site_id,
@@ -818,12 +1450,42 @@ export class HeatmapRenderService {
           subject_ids: dataset.subject_ids,
           sections: dataset.sections,
           clicks: dataset.clicks,
-        })
+        }
+        const disclosure = this.disclosureGuard.evaluate(disclosureInput)
+
+        const metricsDigest = createHash('sha256')
+          .update(
+            JSON.stringify({
+              dom_state: dataset.dom_state,
+              drift_G: dataset.measured_geometry_drift_G,
+              claim_gate_passed: dataset.claim_gate_passed,
+              has_verified_field_layout: dataset.has_verified_field_layout,
+              is_auth_page: Boolean(dataset.is_authenticated_or_personalized_page),
+              pending_job_id: dataset.lab_render_pending_job_id ?? null,
+              screenshot_provenance: dataset.screenshot?.provenance ?? null,
+              sections: disclosure.sections,
+              clicks: disclosure.clicks,
+              http: dataset.http_fetch_metrics ?? null,
+              consent: consentEval.status,
+              audience: principal.audience,
+              disclosure_allowed: disclosure.allowed,
+            }),
+          )
+          .digest('hex')
+        const reproHash = computeReproducibilityHash(
+          dataset.unit,
+          req.kind,
+          req.actor_bucket,
+          dataset.repro_inputs,
+          metricsDigest,
+          reproScope,
+        )
 
         if (!disclosure.allowed) {
           if (disclosure.blocked_differencing_attack) anyDifferencingBlocked = true
           const supArt = this.buildNonImageArtifact({
             req,
+            audience: principal.audience,
             urlKey,
             dataset,
             unitKeyStr,
@@ -845,6 +1507,7 @@ export class HeatmapRenderService {
         if (!consentEval.eligible) {
           const nonEligArt = this.buildNonImageArtifact({
             req,
+            audience: principal.audience,
             urlKey,
             dataset,
             unitKeyStr,
@@ -863,12 +1526,27 @@ export class HeatmapRenderService {
           continue
         }
 
+        // Reuse cached deterministic artifact ONLY AFTER disclosure & consent checks pass,
+        // keyed strictly by tenant, site, audience, window, segment, and reproHash!
+        const cacheKey = `${req.tenant_id}|${req.site_id}|${principal.audience}|${req.period_start}|${req.period_end}|${req.segment_id}|${reproHash}`
+        const cached = this.artifactsByReproHash.get(cacheKey)
+        if (
+          cached &&
+          cached.audience === principal.audience &&
+          cached.deletion_epoch === curDelEpoch &&
+          cached.build_seq === curBuildSeq
+        ) {
+          artifacts.push(Object.freeze({ ...cached.artifact, cache_hit: true }))
+          continue
+        }
+
         // Overlay vs wireframe vs http_fetch vs none/pending decision
         const kindDecision = decideHeatmapRenderKind(dataset, req.actor_bucket)
         if (kindDecision.render_kind === 'none') {
           if (kindDecision.status === 'pending') anyPending = true
           const noImgArt = this.buildNonImageArtifact({
             req,
+            audience: principal.audience,
             urlKey,
             dataset,
             unitKeyStr,
@@ -905,6 +1583,8 @@ export class HeatmapRenderService {
 
         const envelope = this.buildUnitEnvelope({
           req,
+          audience: principal.audience,
+          suppressedCellCount: disclosure.suppressed_cell_count,
           urlKey,
           dataset,
           status: 'ok',
@@ -945,20 +1625,24 @@ export class HeatmapRenderService {
           envelope,
         })
 
-        const entry: StoredArtifactEntry = {
-          artifact,
-          tenant_id: req.tenant_id,
-          site_id: req.site_id,
-          page_url_key: urlKey,
-          png_bytes: rendered.png_bytes,
-          deletion_epoch: curDelEpoch,
-          build_seq: curBuildSeq,
+        // Re-check live generation before publishing to cache/store (§11.12)
+        const postRenderDelEpoch = this.deletionEpochs.get(pk) ?? 0
+        const postRenderBuildSeq = this.buildSeqs.get(pk) ?? 1
+        if (postRenderDelEpoch === curDelEpoch && postRenderBuildSeq === curBuildSeq) {
+          const entry: StoredArtifactEntry = {
+            artifact,
+            tenant_id: req.tenant_id,
+            site_id: req.site_id,
+            page_url_key: urlKey,
+            audience: principal.audience,
+            disclosure_input: disclosureInput,
+            png_bytes: rendered.png_bytes,
+            deletion_epoch: curDelEpoch,
+            build_seq: curBuildSeq,
+          }
+          this.artifactsById.set(artifactId, entry)
+          this.artifactsByReproHash.set(cacheKey, entry)
         }
-        this.artifactsById.set(artifactId, entry)
-        this.artifactsByReproHash.set(
-          `${req.tenant_id}|${req.site_id}|${principal.audience}|${reproHash}`,
-          entry,
-        )
         artifacts.push(artifact)
       }
 
@@ -984,6 +1668,7 @@ export class HeatmapRenderService {
 
   private buildNonImageArtifact(params: {
     readonly req: HeatmapRenderRequest
+    readonly audience: 'site_owner' | 'external_party'
     readonly urlKey: string
     readonly dataset: HeatmapUnitDataset
     readonly unitKeyStr: string
@@ -1000,6 +1685,8 @@ export class HeatmapRenderService {
   }): RenderedHeatmapUnitArtifact {
     const envelope = this.buildUnitEnvelope({
       req: params.req,
+      audience: params.audience,
+      suppressedCellCount: 0,
       urlKey: params.urlKey,
       dataset: params.dataset,
       status: params.status,
@@ -1041,6 +1728,8 @@ export class HeatmapRenderService {
 
   private buildUnitEnvelope(params: {
     readonly req: HeatmapRenderRequest
+    readonly audience: 'site_owner' | 'external_party'
+    readonly suppressedCellCount: number
     readonly urlKey: string
     readonly dataset: HeatmapUnitDataset
     readonly status: MeasureStatus
@@ -1059,16 +1748,39 @@ export class HeatmapRenderService {
     const refId = `hmref_${params.reproHash.slice(0, 12)}`
     const measureKey = `heatmap_${params.req.kind}`
 
-    const measure: MeasureInput = {
+    // Never leak raw <10 denominators when status !== 'ok'; and for external_party with cell suppression,
+    // coarsen disclosed total to a multiple of k=10 so residual subtraction cannot narrow suppressed cells!
+    const safeDisclosedUnits = !isOk
+      ? 0
+      : params.audience === 'external_party' && params.suppressedCellCount > 0
+        ? Math.floor(params.dataset.total_units_in_segment / EXTERNAL_PARTY_MIN_CELL_K) *
+          EXTERNAL_PARTY_MIN_CELL_K
+        : params.dataset.total_units_in_segment
+
+    const gateReason = params.limitations[0] ?? params.status
+    const unmetGate: UnmetGate = {
+      id: gateReason,
+      required: EXTERNAL_PARTY_MIN_CELL_K,
+      observed: 0,
+      reason: gateReason,
+      unlock: `satisfy_${params.status}_gate`,
+    }
+
+    const measure: MeasureInput<VerifiedNumericLeaf> = {
       value: isOk
-        ? createDataLayerMetric(params.dataset.total_units_in_segment, refId, {
+        ? createDataLayerMetric(safeDisclosedUnits, refId, {
             authority: 'data_layer',
             createdAt: params.req.requested_at,
           })
         : null,
       unit: 'pv',
       status: params.status,
-      ...(isOk ? {} : { reason: params.limitations[0] ?? params.status }),
+      ...(isOk
+        ? {}
+        : {
+            reason: gateReason,
+            unmet_gates: [unmetGate],
+          }),
       evidence: {
         level: evidenceLevel,
         exactness: 'exact_as_of_build',
@@ -1087,7 +1799,7 @@ export class HeatmapRenderService {
         ],
         scope: `${params.urlKey}|${params.renderKind}|${params.req.actor_bucket}`,
       },
-      sample: isOk ? { n: params.dataset.total_units_in_segment, unit_kind: 'pv' } : null,
+      sample: isOk ? { n: safeDisclosedUnits, unit_kind: 'pv' } : null,
       interval: null,
     }
 
@@ -1105,7 +1817,7 @@ export class HeatmapRenderService {
       },
       coverage: {
         ratio: isOk ? 1 : 0,
-        denominator_n: params.dataset.total_units_in_segment,
+        denominator_n: safeDisclosedUnits,
       },
       lineage: {
         schema_version: '2.0',

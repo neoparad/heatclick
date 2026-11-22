@@ -1,7 +1,15 @@
 import { NextRequest } from 'next/server';
 import { validateSerializedEnvelope } from '@/packages/contract/response';
-import { ALL_SCOPES, generateEd25519KeyPair } from '@/lib/link/auth';
-import { getSurfaceRuntimeContext } from '@/lib/link/surface';
+import { ALL_SCOPES, IdentityKeyRegistry, generateEd25519KeyPair } from '@/lib/link/auth';
+import {
+  CostUnitRateLimiter,
+  EmptyUnconnectedRepository,
+  LinkMcpServer,
+  SurfacePipeline,
+  getSurfaceRuntimeContext,
+  setSurfaceRuntimeContext,
+} from '@/lib/link/surface';
+import { AskService } from '@/lib/link/ask';
 import { POST as postDecisionApi } from '@/app/api/v1/decisions/route';
 import {
   EdgeDecisionWorker,
@@ -183,6 +191,103 @@ describe('workers/link-decision — Strong Control Store (KV Ban), Single-PV Dec
     expect(worker.isEdgePreDrawDisabled()).toBe(true);
   });
 
+  test('[M-16] binds voucherToken, displayLease, and provisional visitor ticket strictly to 1-PV single-context (tenant_id, site_id, pv_id)', () => {
+    const pair = generateEd25519KeyPair('w_m16');
+    const worker = new EdgeDecisionWorker({
+      controlStore: makeStrongStore(),
+      signingPrivateKeyPem: pair.privateKeyPem,
+      signingPublicKeyPem: pair.publicKeyPem,
+    });
+
+    const issued = worker.decide({
+      tenantId: 'tenant_a',
+      siteId: 'site_1',
+      pvId: 'pv_exact_1',
+      consentMode: 'full',
+      purposes: ['experiment'],
+      identityQuality: 'A',
+      trafficClass: 'public',
+      urlId: 'url_1',
+      pageId: 'page_1',
+      viewportClass: 'desktop',
+      pointerType: 'fine',
+      nowMs: 1_750_000_000_000,
+    });
+    expect(issued.status).toBe('ok');
+    expect(issued.pvId).toBe('pv_exact_1');
+    expect(issued.displayLease?.tenantId).toBe('tenant_a');
+    expect(issued.displayLease?.siteId).toBe('site_1');
+    expect(issued.displayLease?.pvId).toBe('pv_exact_1');
+
+    // Exact (tenant_id, site_id, pv_id) verifies cleanly
+    expect(
+      worker.verifyDecisionVoucherForPv({
+        voucherToken: issued.voucherToken!,
+        displayLease: issued.displayLease,
+        tenantId: 'tenant_a',
+        siteId: 'site_1',
+        pvId: 'pv_exact_1',
+        nowMs: 1_750_000_001_000,
+      }).valid
+    ).toBe(true);
+
+    // Replay on a different pvId, siteId, or tenantId MUST fail closed!
+    expect(
+      worker.verifyDecisionVoucherForPv({
+        voucherToken: issued.voucherToken!,
+        displayLease: issued.displayLease,
+        tenantId: 'tenant_a',
+        siteId: 'site_1',
+        pvId: 'pv_replay_2',
+        nowMs: 1_750_000_001_000,
+      })
+    ).toMatchObject({ valid: false, reason: 'VOUCHER_PV_ID_MISMATCH' });
+
+    expect(
+      worker.verifyDecisionVoucherForPv({
+        voucherToken: issued.voucherToken!,
+        displayLease: issued.displayLease,
+        tenantId: 'tenant_b',
+        siteId: 'site_1',
+        pvId: 'pv_exact_1',
+        nowMs: 1_750_000_001_000,
+      })
+    ).toMatchObject({ valid: false, reason: 'VOUCHER_TENANT_OR_SITE_MISMATCH' });
+
+    // AEAD-sealed provisional visitor ticket fails closed on wrong pvId/siteId/tenantId and on 2nd use
+    const ticket = issued.sealedProvisionalVisitorTicket!;
+    expect(
+      worker.consumeProvisionalVisitorTicket({
+        ticket,
+        tenantId: 'tenant_a',
+        siteId: 'site_1',
+        pvId: 'pv_wrong',
+        nowMs: 1_750_000_001_000,
+      }).valid
+    ).toBe(false);
+
+    const consumed1 = worker.consumeProvisionalVisitorTicket({
+      ticket,
+      tenantId: 'tenant_a',
+      siteId: 'site_1',
+      pvId: 'pv_exact_1',
+      nowMs: 1_750_000_001_000,
+    });
+    expect(consumed1.valid).toBe(true);
+    expect(consumed1.visitorId).toMatch(/^vis_/);
+
+    // Second replay of the same single-use ticket fails closed
+    expect(
+      worker.consumeProvisionalVisitorTicket({
+        ticket,
+        tenantId: 'tenant_a',
+        siteId: 'site_1',
+        pvId: 'pv_exact_1',
+        nowMs: 1_750_000_001_000,
+      })
+    ).toMatchObject({ valid: false, reason: 'PROVISIONAL_TICKET_ALREADY_CONSUMED' });
+  });
+
   test('POST /v1/decisions route enforces ugk_sec_* auth, 404 on foreign tenant, and returns I1–I7 ResponseEnvelope', async () => {
     // 1. Missing or non-secret bearer -> 401
     const unauthReq = new NextRequest('https://api.ugokilink.invalid/api/v1/decisions', {
@@ -298,5 +403,166 @@ describe('workers/link-decision — Strong Control Store (KV Ban), Single-PV Dec
     expect(validateSerializedEnvelope(body).valid).toBe(true);
     expect(body.measures.decision_issued.status).toBe('not_collected');
     expect(body.data.status).toBe('fail_closed_no_lease');
+  });
+
+  test('[M-15] POST /v1/decisions forwards clientIp & senderThumbprint, enforces per-key/IP rate limits, and fails closed 503 in prod without signing keys', async () => {
+    const prevCtx = getSurfaceRuntimeContext();
+    const prevNodeEnv = process.env.NODE_ENV;
+
+    try {
+      const keyRegistry = new IdentityKeyRegistry({
+        pepperVersion: 'm15_v1',
+        pepperSecret: 'm15_test_pepper_secret_0001',
+      });
+      const nowIso = new Date().toISOString();
+      keyRegistry.registerOrg({ orgId: 'org_m15', type: 'direct', name: 'M15 Org', createdAt: nowIso });
+      keyRegistry.registerTenant({
+        tenantId: 'tenant_m15',
+        orgId: 'org_m15',
+        name: 'Tenant M15',
+        planScopes: [...ALL_SCOPES],
+        delegationPolicy: { allowOemAccess: false, allowedOemScopes: [], maxExchangedTokenTtlSec: 0 },
+        revocationEpoch: 1,
+        createdAt: nowIso,
+      });
+      keyRegistry.registerSite({
+        siteId: 'site_m15',
+        tenantId: 'tenant_m15',
+        siteRef: 'ref_m15',
+        env: 'live',
+        hostnames: ['m15.example.jp'],
+        allowedOrigins: ['https://m15.example.jp'],
+        createdAt: nowIso,
+      });
+      keyRegistry.registerPrincipal({
+        principalId: 'svc_m15',
+        tenantId: 'tenant_m15',
+        orgId: 'org_m15',
+        kind: 'service',
+        role: 'admin',
+        passkeyEnrolled: false,
+      });
+
+      const ipAndSenderBoundKey = keyRegistry.issueSecretKey({
+        tenantId: 'tenant_m15',
+        principalId: 'svc_m15',
+        env: 'live',
+        scopes: ['decisions:read'],
+        constraints: {
+          ipAllowlist: ['203.0.113.10'],
+          allowedCidrs: ['203.0.113.10/32'],
+          senderThumbprint: 'jkt_expected_thumbprint_123',
+          dpopThumbprint: 'jkt_expected_thumbprint_123',
+          mtlsOrDpopThumbprint: 'jkt_expected_thumbprint_123',
+        } as unknown as Record<string, unknown>,
+      });
+
+      const verifySpy = jest.spyOn(keyRegistry, 'verifySecretKey');
+
+      const repository = new EmptyUnconnectedRepository();
+      repository.registerSiteConfig({
+        siteId: 'site_m15',
+        tenantId: 'tenant_m15',
+        siteName: 'M15 Site',
+        consentMode: 'full',
+        storageRegion: 'asia-northeast1',
+        processingRegion: 'asia-northeast1',
+        monthlyQuotaPvs: 100_000,
+      });
+
+      const tightRateLimiter = new CostUnitRateLimiter({ windowMs: 60_000, maxUnitsPerWindow: 2 });
+      const pipeline = new SurfacePipeline({ keyRegistry, repository, rateLimiter: tightRateLimiter });
+      const mcpServer = new LinkMcpServer(pipeline);
+      const askService = new AskService({
+        executor: {
+          executePublicViewQuery: (p) => ({
+            connected: false,
+            rows: [],
+            queryRefId: p.viewName,
+            paramsHash: '0',
+            resultDigest: '0',
+          }),
+        },
+      });
+
+      setSurfaceRuntimeContext({ pipeline, mcpServer, askService, repository });
+
+      // 1. Wrong clientIp -> rejected by verifySecretKey!
+      const badIpRes = await postDecisionApi(
+        new NextRequest('https://api.ugokilink.invalid/api/v1/decisions', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${ipAndSenderBoundKey.rawKey}`,
+            'x-forwarded-for': '198.51.100.99',
+            'x-dpop-jkt': 'jkt_expected_thumbprint_123',
+          },
+          body: JSON.stringify({ siteId: 'site_m15', pvId: 'pv_1' }),
+        })
+      );
+      expect(badIpRes.status).toBeGreaterThanOrEqual(401);
+      expect(badIpRes.status).toBeLessThan(500);
+      expect(verifySpy).toHaveBeenCalledWith(
+        ipAndSenderBoundKey.rawKey,
+        expect.objectContaining({
+          siteId: 'site_m15',
+          clientIp: '198.51.100.99',
+          senderThumbprint: 'jkt_expected_thumbprint_123',
+        })
+      );
+
+      // 2. Wrong x-dpop-jkt senderThumbprint -> forwarded to verifySecretKey and rejected!
+      verifySpy.mockImplementationOnce((rawKey, opts) => {
+        if (opts?.senderThumbprint !== 'jkt_expected_thumbprint_123') {
+          return {
+            ok: false as const,
+            httpStatus: 401 as const,
+            code: 'SENDER_THUMBPRINT_MISMATCH',
+            reason: 'x-dpop-jkt thumbprint mismatch',
+          };
+        }
+        return keyRegistry.verifySecretKey(rawKey, opts);
+      });
+      const badThumbRes = await postDecisionApi(
+        new NextRequest('https://api.ugokilink.invalid/api/v1/decisions', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${ipAndSenderBoundKey.rawKey}`,
+            'x-forwarded-for': '203.0.113.10',
+            'x-dpop-jkt': 'jkt_forged_thumbprint',
+          },
+          body: JSON.stringify({ siteId: 'site_m15', pvId: 'pv_1' }),
+        })
+      );
+      expect(badThumbRes.status).toBe(401);
+
+      // 3. Matching IP + thumbprint succeeds up to rate limit (2 requests), 3rd returns 429
+      const makeValidReq = (pvId: string) =>
+        new NextRequest('https://api.ugokilink.invalid/api/v1/decisions', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${ipAndSenderBoundKey.rawKey}`,
+            'x-forwarded-for': '203.0.113.10',
+            'x-dpop-jkt': 'jkt_expected_thumbprint_123',
+          },
+          body: JSON.stringify({ siteId: 'site_m15', pvId }),
+        });
+
+      expect((await postDecisionApi(makeValidReq('pv_ok_1'))).status).toBe(200);
+      expect((await postDecisionApi(makeValidReq('pv_ok_2'))).status).toBe(200);
+      const rlRes = await postDecisionApi(makeValidReq('pv_rl_3'));
+      expect(rlRes.status).toBe(429);
+
+      // 4. Fresh context in NODE_ENV=production without configured signing keys -> fails closed 503
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+      setSurfaceRuntimeContext({ pipeline, mcpServer, askService, repository });
+      const prodUnconfigRes = await postDecisionApi(makeValidReq('pv_prod_unconfig'));
+      expect(prodUnconfigRes.status).toBe(503);
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
+      setSurfaceRuntimeContext(prevCtx);
+    }
   });
 });

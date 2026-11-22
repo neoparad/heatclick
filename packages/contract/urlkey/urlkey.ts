@@ -11,6 +11,7 @@
  */
 
 import { sha256Hex, sha256Uint64 } from './sha256'
+import { buildUrlKeyUnknowables, type UrlKeyUnknowables } from './unknowables'
 
 // ---------------------------------------------------------------------------
 // Constants & Types
@@ -106,6 +107,7 @@ export interface UrlKeyV2Result {
   /** 入力語を含むパス型でマスクされた場合に `true` */
   readonly path_masked: boolean
   readonly matched_input_path_rule_id: string | null
+  readonly unknowables: UrlKeyUnknowables
   readonly campaign_attribution: CampaignAttribution
   readonly key_ver: typeof URL_KEY_VERSION
   readonly profile_rev: string
@@ -409,13 +411,50 @@ function measureLogicalLength(raw: string, treatPlusAsSpace: boolean): number {
   }
 }
 
-function tryDecodeUtf8ForChecks(raw: string, treatPlusAsSpace: boolean): string {
-  const normalized = treatPlusAsSpace ? raw.replace(/\+/g, '%20') : raw
-  try {
-    return decodeURIComponent(normalized)
-  } catch {
-    return raw
+const UTF8_DECODER_LOSSY = new TextDecoder('utf-8', { fatal: false })
+
+/**
+ * Per-sequence `%XX` decoder that NEVER aborts on malformed `%` (e.g. `%ZZ`, `%2`, trailing `%`).
+ * Valid contiguous `%XX` byte runs are decoded as UTF-8 (`%40` -> `@`), while malformed `%`
+ * sequences remain literal (`%ZZ` -> `%ZZ`), preventing PII detector bypass via `%ZZ` suffixes.
+ */
+function safePercentDecodePartial(raw: string, treatPlusAsSpace: boolean): string {
+  let out = ''
+  let pendingBytes: number[] = []
+
+  const flushPendingBytes = (): void => {
+    if (pendingBytes.length === 0) return
+    out += UTF8_DECODER_LOSSY.decode(new Uint8Array(pendingBytes))
+    pendingBytes = []
   }
+
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i)
+    if (
+      code === 0x25 /* % */ &&
+      i + 2 < raw.length &&
+      isHexCharCode(raw.charCodeAt(i + 1)) &&
+      isHexCharCode(raw.charCodeAt(i + 2))
+    ) {
+      pendingBytes.push(parseInt(raw.slice(i + 1, i + 3), 16))
+      i += 2
+      continue
+    }
+
+    flushPendingBytes()
+    if (treatPlusAsSpace && code === 0x2b /* + */) {
+      out += ' '
+    } else {
+      out += raw[i]
+    }
+  }
+
+  flushPendingBytes()
+  return out
+}
+
+function tryDecodeUtf8ForChecks(raw: string, treatPlusAsSpace: boolean): string {
+  return safePercentDecodePartial(raw, treatPlusAsSpace)
 }
 
 /**
@@ -441,22 +480,30 @@ export function isPiiShapedValue(rawValue: string): boolean {
   if (!rawValue || rawValue === PII_SCRUB_TOKEN || LENGTH_BUCKET_TOKEN_RE.test(rawValue)) {
     return false
   }
-  const decoded = tryDecodeUtf8ForChecks(rawValue, true).trim()
+  const decoded = safePercentDecodePartial(rawValue, true).trim()
   if (!decoded) return false
 
-  // Email
-  if (/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(decoded)) return true
-  if (/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(decoded)) return true
-  // JWT (header.payload.signature)
-  if (/^eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/.test(decoded)) return true
-  // Phone numbers (JP/international formatted e.g. 090-1234-5678, +81-90-1234-5678, (03)1234-5678)
-  if (/^(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s])\d{2,4}[-.\s]\d{3,4}$/.test(decoded)) {
-    return true
-  }
-  // Credit card / 13-19 contiguous or hyphen/space-separated digits (Luhn-like / card length)
-  const digitsOnly = decoded.replace(/[-\s]/g, '')
-  if (/^\d{13,19}$/.test(digitsOnly) && /^[\d-\s]+$/.test(decoded)) {
-    return true
+  // Also strip residual broken-percent suffixes/tokens (e.g. %ZZ, %25ZZ) for secondary pattern match
+  const cleanedBrokenPct = decoded.replace(/%(?:25)?[^0-9A-Fa-f]{1,2}|%[0-9A-Fa-f]?$/g, ' ').trim()
+
+  for (const candidate of [decoded, cleanedBrokenPct]) {
+    if (!candidate) continue
+    // Email
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(candidate)) return true
+    if (/[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(candidate)) return true
+    // JWT (header.payload.signature)
+    if (/(?:^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/.test(candidate)) {
+      return true
+    }
+    // Phone numbers (JP/international formatted e.g. 090-1234-5678, +81-90-1234-5678, (03)1234-5678)
+    if (/(?:^|[^\dA-Za-z])(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s])\d{2,4}[-.\s]\d{3,4}(?:$|[^\dA-Za-z])/.test(candidate)) {
+      return true
+    }
+    // Credit card / 13-19 contiguous or hyphen/space-separated digits
+    const digitsOnly = candidate.replace(/[-\s]/g, '')
+    if (/^\d{13,19}$/.test(digitsOnly) && /^[\d-\s]+$/.test(candidate)) {
+      return true
+    }
   }
   return false
 }
@@ -524,6 +571,17 @@ function resolveDotSegmentsAndSlashes(
   return joined
 }
 
+function isPlaceholderPatSeg(pSeg: string): boolean {
+  return (
+    (pSeg.startsWith('<') && pSeg.endsWith('>') && pSeg.length > 2) ||
+    (pSeg.startsWith(':') && pSeg.length > 1)
+  )
+}
+
+function isMultiWildcardPatSeg(pSeg: string): boolean {
+  return pSeg === '**' || pSeg === '...'
+}
+
 function applyInputPathPatterns(
   pathname: string,
   patterns: readonly InputPathPatternRule[],
@@ -543,32 +601,93 @@ function applyInputPathPatterns(
       .filter((s) => s.length > 0)
     if (patSegs.length === 0) continue
 
-    const hasWildcardTail = patSegs[patSegs.length - 1] === '*'
-    const matchCount = hasWildcardTail ? patSegs.length - 1 : patSegs.length
-    if (hasWildcardTail ? pathSegs.length < matchCount : pathSegs.length !== matchCount) {
-      continue
-    }
+    const hasExplicitPlaceholder = patSegs.some(isPlaceholderPatSeg)
 
-    let matched = true
-    const outSegs = [...pathSegs]
-    let anyReplaced = false
+    const matchFrom = (pIdx: number, sIdx: number): { out: string[]; replaced: boolean } | null => {
+      if (pIdx === patSegs.length && sIdx === pathSegs.length) {
+        return { out: [], replaced: false }
+      }
+      if (pIdx >= patSegs.length) {
+        return null
+      }
 
-    for (let i = 0; i < matchCount; i++) {
-      const pSeg = patSegs[i]
-      const isPlaceholder =
-        (pSeg.startsWith('<') && pSeg.endsWith('>') && pSeg.length > 2) ||
-        (pSeg.startsWith(':') && pSeg.length > 1)
-      if (isPlaceholder) {
-        outSegs[i] = computeLengthBucket(pathSegs[i], false)
-        anyReplaced = true
-      } else if (pSeg !== pathSegs[i]) {
-        matched = false
-        break
+      const pSeg = patSegs[pIdx]
+      const isLastPat = pIdx === patSegs.length - 1
+
+      // Multi-segment wildcard (`**` or `...`) or trailing `/*` when explicit placeholder exists
+      if (isMultiWildcardPatSeg(pSeg) || (pSeg === '*' && isLastPat)) {
+        // Trailing `/*` or `/...` requires at least 1 segment (`sIdx < pathSegs.length`)
+        if (isLastPat && sIdx >= pathSegs.length) {
+          return null
+        }
+        if (isLastPat) {
+          const rest = pathSegs
+            .slice(sIdx)
+            .map((seg) => (!hasExplicitPlaceholder ? computeLengthBucket(seg, false) : seg))
+          return {
+            out: rest,
+            replaced: !hasExplicitPlaceholder && rest.length > 0,
+          }
+        }
+        // Non-terminal `**` / `...`: match 1 or more (or 0 or more for `**`) segments greedily/backtracking
+        const minCount = pSeg === '**' ? 0 : 1
+        for (let take = minCount; sIdx + take <= pathSegs.length; take++) {
+          const tail = matchFrom(pIdx + 1, sIdx + take)
+          if (tail) {
+            const consumed = pathSegs
+              .slice(sIdx, sIdx + take)
+              .map((seg) => (!hasExplicitPlaceholder ? computeLengthBucket(seg, false) : seg))
+            return {
+              out: [...consumed, ...tail.out],
+              replaced: tail.replaced || (!hasExplicitPlaceholder && consumed.length > 0),
+            }
+          }
+        }
+        return null
+      }
+
+      if (sIdx >= pathSegs.length) {
+        return null
+      }
+
+      // Single-segment placeholder (`<term>` or `:term`)
+      if (isPlaceholderPatSeg(pSeg)) {
+        const tail = matchFrom(pIdx + 1, sIdx + 1)
+        if (!tail) return null
+        return {
+          out: [computeLengthBucket(pathSegs[sIdx], false), ...tail.out],
+          replaced: true,
+        }
+      }
+
+      // Mid-path single-segment wildcard `*` (e.g. `/search/*/query` or `/search/*/:query`)
+      if (pSeg === '*') {
+        const tail = matchFrom(pIdx + 1, sIdx + 1)
+        if (!tail) return null
+        const outSeg = !hasExplicitPlaceholder
+          ? computeLengthBucket(pathSegs[sIdx], false)
+          : pathSegs[sIdx]
+        return {
+          out: [outSeg, ...tail.out],
+          replaced: tail.replaced || !hasExplicitPlaceholder,
+        }
+      }
+
+      // Case-insensitive literal segment match (canonicalizes matched literal to lowercase rule segment)
+      if (pSeg.toLowerCase() !== pathSegs[sIdx].toLowerCase()) {
+        return null
+      }
+      const tail = matchFrom(pIdx + 1, sIdx + 1)
+      if (!tail) return null
+      return {
+        out: [pSeg.toLowerCase(), ...tail.out],
+        replaced: tail.replaced,
       }
     }
 
-    if (matched && anyReplaced) {
-      const rebuilt = '/' + outSegs.join('/') + (hasTrailingSlash ? '/' : '')
+    const res = matchFrom(0, 0)
+    if (res && res.replaced) {
+      const rebuilt = '/' + res.out.join('/') + (hasTrailingSlash ? '/' : '')
       return { pathname: rebuilt, masked: true, ruleId: rule.id }
     }
   }
@@ -645,6 +764,55 @@ export function classifyQueryParam(
 // Main Authoritative Function: computeUrlKeyV2
 // ---------------------------------------------------------------------------
 
+const KNOWN_NON_HTTP_SCHEMES: ReadonlySet<string> = new Set([
+  'javascript',
+  'vbscript',
+  'data',
+  'mailto',
+  'tel',
+  'sms',
+  'mms',
+  'fax',
+  'about',
+  'blob',
+  'file',
+  'ftp',
+  'ftps',
+  'ws',
+  'wss',
+  'urn',
+  'geo',
+  'magnet',
+  'intent',
+  'market',
+  'itms',
+  'itms-apps',
+  'chrome',
+  'chrome-extension',
+  'moz-extension',
+  'view-source',
+])
+
+function assertNonEmptyAuthority(afterDoubleSlash: string, rawUrl: string): void {
+  let delimIdx = -1
+  for (let i = 0; i < afterDoubleSlash.length; i++) {
+    const ch = afterDoubleSlash[i]
+    if (ch === '/' || ch === '\\' || ch === '?' || ch === '#') {
+      delimIdx = i
+      break
+    }
+  }
+  const authority = delimIdx === -1 ? afterDoubleSlash : afterDoubleSlash.slice(0, delimIdx)
+  if (!authority) {
+    throw new UrlKeyError(`Empty authority / host in URL: ${rawUrl}`)
+  }
+  const atIdx = authority.lastIndexOf('@')
+  const hostPort = atIdx >= 0 ? authority.slice(atIdx + 1) : authority
+  if (!hostPort || hostPort.startsWith(':')) {
+    throw new UrlKeyError(`Empty hostname in URL authority: ${rawUrl}`)
+  }
+}
+
 function prepareInputWithScheme(input: string): string {
   // Reject explicit non-http(s) scheme with `://`
   const fullSchemeMatch = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//.exec(input)
@@ -653,33 +821,59 @@ function prepareInputWithScheme(input: string): string {
     if (scheme !== 'http' && scheme !== 'https') {
       throw new UrlKeyError(`Unsupported URL scheme: ${scheme}`)
     }
+    assertNonEmptyAuthority(input.slice(fullSchemeMatch[0].length), input)
     return input
+  }
+
+  // Reject `http:/foo` or `https:/foo` (missing second authority slash) or `///foo`
+  if (/^https?:\/(?!\/)/i.test(input)) {
+    throw new UrlKeyError(`Malformed HTTP(S) authority slashes in URL: ${input}`)
   }
 
   // Protocol-relative URL (`//example.com/path`)
   if (input.startsWith('//')) {
+    assertNonEmptyAuthority(input.slice(2), input)
     return 'https:' + input
   }
 
+  // Reject bare path starting with `/` without host
+  if (input.startsWith('/') || input.startsWith('\\')) {
+    throw new UrlKeyError(`Missing hostname in relative path URL: ${input}`)
+  }
+
   // Detect schemeless `scheme:...` without `//` (javascript:, mailto:, data:, tel:, about:, blob:, file:)
-  // while STILL allowing `host:port/path` (e.g. `example.com:8080/a`, `localhost:3000/a`, `[::1]:8080/a`)!
+  // while STILL allowing `host:port/path` including single-label hosts (`staging:8080/page`, `localhost:3000/a`, `[::1]:8080/a`)!
   if (!input.startsWith('[')) {
     const colonIdx = input.indexOf(':')
     const firstDelim = input.search(/[/?#\\]/)
+    if (colonIdx === 0) {
+      throw new UrlKeyError(`Missing hostname before port in URL: ${input}`)
+    }
     if (colonIdx > 0 && (firstDelim === -1 || colonIdx < firstDelim)) {
       const beforeColon = input.slice(0, colonIdx)
+      const beforeLower = beforeColon.toLowerCase()
       const afterColon = firstDelim === -1 ? input.slice(colonIdx + 1) : input.slice(colonIdx + 1, firstDelim)
-      const looksLikePort = /^\d*$/.test(afterColon)
-      const looksLikeHost =
+
+      if (KNOWN_NON_HTTP_SCHEMES.has(beforeLower)) {
+        throw new UrlKeyError(`Unsupported URL scheme: ${beforeLower}`)
+      }
+
+      const isNumericPort = /^\d{1,5}$/.test(afterColon) && Number(afterColon) >= 1 && Number(afterColon) <= 65535
+      const isEmptyPortWithExplicitHost =
+        afterColon === '' && (beforeColon.includes('.') || beforeLower === 'localhost')
+      const looksLikeValidHost =
         beforeColon.includes('.') ||
-        beforeColon.toLowerCase() === 'localhost' ||
-        /^\d+$/.test(beforeColon)
-      if (!looksLikePort || !looksLikeHost) {
-        throw new UrlKeyError(`Unsupported URL scheme: ${beforeColon.toLowerCase()}`)
+        beforeLower === 'localhost' ||
+        /^\d+$/.test(beforeColon) ||
+        (isNumericPort && /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(beforeColon))
+
+      if (!(isNumericPort || isEmptyPortWithExplicitHost) || !looksLikeValidHost) {
+        throw new UrlKeyError(`Unsupported URL scheme: ${beforeLower}`)
       }
     }
   }
 
+  assertNonEmptyAuthority(input, input)
   return 'https://' + input
 }
 
@@ -866,6 +1060,7 @@ export function computeUrlKeyV2(rawUrl: string, rules?: UrlKeyV2Rules): UrlKeyV2
   const { hex16, uint64 } = sha256Uint64(urlKeyV2)
   const unclassifiedNames = Object.freeze(Array.from(unclassifiedSet).sort())
   const coarseKey = unclassifiedNames.length > 0
+  const unknowables = buildUrlKeyUnknowables(pathname, pathMaskRes.masked, unclassifiedNames)
 
   return Object.freeze({
     url_key_v2: urlKeyV2,
@@ -884,6 +1079,7 @@ export function computeUrlKeyV2(rawUrl: string, rules?: UrlKeyV2Rules): UrlKeyV2
     param_classifications: Object.freeze(classifications),
     path_masked: pathMaskRes.masked,
     matched_input_path_rule_id: pathMaskRes.ruleId,
+    unknowables,
     campaign_attribution: Object.freeze({
       utm: Object.freeze(utmMap),
       click_id_types: Object.freeze(Array.from(clickIdTypesSet).sort()),
@@ -894,7 +1090,9 @@ export function computeUrlKeyV2(rawUrl: string, rules?: UrlKeyV2Rules): UrlKeyV2
 }
 
 /**
- * 受付側での冪等性検証: `computeUrlKeyV2` を 2 回掛けて完全一致することを確認する (設計書 §6.4 / D-6)。
+ * 受付側での真の不動点・冪等性検証:
+ * 入力 `rawUrl` 自体が既に正規化済み正準形 (`rawUrl === first.url_key_v2`) であり、
+ * かつ 2 回目の適用でも完全一致 (`first.url_key_v2 === second.url_key_v2`) することを確認する (設計書 §6.4 / D-6 / [C-08])。
  */
 export function verifyUrlKeyIdempotency(
   rawUrl: string,
@@ -904,6 +1102,7 @@ export function verifyUrlKeyIdempotency(
   const second = computeUrlKeyV2(first.url_key_v2, rules)
 
   const idempotent =
+    rawUrl === first.url_key_v2 &&
     first.url_key_v2 === second.url_key_v2 &&
     first.url_id === second.url_id &&
     first.url_id_hex === second.url_id_hex &&

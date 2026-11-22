@@ -13,6 +13,7 @@ import { NotEntitledError } from '@/packages/contract/ledgers'
 import {
   ACTOR_REGISTRY,
   ActorVerdictEngine,
+  adaptHostingLogRecord,
   assertNoVerdictInClientAck,
   buildOriginCookieSetHeader,
   buildSafeClientAck,
@@ -30,8 +31,10 @@ import {
   MAX_ORIGIN_COOKIE_MAX_AGE_SECONDS,
   mintServerTimingHandoffHeader,
   OriginIpTrustRegistry,
+  parseNginxMsecToMs,
   parseServerTimingHandoffHeader,
   parseSignatureAgentHeader,
+  parseSignatureInputHeader,
   POLICY_ONLY_REGISTRY,
   reduceStandardBrowserUa,
   Rfc9421ReplayCache,
@@ -1487,5 +1490,427 @@ describe('Address Privacy E/T/P Classes, D-12 Gate, 30d Key Destruction & 4 Purp
       TEST_PSEUDONYM_KEYRING,
     )
     expect(pDailyNextDay).not.toBe(pDaily)
+  })
+})
+
+// ===========================================================================
+// Wave 8 Adversarial Regression Tests: [H-26] & [H-29]
+// ===========================================================================
+
+describe('Wave 8 Adversarial Regressions: [H-26] RFC 9421 Target Binding, JWKS Pinning & SFV Parsing', () => {
+  test('[H-26] rejects signatures omitting @method, @path (cross-path replay), or @query (when query present)', async () => {
+    const edKp = await generateEd25519TestKeyPair()
+    const store = new InMemoryEvidenceSnapshotStore()
+    const clock = new ActorEvidenceClock({
+      store,
+      cadenceMode: 'production_poll',
+      now: () => new Date('2026-11-20T11:50:00.000Z'),
+      fetcher: async () => ({
+        status: 200,
+        body: JSON.stringify({ keys: [edKp.jwk] }),
+        headers: { 'cache-control': 'max-age=3600' },
+      }),
+    })
+    const openaiSrc = DEFAULT_EVIDENCE_SOURCES.find(
+      (s) => s.source_id === 'openai:chatgpt-cloud-browser-jwks',
+    )!
+    await clock.captureSource(openaiSrc)
+    const engine = new ActorVerdictEngine({ clock })
+    const nowSec = Math.floor(Date.parse('2026-11-20T12:00:00.000Z') / 1000)
+
+    // 1. Omitting @path (authority-only signature replayed onto /admin) -> rejected!
+    const noPathSig = await signRfc9421Request({
+      algorithm: 'Ed25519',
+      privateKey: edKp.privateKey,
+      publicJwk: edKp.jwk,
+      method: 'GET',
+      authority: 'example.jp',
+      path: '/public',
+      signature_agent: '"https://chatgpt.com"',
+      created: nowSec - 5,
+      expires: nowSec + 300,
+      covered_components: ['@method', '@authority', 'signature-agent'],
+    })
+    const noPathVerdict = await engine.evaluateObservation(
+      makeObservation({
+        host: 'example.jp',
+        path: '/admin/export',
+        rfc9421_headers: {
+          signature_input: noPathSig.signature_input,
+          signature: noPathSig.signature,
+          signature_agent: noPathSig.signature_agent,
+        },
+      }),
+    )
+    expect(noPathVerdict.verified_actor_id).toBeNull()
+    expect(noPathVerdict.verification_result).toBe('signature_invalid')
+
+    // 2. Omitting @method -> rejected!
+    const noMethodSig = await signRfc9421Request({
+      algorithm: 'Ed25519',
+      privateKey: edKp.privateKey,
+      publicJwk: edKp.jwk,
+      method: 'GET',
+      authority: 'example.jp',
+      path: '/public',
+      signature_agent: '"https://chatgpt.com"',
+      created: nowSec - 5,
+      expires: nowSec + 300,
+      covered_components: ['@authority', '@path', 'signature-agent'],
+    })
+    const noMethodVerdict = await engine.evaluateObservation(
+      makeObservation({
+        method: 'POST',
+        host: 'example.jp',
+        path: '/public',
+        rfc9421_headers: {
+          signature_input: noMethodSig.signature_input,
+          signature: noMethodSig.signature,
+          signature_agent: noMethodSig.signature_agent,
+        },
+      }),
+    )
+    expect(noMethodVerdict.verified_actor_id).toBeNull()
+    expect(noMethodVerdict.verification_result).toBe('signature_invalid')
+
+    // 3. Omitting @query when observation has non-empty query -> rejected!
+    const noQuerySig = await signRfc9421Request({
+      algorithm: 'Ed25519',
+      privateKey: edKp.privateKey,
+      publicJwk: edKp.jwk,
+      method: 'GET',
+      authority: 'example.jp',
+      path: '/search',
+      query: null,
+      signature_agent: '"https://chatgpt.com"',
+      created: nowSec - 5,
+      expires: nowSec + 300,
+      covered_components: ['@method', '@authority', '@path', 'signature-agent'],
+    })
+    const noQueryVerdict = await engine.evaluateObservation(
+      makeObservation({
+        host: 'example.jp',
+        path: '/search',
+        query: '?q=secret',
+        rfc9421_headers: {
+          signature_input: noQuerySig.signature_input,
+          signature: noQuerySig.signature,
+          signature_agent: noQuerySig.signature_agent,
+        },
+      }),
+    )
+    expect(noQueryVerdict.verified_actor_id).toBeNull()
+    expect(noQueryVerdict.verification_result).toBe('signature_invalid')
+  })
+
+  test('[H-26] pins JWKS strictly to Signature-Agent, supports ;key="g" SFV dictionary & escaped quotes, catches malformed JWK, and defaults replayCache', async () => {
+    const openaiKp = await generateEd25519TestKeyPair()
+    const googleKp = await generateEcdsaP256TestKeyPair()
+    const store = new InMemoryEvidenceSnapshotStore()
+    const clock = new ActorEvidenceClock({
+      store,
+      cadenceMode: 'production_poll',
+      now: () => new Date('2026-11-20T11:50:00.000Z'),
+      fetcher: async (url: string) => {
+        if (url.includes('chatgpt.com')) {
+          return {
+            status: 200,
+            body: JSON.stringify({ keys: [openaiKp.jwk] }),
+            headers: { 'cache-control': 'max-age=3600' },
+          }
+        }
+        if (url.includes('agent.bot.goog')) {
+          return {
+            status: 200,
+            body: JSON.stringify({ keys: [googleKp.jwk] }),
+            headers: { 'cache-control': 'max-age=3600' },
+          }
+        }
+        return { status: 404, body: '' }
+      },
+    })
+    await clock.captureSource(
+      DEFAULT_EVIDENCE_SOURCES.find((s) => s.source_id === 'openai:chatgpt-cloud-browser-jwks')!,
+    )
+    await clock.captureSource(
+      DEFAULT_EVIDENCE_SOURCES.find((s) => s.source_id === 'google:google-agent-jwks')!,
+    )
+
+    // Note: replayCache NOT explicitly passed -> must still detect replay by default!
+    const engine = new ActorVerdictEngine({ clock })
+    const nowSec = Math.floor(Date.parse('2026-11-20T12:00:00.000Z') / 1000)
+
+    // Cross-agent JWKS confusion attack: claim Google Signature-Agent while signing with OpenAI's key!
+    const crossAgentSig = await signRfc9421Request({
+      algorithm: 'Ed25519',
+      privateKey: openaiKp.privateKey,
+      publicJwk: openaiKp.jwk,
+      method: 'GET',
+      authority: 'example.jp',
+      path: '/pricing',
+      signature_agent: 'g="https://agent.bot.goog"',
+      created: nowSec - 5,
+      expires: nowSec + 300,
+    })
+    const crossAgentVerdict = await engine.evaluateObservation(
+      makeObservation({
+        host: 'example.jp',
+        path: '/pricing',
+        rfc9421_headers: {
+          signature_input: crossAgentSig.signature_input,
+          signature: crossAgentSig.signature,
+          signature_agent: crossAgentSig.signature_agent,
+        },
+      }),
+    )
+    expect(crossAgentVerdict.verified_actor_id).toBeNull()
+    expect(crossAgentVerdict.verification_result).toBe('signature_invalid')
+
+    // Uncatalogued Signature-Agent signed with OpenAI's key -> MUST NOT wildcard-match OpenAI's JWKS!
+    const uncatSig = await signRfc9421Request({
+      algorithm: 'Ed25519',
+      privateKey: openaiKp.privateKey,
+      publicJwk: openaiKp.jwk,
+      method: 'GET',
+      authority: 'example.jp',
+      path: '/pricing',
+      signature_agent: '"https://evil-bot.example"',
+      created: nowSec - 5,
+      expires: nowSec + 300,
+    })
+    const uncatVerdict = await engine.evaluateObservation(
+      makeObservation({
+        host: 'example.jp',
+        path: '/pricing',
+        rfc9421_headers: {
+          signature_input: uncatSig.signature_input,
+          signature: uncatSig.signature,
+          signature_agent: uncatSig.signature_agent,
+        },
+      }),
+    )
+    expect(uncatVerdict.verified_actor_id).toBeNull()
+    expect(uncatVerdict.verification_result).toBe('signature_invalid')
+
+    // Valid RFC 9421 structured dictionary member `"signature-agent";key="g"` + special chars in nonce
+    const specialNonce = 'n;1=2,3)4"escaped'
+    const dictKeySig = await signRfc9421Request({
+      algorithm: 'ES256',
+      privateKey: googleKp.privateKey,
+      publicJwk: googleKp.jwk,
+      method: 'GET',
+      authority: 'example.jp',
+      path: '/pricing',
+      query: '?plan=pro',
+      signature_agent: 'g="https://agent.bot.goog"',
+      created: nowSec - 5,
+      expires: nowSec + 300,
+      nonce: specialNonce,
+      covered_components: ['@method', '@authority', '@path', '@query', '"signature-agent";key="g"'],
+    })
+    const parsedSf = parseSignatureInputHeader(dictKeySig.signature_input)
+    expect(parsedSf?.nonce).toBe(specialNonce)
+    expect(parsedSf?.covered_components).toContain('"signature-agent";key="g"')
+
+    const obsGoogle = makeObservation({
+      host: 'example.jp',
+      path: '/pricing',
+      query: '?plan=pro',
+      rfc9421_headers: {
+        signature_input: dictKeySig.signature_input,
+        signature: dictKeySig.signature,
+        signature_agent: dictKeySig.signature_agent,
+      },
+    })
+    const v1 = await engine.evaluateObservation(obsGoogle)
+    expect(v1.verified_actor_id).toBe('google:google-agent')
+    expect(v1.replay_suspected).toBe(false)
+
+    // Default replayCache catches replay on 2nd evaluation!
+    const v2 = await engine.evaluateObservation(obsGoogle)
+    expect(v2.replay_suspected).toBe(true)
+
+    // Malformed JWK coordinates in unknownDomainJwks must NOT throw an unhandled error
+    const badJwk: Rfc9421Jwk = {
+      kty: 'EC',
+      crv: 'P-256',
+      x: '!!!not-valid-base64url!!!',
+      y: '!!!not-valid-base64url!!!',
+      kid: openaiKp.jwk.thumbprint_sha256,
+      thumbprint_sha256: openaiKp.jwk.thumbprint_sha256,
+    }
+    const badJwkVerdict = await engine.evaluateObservation(
+      makeObservation({
+        host: 'example.jp',
+        path: '/pricing',
+        rfc9421_headers: {
+          signature_input: uncatSig.signature_input,
+          signature: uncatSig.signature,
+          signature_agent: '"https://evil-bot.example"',
+        },
+      }),
+      { unknownDomainJwks: [{ domain: 'evil-bot.example', jwks: [badJwk] }] },
+    )
+    expect(badJwkVerdict.verification_result).toBe('signature_invalid')
+  })
+})
+
+describe('Wave 8 Adversarial Regressions: [H-29] Origin Kit Cookie/Pre-Consent Safety, $msec & Cross-Month Quorum', () => {
+  test('[H-29] Nginx template never leaks HttpOnly cookie via $request_id in Server-Timing, and all 4 templates suppress pre-consent cookies', () => {
+    const nginxCfg = generateOriginKitConfig('nginx', {
+      tenant_id: 'tenant_a',
+      site_id: 'site_1',
+      host: 'example.jp',
+      consent_mode: 'full',
+    })
+    expect(nginxCfg.code_template).not.toContain('__ugk_id=$request_id')
+    expect(nginxCfg.code_template).toContain('default 0;')
+    expect(nginxCfg.code_template).not.toContain('default 1;')
+
+    for (const p of ['cloudflare_worker', 'nextjs_middleware', 'wordpress'] as const) {
+      const cfg = generateOriginKitConfig(p, {
+        tenant_id: 'tenant_a',
+        site_id: 'site_1',
+        host: 'example.jp',
+        consent_mode: 'full',
+      })
+      // Must NOT fall back to `'full'` when consent cookie is absent!
+      expect(cfg.code_template).not.toContain("?? 'full'")
+      // Must NOT leak raw secret into Server-Timing header string
+      expect(cfg.code_template).not.toMatch(/Server-Timing.*\$\{?env\.UGK_EDGE_SECRET/)
+    }
+
+    expect(
+      buildOriginCookieSetHeader({
+        consent_mode: 'unresolved',
+        cookie_value: 'abcdef1234567890',
+      }),
+    ).toBeNull()
+    expect(
+      buildOriginCookieSetHeader({
+        consent_mode: 'full',
+        consent_resolved: false,
+        cookie_value: 'abcdef1234567890',
+      }),
+    ).toBeNull()
+  })
+
+  test('[H-29] parses Nginx $msec decimal timestamps in Server-Timing handoff and Nginx log adapter', () => {
+    expect(parseNginxMsecToMs('1763640000.123')).toBe(1763640000123)
+    const parsedHandoff = parseServerTimingHandoffHeader(
+      'ugk;desc="1.req_nginx_01.1763640000.123"',
+    )
+    expect(parsedHandoff).not.toBeNull()
+    expect(parsedHandoff?.request_id).toBe('req_nginx_01')
+    expect(parsedHandoff?.issued_at_sec).toBe(1763640000)
+    expect(parsedHandoff?.issued_at_ms).toBe(1763640000123)
+
+    const adapted = adaptHostingLogRecord(
+      'nginx',
+      {
+        msec: '1763640000.123',
+        request_id: 'req_nginx_01',
+        request_method: 'GET',
+        request_uri: '/guide',
+        status: 200,
+        remote_addr: '203.0.113.10',
+        http_user_agent: 'CustomAgent/1.0',
+      },
+      'example.jp',
+    )
+    expect(adapted).not.toBeNull()
+    expect(adapted?.observed_at).toBe(new Date(1763640000123).toISOString())
+  })
+
+  test('[H-29] single or 2-network custom UA crossing UTC month boundary (monthly salt rotation) cannot falsely reach 3-network quorum', () => {
+    const tracker = new UnknownUaQuorumTracker()
+    const secret = 'ingest-hmac-secret-01'
+    const customUa = 'HomeNasMonitor/0.9 (private-token-xyz)'
+
+    // Batch 1 on Nov 30 (2 networks: 203.0.113.10 and 198.51.100.20, 6 requests)
+    const novRecords = Array.from({ length: 6 }, (_, idx) => ({
+      observed_at: '2026-11-30T23:59:50Z',
+      request_id: `nov_${idx}`,
+      method: 'GET',
+      host: 'example.jp',
+      path: '/status',
+      status: 200,
+      content_type: 'text/html',
+      client_ip: idx % 2 === 0 ? '203.0.113.10' : '198.51.100.20',
+      user_agent: customUa,
+    }))
+    const novBody = JSON.stringify(novRecords)
+    const novTs = Math.floor(Date.parse('2026-11-30T23:59:55Z') / 1000)
+    const novRes = ingestSignedLogBatch(
+      {
+        tenant_id: 'tenant_a',
+        site_id: 'site_1',
+        default_host: 'example.jp',
+        adapter: 'cloudflare_worker',
+        content_type: 'application/json',
+        raw_body: novBody,
+        timestamp_sec: novTs,
+        signature_header: signLogIngestBatch({
+          tenant_id: 'tenant_a',
+          site_id: 'site_1',
+          timestamp_sec: novTs,
+          raw_body: novBody,
+          secret,
+        }),
+      },
+      {
+        ingest_secret: secret,
+        now_sec: novTs,
+        pseudonym_key_ring: TEST_PSEUDONYM_KEYRING,
+        unknown_ua_quorum: tracker,
+      },
+    )
+    expect(novRes.ok).toBe(true)
+
+    // Batch 2 on Dec 01 (THE SAME 2 networks, 6 more requests -> total 12 requests, 4 rotated pseudonyms across 2 months, ONLY 2 distinct networks per month!)
+    const decRecords = Array.from({ length: 6 }, (_, idx) => ({
+      observed_at: '2026-12-01T00:00:05Z',
+      request_id: `dec_${idx}`,
+      method: 'GET',
+      host: 'example.jp',
+      path: '/status',
+      status: 200,
+      content_type: 'text/html',
+      client_ip: idx % 2 === 0 ? '203.0.113.10' : '198.51.100.20',
+      user_agent: customUa,
+    }))
+    const decBody = JSON.stringify(decRecords)
+    const decTs = Math.floor(Date.parse('2026-12-01T00:00:10Z') / 1000)
+    const decRes = ingestSignedLogBatch(
+      {
+        tenant_id: 'tenant_a',
+        site_id: 'site_1',
+        default_host: 'example.jp',
+        adapter: 'cloudflare_worker',
+        content_type: 'application/json',
+        raw_body: decBody,
+        timestamp_sec: decTs,
+        signature_header: signLogIngestBatch({
+          tenant_id: 'tenant_a',
+          site_id: 'site_1',
+          timestamp_sec: decTs,
+          raw_body: decBody,
+          secret,
+        }),
+      },
+      {
+        ingest_secret: secret,
+        now_sec: decTs,
+        pseudonym_key_ring: TEST_PSEUDONYM_KEYRING,
+        unknown_ua_quorum: tracker,
+      },
+    )
+    expect(decRes.ok).toBe(true)
+
+    const qState = tracker.getEntry('homenasmonitor')!
+    expect(qState.request_count).toBe(12)
+    expect(qState.distinct_network_count).toBe(2)
+    expect(qState.quorum_reached).toBe(false)
+    expect(qState.review_sample_ua).toBeNull()
   })
 })

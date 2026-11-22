@@ -76,11 +76,15 @@ export interface CalibratedLegacyPoint {
   readonly excludeFromDefaultTraining: true;
 }
 
+export const DEFAULT_G17_EQUIVALENCE_MARGIN = 0.02; // ±2.0pp two-sided TOST equivalence margin
+
 export interface ConversionParityInput {
   readonly cvKey: string;
   readonly bothArmPvs: number;
   readonly v2Conversions: number;
   readonly v3Conversions: number;
+  /** Two-sided absolute CVR equivalence margin (defaults to `0.02` = ±2.0 percentage points). */
+  readonly equivalenceMargin?: number;
 }
 
 export interface ConversionParityResult {
@@ -90,6 +94,8 @@ export interface ConversionParityResult {
   readonly v3Rate: number;
   readonly diffV3MinusV2: number;
   readonly ci95LowerDiff: number;
+  readonly ci95UpperDiff: number;
+  readonly equivalenceMargin: number;
   readonly passed: boolean;
   readonly reason: string;
 }
@@ -372,12 +378,14 @@ export function calibrateLegacySeries(
 }
 
 /**
- * `tel.G17` conversion non-inferiority / parity check on the `both` arm:
- * verifies v3 conversion rate is not statistically below v2 within 95% CI.
+ * `tel.G17` two-sided TOST conversion equivalence check on the `both` arm (M-05):
+ * verifies BOTH `ci95LowerDiff >= -margin` (v3 does not drop conversions) AND
+ * `ci95UpperDiff <= +margin` (v3 does not double-fire or inflate conversions).
  */
 export function evaluateConversionParityG17(
   input: ConversionParityInput
 ): ConversionParityResult {
+  const margin = Math.max(0.0001, input.equivalenceMargin ?? DEFAULT_G17_EQUIVALENCE_MARGIN);
   if (input.bothArmPvs <= 0) {
     return {
       gateId: 'tel.G17',
@@ -386,6 +394,8 @@ export function evaluateConversionParityG17(
       v3Rate: 0,
       diffV3MinusV2: 0,
       ci95LowerDiff: -1,
+      ci95UpperDiff: 1,
+      equivalenceMargin: margin,
       passed: false,
       reason: 'zero_both_arm_pvs',
     };
@@ -398,10 +408,18 @@ export function evaluateConversionParityG17(
     (p2 * (1 - p2) + p3 * (1 - p3)) / input.bothArmPvs
   );
   const z = 1.959963984540054;
-  // Pass when v3 >= v2 OR v2's upper difference stays within 95% CI (v3 not significantly lower)
   const ci95UpperDiff = diff + z * se;
   const ci95LowerDiff = diff - z * se;
-  const passed = ci95UpperDiff >= 0;
+  const nonInferior = ci95LowerDiff >= -margin;
+  const nonInflated = ci95UpperDiff <= margin;
+  const passed = nonInferior && nonInflated;
+
+  let reason = 'v3_conversions_equivalent_to_v2_two_sided_tost';
+  if (!nonInferior) {
+    reason = `v3 conversion rate (${(p3 * 100).toFixed(2)}%) below v2 (${(p2 * 100).toFixed(2)}%) outside equivalence margin -${(margin * 100).toFixed(2)}pp`;
+  } else if (!nonInflated) {
+    reason = `v3 conversion rate (${(p3 * 100).toFixed(2)}%) exceeds v2 (${(p2 * 100).toFixed(2)}%) outside equivalence margin +${(margin * 100).toFixed(2)}pp`;
+  }
 
   return {
     gateId: 'tel.G17',
@@ -410,9 +428,9 @@ export function evaluateConversionParityG17(
     v3Rate: Number(p3.toFixed(6)),
     diffV3MinusV2: Number(diff.toFixed(6)),
     ci95LowerDiff: Number(ci95LowerDiff.toFixed(6)),
+    ci95UpperDiff: Number(ci95UpperDiff.toFixed(6)),
+    equivalenceMargin: margin,
     passed,
-    reason: passed
-      ? 'v3_conversions_non_inferior_to_v2'
-      : `v3 conversion rate (${(p3 * 100).toFixed(2)}%) significantly below v2 (${(p2 * 100).toFixed(2)}%)`,
+    reason,
   };
 }

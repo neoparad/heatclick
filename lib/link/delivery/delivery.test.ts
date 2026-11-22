@@ -15,6 +15,8 @@ import {
   evaluateFirstExposureRollout,
   evaluateSdkWeightEquivalence,
   evaluateSealedTrigger,
+  resolveDeliveryConsentGate,
+  resolveDeliveryConsentMode,
   runKillSwitch300Drills,
   runLiveWriteGuardAndProbe,
   runPreflightDefectBenchmark,
@@ -447,5 +449,126 @@ describe('lib/link/delivery — Wave 5-A & 5-B: Shadow/Weight, Trigger Lang, Exp
     expect(gapped.status).toBe('invalid');
     expect(gapped.missingSeqNumbers).toEqual([2]);
     expect(gapped.resendRequested).toBe(true);
+  });
+
+  test('[H-09] validateExpressionSpec enforces closed grammar on A1c and A2, blocks affiliate/script/CSS injection, and locks siteDefault=off against CMP escalation', () => {
+    // 1. Valid A1c passes closed grammar validation
+    const cleanA1c = convertLegacySanitizedHtmlToA1c(
+      '<h2>Special Guide</h2><a href="https://example.jp/go">Read</a>'
+    );
+    const validRes = validateExpressionSpec(cleanA1c, {
+      semanticCategory: 'cro_layout',
+      protectedMatchKeys: [],
+      registeredDestinationUrls: ['https://example.jp/go'],
+    });
+    expect(validRes.valid).toBe(true);
+
+    // 2. Malicious A1c with disallowed tag, affiliate hrefSlot, dangerous CSS url(), and undeclared state transition -> REJECTED!
+    const poisonedA1c = validateExpressionSpec(
+      {
+        tier: 'A1c',
+        shadowDomMode: 'closed',
+        root: {
+          tag: 'div',
+          styles: {
+            color: '#111111',
+            backgroundImage: 'url(https://evil.example/beacon)',
+          } as unknown as Record<string, string>,
+          children: [
+            {
+              tag: 'script' as unknown as 'div',
+              textSlot: 's_xss',
+            },
+            {
+              tag: 'a',
+              textSlot: 's_label',
+              hrefSlot: 's_aff',
+              actionEvent: 'undeclared_evt',
+            },
+          ],
+        },
+        states: ['open'],
+        transitions: [{ from: 'open', on: 'close', to: 'ghost_state' }],
+        values: {
+          s_xss: '<script>alert(1)</script>',
+          s_label: 'Buy now',
+          s_aff: 'https://www.amazon.co.jp/dp/B0001?tag=rogue-22',
+        },
+      },
+      {
+        semanticCategory: 'cro_layout',
+        protectedMatchKeys: [],
+        registeredDestinationUrls: ['https://example.jp/go'],
+      }
+    );
+    expect(poisonedA1c.valid).toBe(false);
+    expect(poisonedA1c.violations.some((v) => v.includes('A1C_TAG_NOT_ALLOWLISTED'))).toBe(true);
+    expect(poisonedA1c.violations.some((v) => v.includes('A1C_AFFILIATE_VALUE_FORBIDDEN'))).toBe(true);
+    expect(poisonedA1c.violations.some((v) => v.includes('A1C_EXECUTABLE_VALUE_FORBIDDEN'))).toBe(true);
+    expect(poisonedA1c.violations.some((v) => v.includes('A1C_STYLE_PROPERTY_NOT_ALLOWLISTED'))).toBe(true);
+    expect(poisonedA1c.violations.some((v) => v.includes('A1C_UNDECLARED_TRANSITION_STATE'))).toBe(true);
+    expect(poisonedA1c.violations.some((v) => v.includes('A1C_UNDECLARED_ACTION_EVENT'))).toBe(true);
+
+    // 3. Malicious A2 with insert_element affiliate injection, onclick attribute, built-in protected region, and missing restoreKey -> REJECTED!
+    const poisonedA2 = validateExpressionSpec(
+      {
+        tier: 'A2',
+        operations: [
+          {
+            opId: 'op_aff_insert',
+            kind: 'insert_element',
+            targetMatchKey: 'sec_hero',
+            payload: {
+              tag: 'a',
+              href: 'https://px.a8.net/svt/ejp?a8mat=3Z999',
+              onclick: 'steal()',
+            },
+            inverseOp: { kind: 'remove', restoreKey: '' },
+          },
+          {
+            opId: 'op_pw_touch',
+            kind: 'replace_text',
+            targetMatchKey: 'password',
+            payload: { text: 'Enter credentials' },
+            inverseOp: { kind: 'replace_text', restoreKey: 'rk_pw' },
+          },
+        ],
+      },
+      {
+        semanticCategory: 'cro_layout',
+        protectedMatchKeys: [],
+        registeredDestinationUrls: ['https://example.jp/go'],
+      }
+    );
+    expect(poisonedA2.valid).toBe(false);
+    expect(poisonedA2.violations.some((v) => v.includes('A2_INVERSE_OP_REQUIRED'))).toBe(true);
+    expect(poisonedA2.violations.some((v) => v.includes('A2_AFFILIATE_MUTATION_FORBIDDEN'))).toBe(true);
+    expect(poisonedA2.violations.some((v) => v.includes('A2_INSERT_ATTR_NOT_ALLOWLISTED'))).toBe(true);
+    expect(poisonedA2.violations.some((v) => v.includes('A2_PROTECTED_REGION_FORBIDDEN'))).toBe(true);
+
+    // 4. Consent gate: siteDefault === 'off' NEVER escalates above 'off' via CMP unless allowCmpOptInFromDefaultOff === true
+    expect(resolveDeliveryConsentMode('off', 'full')).toBe('off');
+    expect(resolveDeliveryConsentMode('off', 'essential_1p')).toBe('off');
+    const lockedGate = resolveDeliveryConsentGate({
+      siteDefault: 'off',
+      cmpResolved: 'full',
+      requestedExpressionTier: 'A1',
+    });
+    expect(lockedGate.effectiveConsentMode).toBe('off');
+    expect(lockedGate.allowDelivery).toBe(false);
+    expect(lockedGate.maxAllowedTier).toBe('A0');
+    expect(lockedGate.reason).toBe('site_default_off_locked');
+
+    // Explicit signed opt-in permission allows controlled escalation (still bounded by loaderDataCap)
+    const permittedGate = resolveDeliveryConsentGate({
+      siteDefault: 'off',
+      cmpResolved: 'full',
+      loaderDataCap: 'essential_1p',
+      allowCmpOptInFromDefaultOff: true,
+      requestedExpressionTier: 'A2',
+    });
+    expect(permittedGate.effectiveConsentMode).toBe('essential_1p');
+    expect(permittedGate.allowDelivery).toBe(true);
+    expect(permittedGate.escalatedFromDefaultOff).toBe(true);
   });
 });

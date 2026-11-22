@@ -14,8 +14,9 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { NextRequest } from 'next/server'
 
-import { classify } from './middleware'
+import { classify, classifyPath, middleware } from './middleware'
 
 describe('middleware classify() — Vercel Cron の経路 (定期ジョブが JWT の関所で止まらないこと)', () => {
   // Vercel Cron は JWT を持たず `Authorization: Bearer <CRON_SECRET>` を送る。api-tenant のままだと
@@ -94,10 +95,6 @@ describe('middleware classify() — scenario route access control (Stage 2)', ()
   })
 
   it('classifies /api/scenarios/runtime/something (deeper path) as api-public — inherits prefix', () => {
-    // Follows API_PUBLIC_PATHS prefix matching: startsWith('/api/scenarios/runtime/')
-    // This is safe: there is no deeper route under /runtime/ today. If one is ever added
-    // and should be private, it must be added to AUTH_PUBLIC_API_PATHS with a length-exact
-    // match override. This test documents the current forward-compatible behaviour.
     expect(classify('/api/scenarios/runtime/extra')).toBe('api-public')
   })
 
@@ -141,8 +138,6 @@ describe('middleware classify() — experiments assign access control (宝 M2b)'
   })
 
   it('classifies /api/experiments/assign/extra (deeper) as api-public — inherits prefix (no subroute today)', () => {
-    // scenarios/runtime と同方針: prefix 継承は forward-compatible で安全 (現状 subroute なし)。
-    // 将来 private な subroute を足すなら length-exact override を入れる。
     expect(classify('/api/experiments/assign/extra')).toBe('api-public')
   })
 
@@ -153,5 +148,45 @@ describe('middleware classify() — experiments assign access control (宝 M2b)'
 
   it('classifies /api/experiments/[id]/result as api-tenant (JWT 必須のまま)', () => {
     expect(classify('/api/experiments/00000000-0000-4000-8000-000000000001/result')).toBe('api-tenant')
+  })
+})
+
+describe('Wave 8 C-01 — /api/v1/** UGOKI LINK v2 surface routing & spoofing header purge', () => {
+  it('classifies /api/v1/** (including .json/.yaml schema endpoints) as api-v1-link instead of static or api-tenant', () => {
+    expect(classifyPath('/api/v1')).toBe('api-v1-link')
+    expect(classifyPath('/api/v1/analytics/overview')).toBe('api-v1-link')
+    expect(classifyPath('/api/v1/openapi.json')).toBe('api-v1-link')
+    expect(classifyPath('/api/v1/mcp/tools.json')).toBe('api-v1-link')
+    // Non-v1 routes remain api-tenant
+    expect(classifyPath('/api/v2/analytics')).toBe('api-tenant')
+  })
+
+  it('lets ugk_sec_* / ugk_oem_* / MCP OAuth Bearer requests reach /api/v1/** without legacy JWT 401 while stripping spoofed x-ugk-* headers', async () => {
+    const req = new NextRequest('https://app.example.com/api/v1/analytics/overview', {
+      headers: {
+        authorization: 'Bearer ugk_sec_live_1234567890abcdef',
+        'x-ugk-tenant-id': 'spoofed_foreign_tenant',
+        'x-ugk-principal-id': 'spoofed_root',
+        'x-ugk-scopes': 'privacy:delete,sites:manage',
+        'x-ugk-allowed-sites': '*',
+        'x-user-id': 'spoofed_user',
+        'x-site-ids': 'spoofed_site',
+      },
+    })
+
+    const res = await middleware(req)
+    expect(res.status).toBe(200)
+    // NextResponse.next({ request: { headers } }) encodes stripped headers in x-middleware-override-headers
+    const overrideList = res.headers.get('x-middleware-override-headers') ?? ''
+    expect(overrideList).not.toContain('x-ugk-tenant-id')
+    expect(overrideList).not.toContain('x-ugk-principal-id')
+    expect(overrideList).not.toContain('x-ugk-scopes')
+    expect(res.headers.get('x-middleware-request-x-ugk-tenant-id')).toBeNull()
+    expect(res.headers.get('x-middleware-request-x-ugk-principal-id')).toBeNull()
+    expect(res.headers.get('x-middleware-request-x-user-id')).toBeNull()
+    // Original Bearer credential must pass through intact for AuthorizationGateway verification
+    expect(res.headers.get('x-middleware-request-authorization')).toBe(
+      'Bearer ugk_sec_live_1234567890abcdef',
+    )
   })
 })

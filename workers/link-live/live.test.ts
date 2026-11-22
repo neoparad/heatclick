@@ -261,4 +261,84 @@ describe('workers/link-live (30-min Edge Live DO)', () => {
     expect(lastOut.envelope.measures.visual_replay_live_count?.value).toBe(1);
     expect(restored.getObservedQueryP95Ms()).toBeLessThanOrEqual(EDGE_LIVE_P95_BUDGET_MS);
   });
+
+  test('Wave 8 Regressions (C-05, H-19): accepts canonical CollectionLane names, rejects cross-tenant or expired labToken, and purges subject units immediately', () => {
+    const live = new SiteLiveDurableObject({
+      tenantId: 't-canon',
+      siteId: 's-canon',
+      storageRegion: 'jp',
+    });
+
+    expect(
+      live.ingest({
+        tenantId: 't-canon',
+        siteId: 's-canon',
+        storageRegion: 'jp',
+        processingRegion: 'jp',
+        lane: 'standard',
+        unitId: 'pv-std-1',
+        receivedAtMs: baseMs,
+        trust: 'edge_attested',
+        consentMode: 'cookieless',
+      }).accepted
+    ).toBe(true);
+    expect(
+      live.ingest({
+        tenantId: 't-canon',
+        siteId: 's-canon',
+        storageRegion: 'jp',
+        processingRegion: 'jp',
+        lane: 'customer_defined',
+        unitId: 'evt-cd-1',
+        receivedAtMs: baseMs,
+        trust: 'continuity',
+        consentMode: 'session',
+      }).accepted
+    ).toBe(true);
+    expect(
+      live.ingest({
+        tenantId: 't-canon',
+        siteId: 's-canon',
+        storageRegion: 'jp',
+        processingRegion: 'jp',
+        lane: 'screen_replay',
+        unitId: 'rep-sr-1',
+        receivedAtMs: baseMs,
+        trust: 'continuity',
+        consentMode: 'full',
+      }).accepted
+    ).toBe(true);
+
+    expect(
+      live.ingest(
+        {
+          tenantId: 't-canon',
+          siteId: 's-canon',
+          storageRegion: 'jp',
+          processingRegion: 'jp',
+          lane: 'standard',
+          unitId: 'pv-bad-lab',
+          receivedAtMs: baseMs,
+          trust: 'edge_attested',
+          consentMode: 'cookieless',
+          labToken: {
+            tokenId: 'tok_foreign',
+            tenantId: 'foreign-tenant',
+            siteId: 's-canon',
+            purpose: 'onboarding_verify',
+            runId: 'r1',
+            issuedAtMs: baseMs - 1000,
+            expiresAtMs: baseMs + 60_000,
+          },
+        },
+        baseMs
+      ).accepted
+    ).toBe(false);
+
+    expect(live.purgeSubjectUnits(['pv-std-1', 'evt-cd-1'])).toBe(2);
+    const q = live.queryLiveEnvelope({ nowMs: baseMs + 1000 });
+    expect(q.envelope.measures.standard_live_pvs?.value).toBe(0);
+    expect(q.envelope.measures.customer_events_live_count?.value).toBe(0);
+    expect(q.envelope.measures.visual_replay_live_count?.value).toBe(1);
+  });
 });

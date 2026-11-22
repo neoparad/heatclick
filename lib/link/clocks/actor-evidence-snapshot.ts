@@ -41,6 +41,7 @@ export type EvidenceVerificationResult =
   | 'late_published'
   | 'unverifiable_no_method'
   | 'unverifiable_stale_evidence'
+  | 'unverifiable_pre_archive'
 
 export interface EvidenceSourceDefinition {
   readonly source_id: string
@@ -213,7 +214,14 @@ export interface HistoricalKeyLookupResult {
   readonly snapshot_sha256: string | null
   readonly relation: 'at_or_before' | 'retro' | null
   readonly snapshot_distance_days: number | null
-  readonly reason: 'valid' | 'not_found' | 'not_yet_valid' | 'expired' | 'stale_snapshot' | 'no_snapshot'
+  readonly reason:
+    | 'valid'
+    | 'not_found'
+    | 'not_yet_valid'
+    | 'expired'
+    | 'stale_snapshot'
+    | 'no_snapshot'
+    | 'unverifiable_pre_archive'
 }
 
 export class SnapshotImmutabilityError extends Error {
@@ -1907,8 +1915,32 @@ export class ActorEvidenceClock {
       })
     }
 
-    // 不一致の場合: 直後2スナップショットで late_published / 3連続ミス refuted / feed_miss を判定
+    // 不一致の場合: アーカイブ開始前 (`relation === 'retro'`) は過去証跡が存在しないため絶対に `refuted` 化せず
+    // `unverifiable_pre_archive` を返す！
     const miss = primaryMissSnapshot!
+    if (miss.lookup.relation === 'retro') {
+      return Object.freeze({
+        ip: query.ip,
+        at: query.at,
+        matched: false,
+        verification_result: 'unverifiable_pre_archive',
+        matched_cidr: null,
+        prefix_length: null,
+        provider: miss.snapshot.provider,
+        source_id: miss.snapshot.source_id,
+        actor_tokens: miss.snapshot.actor_tokens,
+        snapshot_id: miss.snapshot.snapshot_id,
+        snapshot_fetched_at: miss.snapshot.fetched_at,
+        snapshot_sha256: miss.snapshot.sha256,
+        is_exhaustive: miss.snapshot.is_exhaustive,
+        exclusive_scope: miss.snapshot.exclusive_scope,
+        snapshot_distance_days: miss.lookup.snapshot_distance_days,
+        checked_sources: Object.freeze(checkedSources),
+        consecutive_misses: 0,
+      })
+    }
+
+    // `at_or_before` の不一致: 直後2スナップショットで late_published / 3連続ミス refuted / feed_miss を判定
     for (const laterSnap of miss.nextTwo) {
       const laterHit = matchIpInCidrs(query.ip, laterSnap.cidrs)
       if (laterHit.matched) {
@@ -1979,6 +2011,7 @@ export class ActorEvidenceClock {
 
     let hadSnapshot = false
     let hadStaleSnapshot = false
+    let retroMissLookup: AsOfSnapshotLookup | null = null
 
     for (const src of candidateSources) {
       const asOf = await this.store.getAsOf(src.source_id, query.at)
@@ -1995,6 +2028,10 @@ export class ActorEvidenceClock {
           k.thumbprint_sha256 === query.thumbprint_or_kid ||
           (k.kid !== undefined && k.kid === query.thumbprint_or_kid),
       )
+
+      if (!key && asOf.relation === 'retro' && !retroMissLookup) {
+        retroMissLookup = asOf
+      }
 
       if (key) {
         if (typeof key.nbf === 'number' && atSec < key.nbf) {
@@ -2041,6 +2078,22 @@ export class ActorEvidenceClock {
           reason: 'valid',
         })
       }
+    }
+
+    if (retroMissLookup) {
+      return Object.freeze({
+        found: false,
+        valid_at_time: false,
+        key: null,
+        provider: retroMissLookup.snapshot.provider,
+        source_id: retroMissLookup.snapshot.source_id,
+        snapshot_id: retroMissLookup.snapshot.snapshot_id,
+        snapshot_fetched_at: retroMissLookup.snapshot.fetched_at,
+        snapshot_sha256: retroMissLookup.snapshot.sha256,
+        relation: 'retro',
+        snapshot_distance_days: retroMissLookup.snapshot_distance_days,
+        reason: 'unverifiable_pre_archive',
+      })
     }
 
     return Object.freeze({

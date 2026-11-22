@@ -261,6 +261,20 @@ const VOID_TAGS = new Set([
 const RAW_TEXT_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'XMP'])
 const RCDATA_TAGS = new Set(['TITLE', 'TEXTAREA'])
 const FOREIGN_ROOT_TAGS = new Set(['SVG', 'MATH'])
+const SVG_HTML_INTEGRATION_TAGS = new Set(['FOREIGNOBJECT', 'DESC', 'TITLE'])
+const MATH_TEXT_INTEGRATION_TAGS = new Set(['MI', 'MO', 'MN', 'MS', 'MTEXT'])
+
+const P_BUTTON_SCOPE_BOUNDARY_TAGS = new Set([
+  'APPLET', 'BUTTON', 'CAPTION', 'HTML', 'MARQUEE', 'OBJECT', 'TABLE', 'TD', 'TEMPLATE', 'TH',
+  'FOREIGNOBJECT', 'DESC', 'TITLE', 'ANNOTATION-XML', 'MI', 'MO', 'MN', 'MS', 'MTEXT', 'SVG', 'MATH',
+])
+
+const FOREIGN_HTML_BREAKOUT_TAGS = new Set([
+  'B', 'BIG', 'BLOCKQUOTE', 'BODY', 'BR', 'CENTER', 'CODE', 'DD', 'DIV', 'DL', 'DT', 'EM',
+  'EMBED', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HEAD', 'HR', 'I', 'IMG', 'LI', 'LISTING',
+  'MENU', 'META', 'NOBR', 'OL', 'P', 'PRE', 'RUBY', 'S', 'SMALL', 'SPAN', 'STRONG', 'STRIKE',
+  'SUB', 'SUP', 'TABLE', 'TT', 'U', 'UL', 'VAR',
+])
 
 const P_CLOSERS = new Set([
   'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DETAILS', 'DIALOG', 'DD', 'DIV', 'DL', 'DT',
@@ -289,13 +303,40 @@ function isTagNameChar(code: number): boolean {
   )
 }
 
+interface StackEntry {
+  readonly node: LightElementNode
+  readonly ns: 'html' | 'svg' | 'math'
+  readonly isHtmlIntegrationPoint: boolean
+  readonly isMathTextIntegrationPoint: boolean
+}
+
 export function parseHtmlToDom(html: string): LightDocumentNode {
   const doc = new LightDocumentNode()
-  const stack: LightElementNode[] = []
-  let foreignDepth = 0
+  const stack: StackEntry[] = []
 
   const currentParent = (): LightElementNode | LightDocumentNode =>
-    stack.length > 0 ? stack[stack.length - 1] : doc
+    stack.length > 0 ? stack[stack.length - 1].node : doc
+
+  /**
+   * Determines whether a child token under the current stack top is parsed in
+   * SVG/MathML foreign content mode (`true`) vs HTML insertion mode (`false`).
+   * Inside `<svg><foreignObject>` (or `<desc>`, `<title>`, MathML HTML/text integration points),
+   * child elements return to HTML mode per WHATWG HTML5 §13.2.6.5!
+   */
+  const isInForeignInsertionContext = (childTagName?: string): boolean => {
+    if (stack.length === 0) return false
+    const top = stack[stack.length - 1]
+    if (top.ns === 'html') return false
+    if (top.isHtmlIntegrationPoint) return false
+    if (top.isMathTextIntegrationPoint) {
+      if (!childTagName) return false
+      return childTagName === 'MGLYPH' || childTagName === 'MALIGNMARK'
+    }
+    return true
+  }
+
+  const isAdjustedCurrentNodeForeign = (): boolean =>
+    stack.length > 0 && stack[stack.length - 1].ns !== 'html'
 
   const appendText = (text: string): void => {
     if (!text) return
@@ -309,31 +350,37 @@ export function parseHtmlToDom(html: string): LightDocumentNode {
   }
 
   const popElement = (): void => {
-    const popped = stack.pop()
-    if (popped && FOREIGN_ROOT_TAGS.has(popped.tagName) && foreignDepth > 0) {
-      foreignDepth--
-    }
+    stack.pop()
   }
 
   const popIfTopIn = (tags: ReadonlySet<string>): void => {
-    while (stack.length > 0 && tags.has(stack[stack.length - 1].tagName)) {
+    while (stack.length > 0 && tags.has(stack[stack.length - 1].node.tagName)) {
       popElement()
     }
   }
 
   const autoCloseBeforeStart = (tag: string): void => {
-    if (foreignDepth > 0) return
+    if (isInForeignInsertionContext(tag)) return
 
     if (P_CLOSERS.has(tag)) {
-      // Close open <p> if directly on top (or inside inline wrappers? Keep scope within current container)
-      if (stack.length > 0 && stack[stack.length - 1].tagName === 'P') {
-        popElement()
+      for (let i = stack.length - 1; i >= 0; i--) {
+        const entry = stack[i]
+        const t = entry.node.tagName
+        if (t === 'P' && entry.ns === 'html') {
+          while (stack.length > i) popElement()
+          break
+        }
+        if (P_BUTTON_SCOPE_BOUNDARY_TAGS.has(t) || entry.ns !== 'html') {
+          break
+        }
       }
     }
 
     if (tag === 'LI') {
       for (let i = stack.length - 1; i >= 0; i--) {
-        const t = stack[i].tagName
+        const entry = stack[i]
+        const t = entry.node.tagName
+        if (entry.ns !== 'html') break
         if (t === 'LI') {
           while (stack.length > i) popElement()
           break
@@ -342,7 +389,9 @@ export function parseHtmlToDom(html: string): LightDocumentNode {
       }
     } else if (tag === 'DT' || tag === 'DD') {
       for (let i = stack.length - 1; i >= 0; i--) {
-        const t = stack[i].tagName
+        const entry = stack[i]
+        const t = entry.node.tagName
+        if (entry.ns !== 'html') break
         if (t === 'DT' || t === 'DD') {
           while (stack.length > i) popElement()
           break
@@ -351,7 +400,9 @@ export function parseHtmlToDom(html: string): LightDocumentNode {
       }
     } else if (TABLE_CELL_TAGS.has(tag)) {
       for (let i = stack.length - 1; i >= 0; i--) {
-        const t = stack[i].tagName
+        const entry = stack[i]
+        const t = entry.node.tagName
+        if (entry.ns !== 'html') break
         if (TABLE_CELL_TAGS.has(t)) {
           while (stack.length > i) popElement()
           break
@@ -360,7 +411,9 @@ export function parseHtmlToDom(html: string): LightDocumentNode {
       }
     } else if (tag === 'TR') {
       for (let i = stack.length - 1; i >= 0; i--) {
-        const t = stack[i].tagName
+        const entry = stack[i]
+        const t = entry.node.tagName
+        if (entry.ns !== 'html') break
         if (t === 'TR' || TABLE_CELL_TAGS.has(t)) {
           while (stack.length > i) popElement()
           if (t === 'TR') break
@@ -370,7 +423,9 @@ export function parseHtmlToDom(html: string): LightDocumentNode {
       }
     } else if (TABLE_SECTION_TAGS.has(tag)) {
       for (let i = stack.length - 1; i >= 0; i--) {
-        const t = stack[i].tagName
+        const entry = stack[i]
+        const t = entry.node.tagName
+        if (entry.ns !== 'html') break
         if (TABLE_SECTION_TAGS.has(t) || t === 'TR' || TABLE_CELL_TAGS.has(t)) {
           while (stack.length > i) popElement()
           if (TABLE_SECTION_TAGS.has(t)) break
@@ -384,7 +439,8 @@ export function parseHtmlToDom(html: string): LightDocumentNode {
       popIfTopIn(new Set(['OPTION', 'OPTGROUP']))
     } else if (tag === 'BODY') {
       for (let i = stack.length - 1; i >= 0; i--) {
-        if (stack[i].tagName === 'HEAD') {
+        if (stack[i].ns !== 'html') break
+        if (stack[i].node.tagName === 'HEAD') {
           while (stack.length > i) popElement()
           break
         }
@@ -413,6 +469,19 @@ export function parseHtmlToDom(html: string): LightDocumentNode {
       continue
     }
 
+    // CDATA section <![CDATA[ ... ]]> in foreign content (SVG / MathML, WHATWG HTML5 §13.2.5.42)
+    if (isAdjustedCurrentNodeForeign() && html.slice(pos, pos + 9).toUpperCase() === '<![CDATA[') {
+      const endCdata = html.indexOf(']]>', pos + 9)
+      if (endCdata === -1) {
+        appendText(html.slice(pos + 9))
+        pos = len
+      } else {
+        appendText(html.slice(pos + 9, endCdata))
+        pos = endCdata + 3
+      }
+      continue
+    }
+
     // DOCTYPE / bogus comment <! ... > or processing instruction <? ... >
     if (pos + 1 < len && (html[pos + 1] === '!' || html[pos + 1] === '?')) {
       const gtIdx = html.indexOf('>', pos + 2)
@@ -433,7 +502,7 @@ export function parseHtmlToDom(html: string): LightDocumentNode {
       if (closeTag) {
         // Find matching open tag in stack
         for (let i = stack.length - 1; i >= 0; i--) {
-          if (stack[i].tagName === closeTag) {
+          if (stack[i].node.tagName === closeTag) {
             while (stack.length > i) {
               popElement()
             }
@@ -517,17 +586,46 @@ export function parseHtmlToDom(html: string): LightDocumentNode {
       }
 
       pos = cur
+
+      // HTML5 §13.2.6.5 foreign-content breakout: if currently inside foreign content (NOT inside
+      // `<foreignObject>` / `<desc>` / `<title>`), HTML breakout start tags pop foreign elements
+      // back to the nearest HTML element or integration point!
+      if (isInForeignInsertionContext(tagName)) {
+        const isFontBreakout =
+          tagName === 'FONT' &&
+          (el.hasAttribute('color') || el.hasAttribute('face') || el.hasAttribute('size'))
+        if (FOREIGN_HTML_BREAKOUT_TAGS.has(tagName) || isFontBreakout) {
+          while (stack.length > 0) {
+            const top = stack[stack.length - 1]
+            if (top.ns === 'html' || top.isHtmlIntegrationPoint || top.isMathTextIntegrationPoint) {
+              break
+            }
+            popElement()
+          }
+        }
+      }
+
+      const inForeign = isInForeignInsertionContext(tagName)
       autoCloseBeforeStart(tagName)
       currentParent().appendChild(el)
 
-      const isForeignSelfClose = (foreignDepth > 0 || FOREIGN_ROOT_TAGS.has(tagName)) && selfClosing
-      if (VOID_TAGS.has(tagName) || isForeignSelfClose) {
+      const elementNs: 'html' | 'svg' | 'math' = inForeign
+        ? stack[stack.length - 1].ns
+        : tagName === 'SVG'
+          ? 'svg'
+          : tagName === 'MATH'
+            ? 'math'
+            : 'html'
+
+      const isForeignSelfClose = (inForeign || FOREIGN_ROOT_TAGS.has(tagName)) && selfClosing
+      if ((!inForeign && VOID_TAGS.has(tagName)) || isForeignSelfClose) {
         continue
       }
 
-      // Raw text or RCDATA elements: consume until matching </tagName>
-      if (foreignDepth === 0 && (RAW_TEXT_TAGS.has(tagName) || RCDATA_TAGS.has(tagName))) {
-        const closeRe = new RegExp(`</${tagName}\\s*>`, 'i')
+      // Raw text or RCDATA elements in HTML insertion mode (including inside `<svg><foreignObject>`!):
+      // consume verbatim until matching `</tagName>`
+      if (!inForeign && (RAW_TEXT_TAGS.has(tagName) || RCDATA_TAGS.has(tagName))) {
+        const closeRe = new RegExp(`</${tagName}(?:[\\t\\n\\f\\r /][^>]*)?>`, 'i')
         const rest = html.slice(pos)
         const match = closeRe.exec(rest)
         const rawInner = match ? rest.slice(0, match.index) : rest
@@ -539,10 +637,21 @@ export function parseHtmlToDom(html: string): LightDocumentNode {
         continue
       }
 
-      stack.push(el)
-      if (FOREIGN_ROOT_TAGS.has(tagName)) {
-        foreignDepth++
-      }
+      const encodingLower = (el.getAttribute('encoding') ?? '').trim().toLowerCase()
+      const isHtmlIntegrationPoint =
+        (elementNs === 'svg' && SVG_HTML_INTEGRATION_TAGS.has(tagName)) ||
+        (elementNs === 'math' &&
+          tagName === 'ANNOTATION-XML' &&
+          (encodingLower === 'text/html' || encodingLower === 'application/xhtml+xml'))
+      const isMathTextIntegrationPoint =
+        elementNs === 'math' && MATH_TEXT_INTEGRATION_TAGS.has(tagName)
+
+      stack.push({
+        node: el,
+        ns: elementNs,
+        isHtmlIntegrationPoint,
+        isMathTextIntegrationPoint,
+      })
       continue
     }
 

@@ -37,6 +37,7 @@ export interface DomainProofCheckResult {
   readonly checkedAt: string;
   readonly redirectHops?: number;
   readonly resolvedIp?: string;
+  readonly resolvedIps?: ReadonlyArray<string>;
   readonly reason?: string;
 }
 

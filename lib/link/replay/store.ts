@@ -1,30 +1,41 @@
 /**
- * UGOKI LINK v2 — Object-Storage-Only Replay Store, Per-Tenant AES-256-GCM Encryption,
- * Lazy Loader Sampling, >=50-PV K-Anon Selection & 14-Day Deletion (§11.11 item 8)
+ * UGOKI LINK v2 — Object-Storage-Only Replay Store, Per-Tenant AES-256-GCM Encryption with AAD,
+ * Sensitive-Page Hard Reject, Lazy Loader Sampling, >=50-PV K-Anon Selection & Single-Use Handles (§11.11 item 8)
  *
  * Invariants:
  *   - Stored EXCLUSIVELY in object storage (R2/S3 interface); NEVER loaded into ClickHouse 8 GiB RAM.
- *   - Default retention = 30 days.
- *   - Separate billing meter (`replay_sessions`); never mixed into billable PVs.
- *   - Lazy recorder loader activates ONLY when entitled AND sampled-in.
- *   - Selection requires filter match >= 50 PVs (`MIN_REPLAY_FILTER_PVS = 50`) and emits
- *     per-answer disposable opaque handles.
- *   - Registered in 14-day deletion plan with immediate logical hide + physical object purge.
+ *   - Hard-rejects (`status: 'blocked_sensitive_page'`) any snapshot where `detectedSensitiveFieldOnPage === true`
+ *     and zeroes any caller-supplied buffer ([H-13]).
+ *   - Binds `(tenantId, siteId, pvId, chunkSeq)` into AES-256-GCM `additionalData` (`aad`) on both
+ *     encrypt and decrypt so ciphertext chunks can never be transplanted across tenants, sites, PVs, or chunk sequences ([H-13]).
+ *   - Playback handles are strictly single-use (`consumed: true` on first redeem; second attempt returns 403 / `snapshot: null`) ([H-13]).
  */
 
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { canonicalJson, sha256Hex } from '@/packages/contract/response';
 import { drawUniformU } from '@/lib/link/allocator';
-import { REPLAY_LANE, evaluateReplayEntitlement, type ReplaySitePolicy, type ReplayVisitContext } from './entitlement';
+import {
+  REPLAY_LANE,
+  evaluateReplayEntitlement,
+  type ReplaySitePolicy,
+  type ReplayVisitContext,
+} from './entitlement';
 import type { MaskedReplaySnapshot } from './masker';
 
 export const DEFAULT_REPLAY_RETENTION_DAYS = 30;
 export const MIN_REPLAY_FILTER_PVS = 50;
 
 // =========================================================================
-// 1. Authenticated Wire Encryption (Gzip + AES-256-GCM)
+// 1. Authenticated Wire Encryption (Gzip + AES-256-GCM + Mandatory AAD)
 // =========================================================================
+
+export interface ReplayAadContext {
+  readonly tenantId: string;
+  readonly siteId: string;
+  readonly pvId: string;
+  readonly chunkSeq: number;
+}
 
 export interface EncryptedReplayEnvelope {
   readonly algorithm: 'gzip+aes-256-gcm';
@@ -34,18 +45,44 @@ export interface EncryptedReplayEnvelope {
   readonly ciphertextBase64: string;
 }
 
+export function buildReplayAadBytes(aad: ReplayAadContext): Buffer {
+  if (
+    !aad ||
+    typeof aad.tenantId !== 'string' ||
+    aad.tenantId.trim().length === 0 ||
+    typeof aad.siteId !== 'string' ||
+    aad.siteId.trim().length === 0 ||
+    typeof aad.pvId !== 'string' ||
+    aad.pvId.trim().length === 0 ||
+    typeof aad.chunkSeq !== 'number' ||
+    !Number.isInteger(aad.chunkSeq) ||
+    aad.chunkSeq < 0
+  ) {
+    throw new Error(
+      'AES-256-GCM replay AAD requires non-empty (tenantId, siteId, pvId) and non-negative integer chunkSeq'
+    );
+  }
+  return Buffer.from(
+    `ugk-replay-aad/1|${aad.tenantId}|${aad.siteId}|${aad.pvId}|${aad.chunkSeq}`,
+    'utf8'
+  );
+}
+
 export function encryptReplayPayload(
   payload: unknown,
   tenantKey32Bytes: Buffer,
-  keyVersion: string
+  keyVersion: string,
+  aadContext: ReplayAadContext
 ): EncryptedReplayEnvelope {
   if (tenantKey32Bytes.length !== 32) {
     throw new Error('AES-256-GCM requires a 32-byte key');
   }
+  const aadBytes = buildReplayAadBytes(aadContext);
   const jsonBytes = Buffer.from(canonicalJson(payload), 'utf8');
   const compressed = zlib.gzipSync(jsonBytes, { level: 6 });
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', tenantKey32Bytes, iv);
+  cipher.setAAD(aadBytes);
   const ciphertext = Buffer.concat([cipher.update(compressed), cipher.final()]);
   const authTag = cipher.getAuthTag();
 
@@ -60,13 +97,19 @@ export function encryptReplayPayload(
 
 export function decryptReplayPayload<T = unknown>(
   envelope: EncryptedReplayEnvelope,
-  tenantKey32Bytes: Buffer
+  tenantKey32Bytes: Buffer,
+  expectedAadContext: ReplayAadContext
 ): { readonly rawDecodedText: string; readonly parsed: T } {
+  if (tenantKey32Bytes.length !== 32) {
+    throw new Error('AES-256-GCM requires a 32-byte key');
+  }
+  const aadBytes = buildReplayAadBytes(expectedAadContext);
   const iv = Buffer.from(envelope.ivHex, 'hex');
   const authTag = Buffer.from(envelope.authTagHex, 'hex');
   const ciphertext = Buffer.from(envelope.ciphertextBase64, 'base64');
 
   const decipher = crypto.createDecipheriv('aes-256-gcm', tenantKey32Bytes, iv);
+  decipher.setAAD(aadBytes);
   decipher.setAuthTag(authTag);
   const compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   const decompressed = zlib.gunzipSync(compressed);
@@ -107,6 +150,9 @@ export function shouldLazyLoadReplayRecorder(params: {
 // =========================================================================
 
 export interface ReplayObjectMetadata {
+  readonly ok: true;
+  readonly status: 'stored';
+  readonly stored: true;
   readonly replayId: string;
   readonly objectKey: string;
   readonly lane: typeof REPLAY_LANE;
@@ -114,6 +160,8 @@ export interface ReplayObjectMetadata {
   readonly usesClickHouseMemory: false;
   readonly tenantId: string;
   readonly siteId: string;
+  readonly pvId: string;
+  readonly chunkSeq: number;
   readonly subjectKeyHash: string;
   readonly keyVersion: string;
   readonly purpose: 'screen_replay';
@@ -124,6 +172,16 @@ export interface ReplayObjectMetadata {
   readonly unreproducibleRegionCount: number;
   deleted: boolean;
 }
+
+export interface BlockedSensitiveReplayResult {
+  readonly ok: false;
+  readonly status: 'blocked_sensitive_page';
+  readonly stored: false;
+  readonly reason: string;
+  readonly bufferZeroed: boolean;
+}
+
+export type PutReplayResult = ReplayObjectMetadata | BlockedSensitiveReplayResult;
 
 export interface DisposableReplayHandle {
   readonly handle: string;
@@ -138,6 +196,7 @@ interface StoredHandleBinding {
   readonly tenantId: string;
   readonly siteId: string;
   readonly expiresAtMs: number;
+  consumed: boolean;
 }
 
 export class ReplayObjectStore {
@@ -153,22 +212,69 @@ export class ReplayObjectStore {
   public putReplay(params: {
     readonly tenantId: string;
     readonly siteId: string;
+    readonly pvId?: string;
+    readonly chunkSeq?: number;
     readonly subjectKeyHash: string;
     readonly snapshot: MaskedReplaySnapshot;
     readonly encoding: 'delta' | 'full_masked_snapshot';
     readonly tenantKey32Bytes: Buffer;
     readonly keyVersion: string;
+    readonly rawBufferToZero?: Uint8Array | Buffer;
     readonly retentionDays?: number;
     readonly deletionGeneration?: number;
     readonly now?: Date;
-  }): ReplayObjectMetadata {
+  }): PutReplayResult {
+    // [H-13] Hard-reject storing any replay from a page containing payment/card/password/SSN/health fields!
+    if (params.snapshot.detectedSensitiveFieldOnPage) {
+      if (params.rawBufferToZero) {
+        params.rawBufferToZero.fill(0);
+      }
+      if (params.pvId) {
+        for (const existing of this.metadata.values()) {
+          if (
+            existing.tenantId === params.tenantId &&
+            existing.siteId === params.siteId &&
+            existing.pvId === params.pvId &&
+            !existing.deleted
+          ) {
+            existing.deleted = true;
+            this.objects.delete(existing.objectKey);
+          }
+        }
+      }
+      return {
+        ok: false,
+        status: 'blocked_sensitive_page',
+        stored: false,
+        reason:
+          'Sensitive payment, card, password, SSN, or health field detected on page; replay rejected and buffer zeroed',
+        bufferZeroed: Boolean(params.rawBufferToZero),
+      };
+    }
+
     const now = params.now ?? new Date();
     const retentionDays = params.retentionDays ?? DEFAULT_REPLAY_RETENTION_DAYS;
     const replayId = `rpl_${crypto.randomBytes(10).toString('hex')}`;
+    const pvId = params.pvId ?? replayId;
+    const chunkSeq = params.chunkSeq ?? 0;
     const objectKey = `replays/v1/${params.tenantId}/${params.siteId}/${now.toISOString().slice(0, 10)}/${replayId}.enc.gz`;
 
-    const encrypted = encryptReplayPayload(params.snapshot, params.tenantKey32Bytes, params.keyVersion);
+    const encrypted = encryptReplayPayload(
+      params.snapshot,
+      params.tenantKey32Bytes,
+      params.keyVersion,
+      {
+        tenantId: params.tenantId,
+        siteId: params.siteId,
+        pvId,
+        chunkSeq,
+      }
+    );
+
     const meta: ReplayObjectMetadata = {
+      ok: true,
+      status: 'stored',
+      stored: true,
       replayId,
       objectKey,
       lane: REPLAY_LANE,
@@ -176,6 +282,8 @@ export class ReplayObjectStore {
       usesClickHouseMemory: false,
       tenantId: params.tenantId,
       siteId: params.siteId,
+      pvId,
+      chunkSeq,
       subjectKeyHash: params.subjectKeyHash,
       keyVersion: params.keyVersion,
       purpose: 'screen_replay',
@@ -194,7 +302,7 @@ export class ReplayObjectStore {
 
   /**
    * Lists replay handles ONLY when the matching filter cohort has >= 50 PVs (§11.11.8).
-   * Issues per-answer disposable opaque handles bound to `(tenantId, siteId, answerNonce)`.
+   * Issues per-answer single-use disposable opaque handles bound to `(tenantId, siteId, answerNonce)`.
    */
   public selectReplaysForFilter(params: {
     readonly tenantId: string;
@@ -237,6 +345,7 @@ export class ReplayObjectStore {
         tenantId: meta.tenantId,
         siteId: meta.siteId,
         expiresAtMs,
+        consumed: false,
       });
 
       handles.push({
@@ -259,28 +368,43 @@ export class ReplayObjectStore {
     readonly now?: Date;
   }):
     | { readonly ok: true; readonly metadata: ReplayObjectMetadata; readonly snapshot: MaskedReplaySnapshot }
-    | { readonly ok: false; readonly httpStatus: 404 | 410; readonly code: string } {
+    | { readonly ok: false; readonly httpStatus: 403 | 404 | 410; readonly snapshot: null; readonly code: string } {
     const now = params.now ?? new Date();
     const binding = this.handles.get(params.handle);
     if (!binding || binding.tenantId !== params.tenantId || binding.siteId !== params.siteId) {
-      return { ok: false, httpStatus: 404, code: 'HANDLE_NOT_FOUND' };
+      return { ok: false, httpStatus: 404, snapshot: null, code: 'HANDLE_NOT_FOUND' };
+    }
+    if (binding.consumed) {
+      return { ok: false, httpStatus: 403, snapshot: null, code: 'HANDLE_ALREADY_CONSUMED' };
     }
     if (now.getTime() > binding.expiresAtMs) {
-      return { ok: false, httpStatus: 410, code: 'HANDLE_EXPIRED' };
+      return { ok: false, httpStatus: 410, snapshot: null, code: 'HANDLE_EXPIRED' };
     }
     const meta = this.metadata.get(binding.replayId);
     if (!meta || meta.deleted) {
-      return { ok: false, httpStatus: 404, code: 'REPLAY_ERASED_OR_MISSING' };
+      return { ok: false, httpStatus: 404, snapshot: null, code: 'REPLAY_ERASED_OR_MISSING' };
     }
     if (new Date(meta.retentionExpiresAt).getTime() <= now.getTime()) {
-      return { ok: false, httpStatus: 410, code: 'REPLAY_RETENTION_EXPIRED' };
+      return { ok: false, httpStatus: 410, snapshot: null, code: 'REPLAY_RETENTION_EXPIRED' };
     }
     const enc = this.objects.get(meta.objectKey);
     if (!enc) {
-      return { ok: false, httpStatus: 404, code: 'OBJECT_PURGED' };
+      return { ok: false, httpStatus: 404, snapshot: null, code: 'OBJECT_PURGED' };
     }
-    const { parsed } = decryptReplayPayload<MaskedReplaySnapshot>(enc, params.tenantKey32Bytes);
-    return { ok: true, metadata: meta, snapshot: parsed };
+
+    try {
+      const { parsed } = decryptReplayPayload<MaskedReplaySnapshot>(enc, params.tenantKey32Bytes, {
+        tenantId: params.tenantId,
+        siteId: params.siteId,
+        pvId: meta.pvId,
+        chunkSeq: meta.chunkSeq,
+      });
+      // Mark single-use handle consumed strictly on first redeem ([H-13])
+      binding.consumed = true;
+      return { ok: true, metadata: meta, snapshot: parsed };
+    } catch {
+      return { ok: false, httpStatus: 403, snapshot: null, code: 'AAD_AUTH_TAG_MISMATCH' };
+    }
   }
 
   /**
@@ -312,7 +436,7 @@ export class ReplayObjectStore {
 
     let residual = 0;
     for (const meta of this.metadata.values()) {
-      if (meta.tenantId === tenantId && meta.subjectKeyHash === subjectKeyHash && this.objects.has(meta.objectKey)) {
+      if (tenantId === meta.tenantId && meta.subjectKeyHash === subjectKeyHash && this.objects.has(meta.objectKey)) {
         residual += 1;
       }
     }

@@ -21,6 +21,60 @@ export const G13_RATIO_LOWER_BOUND = 0.85
 export const G13_RATIO_UPPER_BOUND = 1.15
 const Z_95_TWO_SIDED = 1.959963984540054
 
+/** Exact two-sided 95% Student-t critical values t_{0.975, df} for df = 1..60 */
+const STUDENT_T_975_TABLE: Readonly<Record<number, number>> = Object.freeze({
+  1: 12.706205,
+  2: 4.302653,
+  3: 3.182446,
+  4: 2.776445,
+  5: 2.570582,
+  6: 2.446912,
+  7: 2.364624,
+  8: 2.306004,
+  9: 2.262157,
+  10: 2.228139,
+  11: 2.200985,
+  12: 2.178813,
+  13: 2.160369,
+  14: 2.144787,
+  15: 2.13145,
+  16: 2.119905,
+  17: 2.109816,
+  18: 2.100922,
+  19: 2.093024,
+  20: 2.085963,
+  21: 2.079614,
+  22: 2.073873,
+  23: 2.068658,
+  24: 2.063899,
+  25: 2.059539,
+  26: 2.055529,
+  27: 2.051831,
+  28: 2.048407,
+  29: 2.04523,
+  30: 2.042272,
+  35: 2.030108,
+  40: 2.021075,
+  45: 2.014103,
+  50: 2.008559,
+  60: 2.000298,
+})
+
+/**
+ * Computes two-sided 95% Student-t critical value t_{0.975, df} (df >= 1).
+ * Uses exact lookup table for small df and Cornish-Fisher asymptotic expansion for larger df.
+ */
+export function studentT975Critical(df: number): number {
+  const k = Math.max(1, Math.floor(df))
+  const exact = STUDENT_T_975_TABLE[k]
+  if (exact !== undefined) return exact
+  const z = Z_95_TWO_SIDED
+  const z2 = z * z
+  const z3 = z2 * z
+  const z5 = z3 * z2
+  return z + (z3 + z) / (4 * k) + (5 * z5 + 16 * z3 + 3 * z) / (96 * k * k)
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -49,11 +103,14 @@ export interface JoinG13EvaluationResult {
   readonly status: 'pass' | 'fail' | 'insufficient_data'
   readonly passed: boolean
   readonly days_included: number
+  readonly inactive_zero_days_excluded: number
   readonly excluded_lab_or_panel_rows: number
   readonly total_own_clicks: number
   readonly total_network_clicks: number
   readonly ratio: number | null
+  readonly relative_diff: number | null
   readonly paired_se: number | null
+  readonly t_critical_95: number | null
   readonly ci95_lower: number | null
   readonly ci95_upper: number | null
   readonly unmet_reasons: readonly string[]
@@ -91,7 +148,11 @@ export function evaluateJoinG13Gate(params: {
     byDate.set(r.date, cur)
   }
 
-  const dailyPairs = [...byDate.values()]
+  // Exclude 0/0 inactive days so zero-traffic days cannot pad the 14-day minimum sample requirement!
+  const allDates = [...byDate.values()]
+  const dailyPairs = allDates.filter((p) => p.own > 0 || p.net > 0)
+  const inactiveZeroDaysExcluded = allDates.length - dailyPairs.length
+
   const n = dailyPairs.length
   const totalOwn = dailyPairs.reduce((s, p) => s + p.own, 0)
   const totalNet = dailyPairs.reduce((s, p) => s + p.net, 0)
@@ -103,11 +164,8 @@ export function evaluateJoinG13Gate(params: {
   if (totalNet < G13_MIN_NETWORK_CLICKS) {
     unmet.push(`network_clicks_lt_${G13_MIN_NETWORK_CLICKS}:${totalNet}`)
   }
-  if (totalOwn <= 0) {
-    unmet.push('total_own_clicks_zero')
-  }
 
-  if (n < 2 || totalOwn <= 0) {
+  if (n < 2 || totalNet <= 0) {
     return Object.freeze({
       gate_id: 'join.G13',
       tenant_id: params.tenant_id,
@@ -117,35 +175,48 @@ export function evaluateJoinG13Gate(params: {
       status: 'insufficient_data',
       passed: false,
       days_included: n,
+      inactive_zero_days_excluded: inactiveZeroDaysExcluded,
       excluded_lab_or_panel_rows: excludedLabOrPanel,
       total_own_clicks: totalOwn,
       total_network_clicks: totalNet,
       ratio: null,
+      relative_diff: null,
       paired_se: null,
+      t_critical_95: null,
       ci95_lower: null,
       ci95_upper: null,
       unmet_reasons: Object.freeze(unmet),
     })
   }
 
-  // Paired-difference ratio estimator variance (Cochran ratio estimator):
-  // R = sum(y_i) / sum(x_i)
+  // Paired-difference Cochran ratio estimator (§6.5 / §8.1):
+  // Ratio direction: link_attributed / ledger_net = own_clicks / network_clicks
+  // R = sum(y_i) / sum(x_i) where y_i = own_i, x_i = net_i
   // d_i = y_i - R * x_i  (paired daily counting discrepancy!)
   // Var(R) = (n / (n - 1)) * sum(d_i^2) / (sum(x_i))^2
-  const R = totalNet / totalOwn
+  const R = totalOwn / totalNet
+  const relativeDiff = (totalOwn - totalNet) / totalNet
   let sumSqResid = 0
   for (const p of dailyPairs) {
-    const d = p.net - R * p.own
+    const d = p.own - R * p.net
     sumSqResid += d * d
   }
 
-  // Add tiny binomial discrepancy floor when all daily counts match identically (d_i === 0)
-  // so 0-discrepancy days still yield a realistic narrow interval rather than degenerate 0 width
-  const pairedVar = ((n / (n - 1)) * sumSqResid) / (totalOwn * totalOwn)
-  const se = Math.sqrt(Math.max(0, pairedVar))
-  const ciLower = Math.max(0, R - Z_95_TWO_SIDED * se)
-  const ciUpper = R + Z_95_TWO_SIDED * se
+  const pairedVar = ((n / (n - 1)) * sumSqResid) / (totalNet * totalNet)
+  const rawSe = Math.sqrt(Math.max(0, pairedVar))
+  const tCrit = studentT975Critical(n - 1)
 
+  // Rule-of-Three binomial/Poisson discrepancy floor (`3 / totalNet`) when all daily counts match identically (`d_i = 0`)
+  // so finite-sample 0-discrepancy series NEVER produce a degenerate 0-width interval!
+  const ruleOfThreeHalfWidth = 3 / totalNet
+  const se = Math.max(rawSe, ruleOfThreeHalfWidth / tCrit)
+  const halfWidth = Math.max(tCrit * rawSe, ruleOfThreeHalfWidth)
+  const ciLower = Math.max(0, R - halfWidth)
+  const ciUpper = R + halfWidth
+
+  if (totalOwn <= 0) {
+    unmet.push('total_own_clicks_zero')
+  }
   if (ciLower < G13_RATIO_LOWER_BOUND) {
     unmet.push(`ci95_lower_lt_${G13_RATIO_LOWER_BOUND}:${ciLower.toFixed(4)}`)
   }
@@ -169,11 +240,14 @@ export function evaluateJoinG13Gate(params: {
     status,
     passed,
     days_included: n,
+    inactive_zero_days_excluded: inactiveZeroDaysExcluded,
     excluded_lab_or_panel_rows: excludedLabOrPanel,
     total_own_clicks: totalOwn,
     total_network_clicks: totalNet,
     ratio: R,
+    relative_diff: relativeDiff,
     paired_se: se,
+    t_critical_95: tCrit,
     ci95_lower: ciLower,
     ci95_upper: ciUpper,
     unmet_reasons: Object.freeze(unmet),

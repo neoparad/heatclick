@@ -20,6 +20,7 @@ import {
   evaluateUsageQuotaBehavior,
   LaneBillingGuard,
   OemPartnerManager,
+  SHARED_DAILY_CONTINUITY_PREFIX_CAP,
   simulatePublicKeyFlood,
   type CanaryIsolationDayRecord,
   type DailyBillingReconciliationEntry,
@@ -326,5 +327,117 @@ describe('lib/link/oem/billing-guard (1M public-key flood & 30d ledger reconcili
     expect(blockedReport.overageBillingUnlocked).toBe(false);
     expect(blockedReport.consecutivePassingDays).toBe(10);
     expect(blockedReport.failedDays).toHaveLength(1);
+  });
+
+  test('Wave 8 Regressions (H-24, M-04): OEM export requires analytics:export scope, revoking partner/delegation invalidates child tokens, and LaneBillingGuard enforces dayUtc reset + shared cross-lane prefix cap', async () => {
+    const reg = new IdentityKeyRegistry({ pepperVersion: 'p1', pepperSecret: 'pep-oem' });
+    const mgr = new OemPartnerManager(reg, undefined, {
+      decision15ApprovedOverride: true,
+      legalSignOffOverride: true,
+    });
+    const partner = mgr.registerOemPartner({
+      orgId: 'org-h24',
+      name: 'H24 OEM',
+      managementTenantId: 'ten-mgmt-h24',
+      oemLegalSignoffRef: 'dpa-h24',
+      delegableScopes: ['analytics:read', 'analytics:export'],
+    });
+    expect(partner.ok).toBe(true);
+    if (!partner.ok) return;
+
+    mgr.provisionChildTenant({
+      rawOemKey: partner.data.rawOemKey,
+      childTenantId: 'ten-child-h24',
+      childName: 'Child H24',
+      planScopes: ['analytics:read', 'analytics:export'],
+      delegationPolicy: {
+        allowedOemScopes: ['analytics:read', 'analytics:export'],
+        maxExchangedTokenTtlSec: 900,
+        allowOemAccess: true,
+      },
+      actorSub: 'op-1',
+    });
+
+    // Token with ONLY analytics:read MUST be rejected by exportChildDataForOemParent
+    const readOnlyEx = mgr.exchangeForChildToken({
+      rawOemKey: partner.data.rawOemKey,
+      childTenantId: 'ten-child-h24',
+      actorSub: 'op-1',
+      requestedScopes: ['analytics:read'],
+    });
+    expect(readOnlyEx.ok).toBe(true);
+    if (!readOnlyEx.ok) return;
+
+    const deniedExport = await mgr.exportChildDataForOemParent({
+      principal: readOnlyEx.data.principal,
+      exportId: 'exp-denied',
+      childTenantId: 'ten-child-h24',
+      siteId: 's1',
+      target: 'bigquery',
+      storageRegion: 'jp',
+      destinationRegion: 'jp',
+      deletionEpoch: 1,
+      rows: [],
+      sourceEventCutoffMs: 1000,
+      nowMs: 2000,
+    });
+    expect(deniedExport.ok).toBe(false);
+
+    // Revoking child delegation immediately invalidates already-exchanged token
+    expect(mgr.revokeChildDelegation('ten-child-h24').revoked).toBe(true);
+    expect(reg.verifyOemExchangedToken(readOnlyEx.data.token).ok).toBe(false);
+
+    // M-04: Cross-lane continuity prefix cap (SHARED_DAILY_CONTINUITY_PREFIX_CAP = 500) + dayUtc reset
+    const guard = new LaneBillingGuard();
+    expect(
+      guard.evaluateUnit({
+        tenantId: 't1',
+        siteId: 's1',
+        lane: 'destination_delivery',
+        dedupeId: 'pub-dest-1',
+        networkPrefix: '192.0.2.0/24',
+        credentialKind: 'ugk_pub',
+        trust: 'continuity',
+        stored: true,
+        deliverySucceeded: true,
+        dayUtc: '2026-11-20',
+      }).billable
+    ).toBe(false);
+
+    let billedDay1 = 0;
+    for (let i = 0; i < SHARED_DAILY_CONTINUITY_PREFIX_CAP + 50; i += 1) {
+      const lane = i % 2 === 0 ? 'standard_telemetry_pv' : 'customer_event';
+      if (
+        guard.evaluateUnit({
+          tenantId: 't1',
+          siteId: 's1',
+          lane,
+          dedupeId: `d1-${i}`,
+          networkPrefix: '198.51.100.0/24',
+          credentialKind: 'ugk_pub',
+          trust: 'continuity',
+          stored: true,
+          dayUtc: '2026-11-20',
+        }).billable
+      ) {
+        billedDay1 += 1;
+      }
+    }
+    expect(billedDay1).toBe(SHARED_DAILY_CONTINUITY_PREFIX_CAP);
+
+    // Next UTC day resets daily prefix budget cleanly!
+    expect(
+      guard.evaluateUnit({
+        tenantId: 't1',
+        siteId: 's1',
+        lane: 'standard_telemetry_pv',
+        dedupeId: 'd2-0',
+        networkPrefix: '198.51.100.0/24',
+        credentialKind: 'ugk_pub',
+        trust: 'continuity',
+        stored: true,
+        dayUtc: '2026-11-21',
+      }).billable
+    ).toBe(true);
   });
 });

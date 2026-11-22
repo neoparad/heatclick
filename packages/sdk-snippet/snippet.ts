@@ -89,33 +89,45 @@ export async function generatePinnedSnippet(
   assertValidHttpsOrigin(config.cdnOrigin);
 
   const origin = config.cdnOrigin.replace(/\/+$/, '');
-  const manifestUrl = `${origin}${config.manifestPath ?? '/release/manifest.json'}`;
-  const loaderUrl = `${origin}${config.loaderDataPath ?? `/l/${config.siteRef}.json`}`;
+  const manifestRelPath = config.manifestPath ?? '/release/manifest.json';
+  const loaderRelPath = config.loaderDataPath ?? `/l/${config.siteRef}.json`;
   const emptyBase = `${origin}${config.emptyFilePath ?? '/static/empty.v1.js'}`;
   const emptyUrl = config.pagePathKeyHash
     ? `${emptyBase}?p=${encodeURIComponent(config.pagePathKeyHash)}`
     : emptyBase;
-  const ttPolicy = config.trustedTypesPolicyName ?? 'ugokilink';
+  const ttPolicy = config.trustedTypesPolicyName ?? 'ugokilink-sdk';
 
-  // Compact, zero-eval, CSP-clean static bootstrap (< 2 KB)
+  // Compact, zero-eval, self-contained WebCrypto Ed25519 + strict Trusted Types bootstrap (<= 2 KB)
   const bootstrapConfig = canonicalJson({
-    s: config.siteRef,
     k: config.offlinePubKeyJwk.x ?? '',
+    l: loaderRelPath,
     m: config.minManifestSeq,
-    u: manifestUrl,
-    l: loaderUrl,
+    o: origin,
+    s: config.siteRef,
     t: ttPolicy,
+    u: manifestRelPath,
   });
 
   const snippetJs =
     `!function(w,d,c){` +
     `if(w.__ugkBoot)return;w.__ugkBoot=1;` +
     `var q=w.__ugkQ=[];w.ugk=w.ugk||function(){q.push(arguments)};` +
-    `var p=w.trustedTypes&&w.trustedTypes.createPolicy?w.trustedTypes.createPolicy(c.t,{createScriptURL:function(u){return u}}):null;` +
-    `function load(u,i){var s=d.createElement("script");s.async=true;s.crossOrigin="anonymous";s.integrity=i;s.src=p?p.createScriptURL(u):u;d.head.appendChild(s)}` +
-    `w.__ugkCfg=c;w.__ugkLoadSri=load;` +
-    `Promise.all([fetch(c.u,{credentials:"omit"}).then(function(r){return r.json()}),fetch(c.l,{credentials:"omit",cache:"no-cache"}).then(function(r){return r.json()})])` +
-    `.then(function(res){w.__ugkVerifyAndBoot&&w.__ugkVerifyAndBoot(res[0],res[1],c,load)}).catch(function(){})` +
+    `var al=new Set,` +
+    `uOk=u=>{if(typeof u=="string"){var x=new URL(u);if(x.protocol=="https:"&&x.origin==c.o&&al.has(u))return u}throw new TypeError("ugk:url")},` +
+    `p=w.trustedTypes?.createPolicy?w.trustedTypes.createPolicy(c.t,{createScriptURL:uOk}):null,` +
+    `ld=(u,i)=>{var v=p?p.createScriptURL(u):uOk(u),s=d.createElement("script");s.async=!0;s.crossOrigin="anonymous";s.integrity=i;s.src=v;d.head.appendChild(s)},` +
+    `b64=s=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),x=>x.charCodeAt(0)),` +
+    `cj=v=>v===null||typeof v!="object"?JSON.stringify(v):Array.isArray(v)?"["+v.map(cj)+"]":"{"+Object.keys(v).filter(x=>v[x]!==void 0).sort().map(x=>JSON.stringify(x)+":"+cj(v[x]))+"}",` +
+    `cs=w.crypto?.subtle;if(!cs)return;` +
+    `var pk=b64(c.k);if(pk.length!=32)return;` +
+    `var jf=u=>fetch(c.o+u,{credentials:"omit",cache:"no-cache"}).then(r=>r.json());` +
+    `Promise.all([jf(c.u),jf(c.l),cs.importKey("raw",pk,{name:"Ed25519"},!1,["verify"])])` +
+    `.then(([m,l,ky])=>{var mp=m?.payload,sg=m?.signature;if(!mp||sg?.alg!="Ed25519"||typeof sg.sig_b64!="string"||mp.manifest_seq<c.m)return;` +
+    `var sb=b64(sg.sig_b64);if(sb.length!=64)return;` +
+    `return cs.verify({name:"Ed25519"},ky,sb,(new TextEncoder).encode(cj(mp))).then(ok=>{if(!ok||(l?.server_time_ms||Date.now())>Date.parse(mp.not_after))return;` +
+    `var ar=mp.artifacts||{},ks=[ar.measure_core,ar.segmenter];` +
+    `if(!(l?.stop_deliver||l?.kill_bits&1)&&ar.deliver_core)ks.push(ar.deliver_core);` +
+    `ks.forEach(it=>{if(typeof it?.url=="string"&&/^sha256-[A-Za-z0-9+/=]{43,44}$/.test(it.sri)){var x=new URL(it.url);if(x.protocol=="https:"&&x.origin==c.o){al.add(it.url);ld(it.url,it.sri)}}})})}).catch(()=>{})` +
     `}(window,document,${bootstrapConfig});`;
 
   const snippetBytes = new TextEncoder().encode(snippetJs).byteLength;

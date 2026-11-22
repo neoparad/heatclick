@@ -120,17 +120,117 @@ export function twoSidedNormalPValue(z: number): number {
   return Math.max(0, Math.min(1, 1 - erf(Math.abs(z) / Math.SQRT2)));
 }
 
+export interface AlwaysValidMsprtInput {
+  /** Point estimate of treatment effect $\hat{\theta}_t$. */
+  readonly effectEstimate: number;
+  /** Sampling variance $V_t = \widehat{\mathrm{SE}}_t^2 > 0$ of $\hat{\theta}_t$. */
+  readonly sampleVariance: number;
+  /** Normal mixture prior variance $\tau^2 > 0$ (Johari et al., 2017). */
+  readonly mixingVarianceTauSq: number;
+  /** Stage / test significance level $\alpha \in (0, 1)$. */
+  readonly alpha: number;
+  /** Running maximum $\max_{s < t} \Lambda_s$ across prior looks (optional). */
+  readonly priorMaxLambda?: number;
+}
+
+export interface AlwaysValidMsprtResult {
+  readonly lambdaT: number;
+  readonly runningMaxLambda: number;
+  readonly anytimePValue: number;
+  readonly confidenceSequenceHalfWidth: number;
+  readonly ciLower: number;
+  readonly ciUpper: number;
+  readonly crossesBoundary: boolean;
+}
+
+/**
+ * Johari, Koomen, Pekelis & Walsh (2017) mixture Sequential Probability Ratio Test (mSPRT):
+ *
+ * $$\Lambda_t = \sqrt{\frac{V_t}{V_t + \tau^2}} \exp\!\left(\frac{\hat{\theta}_t^2 \tau^2}{2 V_t (V_t + \tau^2)}\right)$$
+ *
+ * Under $H_0: \theta = 0$, $\{\Lambda_t\}_{t \ge 1}$ is a non-negative martingale with $\mathbb{E}_0[\Lambda_1] = 1$,
+ * so by Ville's maximal inequality $\mathbb{P}_0(\sup_{t \ge 1} \Lambda_t \ge 1/\alpha) \le \alpha$ under
+ * arbitrary continuous peeking (`[H-06]`).
+ */
+export function evaluateAlwaysValidMsprt(input: AlwaysValidMsprtInput): AlwaysValidMsprtResult {
+  const vT = Math.max(1e-12, input.sampleVariance);
+  const tauSq = Math.max(1e-12, input.mixingVarianceTauSq);
+  const alpha = Math.min(0.999999, Math.max(1e-12, input.alpha));
+  const thetaHat = input.effectEstimate;
+
+  const varianceRatio = vT / (vT + tauSq);
+  const exponent = Math.min(
+    700,
+    (thetaHat * thetaHat * tauSq) / (2 * vT * (vT + tauSq))
+  );
+  const lambdaT = Math.sqrt(varianceRatio) * Math.exp(exponent);
+  const runningMaxLambda = Math.max(input.priorMaxLambda ?? 0, lambdaT);
+  const anytimePValue = Math.min(1, 1 / Math.max(1e-300, runningMaxLambda));
+
+  const logTerm = Math.max(
+    0,
+    Math.log((1 / alpha) * Math.sqrt((vT + tauSq) / vT))
+  );
+  const halfWidth = Math.sqrt(((2 * vT * (vT + tauSq)) / tauSq) * logTerm);
+
+  return {
+    lambdaT,
+    runningMaxLambda,
+    anytimePValue,
+    confidenceSequenceHalfWidth: halfWidth,
+    ciLower: thetaHat - halfWidth,
+    ciUpper: thetaHat + halfWidth,
+    crossesBoundary: anytimePValue <= alpha,
+  };
+}
+
 export function evaluateInterimLook(params: {
   readonly totalAlpha: number;
   readonly stage: InterimLookStage;
   readonly zStatistic: number;
+  /** Optional explicit sampling variance $V_t = \mathrm{SE}_t^2$ for `always_valid` mSPRT (`[H-06]`). */
+  readonly sampleVariance?: number;
+  /** Optional explicit point estimate $\hat{\theta}_t$ (defaults to $z_t \sqrt{V_t}$). */
+  readonly effectEstimate?: number;
+  /** Optional mSPRT mixing variance $\tau^2$ (defaults to `0.04`). */
+  readonly mixingVarianceTauSq?: number;
+  /** Optional running $\max_{s < t} \Lambda_s$ for sequential `always_valid` monitoring. */
+  readonly priorMaxLambda?: number;
 }): {
   readonly stage: InterimLookStage;
   readonly stageAlpha: number;
   readonly twoSidedPValue: number;
   readonly crossesBoundary: boolean;
+  readonly msprtLambda?: number;
+  readonly confidenceSequenceHalfWidth?: number;
 } {
   const stageAlpha = getStageAlphaBudget(params.totalAlpha, params.stage);
+
+  // [H-06]: `always_valid` look MUST use Johari et al. (2017) mSPRT, never fixed-horizon normal z-test!
+  if (params.stage === 'always_valid') {
+    const vT = Math.max(1e-12, params.sampleVariance ?? 0.01);
+    const tauSq = Math.max(1e-12, params.mixingVarianceTauSq ?? 0.04);
+    const thetaHat =
+      params.effectEstimate !== undefined
+        ? params.effectEstimate
+        : params.zStatistic * Math.sqrt(vT);
+    const msprt = evaluateAlwaysValidMsprt({
+      effectEstimate: thetaHat,
+      sampleVariance: vT,
+      mixingVarianceTauSq: tauSq,
+      alpha: stageAlpha,
+      priorMaxLambda: params.priorMaxLambda,
+    });
+    return {
+      stage: params.stage,
+      stageAlpha,
+      twoSidedPValue: msprt.anytimePValue,
+      crossesBoundary: msprt.crossesBoundary,
+      msprtLambda: msprt.lambdaT,
+      confidenceSequenceHalfWidth: msprt.confidenceSequenceHalfWidth,
+    };
+  }
+
   const p = twoSidedNormalPValue(params.zStatistic);
   return {
     stage: params.stage,
@@ -339,16 +439,22 @@ export class DualExperimentLedger {
   private readonly humanRegister: RegisterEntry[] = [];
   private readonly autonomyRegister: RegisterEntry[] = [];
   private readonly targetFdr: number;
-  private autonomyWealth: number;
-  private autonomyLastDiscoveryIdx = 0;
+  private readonly initialWealth: number;
+  /** Full history of discovery indices $\tau_1 < \tau_2 < \dots$ (`[H-05]`). */
+  private readonly autonomyDiscoveryTimes: number[] = [];
 
-  constructor(targetFdr = 0.1) {
+  constructor(targetFdr = 0.1, initialWealth?: number) {
     this.targetFdr = Math.min(Math.max(0.01, targetFdr), 0.1);
-    this.autonomyWealth = this.targetFdr * 0.5; // W_0 = FDR / 2
+    const defaultW0 = this.targetFdr * 0.5;
+    this.initialWealth =
+      initialWealth !== undefined && initialWealth > 0 && initialWealth < this.targetFdr
+        ? initialWealth
+        : defaultW0;
   }
 
   private gammaWeight(lag: number): number {
-    // Summable decay sequence γ_m = 6 / (π^2 * m^2) summing strictly to 1
+    // Summable decay sequence γ_m = 6 / (π^2 * m^2) summing strictly to 1 over m >= 1
+    if (lag < 1) return 0;
     return 6 / (Math.PI * Math.PI * lag * lag);
   }
 
@@ -372,8 +478,13 @@ export class DualExperimentLedger {
   }
 
   /**
-   * Online LORD++ step for autonomy-envelope stream (Register S):
-   * guarantees overall stream FDR <= 10% across arbitrary sequences of agent experiments.
+   * Exact Javanmard & Montanari (2018) LORD++ step for autonomy-envelope stream (`[H-05]`):
+   *
+   * $$\alpha_t = \gamma_t W_0 + (\alpha - W_0)\gamma_{t - \tau_1} + \alpha \sum_{j \ge 2:\, \tau_j < t} \gamma_{t - \tau_j}$$
+   *
+   * where $\tau_1$ is the FIRST rejection time (earning $\alpha - W_0$, never $\alpha$) and ALL
+   * subsequent rejection times $\tau_2, \tau_3, \dots$ are retained and summed at every step $t$,
+   * guaranteeing $\sum_{s \le t} \alpha_s \le \max(1, R_t)\alpha$ and online $\mathrm{FDR} \le \alpha$.
    */
   public recordAutonomyExperiment(params: {
     readonly experimentId: string;
@@ -381,28 +492,27 @@ export class DualExperimentLedger {
     readonly now?: Date;
   }): RegisterEntry {
     const t = this.autonomyRegister.length + 1;
-    const lagSinceStart = t;
-    const lagSinceLast = Math.max(1, t - this.autonomyLastDiscoveryIdx);
 
-    const alphaT =
-      this.autonomyLastDiscoveryIdx === 0
-        ? this.gammaWeight(lagSinceStart) * this.autonomyWealth
-        : Math.min(
-            this.targetFdr,
-            this.gammaWeight(lagSinceStart) * this.autonomyWealth +
-              this.gammaWeight(lagSinceLast) * this.targetFdr
-          );
+    let alphaT = this.gammaWeight(t) * this.initialWealth;
+    if (this.autonomyDiscoveryTimes.length >= 1) {
+      const tau1 = this.autonomyDiscoveryTimes[0];
+      alphaT += (this.targetFdr - this.initialWealth) * this.gammaWeight(t - tau1);
+      for (let j = 1; j < this.autonomyDiscoveryTimes.length; j += 1) {
+        const tauJ = this.autonomyDiscoveryTimes[j];
+        alphaT += this.targetFdr * this.gammaWeight(t - tauJ);
+      }
+    }
 
     const rejected = params.pValue <= alphaT;
     if (rejected) {
-      this.autonomyLastDiscoveryIdx = t;
+      this.autonomyDiscoveryTimes.push(t);
     }
 
     const entry: RegisterEntry = {
       experimentId: params.experimentId,
       registerKind: 'autonomy_stream',
       pValue: params.pValue,
-      thresholdAlpha: Number(alphaT.toFixed(6)),
+      thresholdAlpha: alphaT,
       rejectedNull: rejected,
       recordedAt: (params.now ?? new Date()).toISOString(),
     };
@@ -414,11 +524,15 @@ export class DualExperimentLedger {
     readonly human: ReadonlyArray<RegisterEntry>;
     readonly autonomy: ReadonlyArray<RegisterEntry>;
     readonly autonomyTargetFdr: number;
+    readonly autonomyInitialWealth: number;
+    readonly autonomyDiscoveryTimes: ReadonlyArray<number>;
   } {
     return {
       human: [...this.humanRegister],
       autonomy: [...this.autonomyRegister],
       autonomyTargetFdr: this.targetFdr,
+      autonomyInitialWealth: this.initialWealth,
+      autonomyDiscoveryTimes: [...this.autonomyDiscoveryTimes],
     };
   }
 }

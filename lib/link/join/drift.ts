@@ -273,15 +273,21 @@ export function evaluateDriftAndRenderTrigger(input: DriftTriggerInput): DriftTr
     })
   }
 
-  // Case 1: No lab snapshot exists at all -> unknown skel_fp -> identity_render (or full_render if first time)
+  // Case 1: No lab snapshot exists at all -> full_render when field carries CSS/layout signals so visual facts can become valid, else identity_render
   if (!input.lab_snapshot) {
+    const needsInitialFullRender =
+      input.field_css_fp !== null || input.field_layout.sections.length > 0
     return Object.freeze({
       tenant_id: input.tenant_id,
       site_id: input.site_id,
       page_id: input.page_id,
       variant_set_key: input.variant_set_key,
-      action: 'identity_render',
-      trigger_reasons: Object.freeze(['unknown_skel_fp_no_snapshot']),
+      action: needsInitialFullRender ? 'full_render' : 'identity_render',
+      trigger_reasons: Object.freeze([
+        needsInitialFullRender
+          ? 'initial_full_render_no_snapshot'
+          : 'unknown_skel_fp_no_snapshot',
+      ]),
       drift: null,
       visual_facts_valid: false,
       visual_invalidation_reasons: Object.freeze(['no_lab_snapshot']),
@@ -299,7 +305,8 @@ export function evaluateDriftAndRenderTrigger(input: DriftTriggerInput): DriftTr
     input.field_slot_fp !== null && snap.slot_fp !== null && input.field_slot_fp !== snap.slot_fp
 
   // Visual facts validity (§6.2): ONLY when full render + skel_fp match + css_fp match + G <= 0.08
-  if (snap.job_class !== 'full' && snap.job_class !== 'full_render') {
+  const isFullRenderSnapshot = snap.job_class === 'full' || snap.job_class === 'full_render'
+  if (!isFullRenderSnapshot) {
     visualInvalidation.push('not_full_render')
   }
   if (!skelMatches) visualInvalidation.push('skel_fp_mismatch')
@@ -315,6 +322,14 @@ export function evaluateDriftAndRenderTrigger(input: DriftTriggerInput): DriftTr
 
   // Check Full Render triggers first (§6.2)
   let needsFullRender = false
+  if (
+    !isFullRenderSnapshot &&
+    skelMatches &&
+    (input.field_css_fp !== null || input.field_layout.sections.length > 0)
+  ) {
+    needsFullRender = true
+    triggerReasons.push('upgrade_identity_snapshot_to_full_render')
+  }
   if (cssChanged && !snap.css_volatile) {
     needsFullRender = true
     triggerReasons.push('css_fp_changed')

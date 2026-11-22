@@ -399,6 +399,63 @@ export interface PooledDwellEstimateResult {
   readonly hierarchy_levels_used: readonly ('page' | 'template_role' | 'site')[]
 }
 
+/** Minimum measurement-resolution SD floor (ms) so quantized/identical readings never yield zero-width CIs */
+export const DWELL_MIN_SD_FLOOR_MS = 50
+/** Minimum coefficient-of-variation floor when sample SD collapses to 0 on finite observations */
+export const DWELL_ZERO_SD_CV_FLOOR = 0.1
+
+const STUDENT_T_975_BY_DF: Readonly<Record<number, number>> = Object.freeze({
+  1: 12.706205,
+  2: 4.302653,
+  3: 3.182446,
+  4: 2.776445,
+  5: 2.570582,
+  6: 2.446912,
+  7: 2.364624,
+  8: 2.306004,
+  9: 2.262157,
+  10: 2.228139,
+  11: 2.200985,
+  12: 2.178813,
+  13: 2.160369,
+  14: 2.144787,
+  15: 2.13145,
+  16: 2.119905,
+  17: 2.109816,
+  18: 2.100922,
+  19: 2.093024,
+  20: 2.085963,
+  21: 2.079614,
+  22: 2.073873,
+  23: 2.068658,
+  24: 2.063899,
+  25: 2.059539,
+  26: 2.055529,
+  27: 2.051831,
+  28: 2.048407,
+  29: 2.04523,
+  30: 2.042272,
+})
+
+function studentT975ForDwell(df: number): number {
+  const k = Math.floor(df)
+  if (k <= 0) return Infinity
+  const exact = STUDENT_T_975_BY_DF[k]
+  if (exact !== undefined) return exact
+  const z = Z_95_TWO_SIDED
+  const z3 = z * z * z
+  const z5 = z3 * z * z
+  return z + (z3 + z) / (4 * k) + (5 * z5 + 16 * z3 + 3 * z) / (96 * k * k)
+}
+
+function effectiveDwellSdMs(obs: DwellLevelObservation, fallbackPriorSdMs = 0): number {
+  if (Number.isFinite(obs.sd_ms) && obs.sd_ms > 0) {
+    return Math.max(obs.sd_ms, DWELL_MIN_SD_FLOOR_MS)
+  }
+  const cvFloor = DWELL_ZERO_SD_CV_FLOOR * Math.max(0, Math.abs(obs.mean_ms))
+  return Math.max(DWELL_MIN_SD_FLOOR_MS, cvFloor, fallbackPriorSdMs)
+}
+
 /**
  * 滞在時間など連続指標の相対幅ベース判定（相対 ±25%）＋テナント内階層部分持ち寄り。
  */
@@ -418,8 +475,16 @@ export function computePooledDwellTime(params: {
   }
 
   const targetRel = params.target_relative_half_width ?? DWELL_TIME_MAX_REL_HALF_WIDTH
-  const pageSe = params.page.n > 1 ? params.page.sd_ms / Math.sqrt(params.page.n) : Infinity
-  const pageHalf = Z_95_TWO_SIDED * pageSe
+  const siteSd = effectiveDwellSdMs(params.site)
+  const roleSd =
+    params.template_role && params.template_role.n > 0
+      ? effectiveDwellSdMs(params.template_role, siteSd)
+      : null
+  const pageDirectSd = effectiveDwellSdMs(params.page, roleSd ?? siteSd)
+
+  const pageSe = params.page.n > 1 ? pageDirectSd / Math.sqrt(params.page.n) : Infinity
+  const tCrit = params.page.n > 1 ? studentT975ForDwell(params.page.n - 1) : Infinity
+  const pageHalf = tCrit * pageSe
   const pageRelHalf = params.page.mean_ms > 0 ? pageHalf / params.page.mean_ms : Infinity
 
   if (Number.isFinite(pageRelHalf) && pageRelHalf <= targetRel) {
@@ -444,23 +509,33 @@ export function computePooledDwellTime(params: {
 
   const levelsUsed: Array<'page' | 'template_role' | 'site'> = ['page']
   let priorMean = params.site.mean_ms
-  let priorVar = Math.max(1, params.site.sd_ms * params.site.sd_ms / Math.max(1, Math.min(params.site.n, 20)))
+  let priorVar = Math.max(
+    DWELL_MIN_SD_FLOOR_MS * DWELL_MIN_SD_FLOOR_MS,
+    (siteSd * siteSd) / Math.max(1, Math.min(params.site.n, 20)),
+  )
 
-  if (params.template_role && params.template_role.n > 0) {
+  if (params.template_role && params.template_role.n > 0 && roleSd !== null) {
     levelsUsed.push('template_role')
     const roleVar = Math.max(
-      1,
-      (params.template_role.sd_ms * params.template_role.sd_ms) / Math.max(1, params.template_role.n),
+      DWELL_MIN_SD_FLOOR_MS * DWELL_MIN_SD_FLOOR_MS,
+      (roleSd * roleSd) / Math.max(1, params.template_role.n),
     )
     const wRole = (1 / roleVar) / (1 / roleVar + 1 / priorVar)
     priorMean = wRole * params.template_role.mean_ms + (1 - wRole) * priorMean
-    priorVar = Math.max(1, params.template_role.sd_ms * params.template_role.sd_ms / Math.max(1, Math.min(params.template_role.n, 20)))
+    priorVar = Math.max(
+      DWELL_MIN_SD_FLOOR_MS * DWELL_MIN_SD_FLOOR_MS,
+      (roleSd * roleSd) / Math.max(1, Math.min(params.template_role.n, 20)),
+    )
   }
   levelsUsed.push('site')
 
+  const pooledPageSd = Math.max(pageDirectSd, siteSd)
   const pageVar =
     params.page.n > 0
-      ? Math.max(1, (Math.max(params.page.sd_ms, params.site.sd_ms) ** 2) / params.page.n)
+      ? Math.max(
+          DWELL_MIN_SD_FLOOR_MS * DWELL_MIN_SD_FLOOR_MS,
+          (pooledPageSd * pooledPageSd) / params.page.n,
+        )
       : Infinity
 
   const precPage = Number.isFinite(pageVar) ? 1 / pageVar : 0
@@ -468,7 +543,7 @@ export function computePooledDwellTime(params: {
   const totalPrec = precPage + precPrior
   const ownWeight = precPage / totalPrec
   const pooledMean = ownWeight * params.page.mean_ms + (1 - ownWeight) * priorMean
-  const postHalf = Z_95_TWO_SIDED * Math.sqrt(1 / totalPrec)
+  const postHalf = Math.max(1, Z_95_TWO_SIDED * Math.sqrt(1 / totalPrec))
   const relHalf = pooledMean > 0 ? postHalf / pooledMean : Infinity
 
   return Object.freeze({

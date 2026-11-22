@@ -125,12 +125,22 @@ export interface HeatmapReproducibilityInputs {
   readonly palette_id: 'ugk-thermal-v1'
 }
 
+export interface HeatmapReproducibilityScope {
+  readonly tenant_id: string
+  readonly site_id: string
+  readonly audience: 'site_owner' | 'external_party'
+  readonly period_start: string
+  readonly period_end: string
+  readonly segment_id: string
+}
+
 export function computeReproducibilityHash(
   unit: HeatmapUnitKey,
   kind: HeatmapKind,
   actorBucket: HeatmapActorBucket,
   repro: HeatmapReproducibilityInputs,
   metricsDigest: string,
+  scope?: HeatmapReproducibilityScope,
 ): string {
   const canonical = JSON.stringify({
     unit: serializeHeatmapUnitKey(unit),
@@ -138,6 +148,16 @@ export function computeReproducibilityHash(
     actorBucket,
     repro,
     metricsDigest,
+    ...(scope
+      ? {
+          tenant_id: scope.tenant_id,
+          site_id: scope.site_id,
+          audience: scope.audience,
+          period_start: scope.period_start,
+          period_end: scope.period_end,
+          segment_id: scope.segment_id,
+        }
+      : {}),
   })
   return createHash('sha256').update(canonical, 'utf8').digest('hex')
 }
@@ -155,13 +175,17 @@ export interface HeatmapSectionMetricInput {
   readonly top_ratio: number
   readonly height_ratio: number
   readonly reach_rate: number | null
-  readonly reach_pvs: number
+  readonly reach_pvs: number | null
   readonly dwell_center40_ms: number | null
-  readonly dwell_pvs: number
+  readonly dwell_pvs: number | null
+  readonly cta_clicks?: number | null
+  readonly sample_size?: number | null
   readonly evidence: 'observed' | 'inferred'
   readonly status: MeasureStatus
-  readonly pooling_weight?: number
+  readonly pooling_weight?: number | null
 }
+
+export type HeatmapSectionOutput = HeatmapSectionMetricInput
 
 export interface HeatmapClickPointInput {
   readonly el_fp: string
@@ -175,10 +199,13 @@ export interface HeatmapClickPointInput {
   /** Relative click position inside the element [0, 1] × [0, 1] (§4.3, §11.12) */
   readonly rel_x: number
   readonly rel_y: number
-  readonly click_count: number
+  readonly click_count: number | null
+  readonly sample_size?: number | null
   readonly evidence: 'observed' | 'inferred'
   readonly status: MeasureStatus
 }
+
+export type HeatmapClickPointOutput = HeatmapClickPointInput
 
 export interface HeatmapHttpFetchMetricInput {
   readonly status_counts: Readonly<Record<string, number>>

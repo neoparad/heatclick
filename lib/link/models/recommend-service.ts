@@ -1,22 +1,21 @@
 /**
- * UGOKI LINK v2 — Wave 6 (Bundle 6-D.4): Unified `POST /v1/recommend` Service & MCP Tool Descriptor
+ * UGOKI LINK v2 — Wave 6 (Bundle 6-D.4 + [H-02]): Unified `POST /v1/recommend` &
+ * `POST /v1/sites/{siteId}/recommend` Service & MCP Tool Descriptor
  * (`lib/link/models/recommend-service.ts`)
  *
- * Implements Master Architecture v2 §8.5, §8.13 (3–6), §10.11, §11.5–§11.7:
- * - Authenticates via the shared Surface `IdentityKeyRegistry` (`ugk_sec_*`, `ugk_oauth_*`,
- *   `ugk_oemx_*`, `ugk_pub_*`) and derives `tenant_id` EXCLUSIVELY from the verified credential.
- * - Rejects cross-tenant caller probes (`tenant_id` mismatch or foreign `site_id`) with HTTP 404
- *   (zero existence oracle) + hash-chained audit log entry.
- * - Prevents browser privilege escalation: `ugk_pub_*` credentials are ALWAYS forced to
- *   `caller_channel = 'browser'`, requiring a signed `EcMemberProofToken` for logged-in member joins
- *   and rejecting raw member hashes (`MemberProofRequiredError` -> HTTP 403).
- * - Runs EC placements through `runEcRecommendation()` (pre-draw exclusions -> full-set Plackett-Luce
- *   -> last-second sold-out filter -> zero confidential field leak verified by `assertNoEcConfidentialLeak`)
- *   and content placements through `rerankCandidatesInBrowser()` / full-set Plackett-Luce.
+ * Implements Master Architecture v2 §8.5, §8.13 (3–6), §10.11, §11.5–§11.7 & `[H-02]`:
+ * - Routes every call through `IdentityKeyRegistry` + `AuthorizationGateway` + `CostUnitRateLimiter`.
+ * - Rejects unknown/unregistered `siteId` (`siteCfg === null`) and cross-tenant probes with HTTP 404
+ *   (NEVER 200 OK!) + hash-chained audit log entry.
+ * - Enforces strict browser (`ugk_pub_*`) input lockdown:
+ *   - Always forces `caller_channel = 'browser'`.
+ *   - Rejects/ignores caller-supplied `candidates`, `ec_candidates`, `article_candidates`,
+ *     `gross_margin`, `server_only_gross_margin`, `in_stock`, `available`, and `consent_granted`
+ *     overrides (HTTP 403 `BROWSER_INPUT_OVERRIDE_FORBIDDEN`).
+ *   - Resolves catalog candidates, gross margin, stock/availability, and site consent bounds
+ *     STRICTLY from server-side registered catalog & `SiteRuntimeConfig`.
  * - Serializes EVERY data response through `buildResponseEnvelope()` (`packages/contract/response` I1–I7),
- *   wrapping every external-origin string in `UntrustedValue` and every metric leaf in `VerifiedMetricValue`.
- * - Exports `RECOMMEND_MCP_TOOL_DEF` (`McpToolDefinition`) + `callRecommendMcpTool()` sharing the exact
- *   same execution pipeline as HTTP `POST /v1/recommend`.
+ *   wrapping every external-origin string in `UntrustedValue` and every numeric leaf in `VerifiedMetricValue`.
  */
 
 import {
@@ -30,11 +29,13 @@ import {
   type MeasureInput,
   type SerializedResponseEnvelope,
   type UntrustedValue,
+  type VerifiedMetricValue,
   type VerifiedNumericLeaf,
 } from '../../../packages/contract/response';
 import type { VerifiedPrincipal } from '../auth';
 import type { EcMemberSummaryStore } from '../revenue/ec-member-store';
 import {
+  buildApiVersionHeaders,
   getSurfaceRuntimeContext,
   type McpToolDefinition,
   type SurfacePipeline,
@@ -142,6 +143,12 @@ export interface RecommendRuntimeConfig {
   readonly catalogProvider?: RecommendCatalogProvider;
   readonly ecMemberStore?: EcMemberSummaryStore;
   readonly ecServerProofSecret?: string;
+  /** Optional server-verified per-session/site consent resolver for browser callers. */
+  readonly resolveBrowserConsent?: (params: {
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly sessionId?: string;
+  }) => { readonly memberLink: boolean; readonly personalisation: boolean } | null;
   readonly onServerDecisionLog?: (entry: {
     readonly tenantId: string;
     readonly siteId: string;
@@ -171,6 +178,7 @@ export interface RecommendInvocation {
   readonly clientIp?: string;
   readonly dpopThumbprint?: string;
   readonly callerSuppliedTenantId?: string;
+  readonly requestedRevision?: string | null;
   readonly body: Readonly<Record<string, unknown>>;
   readonly pipeline?: SurfacePipeline;
   readonly config?: RecommendRuntimeConfig;
@@ -184,17 +192,18 @@ export interface RecommendExecutionResult {
   readonly error?: {
     readonly code: string;
     readonly message: string;
+    readonly auditEntryId?: string;
   };
 }
 
 interface SafeSerializedEcItem {
   readonly product_id: string;
-  readonly rank: number;
+  readonly rank: VerifiedMetricValue<number>;
   readonly title: UntrustedValue;
   readonly product_url: UntrustedValue;
   readonly image_url: UntrustedValue | null;
   readonly hide_price: boolean;
-  readonly price: number | null;
+  readonly price: VerifiedMetricValue<number> | null;
   readonly currency: string | null;
   readonly category: UntrustedValue;
   readonly brand: UntrustedValue | null;
@@ -203,10 +212,10 @@ interface SafeSerializedEcItem {
 interface SafeSerializedArticleItem {
   readonly item_id: string;
   readonly kind: RecommendCandidateItem['kind'];
-  readonly rank: number;
+  readonly rank: VerifiedMetricValue<number>;
   readonly title: UntrustedValue;
   readonly url: UntrustedValue;
-  readonly display_prob: number;
+  readonly display_prob: VerifiedMetricValue<number>;
   readonly click_only_evidence: boolean;
 }
 
@@ -221,6 +230,21 @@ const VALID_PLACEMENTS: ReadonlySet<string> = new Set([
   'post_purchase',
   'article',
 ]);
+
+/**
+ * Keys that publishable browser keys (`ugk_pub_*`) are strictly forbidden from supplying (`[H-02]`).
+ * Catalog items, gross margin, stock/availability, and consent overrides MUST come from server config.
+ */
+const FORBIDDEN_BROWSER_OVERRIDE_KEYS: ReadonlyArray<string> = [
+  'candidates',
+  'ec_candidates',
+  'article_candidates',
+  'gross_margin',
+  'server_only_gross_margin',
+  'in_stock',
+  'available',
+  'consent_granted',
+];
 
 function resolvePrincipal(
   pipeline: SurfacePipeline,
@@ -313,7 +337,7 @@ function makeActiveRef(params: {
 }
 
 // =========================================================================
-// 5. Core Unified Executor (`POST /v1/recommend` & MCP `recommendItems`)
+// 5. Core Unified Executor (`POST /v1/recommend`, `POST /v1/sites/{siteId}/recommend`, & MCP)
 // =========================================================================
 
 export function executeRecommendRequest(inv: RecommendInvocation): RecommendExecutionResult {
@@ -324,6 +348,11 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
   const cfg = inv.config ?? activeRecommendConfig;
   const body = inv.body;
 
+  const baseHeaders: Record<string, string> = {
+    'Cache-Control': 'no-store',
+    ...buildApiVersionHeaders({ requestedRevision: inv.requestedRevision, now }),
+  };
+
   const siteId =
     typeof body.site_id === 'string' && body.site_id.trim().length > 0
       ? body.site_id.trim()
@@ -331,102 +360,188 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
         ? body.siteId.trim()
         : undefined;
 
-  // 1. Authenticate credential
+  // 1. Authenticate credential via IdentityKeyRegistry
   const auth = resolvePrincipal(pipeline, inv, siteId, now);
   if (!auth.ok) {
     return {
       httpStatus: auth.httpStatus,
-      headers: { 'Cache-Control': 'no-store' },
+      headers: baseHeaders,
       error: { code: auth.code, message: auth.reason },
     };
   }
   const principal = auth.principal;
 
-  // 2. Reject cross-tenant caller probe -> 404 (zero existence oracle, §11.5)
   const callerTenant =
     inv.callerSuppliedTenantId ??
     (typeof body.tenant_id === 'string' ? body.tenant_id : undefined) ??
     (typeof body.tenantId === 'string' ? body.tenantId : undefined);
 
-  if (callerTenant && callerTenant !== principal.tenantId) {
-    pipeline.gateway.auditLog.append({
-      timestamp: nowIso,
-      tenantId: principal.tenantId,
-      targetTenantId: callerTenant,
-      principalId: principal.principalId,
-      credentialKind: principal.credentialKind,
-      credentialId: principal.credentialId,
-      action: 'recommendItems',
-      riskClass: 'R0',
-      resourceType: 'site',
-      resourceId: siteId ?? 'unknown',
-      outcome: 'deny_404',
-      reason: 'CROSS_TENANT_PROBE_REJECTED',
-      metadata: { channel: inv.channel },
-    });
-    return {
-      httpStatus: 404,
-      headers: { 'Cache-Control': 'no-store' },
-      error: { code: 'RESOURCE_NOT_FOUND', message: 'Requested resource not found' },
-    };
-  }
-
-  // 3. Enforce read scope (`decisions:read` or `ml:read`)
-  if (!principal.effectiveScopes.has('decisions:read') && !principal.effectiveScopes.has('ml:read')) {
-    return {
-      httpStatus: 403,
-      headers: { 'Cache-Control': 'no-store' },
-      error: { code: 'INSUFFICIENT_SCOPE', message: 'Requires decisions:read or ml:read scope' },
-    };
-  }
-
-  // 4. Validate site_id & tenant ownership
   if (!siteId) {
+    if (callerTenant && callerTenant !== principal.tenantId) {
+      return {
+        httpStatus: 404,
+        headers: baseHeaders,
+        error: { code: 'RESOURCE_NOT_FOUND', message: 'Requested resource not found' },
+      };
+    }
     return {
       httpStatus: 400,
-      headers: { 'Cache-Control': 'no-store' },
+      headers: baseHeaders,
       error: { code: 'MISSING_SITE_ID', message: 'site_id is required' },
     };
   }
 
-  if (principal.allowedSiteIds !== null && !principal.allowedSiteIds.includes(siteId)) {
+  // 2. Look up server-registered site config & authorize via unified AuthorizationGateway ([H-02])
+  //    Unknown `siteCfg === null` OR foreign `siteCfg.tenantId !== principal.tenantId` OR foreign
+  //    `callerSuppliedTenantId` ALWAYS fails closed with 404 (NEVER 200 OK!).
+  const siteCfg = pipeline.repository.getSiteConfig(siteId);
+  const requiredScope =
+    principal.effectiveScopes.has('ml:read') && !principal.effectiveScopes.has('decisions:read')
+      ? 'ml:read'
+      : 'decisions:read';
+
+  const isBrowserPublicKey = principal.credentialKind === 'ugk_pub';
+
+  const authz = pipeline.gateway.authorize({
+    principal,
+    action: 'recommendItems',
+    riskClass: 'R0',
+    requiredScope,
+    resource: {
+      type: 'site',
+      id: siteId,
+      tenantId: siteCfg ? siteCfg.tenantId : '__nonexistent_tenant__',
+      siteId,
+    },
+    callerSuppliedTenantId: callerTenant,
+    now,
+  });
+
+  // Note: `/v1/recommend` and `/v1/sites/{siteId}/recommend` explicitly support `ugk_pub_*`
+  // browser calls under strict [H-02] input lockdown while general SurfacePipeline management
+  // endpoints block `ugk_pub_*` with `PUBLIC_KEY_OPERATION_FORBIDDEN`. Enforce full site, tenant,
+  // allowedSiteIds, and scope isolation even when gateway blocks generic `ugk_pub` actions.
+  if (isBrowserPublicKey && !authz.allowed && authz.code === 'PUBLIC_KEY_OPERATION_FORBIDDEN') {
+    if (
+      !siteCfg ||
+      siteCfg.tenantId !== principal.tenantId ||
+      (callerTenant !== undefined && callerTenant !== principal.tenantId) ||
+      (principal.allowedSiteIds !== null && !principal.allowedSiteIds.includes(siteId))
+    ) {
+      const denyAudit = pipeline.gateway.auditLog.append({
+        timestamp: nowIso,
+        tenantId: principal.tenantId,
+        targetTenantId: callerTenant ?? siteCfg?.tenantId ?? '__nonexistent_tenant__',
+        principalId: principal.principalId,
+        credentialKind: principal.credentialKind,
+        credentialId: principal.credentialId,
+        action: 'recommendItems',
+        riskClass: 'R0',
+        resourceType: 'site',
+        resourceId: siteId,
+        outcome: 'deny_404',
+        reason: 'BROWSER_KEY_FOREIGN_OR_UNKNOWN_SITE',
+        metadata: { channel: inv.channel },
+      });
+      return {
+        httpStatus: 404,
+        headers: baseHeaders,
+        error: {
+          code: 'SITE_NOT_FOUND',
+          message: 'Site not found',
+          auditEntryId: denyAudit.auditId,
+        },
+      };
+    }
+    if (!principal.effectiveScopes.has('decisions:read') && !principal.effectiveScopes.has('ml:read')) {
+      return {
+        httpStatus: 403,
+        headers: baseHeaders,
+        error: {
+          code: 'INSUFFICIENT_SCOPE',
+          message: 'Requires decisions:read or ml:read scope',
+          auditEntryId: authz.auditEntryId,
+        },
+      };
+    }
+  } else if (!authz.allowed || !siteCfg) {
     return {
-      httpStatus: 404,
-      headers: { 'Cache-Control': 'no-store' },
-      error: { code: 'RESOURCE_NOT_FOUND', message: 'Requested resource not found' },
+      httpStatus: authz.allowed ? 404 : authz.httpStatus,
+      headers: baseHeaders,
+      error: {
+        code: authz.allowed ? 'SITE_NOT_FOUND' : authz.code,
+        message: authz.allowed ? 'Site not found' : authz.reason,
+        auditEntryId: authz.auditEntryId,
+      },
     };
   }
 
-  const siteCfg = pipeline.repository.getSiteConfig(siteId);
-  if (siteCfg && siteCfg.tenantId !== principal.tenantId) {
-    pipeline.gateway.auditLog.append({
-      timestamp: nowIso,
-      tenantId: principal.tenantId,
-      targetTenantId: siteCfg.tenantId,
-      principalId: principal.principalId,
-      credentialKind: principal.credentialKind,
-      credentialId: principal.credentialId,
-      action: 'recommendItems',
-      riskClass: 'R0',
-      resourceType: 'site',
-      resourceId: siteId,
-      outcome: 'deny_404',
-      reason: 'FOREIGN_SITE_ACCESS_DENIED',
-      metadata: { channel: inv.channel },
-    });
+  // 3. Browser (`ugk_pub_*`) Input Lockdown ([H-02]):
+  //    Publishable browser keys CANNOT supply catalog candidates, gross margin, stock/availability,
+  //    or `consent_granted` overrides! Checked BEFORE consuming valid-request rate units.
+  if (isBrowserPublicKey) {
+    for (const forbiddenKey of FORBIDDEN_BROWSER_OVERRIDE_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(body, forbiddenKey) && body[forbiddenKey] !== undefined) {
+        pipeline.gateway.auditLog.append({
+          timestamp: nowIso,
+          tenantId: principal.tenantId,
+          targetTenantId: principal.tenantId,
+          principalId: principal.principalId,
+          credentialKind: principal.credentialKind,
+          credentialId: principal.credentialId,
+          action: 'recommendItems',
+          riskClass: 'R0',
+          resourceType: 'site',
+          resourceId: siteId,
+          outcome: 'deny_403',
+          reason: `BROWSER_INPUT_OVERRIDE_FORBIDDEN:${forbiddenKey}`,
+          metadata: { channel: inv.channel, forbiddenKey },
+        });
+        return {
+          httpStatus: 403,
+          headers: baseHeaders,
+          error: {
+            code: 'BROWSER_INPUT_OVERRIDE_FORBIDDEN',
+            message: `Publishable browser keys (ugk_pub_*) cannot supply "${forbiddenKey}"; catalog, margin, stock, and consent are resolved strictly server-side`,
+            auditEntryId: authz.auditEntryId,
+          },
+        };
+      }
+    }
+  }
+
+  // 4. Enforce per-key/IP cost-unit rate limiter ([H-02])
+  const rateKey = `recommend:${principal.tenantId}:${principal.credentialId}:${inv.clientIp ?? 'no_ip'}`;
+  const rate = pipeline.rateLimiter.consume(rateKey, RECOMMEND_MCP_TOOL_DEF.costUnits, now);
+  if (!rate.allowed) {
     return {
-      httpStatus: 404,
-      headers: { 'Cache-Control': 'no-store' },
-      error: { code: 'RESOURCE_NOT_FOUND', message: 'Requested resource not found' },
+      httpStatus: 429,
+      headers: {
+        ...baseHeaders,
+        'Retry-After': String(rate.retryAfterSec),
+        'X-UGOKI-Cost-Units-Remaining': String(rate.remaining),
+      },
+      error: {
+        code: 'RATE_LIMIT_EXCEEDED',
+        message: 'Recommendation cost-unit rate limit exceeded',
+        auditEntryId: authz.auditEntryId,
+      },
     };
   }
+
+  const responseHeaders: Record<string, string> = {
+    ...baseHeaders,
+    'X-UGOKI-Cost-Units': String(RECOMMEND_MCP_TOOL_DEF.costUnits),
+    'X-UGOKI-Cost-Units-Remaining': String(rate.remaining),
+    'X-UGOKI-Audit-Id': authz.auditEntryId,
+  };
 
   // 5. Validate placement & parameters
   const rawPlacement = typeof body.placement === 'string' ? body.placement.trim() : '';
   if (!VALID_PLACEMENTS.has(rawPlacement)) {
     return {
       httpStatus: 400,
-      headers: { 'Cache-Control': 'no-store' },
+      headers: responseHeaders,
       error: {
         code: 'INVALID_PLACEMENT',
         message: 'placement must be one of product_page | cart | home | post_purchase | article',
@@ -446,14 +561,18 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
       ? body.seed_key.trim()
       : `rec_${principal.tenantId}_${siteId}_${now.getTime()}`;
 
-  const storageRegion = siteCfg?.storageRegion ?? 'ap-northeast-1';
-  const processingRegion = siteCfg?.processingRegion ?? 'ap-northeast-1';
+  const storageRegion = siteCfg.storageRegion;
+  const processingRegion = siteCfg.processingRegion;
 
   // Force browser channel whenever caller authenticates with a public browser key (`ugk_pub_*`)
   const requestedChannel =
     body.caller_channel === 'ec_server_direct' ? 'ec_server_direct' : 'browser';
-  const effectiveCallerChannel: 'ec_server_direct' | 'browser' =
-    principal.credentialKind === 'ugk_pub' ? 'browser' : requestedChannel;
+  const effectiveCallerChannel: 'ec_server_direct' | 'browser' = isBrowserPublicKey
+    ? 'browser'
+    : requestedChannel;
+
+  // If site consent mode is 'off' and caller is browser, do not join personalisation or session features
+  const siteAllowsPersonalisation = siteCfg.consentMode === 'full';
 
   // 6. Content / Article Placement Path
   if (placement === 'article') {
@@ -462,7 +581,7 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
         tenantId: principal.tenantId,
         siteId,
       }) ??
-      (Array.isArray(body.article_candidates)
+      (!isBrowserPublicKey && Array.isArray(body.article_candidates)
         ? (body.article_candidates as readonly RecommendCandidateItem[])
         : null);
 
@@ -502,7 +621,7 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
         data: { placement, items: [] },
         policy: { version: 'rec_content_v1', fallback_reason: 'catalog_not_connected' },
       });
-      return { httpStatus: 200, headers: { 'Cache-Control': 'no-store' }, envelope };
+      return { httpStatus: 200, headers: responseHeaders, envelope };
     }
 
     const rawRung = typeof body.rung === 'string' ? body.rung : 'R0_hybrid_baseline';
@@ -513,9 +632,18 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
         ? rawRung
         : 'R0_hybrid_baseline';
 
-    const sessionEmbedding = Array.isArray(body.session_embedding)
-      ? body.session_embedding.filter((n): n is number => typeof n === 'number' && Number.isFinite(n))
-      : undefined;
+    const sessionEmbedding =
+      siteCfg.consentMode !== 'off' && Array.isArray(body.session_embedding)
+        ? body.session_embedding.filter((n): n is number => typeof n === 'number' && Number.isFinite(n))
+        : undefined;
+
+    const ref = makeActiveRef({
+      refId: `rec_art_${siteId}_${sha256Hex(seedKey).slice(0, 8)}`,
+      kind: 'model',
+      payload: { siteId, placement, rung, topK, temperature },
+      issuedAt: nowIso,
+      validUntil: validUntilIso,
+    });
 
     let safeArticleItems: SafeSerializedArticleItem[];
 
@@ -527,13 +655,15 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
         seedKey,
         temperature,
       });
-      safeArticleItems = reranked.shown.map((entry) => ({
+      safeArticleItems = reranked.shown.map((entry, idx) => ({
         item_id: entry.item.item.item_id,
         kind: entry.item.item.kind,
-        rank: entry.rank,
+        rank: createDataLayerMetric(entry.rank, `${ref.ref_id}:rank:${idx}`, { createdAt: nowIso }),
         title: wrapUntrusted(entry.item.item.title, 'page_content'),
         url: wrapUntrusted(entry.item.item.url_key_v2, 'url'),
-        display_prob: entry.step_propensity,
+        display_prob: createModelRegistryMetric(entry.step_propensity, `${ref.ref_id}:prob:${idx}`, {
+          createdAt: nowIso,
+        }),
         click_only_evidence: !entry.item.item.value_terms,
       }));
     } else {
@@ -552,24 +682,18 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
       });
 
       const plOrdering = sampleFullPlackettLuceOrdering(scored, seedKey, temperature);
-      safeArticleItems = plOrdering.slice(0, topK).map((entry) => ({
+      safeArticleItems = plOrdering.slice(0, topK).map((entry, idx) => ({
         item_id: entry.item.item.item_id,
         kind: entry.item.item.kind,
-        rank: entry.rank,
+        rank: createDataLayerMetric(entry.rank, `${ref.ref_id}:rank:${idx}`, { createdAt: nowIso }),
         title: wrapUntrusted(entry.item.item.title, 'page_content'),
         url: wrapUntrusted(entry.item.item.url_key_v2, 'url'),
-        display_prob: entry.step_propensity,
+        display_prob: createModelRegistryMetric(entry.step_propensity, `${ref.ref_id}:prob:${idx}`, {
+          createdAt: nowIso,
+        }),
         click_only_evidence: entry.item.click_only_evidence,
       }));
     }
-
-    const ref = makeActiveRef({
-      refId: `rec_art_${siteId}_${sha256Hex(seedKey).slice(0, 8)}`,
-      kind: 'model',
-      payload: { siteId, placement, rung, topK, temperature },
-      issuedAt: nowIso,
-      validUntil: validUntilIso,
-    });
 
     const measures: Record<string, MeasureInput<VerifiedNumericLeaf>> = {
       items_returned: {
@@ -612,17 +736,20 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
     });
 
     assertNoEcConfidentialLeak(envelope);
-    return { httpStatus: 200, headers: { 'Cache-Control': 'no-store' }, envelope };
+    return { httpStatus: 200, headers: responseHeaders, envelope };
   }
 
   // 7. E-Commerce Placement Path (`product_page | cart | home | post_purchase`)
+  //    For `ugk_pub_*`, candidates/margin/stock come EXCLUSIVELY from server-registered `catalogProvider`!
   const ecCandidates =
     cfg.catalogProvider?.getEcCandidates({
       tenantId: principal.tenantId,
       siteId,
       placement,
     }) ??
-    (Array.isArray(body.ec_candidates) ? (body.ec_candidates as readonly EcCandidateProduct[]) : null);
+    (!isBrowserPublicKey && Array.isArray(body.ec_candidates)
+      ? (body.ec_candidates as readonly EcCandidateProduct[])
+      : null);
 
   if (!ecCandidates || ecCandidates.length === 0) {
     const ref = makeActiveRef({
@@ -660,11 +787,12 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
       data: { placement, items: [] },
       policy: { version: 'ec_rec_v1', fallback_reason: 'ec_catalog_not_connected' },
     });
-    return { httpStatus: 200, headers: { 'Cache-Control': 'no-store' }, envelope };
+    return { httpStatus: 200, headers: responseHeaders, envelope };
   }
 
   const cartProductIds = asStringArray(body.cart_product_ids);
-  const lastSecondSoldOutIds = asStringArray(body.last_second_sold_out_ids);
+  // Browser callers cannot force arbitrary server items out-of-stock to manipulate rankings ([H-02])
+  const lastSecondSoldOutIds = isBrowserPublicKey ? [] : asStringArray(body.last_second_sold_out_ids);
   const directMemberKey =
     typeof body.member_key === 'string' && body.member_key.trim().length > 0
       ? body.member_key.trim()
@@ -678,6 +806,29 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
   const proofToken = asProofToken(body.member_proof_token);
   const browserSessionId =
     typeof body.session_id === 'string' ? body.session_id.trim() : undefined;
+
+  // Resolve consent strictly bounded by server-side site consent config ([H-02])
+  let effectiveConsentMemberLink: boolean;
+  let effectiveConsentPersonalisation: boolean;
+  if (isBrowserPublicKey) {
+    const serverConsent = cfg.resolveBrowserConsent?.({
+      tenantId: principal.tenantId,
+      siteId,
+      sessionId: browserSessionId,
+    });
+    if (serverConsent) {
+      effectiveConsentMemberLink = siteAllowsPersonalisation && serverConsent.memberLink;
+      effectiveConsentPersonalisation = siteAllowsPersonalisation && serverConsent.personalisation;
+    } else {
+      // Without explicit server-side consent grant resolver, browser keys CANNOT self-escalate
+      // member_link or personalisation consent!
+      effectiveConsentMemberLink = false;
+      effectiveConsentPersonalisation = false;
+    }
+  } else {
+    effectiveConsentMemberLink = siteAllowsPersonalisation && body.consent_member_link === true;
+    effectiveConsentPersonalisation = siteAllowsPersonalisation && body.consent_personalisation === true;
+  }
 
   let ecOutput;
   try {
@@ -699,19 +850,20 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
       browser_session_id: browserSessionId,
       ec_server_proof_secret: cfg.ecServerProofSecret,
       raw_browser_member_hash: rawBrowserHash,
-      consent_member_link: body.consent_member_link === true,
-      consent_personalisation: body.consent_personalisation === true,
-      member_lookup_timed_out: body.member_lookup_timed_out === true,
+      consent_member_link: effectiveConsentMemberLink,
+      consent_personalisation: effectiveConsentPersonalisation,
+      member_lookup_timed_out: !isBrowserPublicKey && body.member_lookup_timed_out === true,
     });
   } catch (err) {
     if (err instanceof MemberProofRequiredError) {
       return {
         httpStatus: 403,
-        headers: { 'Cache-Control': 'no-store' },
+        headers: responseHeaders,
         error: {
           code: 'MEMBER_PROOF_REQUIRED',
           message:
             'Browser callers cannot pass raw member keys or hashes; provide an EC-server-signed proof token',
+          auditEntryId: authz.auditEntryId,
         },
       };
     }
@@ -728,19 +880,6 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
     });
   }
 
-  const safeItems: SafeSerializedEcItem[] = ecOutput.browser_items.map((item) => ({
-    product_id: item.product_id,
-    rank: item.rank,
-    title: wrapUntrusted(item.title, 'page_content'),
-    product_url: wrapUntrusted(item.product_url_key_v2, 'url'),
-    image_url: item.image_url ? wrapUntrusted(item.image_url, 'url') : null,
-    hide_price: item.hide_price,
-    price: item.hide_price ? null : item.price,
-    currency: item.hide_price ? null : item.currency,
-    category: wrapUntrusted(item.category, 'page_content'),
-    brand: item.brand ? wrapUntrusted(item.brand, 'page_content') : null,
-  }));
-
   const ref = makeActiveRef({
     refId: `rec_ec_${siteId}_${sha256Hex(seedKey).slice(0, 8)}`,
     kind: 'model',
@@ -748,6 +887,22 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
     issuedAt: nowIso,
     validUntil: validUntilIso,
   });
+
+  const safeItems: SafeSerializedEcItem[] = ecOutput.browser_items.map((item, idx) => ({
+    product_id: item.product_id,
+    rank: createDataLayerMetric(item.rank, `${ref.ref_id}:rank:${idx}`, { createdAt: nowIso }),
+    title: wrapUntrusted(item.title, 'page_content'),
+    product_url: wrapUntrusted(item.product_url_key_v2, 'url'),
+    image_url: item.image_url ? wrapUntrusted(item.image_url, 'url') : null,
+    hide_price: item.hide_price,
+    price:
+      item.hide_price || item.price === null
+        ? null
+        : createDataLayerMetric(item.price, `${ref.ref_id}:price:${idx}`, { createdAt: nowIso }),
+    currency: item.hide_price ? null : item.currency,
+    category: wrapUntrusted(item.category, 'page_content'),
+    brand: item.brand ? wrapUntrusted(item.brand, 'page_content') : null,
+  }));
 
   const envelope = buildResponseEnvelope({
     window: { start: nowIso, end: nowIso },
@@ -814,7 +969,7 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
 
   return {
     httpStatus: 200,
-    headers: { 'Cache-Control': 'no-store' },
+    headers: responseHeaders,
     envelope,
   };
 }
@@ -826,6 +981,7 @@ export function callRecommendMcpTool(params: {
   readonly bearerToken?: string;
   readonly sessionPrincipal?: VerifiedPrincipal;
   readonly dpopThumbprint?: string;
+  readonly clientIp?: string;
   readonly callerSuppliedTenantId?: string;
   readonly arguments: Readonly<Record<string, unknown>>;
   readonly pipeline?: SurfacePipeline;
@@ -837,6 +993,7 @@ export function callRecommendMcpTool(params: {
     bearerToken: params.bearerToken,
     sessionPrincipal: params.sessionPrincipal,
     dpopThumbprint: params.dpopThumbprint,
+    clientIp: params.clientIp,
     callerSuppliedTenantId: params.callerSuppliedTenantId,
     body: params.arguments,
     pipeline: params.pipeline,

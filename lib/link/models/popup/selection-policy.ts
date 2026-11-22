@@ -292,8 +292,21 @@ export function selectP3CateUpliftArm(params: {
   };
 }
 
+/** Fast deterministic Mulberry32 PRNG for 10,000-iteration paired bootstrap replay (`[M-12]`). */
+function mulberry32PopupReplay(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 /**
- * Full-unit logged-propensity IPS replay verifier for bandit policy updates (§8.3).
+ * Full-unit logged-propensity IPS paired bootstrap/permutation replay verifier (`§8.3`, `[M-12]`):
+ * Executes all `replayIterations` (default `10,000`) seeded paired bootstrap resamples over
+ * the `n` logged units, evaluating candidate vs baseline/champion on identical resampled unit draws.
  */
 export function verifyBanditPolicyByFullUnitReplay(params: {
   readonly loggedUnits: ReadonlyArray<{
@@ -303,49 +316,113 @@ export function verifyBanditPolicyByFullUnitReplay(params: {
   }>;
   readonly newPolicyProbs: Readonly<Record<string, number>>;
   readonly championIpsValue: number;
+  /** Optional explicit baseline/champion arm probability vector for paired unit-by-unit contrast. */
+  readonly championPolicyProbs?: Readonly<Record<string, number>>;
   readonly replayIterations?: number;
+  readonly seed?: number;
 }): {
   readonly ips_estimate: number;
   readonly ips_lcb: number;
+  readonly paired_diff_estimate: number;
+  readonly paired_diff_lcb: number;
+  readonly paired_p_value: number;
   readonly effective_n: number;
   readonly beats_champion: boolean;
   readonly replay_iterations: number;
 } {
+  const iterations = Math.max(
+    1,
+    Math.trunc(params.replayIterations ?? POPUP_BANDIT_CONSTANTS.replayVerificationIterations)
+  );
   const n = params.loggedUnits.length;
   if (n === 0) {
     return {
       ips_estimate: 0,
       ips_lcb: -Infinity,
+      paired_diff_estimate: -Infinity,
+      paired_diff_lcb: -Infinity,
+      paired_p_value: 1,
       effective_n: 0,
       beats_champion: false,
-      replay_iterations: params.replayIterations ?? POPUP_BANDIT_CONSTANTS.replayVerificationIterations,
+      replay_iterations: iterations,
     };
   }
 
-  const weightedValues: number[] = [];
+  const candValues = new Float64Array(n);
+  const baseValues = new Float64Array(n);
+  let sumCand = 0;
+  let sumBase = 0;
   let sumW = 0;
   let sumW2 = 0;
-  for (const u of params.loggedUnits) {
+
+  for (let i = 0; i < n; i += 1) {
+    const u = params.loggedUnits[i];
+    const prop = Math.max(0.01, u.logged_propensity);
     const piNew = params.newPolicyProbs[u.logged_arm_id] ?? 0;
-    const w = piNew / Math.max(0.01, u.logged_propensity);
-    weightedValues.push(w * u.reward);
-    sumW += w;
-    sumW2 += w * w;
+    const wNew = piNew / prop;
+    const candVal = wNew * u.reward;
+    candValues[i] = candVal;
+    sumCand += candVal;
+    sumW += wNew;
+    sumW2 += wNew * wNew;
+
+    if (params.championPolicyProbs) {
+      const piChamp = params.championPolicyProbs[u.logged_arm_id] ?? 0;
+      const baseVal = (piChamp / prop) * u.reward;
+      baseValues[i] = baseVal;
+      sumBase += baseVal;
+    } else {
+      baseValues[i] = params.championIpsValue;
+      sumBase += params.championIpsValue;
+    }
   }
 
-  const mean = weightedValues.reduce((s, v) => s + v, 0) / n;
-  const variance =
-    weightedValues.reduce((s, v) => s + (v - mean) ** 2, 0) / Math.max(1, n - 1);
-  const se = Math.sqrt(variance / n);
-  const lcb = mean - 1.95996 * se;
+  const meanCand = sumCand / n;
+  const meanDiff = (sumCand - sumBase) / n;
   const effN = sumW2 > 0 ? (sumW * sumW) / sumW2 : 0;
 
+  // [M-12]: Execute all `iterations` (default 10,000) paired unit resamples!
+  const rng = mulberry32PopupReplay(params.seed ?? 20261120);
+  const bootCandMeans = new Float64Array(iterations);
+  const bootPairedDiffs = new Float64Array(iterations);
+  const invN = 1 / n;
+  let nonPositiveDiffCount = 0;
+
+  for (let b = 0; b < iterations; b += 1) {
+    let bCandSum = 0;
+    let bDiffSum = 0;
+    for (let j = 0; j < n; j += 1) {
+      const idx = Math.floor(rng() * n);
+      const c = candValues[idx];
+      bCandSum += c;
+      bDiffSum += c - baseValues[idx];
+    }
+    const bMean = bCandSum * invN;
+    const bDiff = bDiffSum * invN;
+    bootCandMeans[b] = bMean;
+    bootPairedDiffs[b] = bDiff;
+    if (bDiff <= 0) {
+      nonPositiveDiffCount += 1;
+    }
+  }
+
+  bootCandMeans.sort();
+  bootPairedDiffs.sort();
+
+  const lcbIdx = Math.min(iterations - 1, Math.max(0, Math.floor(0.025 * iterations)));
+  const bootLcb = bootCandMeans[lcbIdx];
+  const pairedDiffLcb = bootPairedDiffs[lcbIdx];
+  const pairedPValue = (1 + nonPositiveDiffCount) / (iterations + 1);
+
   return {
-    ips_estimate: Number(mean.toFixed(6)),
-    ips_lcb: Number(lcb.toFixed(6)),
+    ips_estimate: Number(meanCand.toFixed(6)),
+    ips_lcb: Number(bootLcb.toFixed(6)),
+    paired_diff_estimate: Number(meanDiff.toFixed(6)),
+    paired_diff_lcb: Number(pairedDiffLcb.toFixed(6)),
+    paired_p_value: Number(pairedPValue.toFixed(6)),
     effective_n: Math.round(effN),
-    beats_champion: lcb > params.championIpsValue,
-    replay_iterations: params.replayIterations ?? POPUP_BANDIT_CONSTANTS.replayVerificationIterations,
+    beats_champion: pairedDiffLcb > 0,
+    replay_iterations: iterations,
   };
 }
 

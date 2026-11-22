@@ -3,10 +3,12 @@
  *
  * Implements Master Architecture v2 §11.11 item 11:
  *   - Strictly read-only planner (physical exclusion of write/publish tools)
+ *   - Zero raw SQL metric string concatenation (static precompiled SQL lookup only)
  *   - Enforces self-hosted/baseline provider only (external cloud LLMs & Jev banned)
  *   - Wraps question, column names, and table descriptions in `UntrustedValue`
  *   - Isolates conversation & cache strictly by `(tenant_id, site_id, permission_epoch)`
- *   - Passes every SQL query + result set through the independent pre-LLM filter
+ *   - Runs independent pre-execution privacy/SQL/window-differencing gate BEFORE DB execution
+ *   - Enforces primary `< 10` + complementary secondary suppression on `GROUP BY` results
  *   - Grounds every numeric figure exclusively in `VerifiedMetricValue` citations
  *   - Marks every interpretation explicitly as `hypothesis`
  *   - Serializes every output through `buildResponseEnvelope` (`packages/contract/response`)
@@ -26,6 +28,7 @@ import {
   DifferencingGuard,
   assertSelfHostedProviderOnly,
   filterQueryAndRowsBeforeLlm,
+  validateAskQueryBeforeExecution,
   verifyAnswerNumericReferences,
 } from './pre-llm-filter';
 import {
@@ -43,7 +46,7 @@ import {
 } from './types';
 
 // =========================================================================
-// 1. Public View Metadata Catalog (Wrapped in UntrustedValue when passed to LLM)
+// 1. Public View Metadata Catalog & Static Precompiled SQL Lookup ([M-06])
 // =========================================================================
 
 const PUBLIC_VIEW_SCHEMAS: ReadonlyArray<{
@@ -82,6 +85,75 @@ const PUBLIC_VIEW_SCHEMAS: ReadonlyArray<{
     columns: ['day_local', 'actor_class', 'requests'],
   },
 ];
+
+/**
+ * Frozen static precompiled parameterized SQL lookup by `(viewName, metricName)`.
+ * Eliminates all template string concatenation of SQL metric identifiers (`[M-06]`).
+ */
+export const PRECOMPILED_PUBLIC_VIEW_SQL: Readonly<
+  Record<PublicAggregateViewName, Readonly<Record<string, string>>>
+> = Object.freeze({
+  v_pub_site_daily: Object.freeze({
+    page_views:
+      'SELECT day_local, sum(page_views) AS metric_value FROM v_pub_site_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY day_local',
+    conversions:
+      'SELECT day_local, sum(conversions) AS metric_value FROM v_pub_site_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY day_local',
+    cvr:
+      'SELECT day_local, avg(cvr) AS metric_value FROM v_pub_site_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY day_local',
+    avg_focal_dwell_ms:
+      'SELECT day_local, avg(avg_focal_dwell_ms) AS metric_value FROM v_pub_site_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY day_local',
+  }),
+  v_pub_page_daily: Object.freeze({
+    page_views:
+      'SELECT page_id, sum(page_views) AS metric_value FROM v_pub_page_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY page_id',
+    conversions:
+      'SELECT page_id, sum(conversions) AS metric_value FROM v_pub_page_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY page_id',
+    avg_focal_dwell_ms:
+      'SELECT page_id, avg(avg_focal_dwell_ms) AS metric_value FROM v_pub_page_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY page_id',
+  }),
+  v_pub_section_daily: Object.freeze({
+    reach_rate:
+      'SELECT sec_fp, avg(reach_rate) AS metric_value FROM v_pub_section_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY sec_fp',
+    avg_focal_dwell_ms:
+      'SELECT sec_fp, avg(avg_focal_dwell_ms) AS metric_value FROM v_pub_section_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY sec_fp',
+  }),
+  v_pub_segment_agg: Object.freeze({
+    page_views:
+      'SELECT segment_id, sum(page_views) AS metric_value FROM v_pub_segment_agg WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY segment_id',
+    conversions:
+      'SELECT segment_id, sum(conversions) AS metric_value FROM v_pub_segment_agg WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY segment_id',
+    cvr:
+      'SELECT segment_id, avg(cvr) AS metric_value FROM v_pub_segment_agg WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY segment_id',
+  }),
+  v_pub_funnel_agg: Object.freeze({
+    sessions:
+      'SELECT funnel_step, sum(sessions) AS metric_value FROM v_pub_funnel_agg WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY funnel_step',
+    step_conversion_rate:
+      'SELECT funnel_step, avg(step_conversion_rate) AS metric_value FROM v_pub_funnel_agg WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY funnel_step',
+  }),
+  v_pub_experiment_summary: Object.freeze({
+    lift_estimate:
+      'SELECT experiment_id, avg(lift_estimate) AS metric_value FROM v_pub_experiment_summary WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY experiment_id',
+  }),
+  v_pub_ai_actor_daily: Object.freeze({
+    requests:
+      'SELECT actor_class, sum(requests) AS metric_value FROM v_pub_ai_actor_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY actor_class',
+  }),
+});
+
+export function lookupPrecompiledPublicViewSql(
+  viewName: PublicAggregateViewName,
+  metricName: string
+): string | null {
+  if (!Object.prototype.hasOwnProperty.call(PRECOMPILED_PUBLIC_VIEW_SQL, viewName)) {
+    return null;
+  }
+  const byMetric = PRECOMPILED_PUBLIC_VIEW_SQL[viewName];
+  if (!Object.prototype.hasOwnProperty.call(byMetric, metricName)) {
+    return null;
+  }
+  return byMetric[metricName];
+}
 
 // =========================================================================
 // 2. Deterministic Read-Only Baseline Planner (Pluggable for 4-G Self-Hosted LLM)
@@ -164,13 +236,18 @@ export class DeterministicReadOnlyPlanner implements AskPlannerProvider {
 
     // 6. Segment / device / period comparison
     if (/(比較|compare|セグメント|segment|対比|vs\b|デバイス別)/i.test(q)) {
+      const metric = /(cvr|成約率|コンバージョン率)/i.test(q) ? 'cvr' : 'page_views';
+      const sql = lookupPrecompiledPublicViewSql('v_pub_segment_agg', metric);
+      if (!sql) {
+        return { kind: 'refuse', refusalStatus: 'not_collected', refusalReason: 'Unsupported metric' };
+      }
       return {
         kind: 'execute_query',
         toolName: 'query_public_segment_agg',
         viewName: 'v_pub_segment_agg',
-        metricName: /(cvr|成約率|コンバージョン率)/i.test(q) ? 'cvr' : 'page_views',
-        sql: `SELECT segment_id, sum(page_views) AS metric_value FROM v_pub_segment_agg WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY segment_id`,
-        requestedColumns: ['segment_id', 'page_views', 'cvr'],
+        metricName: metric,
+        sql,
+        requestedColumns: ['segment_id', metric],
         groupByColumns: ['segment_id'],
         filterSignature,
         hypothesisTemplate:
@@ -181,12 +258,16 @@ export class DeterministicReadOnlyPlanner implements AskPlannerProvider {
     // 7. Time-series trend
     if (/(推移|トレンド|日別|週別|時系列|trend|daily|weekly|time series)/i.test(q)) {
       const metric = /(cv|成果|コンバージョン|conversion)/i.test(q) ? 'conversions' : 'page_views';
+      const sql = lookupPrecompiledPublicViewSql('v_pub_site_daily', metric);
+      if (!sql) {
+        return { kind: 'refuse', refusalStatus: 'not_collected', refusalReason: 'Unsupported metric' };
+      }
       return {
         kind: 'execute_query',
         toolName: 'query_public_site_daily',
         viewName: 'v_pub_site_daily',
         metricName: metric,
-        sql: `SELECT day_local, sum(${metric}) AS metric_value FROM v_pub_site_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY day_local`,
+        sql,
         requestedColumns: ['day_local', metric],
         groupByColumns: ['day_local'],
         filterSignature,
@@ -198,12 +279,16 @@ export class DeterministicReadOnlyPlanner implements AskPlannerProvider {
     // 8. Section reach / focal dwell
     if (/(区画|セクション|到達|滞在|dwell|reach|section)/i.test(q)) {
       const metric = /(滞在|dwell)/i.test(q) ? 'avg_focal_dwell_ms' : 'reach_rate';
+      const sql = lookupPrecompiledPublicViewSql('v_pub_section_daily', metric);
+      if (!sql) {
+        return { kind: 'refuse', refusalStatus: 'not_collected', refusalReason: 'Unsupported metric' };
+      }
       return {
         kind: 'execute_query',
         toolName: 'query_public_section_daily',
         viewName: 'v_pub_section_daily',
         metricName: metric,
-        sql: `SELECT sec_fp, avg(${metric}) AS metric_value FROM v_pub_section_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY sec_fp`,
+        sql,
         requestedColumns: ['sec_fp', metric],
         groupByColumns: ['sec_fp'],
         filterSignature,
@@ -219,12 +304,16 @@ export class DeterministicReadOnlyPlanner implements AskPlannerProvider {
         : /(cv|成果|コンバージョン|conversion)/i.test(q)
           ? 'conversions'
           : 'page_views';
+      const sql = lookupPrecompiledPublicViewSql('v_pub_site_daily', metric);
+      if (!sql) {
+        return { kind: 'refuse', refusalStatus: 'not_collected', refusalReason: 'Unsupported metric' };
+      }
       return {
         kind: 'execute_query',
         toolName: 'query_public_site_daily',
         viewName: 'v_pub_site_daily',
         metricName: metric,
-        sql: `SELECT day_local, sum(${metric}) AS metric_value FROM v_pub_site_daily WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String} AND day_local >= {start:Date} AND day_local <= {end:Date} GROUP BY day_local`,
+        sql,
         requestedColumns: ['day_local', metric],
         groupByColumns: ['day_local'],
         filterSignature,
@@ -244,7 +333,7 @@ export class DeterministicReadOnlyPlanner implements AskPlannerProvider {
 }
 
 // =========================================================================
-// 3. AskService (Conversation Isolation + Pre-LLM Filter + Grounded Response)
+// 3. AskService (Conversation Isolation + Pre-Execution & Pre-LLM Filter + Grounded Response)
 // =========================================================================
 
 export class AskService {
@@ -346,8 +435,68 @@ export class AskService {
       return existingCache;
     }
 
+    const refBase = (seed: string): EvidenceRef => ({
+      ref_id: `ask_${sha256Hex(`${sessionKey}:${seed}`).slice(0, 16)}`,
+      kind: 'query',
+      params_hash: sha256Hex(`${req.siteId}:${windowStart}:${windowEnd}`),
+      watermarks: { as_of: nowIso },
+      result_digest: sha256Hex(seed),
+      issued_at: nowIso,
+      valid_until: new Date(now.getTime() + 24 * 3600_000).toISOString(),
+      kid: 'ask_v1',
+    });
+
     // 2. Wrap question & schema metadata in `UntrustedValue` before handing to planner
     const untrustedQuestion = wrapUntrusted(req.question, 'external_query');
+
+    // Enforce site consent gate BEFORE even planning or executing if site consent is 'off'
+    if (req.siteConsentMode === 'off') {
+      const status = 'not_collected' as const;
+      const reason = 'Site consent mode is "off"; human behaviour aggregates are not collected';
+      const ref = refBase(`consent_off:${cacheKey}`);
+      const envelope = buildResponseEnvelope({
+        window: { start: windowStart, end: windowEnd },
+        freshness: { data_through: nowIso, lag_s: 0, sources: {}, stale: false },
+        coverage: { ratio: 0, denominator_n: 0 },
+        lineage: { schema_version: '2.0', def_ver: 1, collection_gen: 'v3' },
+        residency,
+        measures: {
+          ask_metric: {
+            value: null,
+            unit: 'none',
+            status,
+            reason,
+            evidence: { level: 'observed', exactness: 'exact', criteria: [], refs: [ref], scope: `site:${req.siteId}` },
+            sample: null,
+            interval: null,
+            unmet_gates: [{ id: 'tel.G10', required: 1, observed: 0, unlock: reason }],
+          },
+        },
+        data: {
+          question: untrustedQuestion,
+          executedSql: null,
+          citations: [],
+          hypotheses: [],
+          refusalStatus: status,
+          refusalReason: reason,
+        },
+      });
+      const outcome: AskExecutionOutcome = {
+        httpStatus: 200,
+        allowed: true,
+        envelope,
+        executedSql: null,
+        citations: [],
+        answerText: null,
+        hypotheses: [],
+        passedForbiddenDataToModel: false,
+        returnedUnauthorizedData: false,
+        auditCode: `REFUSED:${status}`,
+      };
+      this.storeCache(sessionKey, cacheKey, outcome);
+      return outcome;
+    }
+
     const untrustedSchemaCatalog = PUBLIC_VIEW_SCHEMAS.map((v) => ({
       viewName: v.viewName,
       description: wrapUntrusted(v.description, 'customer_event_string'),
@@ -361,17 +510,6 @@ export class AskService {
       siteConsentMode: req.siteConsentMode,
       windowStart,
       windowEnd,
-    });
-
-    const refBase = (seed: string): EvidenceRef => ({
-      ref_id: `ask_${sha256Hex(`${sessionKey}:${seed}`).slice(0, 16)}`,
-      kind: 'query',
-      params_hash: sha256Hex(`${req.siteId}:${windowStart}:${windowEnd}`),
-      watermarks: { as_of: nowIso },
-      result_digest: sha256Hex(seed),
-      issued_at: nowIso,
-      valid_until: new Date(now.getTime() + 24 * 3600_000).toISOString(),
-      kid: 'ask_v1',
     });
 
     // 3. Refusal path -> honest non-ok envelope with null value & unmet gate
@@ -425,7 +563,92 @@ export class AskService {
       return outcome;
     }
 
-    // 4. Execute read-only query under server-bound tenant/site
+    const effectiveFilterSig = plan.filterSignature ?? cacheKey;
+
+    // 4. Independent Pre-Execution Gate ([H-03] & [M-06]):
+    //    Validates consent, purpose, read-only tool allowlist, public view & SQL FROM table match,
+    //    allowlisted metric identifiers, PII/free-text columns, and time-window / cohort differencing
+    //    STRICTLY BEFORE calling `executor.executePublicViewQuery`!
+    const preExecVerdict = validateAskQueryBeforeExecution({
+      siteConsentMode: req.siteConsentMode,
+      toolName: plan.toolName,
+      viewName: plan.viewName,
+      metricName: plan.metricName,
+      sql: plan.sql,
+      requestedColumns: plan.requestedColumns ?? [],
+      groupByColumns: plan.groupByColumns ?? [],
+      sessionKey,
+      filterSignature: effectiveFilterSig,
+      windowStart,
+      windowEnd,
+      predeclaredCohortMemberIds: plan.cohortMemberIds,
+      differencingGuard: this.differencingGuard,
+    });
+
+    if (!preExecVerdict.allowed) {
+      const status =
+        preExecVerdict.blockedCode === 'CONSENT_OFF_BLOCKED' ||
+        preExecVerdict.blockedCode === 'CONSENT_PURPOSE_MISMATCH'
+          ? 'not_collected'
+          : preExecVerdict.blockedCode === 'SMALL_CELL_SUPPRESSED' ||
+              preExecVerdict.blockedCode === 'DIFFERENCING_ATTACK_BLOCKED' ||
+              preExecVerdict.blockedCode === 'PER_PERSON_AGGREGATION_BLOCKED'
+            ? 'suppressed'
+            : 'not_entitled';
+      const ref = refBase(`preexec_blocked:${cacheKey}`);
+      const safeMeasureKey = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(plan.metricName)
+        ? plan.metricName
+        : 'ask_metric';
+      const envelope = buildResponseEnvelope({
+        window: { start: windowStart, end: windowEnd },
+        freshness: { data_through: nowIso, lag_s: 0, sources: {}, stale: false },
+        coverage: { ratio: 0, denominator_n: 0 },
+        lineage: { schema_version: '2.0', def_ver: 1, collection_gen: 'v3' },
+        residency,
+        measures: {
+          [safeMeasureKey]: {
+            value: null,
+            unit: 'count',
+            status,
+            reason: preExecVerdict.reason ?? 'Blocked by pre-execution privacy/SQL filter',
+            evidence: { level: 'observed', exactness: 'exact', criteria: [], refs: [ref], scope: `site:${req.siteId}` },
+            sample: null,
+            interval: null,
+            unmet_gates: [
+              {
+                id: 'surf.ask_accuracy',
+                required: ASK_MIN_CELL_K,
+                observed: 0,
+                unlock: preExecVerdict.reason ?? 'Pre-execution privacy/SQL filter blocked query',
+              },
+            ],
+          },
+        },
+        data: {
+          question: untrustedQuestion,
+          executedSql: null,
+          citations: [],
+          hypotheses: [],
+          refusalStatus: status,
+          refusalReason: preExecVerdict.reason,
+          blockedCode: preExecVerdict.blockedCode,
+        },
+      });
+      return {
+        httpStatus: 200,
+        allowed: true,
+        envelope,
+        executedSql: null,
+        citations: [],
+        answerText: null,
+        hypotheses: [],
+        passedForbiddenDataToModel: false,
+        returnedUnauthorizedData: false,
+        auditCode: `PRE_LLM_BLOCKED:${preExecVerdict.blockedCode}`,
+      };
+    }
+
+    // 5. Execute read-only query under server-bound tenant/site (ONLY after pre-execution gate passed!)
     const rawResult = this.executor.executePublicViewQuery({
       tenantId: req.principal.tenantId,
       siteId: req.siteId,
@@ -486,15 +709,21 @@ export class AskService {
       return outcome;
     }
 
-    // 5. Independent Pre-LLM Filter (blocks identifiers, free text, <k cells, differencing attacks, SQL AST)
+    // 6. Independent Post-Execution / Pre-LLM Row Filter:
+    //    Enforces row-level PII/free-text check, returned cohort differencing,
+    //    primary `< k` suppression, AND complementary secondary suppression on GROUP BY results!
     const filterVerdict = filterQueryAndRowsBeforeLlm({
       viewName: plan.viewName,
+      metricName: plan.metricName,
       sql: plan.sql,
       requestedColumns: plan.requestedColumns ?? [],
       groupByColumns: plan.groupByColumns ?? [],
       rows: rawResult.rows,
       sessionKey,
-      filterSignature: plan.filterSignature ?? cacheKey,
+      filterSignature: effectiveFilterSig,
+      windowStart,
+      windowEnd,
+      skipWindowCheck: true,
       differencingGuard: this.differencingGuard,
     });
 
@@ -541,7 +770,7 @@ export class AskService {
           blockedCode: filterVerdict.blockedCode,
         },
       });
-      const outcome: AskExecutionOutcome = {
+      return {
         httpStatus: 200,
         allowed: true,
         envelope,
@@ -553,12 +782,9 @@ export class AskService {
         returnedUnauthorizedData: false,
         auditCode: `PRE_LLM_BLOCKED:${filterVerdict.blockedCode}`,
       };
-      // Do NOT cache differencing blocks under normal cache if repeated with different filters,
-      // but caching exact same query signature is safe and deterministic.
-      return outcome;
     }
 
-    // 6. Construct VerifiedMetricValue citations & strictly grounded answer text
+    // 7. Construct VerifiedMetricValue citations & strictly grounded answer text
     const queryRef: EvidenceRef = {
       ref_id: rawResult.queryRefId,
       kind: 'query',
@@ -632,7 +858,7 @@ export class AskService {
     const warnings: string[] = [];
     if (filterVerdict.suppressedCount > 0) {
       warnings.push(
-        `${filterVerdict.suppressedCount} small cell(s) below k=${ASK_MIN_CELL_K} were suppressed before model synthesis`
+        `${filterVerdict.suppressedCount} cell(s) suppressed (primary < k=${ASK_MIN_CELL_K} plus ${filterVerdict.secondarySuppressedCount ?? 0} complementary secondary) before model synthesis`
       );
     }
 
@@ -652,7 +878,7 @@ export class AskService {
         citations: citations.map((c) => ({
           citationId: c.citationId,
           metricKey: c.metricKey,
-          value: c.value,
+          value: c.verifiedMetric,
           unit: c.unit,
           provenanceRef: c.provenanceRef,
         })),

@@ -52,6 +52,15 @@ export interface LegacyClickRow {
   readonly href: string | null;
 }
 
+export interface LegacyPageviewRow {
+  readonly legacyEventId: string;
+  readonly tenantId: string;
+  readonly siteId: string;
+  readonly sessionId: string;
+  readonly urlKey: string;
+  readonly occurredAtMs: number;
+}
+
 export interface LegacyVitalRow {
   readonly tenantId: string;
   readonly siteId: string;
@@ -230,7 +239,8 @@ export class LegacyBridgePipeline {
 
   private activeScrollRows: LegacyScrollRow[];
   private activeClickRows: LegacyClickRow[];
-  private readonly vitalRows: readonly LegacyVitalRow[];
+  private activePageviewRows: LegacyPageviewRow[];
+  private activeVitalRows: LegacyVitalRow[];
   private readonly kThreshold: number;
 
   private foldedCells: FoldedExpiredStatCell[] = [];
@@ -242,12 +252,14 @@ export class LegacyBridgePipeline {
   public constructor(args: {
     readonly scrollRows: readonly LegacyScrollRow[];
     readonly clickRows: readonly LegacyClickRow[];
+    readonly pageviewRows?: readonly LegacyPageviewRow[];
     readonly vitalRows?: readonly LegacyVitalRow[];
     readonly kThreshold?: number;
   }) {
     this.activeScrollRows = [...args.scrollRows];
     this.activeClickRows = [...args.clickRows];
-    this.vitalRows = args.vitalRows ?? [];
+    this.activePageviewRows = [...(args.pageviewRows ?? [])];
+    this.activeVitalRows = [...(args.vitalRows ?? [])];
     this.kThreshold = args.kThreshold ?? DEFAULT_LEGACY_FOLD_K;
   }
 
@@ -284,6 +296,9 @@ export class LegacyBridgePipeline {
     }
     for (const c of this.activeClickRows) {
       addExpired(c.tenantId, c.siteId, c.urlKey, c.occurredAtMs, c.sessionId);
+    }
+    for (const pv of this.activePageviewRows) {
+      addExpired(pv.tenantId, pv.siteId, pv.urlKey, pv.occurredAtMs, pv.sessionId);
     }
 
     this.foldedCells = Array.from(buckets.values())
@@ -335,6 +350,12 @@ export class LegacyBridgePipeline {
     this.droppedClickCount = this.activeClickRows.length - keptClicks.length;
     this.activeScrollRows = keptScroll;
     this.activeClickRows = keptClicks;
+    this.activePageviewRows = this.activePageviewRows.filter(
+      (r) => r.occurredAtMs >= retentionCutoffMs
+    );
+    this.activeVitalRows = this.activeVitalRows.filter(
+      (r) => r.occurredAtMs >= retentionCutoffMs
+    );
     this.expiredDropped = true;
     return {
       droppedScrollRows: this.droppedScrollCount,
@@ -519,7 +540,7 @@ export class LegacyBridgePipeline {
           0
         );
 
-        const vital = this.vitalRows.find(
+        const vital = this.activeVitalRows.find(
           (v) =>
             v.tenantId === first.tenantId &&
             v.siteId === first.siteId &&
@@ -572,6 +593,107 @@ export class LegacyBridgePipeline {
       }
     }
 
+    // Preserve 0-scroll bounce/click/vital/pageview PVs that have zero LegacyScrollRows (M-05)
+    const zeroScrollGroups = new Map<
+      string,
+      {
+        tenantId: string;
+        siteId: string;
+        sessionId: string;
+        urlKey: string;
+        minTs: number;
+      }
+    >();
+    const registerZeroScrollCandidate = (
+      tenantId: string,
+      siteId: string,
+      sessionId: string,
+      urlKey: string,
+      occurredAtMs: number
+    ) => {
+      const gk = `${tenantId}\u0000${siteId}\u0000${sessionId}\u0000${urlKey}`;
+      if (groups.has(gk)) return; // Already covered by scroll segments
+      const existing = zeroScrollGroups.get(gk);
+      if (!existing || occurredAtMs < existing.minTs) {
+        zeroScrollGroups.set(gk, { tenantId, siteId, sessionId, urlKey, minTs: occurredAtMs });
+      }
+    };
+
+    for (const pv of this.activePageviewRows) {
+      registerZeroScrollCandidate(pv.tenantId, pv.siteId, pv.sessionId, pv.urlKey, pv.occurredAtMs);
+    }
+    for (const c of this.sanitizedClicks) {
+      registerZeroScrollCandidate(c.tenantId, c.siteId, c.sessionId, c.urlKey, c.occurredAtMs);
+    }
+    for (const v of this.activeVitalRows) {
+      registerZeroScrollCandidate(v.tenantId, v.siteId, v.sessionId, v.urlKey, v.occurredAtMs);
+    }
+
+    for (const z of zeroScrollGroups.values()) {
+      handleSeq += 1;
+      const matchedClicks = this.sanitizedClicks.filter(
+        (c) =>
+          c.tenantId === z.tenantId &&
+          c.siteId === z.siteId &&
+          c.sessionId === z.sessionId &&
+          c.urlKey === z.urlKey
+      );
+      const matchedCvs = matchedClicks.reduce(
+        (acc, c) => acc + c.matchedConversionKeys.length,
+        0
+      );
+      const vital = this.activeVitalRows.find(
+        (v) =>
+          v.tenantId === z.tenantId &&
+          v.siteId === z.siteId &&
+          v.sessionId === z.sessionId &&
+          v.urlKey === z.urlKey
+      );
+
+      bridgedPvs.push({
+        tenantId: z.tenantId,
+        siteId: z.siteId,
+        bridgeHandleId: `legacy_pv_${handleSeq}`,
+        sessionId: z.sessionId,
+        urlKey: z.urlKey,
+        pvStartAtMs: z.minTs,
+        collectionGen: 'legacy',
+        directMeasured: {
+          evidenceLevel: 'observed',
+          maxEvidenceCap: 'observed',
+          canBeProven: false,
+          maxScrollY: 0,
+          clickCount: matchedClicks.length,
+          conversionCount: matchedCvs,
+        },
+        recovered: {
+          evidenceLevel: 'inferred',
+          pageHeightRangePx: null,
+          depthBandDwellMs: {
+            '0_25': 0,
+            '25_50': 0,
+            '50_75': 0,
+            '75_100': 0,
+          },
+          scrollReversals: 0,
+          webVitals: {
+            lcpMs: vital?.lcpMs ?? null,
+            inpMs: vital?.inpMs ?? null,
+            clsX1000: vital?.clsX1000 ?? null,
+            ttfbMs: vital?.ttfbMs ?? null,
+          },
+        },
+        unrecoverable: {
+          pv_id: UNRECOVERABLE,
+          section_id: UNRECOVERABLE,
+          element_coordinates: UNRECOVERABLE,
+          form_field_duration_ms: UNRECOVERABLE,
+        },
+        excludeFromFingerprintJoin: true,
+        excludeFromDefaultTraining: true,
+      });
+    }
+
     return {
       executionOrderVerified: [
         'fold_expired_to_k_stats',
@@ -596,6 +718,7 @@ export class LegacyBridgePipeline {
 export function runLegacyBridge(args: {
   readonly scrollRows: readonly LegacyScrollRow[];
   readonly clickRows: readonly LegacyClickRow[];
+  readonly pageviewRows?: readonly LegacyPageviewRow[];
   readonly vitalRows?: readonly LegacyVitalRow[];
   readonly conversionRules: readonly LegacyConversionRule[];
   readonly retentionCutoffMs: number;
@@ -604,6 +727,7 @@ export function runLegacyBridge(args: {
   const pipeline = new LegacyBridgePipeline({
     scrollRows: args.scrollRows,
     clickRows: args.clickRows,
+    pageviewRows: args.pageviewRows,
     vitalRows: args.vitalRows,
     kThreshold: args.kThreshold,
   });

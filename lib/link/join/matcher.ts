@@ -179,9 +179,9 @@ export function matchPvToSnapshot(req: SnapshotMatchRequest): ExactFingerprintJo
     })
   }
 
-  // 4. Visual layout facts require full render (`job_class === 'full'`) + valid G <= 0.08 (§6.2)
+  // 4. Visual layout facts require full render (`job_class === 'full' | 'full_render'`) + valid G <= 0.08 (§6.2)
   if (req.fact_class === 'visual_layout') {
-    if (req.snapshot.job_class !== 'full') {
+    if (req.snapshot.job_class !== 'full' && req.snapshot.job_class !== 'full_render') {
       return Object.freeze({
         matched: false,
         status: 'unmatched',

@@ -742,12 +742,24 @@ export interface UnknownUaQuorumEntry {
   readonly last_seen_at: string
 }
 
+function deriveUtcMonthEpoch(observedAt: string): string {
+  const d = new Date(observedAt)
+  if (!Number.isNaN(d.getTime())) {
+    const y = d.getUTCFullYear()
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0')
+    return `${y}-${m}`
+  }
+  return observedAt.slice(0, 7) || 'unknown-epoch'
+}
+
 export class UnknownUaQuorumTracker {
   private readonly entries = new Map<
     string,
     {
       requestCount: number
-      networks: Set<string>
+      /** Tracks distinct network pseudonyms strictly partitioned per monthly salt epoch (§7.3) */
+      networksByEpoch: Map<string, Set<string>>
+      requestsByEpoch: Map<string, number>
       reviewSampleUa: string | null
       firstSeenAt: string
       lastSeenAt: string
@@ -759,19 +771,43 @@ export class UnknownUaQuorumTracker {
     private readonly minNetworks = UNKNOWN_UA_MIN_NETWORKS,
   ) {}
 
+  private computeEpochStats(state: {
+    readonly requestCount: number
+    readonly networksByEpoch: ReadonlyMap<string, ReadonlySet<string>>
+    readonly requestsByEpoch: ReadonlyMap<string, number>
+  }): { readonly maxSameEpochNetworks: number; readonly quorumReached: boolean } {
+    let maxSameEpochNetworks = 0
+    let quorumReached = false
+    for (const [epoch, netSet] of state.networksByEpoch.entries()) {
+      if (netSet.size > maxSameEpochNetworks) {
+        maxSameEpochNetworks = netSet.size
+      }
+      const epochReqs = state.requestsByEpoch.get(epoch) ?? 0
+      // Require >= minNetworks within the SAME monthly salt epoch AND >= minRequests
+      // so a single IP crossing a UTC month boundary (2 rotated pseudonyms) never inflates network count!
+      if (netSet.size >= this.minNetworks && state.requestCount >= this.minRequests && epochReqs >= 1) {
+        quorumReached = true
+      }
+    }
+    return { maxSameEpochNetworks, quorumReached }
+  }
+
   record(params: {
     readonly raw_ua: string
     readonly network_key: string
     readonly observed_at: string
+    readonly quorum_epoch?: string
   }): UnknownUaQuorumEntry {
     const reduced = reduceStandardBrowserUa(params.raw_ua)
     const tokenKey = reduced.family.toLowerCase()
+    const epoch = params.quorum_epoch ?? deriveUtcMonthEpoch(params.observed_at)
 
     let state = this.entries.get(tokenKey)
     if (!state) {
       state = {
         requestCount: 0,
-        networks: new Set<string>(),
+        networksByEpoch: new Map<string, Set<string>>(),
+        requestsByEpoch: new Map<string, number>(),
         reviewSampleUa: null,
         firstSeenAt: params.observed_at,
         lastSeenAt: params.observed_at,
@@ -780,20 +816,25 @@ export class UnknownUaQuorumTracker {
     }
 
     state.requestCount++
-    state.networks.add(params.network_key)
+    let epochSet = state.networksByEpoch.get(epoch)
+    if (!epochSet) {
+      epochSet = new Set<string>()
+      state.networksByEpoch.set(epoch, epochSet)
+    }
+    epochSet.add(params.network_key)
+    state.requestsByEpoch.set(epoch, (state.requestsByEpoch.get(epoch) ?? 0) + 1)
     state.lastSeenAt = params.observed_at
 
-    const reached =
-      state.requestCount >= this.minRequests && state.networks.size >= this.minNetworks
-    if (reached && state.reviewSampleUa === null) {
+    const { maxSameEpochNetworks, quorumReached } = this.computeEpochStats(state)
+    if (quorumReached && state.reviewSampleUa === null) {
       state.reviewSampleUa = params.raw_ua.slice(0, 512)
     }
 
     return Object.freeze({
       token_key: tokenKey,
       request_count: state.requestCount,
-      distinct_network_count: state.networks.size,
-      quorum_reached: reached,
+      distinct_network_count: maxSameEpochNetworks,
+      quorum_reached: quorumReached,
       review_sample_ua: state.reviewSampleUa,
       first_seen_at: state.firstSeenAt,
       last_seen_at: state.lastSeenAt,
@@ -803,13 +844,12 @@ export class UnknownUaQuorumTracker {
   getEntry(tokenKey: string): UnknownUaQuorumEntry | null {
     const state = this.entries.get(tokenKey.toLowerCase())
     if (!state) return null
-    const reached =
-      state.requestCount >= this.minRequests && state.networks.size >= this.minNetworks
+    const { maxSameEpochNetworks, quorumReached } = this.computeEpochStats(state)
     return Object.freeze({
       token_key: tokenKey.toLowerCase(),
       request_count: state.requestCount,
-      distinct_network_count: state.networks.size,
-      quorum_reached: reached,
+      distinct_network_count: maxSameEpochNetworks,
+      quorum_reached: quorumReached,
       review_sample_ua: state.reviewSampleUa,
       first_seen_at: state.firstSeenAt,
       last_seen_at: state.lastSeenAt,

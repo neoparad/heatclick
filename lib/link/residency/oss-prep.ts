@@ -37,9 +37,29 @@ export const OSS_BOUNDARY_MANIFEST: readonly OssDirectoryRule[] = [
     rationale: 'Single authoritative contract schema, urlkey/2, segmenter, response envelope & ledgers',
   },
   {
+    pattern: 'packages/wp-plugin/',
+    scope: 'public_oss',
+    rationale: 'Auditable WordPress two-key companion plugin',
+  },
+  {
     pattern: 'workers/link-collector/',
     scope: 'public_oss',
     rationale: 'Standard & Segment-compatible collector runtime (identical to Tier 3 self-hosted core)',
+  },
+  {
+    pattern: 'workers/link-wal/',
+    scope: 'public_oss',
+    rationale: 'Auditable Tier-3 self-hosted WAL writer and storage adapter contract',
+  },
+  {
+    pattern: 'workers/link-loader/',
+    scope: 'public_oss',
+    rationale: 'Auditable idempotent PV state merger and sealed rollup builder',
+  },
+  {
+    pattern: 'workers/link-live/',
+    scope: 'public_oss',
+    rationale: 'Auditable live tail ring buffer for self-hosted Tier 3 verification',
   },
   {
     pattern: 'lib/link/export/destinations-catalog.ts',
@@ -54,9 +74,59 @@ export const OSS_BOUNDARY_MANIFEST: readonly OssDirectoryRule[] = [
 
   // --- Strictly Proprietary / Non-Public Scope (§11.11 #12) ---
   {
-    pattern: 'lib/link/ml/models/',
+    pattern: 'lib/link/actors/',
     scope: 'proprietary_private',
-    rationale: 'Trained ML weights, checkpoints, and distillation artifacts remain closed',
+    rationale: 'Bot, stealth-agent, RFC 9421, and origin-kit verdict engines remain closed to prevent evasion',
+  },
+  {
+    pattern: 'lib/link/ai-layer/',
+    scope: 'proprietary_private',
+    rationale: 'Local AI scoring models, certificates, and actor experiment engines remain closed',
+  },
+  {
+    pattern: 'lib/link/ml/',
+    scope: 'proprietary_private',
+    rationale: 'Trained ML weights, int8 tree runtime, dataset builders, and LLM/distillation guards remain closed',
+  },
+  {
+    pattern: 'lib/link/models/',
+    scope: 'proprietary_private',
+    rationale: 'Proprietary recommendation, Plackett-Luce ranking, and bandit selection models remain closed',
+  },
+  {
+    pattern: 'lib/link/autonomy/',
+    scope: 'proprietary_private',
+    rationale: 'Proprietary autonomous agent publishing & safety gate internals remain closed',
+  },
+  {
+    pattern: 'lib/link/evidence/',
+    scope: 'proprietary_private',
+    rationale: 'Proprietary LORD++ / mSPRT sequential experimentation engines remain closed',
+  },
+  {
+    pattern: 'lib/link/rollout/',
+    scope: 'proprietary_private',
+    rationale: 'Proprietary adaptive allocation & replay verification engines remain closed',
+  },
+  {
+    pattern: 'lib/link/heatmap-render/',
+    scope: 'proprietary_private',
+    rationale: 'Proprietary differential-privacy heatmap rendering & differencing guards remain closed',
+  },
+  {
+    pattern: 'lib/link/revenue/',
+    scope: 'proprietary_private',
+    rationale: 'Proprietary EC catalog attribution, reconciliation, and member summary engines remain closed',
+  },
+  {
+    pattern: 'lib/link/search/',
+    scope: 'proprietary_private',
+    rationale: 'Proprietary Fréchet/Manski search & AI citation inference engines remain closed',
+  },
+  {
+    pattern: 'lib/link/ask/',
+    scope: 'proprietary_private',
+    rationale: 'Proprietary natural-language Ask service and pre-LLM privacy filters remain closed',
   },
   {
     pattern: 'lib/link/pool/',
@@ -64,9 +134,24 @@ export const OSS_BOUNDARY_MANIFEST: readonly OssDirectoryRule[] = [
     rationale: 'Cross-tenant pooled statistics remain closed',
   },
   {
-    pattern: 'lib/link/actors/bot-rules/',
+    pattern: 'lib/link/oem/',
     scope: 'proprietary_private',
-    rationale: 'Bot & automation detection heuristics remain closed to prevent adversarial evasion',
+    rationale: 'OEM multi-tenant partner billing & flood-defense heuristics remain closed',
+  },
+  {
+    pattern: 'workers/link-signer/',
+    scope: 'proprietary_private',
+    rationale: 'Control-plane Ed25519 bundle signer remains strictly private',
+  },
+  {
+    pattern: 'workers/link-decision/',
+    scope: 'proprietary_private',
+    rationale: 'Proprietary edge decision worker remains closed',
+  },
+  {
+    pattern: 'workers/link-zone/',
+    scope: 'proprietary_private',
+    rationale: 'Proprietary customer-zone edge proxy worker remains closed',
   },
   {
     pattern: 'config/keys/',
@@ -90,6 +175,7 @@ export interface OssBoundaryFinding {
   readonly severity: 'blocker';
   readonly code:
     | 'PROPRIETARY_PATH_IN_OSS_BUNDLE'
+    | 'UNCLASSIFIED_PATH_IN_OSS_BUNDLE'
     | 'PROPRIETARY_IMPORT_LEAK'
     | 'SECRET_OR_KEY_LITERAL_LEAK'
     | 'UNFIXED_WEAKNESS_DOC_REF';
@@ -196,6 +282,13 @@ export function auditOssExportBoundary(
         severity: 'blocker',
         code: 'PROPRIETARY_PATH_IN_OSS_BUNDLE',
         detail: `File "${normPath}" belongs to proprietary_private scope and must not be exported to OSS`,
+      });
+    } else if (scope === 'unclassified') {
+      findings.push({
+        relativePath: normPath,
+        severity: 'blocker',
+        code: 'UNCLASSIFIED_PATH_IN_OSS_BUNDLE',
+        detail: `File "${normPath}" is unclassified in OSS_BOUNDARY_MANIFEST; fail-closed default-deny blocks unreviewed paths from OSS export`,
       });
     }
 

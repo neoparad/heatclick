@@ -4,13 +4,17 @@
  * and data-only loader responses (`GET /l/:siteRef.json`, §4.2 / D-23).
  */
 
+import { sha256Bytes, utf8Encode } from './crypto';
 import {
+  InMemoryBundleStateStore,
+  SignerCasConflictError,
   SignerPolicyError,
-  signConfigBundle,
+  SignerService,
   verifyConfigBundle,
   verifyReleaseManifest,
 } from './signer';
 import type {
+  BundleStateStore,
   ConfigBundlePayload,
   LoaderDataPayload,
   SignedConfigBundle,
@@ -21,6 +25,10 @@ export interface SignerWorkerDeps {
   readonly offlinePublicKey: CryptoKey;
   readonly onlinePrivateKey: CryptoKey;
   readonly onlineKid: string;
+  /** Internal control-plane bearer secret (`CONTROL_PLANE_SIGNER_TOKEN`, C-18). Fails closed 503 if unconfigured. */
+  readonly controlPlaneSignerToken?: string;
+  /** Authoritative CAS store for `(tenant_id, site_id)` current ConfigBundle (C-18). */
+  readonly bundleStateStore?: BundleStateStore;
   readonly getReleaseManifest: () => Promise<SignedReleaseManifest>;
   readonly getLoaderData: (siteRef: string, pathKeyHash: string | null) => Promise<LoaderDataPayload | null>;
   readonly nowMs?: () => number;
@@ -38,10 +46,59 @@ function jsonResponse(body: unknown, status = 200, extraHeaders?: Record<string,
   });
 }
 
+/**
+ * Constant-time control-plane bearer token verifier using fixed-length SHA-256 digests
+ * so timing never leaks secret length or prefix characters (C-18).
+ */
+async function verifyControlPlaneAuth(
+  request: Request,
+  configuredToken: string | undefined
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly status: 401 | 503; readonly error: string }> {
+  const expected = configuredToken?.trim() ?? '';
+  if (!expected) {
+    return { ok: false, status: 503, error: 'signer_auth_unconfigured' };
+  }
+
+  const authHeader = request.headers.get('authorization')?.trim() ?? '';
+  const match = /^Bearer\s+(.+)$/i.exec(authHeader);
+  if (!match) {
+    return { ok: false, status: 401, error: 'unauthorized' };
+  }
+  const provided = match[1].trim();
+  if (!provided) {
+    return { ok: false, status: 401, error: 'unauthorized' };
+  }
+
+  const [a, b] = await Promise.all([
+    sha256Bytes(utf8Encode(provided)),
+    sha256Bytes(utf8Encode(expected)),
+  ]);
+  if (a.length !== b.length) {
+    return { ok: false, status: 401, error: 'unauthorized' };
+  }
+  let diff = provided.length ^ expected.length;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a[i] ^ b[i];
+  }
+  if (diff !== 0) {
+    return { ok: false, status: 401, error: 'unauthorized' };
+  }
+  return { ok: true };
+}
+
 export function createSignerWorkerHandler(deps: SignerWorkerDeps) {
   const now = deps.nowMs ?? (() => Date.now());
+  const bundleStateStore = deps.bundleStateStore ?? new InMemoryBundleStateStore();
+  const signerService = new SignerService({
+    onlinePrivateKey: deps.onlinePrivateKey,
+    onlineKid: deps.onlineKid,
+    getReleaseManifest: deps.getReleaseManifest,
+    bundleStateStore,
+  });
 
   return {
+    bundleStateStore,
+    signerService,
     async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
       const path = url.pathname;
@@ -68,21 +125,26 @@ export function createSignerWorkerHandler(deps: SignerWorkerDeps) {
       }
 
       if (request.method === 'POST' && path === '/v1/signer/bundle/sign') {
+        const auth = await verifyControlPlaneAuth(request, deps.controlPlaneSignerToken);
+        if (!auth.ok) {
+          return jsonResponse({ error: auth.error }, auth.status);
+        }
+
         try {
+          // C-18: NEVER read or trust caller-supplied `body.previousBundle`!
+          // Authoritative previous state is read exclusively from `bundleStateStore` with CAS.
           const body = (await request.json()) as {
             payload: ConfigBundlePayload;
-            previousBundle?: ConfigBundlePayload;
           };
-          const manifest = await deps.getReleaseManifest();
-          const signed = await signConfigBundle(
-            body.payload,
-            deps.onlinePrivateKey,
-            deps.onlineKid,
-            manifest.payload,
-            { previousBundle: body.previousBundle }
-          );
+          if (!body || !body.payload) {
+            return jsonResponse({ error: 'bad_request' }, 400);
+          }
+          const signed = await signerService.signAndCommitBundle(body.payload);
           return jsonResponse({ bundle: signed }, 200);
         } catch (err) {
+          if (err instanceof SignerCasConflictError) {
+            return jsonResponse({ error: 'cas_conflict', message: err.message }, 409);
+          }
           if (err instanceof SignerPolicyError) {
             return jsonResponse({ error: 'policy_rejected', details: err.errors }, 422);
           }
@@ -99,15 +161,28 @@ export function createSignerWorkerHandler(deps: SignerWorkerDeps) {
             previousBundle?: ConfigBundlePayload;
           };
           const manifest = await deps.getReleaseManifest();
+          const storedPrev = await bundleStateStore.getCurrent(
+            body.expectedTenantId,
+            body.expectedSiteId
+          );
+          const effectivePrev = storedPrev?.bundle.payload ?? body.previousBundle;
           const res = await verifyConfigBundle(body.bundle, manifest, deps.offlinePublicKey, {
             nowMs: now(),
             expectedTenantId: body.expectedTenantId,
             expectedSiteId: body.expectedSiteId,
-            previousBundle: body.previousBundle,
+            previousBundle: effectivePrev,
           });
           return jsonResponse(res, res.valid ? 200 : 422);
         } catch {
           return jsonResponse({ error: 'bad_request' }, 400);
+        }
+      }
+
+      // Any other mutating request requires control-plane auth before returning 404
+      if (request.method !== 'GET' && request.method !== 'HEAD') {
+        const auth = await verifyControlPlaneAuth(request, deps.controlPlaneSignerToken);
+        if (!auth.ok) {
+          return jsonResponse({ error: auth.error }, auth.status);
         }
       }
 

@@ -5,27 +5,28 @@
  */
 
 import { sha256Hex } from '@/packages/contract/response';
+import { CANONICAL_SCHEMA } from '@/packages/contract/schema';
 import { TENANT_TABLE_CATALOG } from './ast-inspector';
 
 export const ALL_TENANT_TABLES: ReadonlyArray<string> = Object.keys(TENANT_TABLE_CATALOG);
 
-export const BEHAVIOUR_TABLES: ReadonlyArray<string> = [
-  'events',
-  'events_v2',
-  'frame_log',
-  'frame_payload',
-  'page_view_state',
-  'trajectories',
-  'access_obs',
-  'decision_log',
-  'exposure_log',
-  'conversion_events',
-  'rollup_page_hourly',
-  'rollup_section_hourly',
-  'rollup_element_hourly',
-  'rollup_site_daily',
-  'visitor_identity_index',
-];
+const NON_BEHAVIOUR_STRUCTURAL_TABLES: ReadonlySet<string> = new Set([
+  'dim_pages',
+  'dim_sections',
+  'fact_structure_asof',
+  'snapshot_registry',
+]);
+
+export const BEHAVIOUR_TABLES: ReadonlyArray<string> = Array.from(
+  new Set([
+    ...CANONICAL_SCHEMA.tables
+      .filter((t) => t.store === 'clickhouse' && !NON_BEHAVIOUR_STRUCTURAL_TABLES.has(t.name))
+      .map((t) => t.name),
+    'events',
+    'conversion_events',
+    'visitor_identity_index',
+  ])
+);
 
 export interface TenantProfileLimits {
   readonly maxMemoryUsageBytes: number;
@@ -52,17 +53,31 @@ function escapeSqlStringLiteral(value: string): string {
 }
 
 /**
- * Deterministic per-tenant read-only ClickHouse username.
- * Identity cannot be switched from SQL text once authenticated (`readonly = 1`).
+ * Deterministic per-tenant read-only ClickHouse username (32 hex chars = 128-bit collision resistance).
+ * Matches `ddl-generator.ts` Row Policy predicate:
+ * `substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '')`
  */
 export function perTenantRoUsername(tenantId: string): string {
   assertSafeIdentifier(tenantId, 'tenantId');
-  return `ugk_ro_${sha256Hex(tenantId).slice(0, 16)}`;
+  return `ugk_ro_${sha256Hex(tenantId).slice(0, 32)}`;
 }
 
 export function perTenantProfileName(tenantId: string): string {
   assertSafeIdentifier(tenantId, 'tenantId');
-  return `ugk_prof_${sha256Hex(tenantId).slice(0, 16)}`;
+  return `ugk_prof_${sha256Hex(tenantId).slice(0, 32)}`;
+}
+
+/**
+ * Exact TypeScript evaluation of the base ClickHouse table-level Row Policy predicate emitted in `001_clickhouse_v2.sql`:
+ * `substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '')`
+ */
+export function evaluateBaseDdlRowPolicyPredicate(
+  rowTenantId: string,
+  currentUsername: string
+): boolean {
+  const rowHash32 = sha256Hex(String(rowTenantId)).toLowerCase().slice(0, 32);
+  const userSuffix = currentUsername.replace(/^ugk_ro_/, '');
+  return rowHash32 === userSuffix;
 }
 
 export interface GeneratedTenantIsolationDdl {
@@ -226,7 +241,10 @@ export class ClickHouseIsolationSimulator {
   }
 
   /**
-   * Provisions a tenant with the exact Layer-B profile + paired permissive & restrictive policies.
+   * Provisions a tenant with BOTH:
+   *   1. The base `001_clickhouse_v2.sql` `SHA256(toString(tenant_id))` paired PERMISSIVE + RESTRICTIVE policies
+   *   2. The per-tenant `generatePerTenantIdentityDdl` `tenant_id = '<tenantId>'` paired PERMISSIVE + RESTRICTIVE policies
+   * Proves zero lockout when both RESTRICTIVE policies are active simultaneously (C-14).
    */
   public provisionTenantRoIdentity(
     tenantId: string,
@@ -240,6 +258,23 @@ export class ClickHouseIsolationSimulator {
       grantedSelectTables: new Set(tables),
     });
     for (const tbl of tables) {
+      // Base table-level DDL row policies (`001_clickhouse_v2.sql`)
+      this.addPolicy({
+        name: `rp_${tbl}_tenant_permissive`,
+        table: tbl,
+        user: username,
+        mode: 'PERMISSIVE',
+        predicate: (r) => evaluateBaseDdlRowPolicyPredicate(r.tenant_id, username),
+      });
+      this.addPolicy({
+        name: `rp_${tbl}_tenant_restrictive`,
+        table: tbl,
+        user: username,
+        mode: 'RESTRICTIVE',
+        predicate: (r) => evaluateBaseDdlRowPolicyPredicate(r.tenant_id, username),
+      });
+
+      // Per-tenant identity DDL row policies (`generatePerTenantIdentityDdl`)
       this.addPolicy({
         name: `rp_allow_${username}_${tbl}`,
         table: tbl,

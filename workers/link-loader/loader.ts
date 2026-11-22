@@ -33,6 +33,7 @@ import {
 import type {
   AccessObsRecord,
   DecisionRecord,
+  DeletionTombstoneSpec,
   DirtyCell,
   FrameLogRow,
   LoadControlTotals,
@@ -152,12 +153,53 @@ export class ShardLoader {
   private readonly decisions = new Map<string, DecisionRecord>();
   private readonly accessObs = new Map<string, AccessObsRecord>();
   private readonly dirtyCells = new Map<string, DirtyCell>();
+  private readonly deletedPvKeys = new Set<string>();
+  private readonly deletedVisitorKeys = new Set<string>();
+  private readonly deletedMemberHashes = new Set<string>();
 
   public constructor(options: ShardLoaderOptions) {
     this.region = options.region;
     this.shardId = options.shardId;
     this.bucket = options.bucket;
     this.manifestBucket = options.manifestBucket ?? options.bucket;
+  }
+
+  /**
+   * Registers subject deletion tombstones so neither late-arriving frames nor
+   * full WAL replay (`replayAllFromWal`) can resurrect erased subjects (H-19).
+   */
+  public registerDeletionTombstones(spec: DeletionTombstoneSpec): void {
+    for (const pvId of spec.pvIds ?? []) {
+      this.deletedPvKeys.add(makePvCompositeKey(spec.tenantId, spec.siteId, pvId));
+    }
+    for (const vk of spec.visitorKeys ?? []) {
+      this.deletedVisitorKeys.add(makePvCompositeKey(spec.tenantId, spec.siteId, vk));
+    }
+    for (const mh of spec.memberHashes ?? []) {
+      this.deletedMemberHashes.add(makePvCompositeKey(spec.tenantId, spec.siteId, mh));
+    }
+  }
+
+  private isRecordTombstoned(record: WalRecord): boolean {
+    const pvKey = makePvCompositeKey(record.tenant_id, record.site_id, record.frame.pv_id);
+    if (this.deletedPvKeys.has(pvKey)) return true;
+    if (
+      record.frame.visitor_id &&
+      this.deletedVisitorKeys.has(
+        makePvCompositeKey(record.tenant_id, record.site_id, record.frame.visitor_id)
+      )
+    ) {
+      return true;
+    }
+    if (
+      record.frame.member_hash &&
+      this.deletedMemberHashes.has(
+        makePvCompositeKey(record.tenant_id, record.site_id, record.frame.member_hash)
+      )
+    ) {
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -283,9 +325,16 @@ export class ShardLoader {
     let newlyPlacedPvs = 0;
 
     for (const { walKey, record } of items) {
+      if (this.isRecordTombstoned(record)) {
+        continue;
+      }
       const frame = record.frame;
       const pvKey = makePvCompositeKey(record.tenant_id, record.site_id, frame.pv_id);
       const frameHash = record.frame_hash || computeFastFrameHash(frame);
+      const isLabTraffic =
+        Boolean(frame.lab_run_id) ||
+        record.lab_exclusion?.is_lab_traffic === true ||
+        record.lab_exclusion?.exclude_human_rollups === true;
 
       let indexRow = stagedPvIndex.get(pvKey) ?? this.pvIndex.get(pvKey);
       let placement: PvPlacement;
@@ -324,6 +373,7 @@ export class ShardLoader {
           skelFp: frame.state.skel_fp,
           variantKey: frame.state.variant_key,
           firstFrameReceivedAtMs: record.received_at_ms,
+          excludeFromHumanRollups: isLabTraffic,
         };
         stagedPvIndex.set(pvKey, indexRow);
       } else {
@@ -341,6 +391,7 @@ export class ShardLoader {
           placementBiasMs,
           visitorKey: indexRow.visitorKey ?? frame.visitor_id ?? null,
           sessionKey: indexRow.sessionKey ?? frame.session_id ?? null,
+          excludeFromHumanRollups: Boolean(indexRow.excludeFromHumanRollups) || isLabTraffic,
         };
         stagedPvIndex.set(pvKey, indexRow);
 
@@ -361,13 +412,17 @@ export class ShardLoader {
       }
 
       const existingState = stagedPvStates.get(pvKey) ?? this.pvStates.get(pvKey) ?? null;
-      const mergedState = mergeFrameIntoPvState(
+      const mergedBase = mergeFrameIntoPvState(
         existingState,
         frame,
         frameHash,
         placement,
         record.state_incomplete
       );
+      const mergedState: MergedPvState =
+        Boolean(existingState?.excludeFromHumanRollups) || isLabTraffic
+          ? { ...mergedBase, excludeFromHumanRollups: true }
+          : mergedBase;
       stagedPvStates.set(pvKey, mergedState);
 
       const frameKey = makeFrameLogCompositeKey(
@@ -550,6 +605,7 @@ export class ShardLoader {
 
     for (const pvId of pvSet) {
       const pvKey = makePvCompositeKey(tenantId, siteId, pvId);
+      this.deletedPvKeys.add(pvKey);
       const st = this.pvStates.get(pvKey);
       const idx = this.pvIndex.get(pvKey);
       const pvHourMs = st?.placement.pvHourMs ?? idx?.pvHourMinMs;
@@ -713,6 +769,7 @@ export async function replayAllFromWal(options: {
   readonly walBucket: R2BucketLike;
   readonly nowMs?: number;
   readonly chunkSize?: number;
+  readonly deletionTombstones?: readonly DeletionTombstoneSpec[];
 }): Promise<ReplayOutcome> {
   const replayManifestBucket = new InMemoryR2Bucket();
   const loader = new ShardLoader({
@@ -721,6 +778,9 @@ export async function replayAllFromWal(options: {
     bucket: options.walBucket,
     manifestBucket: replayManifestBucket,
   });
+  for (const ts of options.deletionTombstones ?? []) {
+    loader.registerDeletionTombstones(ts);
+  }
 
   const chunkSize = Math.max(1, options.chunkSize ?? 250);
   const nowMs = options.nowMs ?? Date.now();

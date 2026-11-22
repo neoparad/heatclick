@@ -6,9 +6,13 @@
  */
 
 import type {
+  CanonicalWalQueueEnvelope,
+  CollectionLane,
   ConsentMode,
   ConsentPurpose,
+  DataRegion,
   SanitizedQuarantineRecord,
+  StorageTier,
   TelemetryFrame,
   TrustLevel,
 } from '../../packages/contract/schema';
@@ -17,10 +21,19 @@ import type {
   LabMarkerPurpose,
   LabMarkerToken,
   MeasurementLane,
+  MeasurementLaneInput,
   SiteCustomEventRegistry,
 } from '../../packages/sdk-browser';
 
-export type { LabMarkerPurpose, LabMarkerToken, MeasurementLane };
+export type {
+  CollectionLane,
+  DataRegion,
+  LabMarkerPurpose,
+  LabMarkerToken,
+  MeasurementLane,
+  MeasurementLaneInput,
+  StorageTier,
+};
 
 export interface QueueLike<T = unknown> {
   send(message: T): Promise<void>;
@@ -41,6 +54,9 @@ export interface SiteKeyRegistration {
   readonly publishableKey: string; // ugk_pub_*
   readonly tenantId: string;
   readonly siteId: string;
+  readonly storageRegion?: DataRegion;
+  readonly storageTier?: StorageTier;
+  readonly retentionDays?: number;
   readonly edgeHandoffMacKey?: string;
   readonly originAttestKey?: string;
   readonly tenantMemberHashKey: string;
@@ -51,6 +67,8 @@ export interface SiteKeyRegistration {
   readonly surgeMultiplier?: number;
   /** Daily unverified network-prefix billable PV cap (§4.4 / §11.8). */
   readonly prefixDailyCap?: number;
+  /** Conservative daily cap when CF-Connecting-IP is absent (`unknown_ip`). */
+  readonly unknownIpDailyCap?: number;
   /** Higher daily prefix cap for origin_attested PVs (§11.8). */
   readonly originAttestedPrefixDailyCap?: number;
   /** Whether tenant has exceeded its plan billing quota (degrades to count-only, never 402!). */
@@ -74,11 +92,13 @@ export interface LabPipelineExclusionFlags {
   readonly exclude_billing: boolean;
 }
 
-export interface PersistedCollectorRecord {
+export interface PersistedCollectorRecord extends CanonicalWalQueueEnvelope {
   readonly record_id: string;
-  readonly lane: MeasurementLane;
+  readonly lane: CollectionLane;
   readonly tenant_id: string;
   readonly site_id: string;
+  readonly storage_region: DataRegion;
+  readonly shard_id: number;
   readonly received_at_ms: number;
   readonly pv_id: string;
   readonly seq: number;
@@ -88,14 +108,18 @@ export interface PersistedCollectorRecord {
   readonly billing_mode: BillingMode;
   readonly billable: boolean;
   readonly held: boolean;
+  readonly edge_acked: boolean;
   readonly spilled_to_r2: boolean;
   readonly state_incomplete: boolean;
   readonly partial_accepted: boolean;
   readonly rej: readonly string[];
   readonly network_prefix_hash: string;
+  readonly retention_days: number;
+  readonly storage_tier: StorageTier;
   readonly lab_exclusion: LabPipelineExclusionFlags;
   readonly eligible_for_cross_tenant_pool: boolean;
   readonly eligible_for_standard_pv_billing: boolean;
+  readonly raw_frame: TelemetryFrame;
   readonly frame: TelemetryFrame;
 }
 
@@ -127,6 +151,46 @@ export interface PostAckLossEntry {
   readonly elapsed_since_ack_ms: number;
 }
 
+export interface AckLedgerStoreLike {
+  recordAck(pvId: string, seq: number, ackedAtMs: number): void | Promise<void>;
+  getAckedAt(pvId: string, seq: number, nowMs: number): number | undefined | Promise<number | undefined>;
+  incrementSiteHour(hourKey: string, nowMs: number): number | Promise<number>;
+  getPrefixDayCount(prefixDayKey: string, nowMs: number): number | Promise<number>;
+  incrementPrefixDayCount(prefixDayKey: string, nowMs: number): number | Promise<number>;
+  recordPostAckLoss?(entry: PostAckLossEntry, nowMs: number): void | Promise<void>;
+  getPostAckLosses?(): readonly PostAckLossEntry[];
+}
+
+export interface LiveTailFrameEvent {
+  readonly tenantId: string;
+  readonly siteId: string;
+  readonly pvId: string;
+  readonly receivedAtMs: number;
+  readonly lane: CollectionLane;
+  readonly labExcluded: boolean;
+  readonly frame: TelemetryFrame;
+}
+
+export interface LiveTailSinkLike {
+  publishLiveFrame(event: LiveTailFrameEvent): Promise<void>;
+}
+
+export interface SubjectDeletionRequest {
+  readonly receiptId: string;
+  readonly tenantId: string;
+  readonly siteId: string;
+  readonly subjectKind: 'visitor_id' | 'member_hash' | 'external_id' | 'ga_client_id' | 'optout_cookie';
+  readonly subjectHmac: string | null;
+  readonly requestedAtMs: number;
+  readonly slaDays: 14;
+}
+
+export interface SubjectDeletionSinkLike {
+  enqueueSubjectDeletion(
+    req: SubjectDeletionRequest
+  ): Promise<{ readonly receiptId?: string } | void>;
+}
+
 export interface CollectorDeps {
   readonly sitesByPublishableKey: ReadonlyMap<string, SiteKeyRegistration>;
   readonly continuityTokenSecret: string;
@@ -135,6 +199,12 @@ export interface CollectorDeps {
   readonly r2SpillBucket: R2BucketLike;
   readonly r2HoldBucket: R2BucketLike;
   readonly r2QuarantineBucket: R2BucketLike;
+  /** Optional shared bounded ACK/rate ledger across multi-instance Workers ([M-02]). */
+  readonly ackLedgerStore?: AckLedgerStoreLike;
+  /** Optional non-blocking `link-live` Durable Object fanout sink ([C-05]). */
+  readonly liveTailSink?: LiveTailSinkLike;
+  /** Optional downstream 14-day subject erasure queue sink for `/v1/optout` ([H-11]). */
+  readonly deletionSink?: SubjectDeletionSinkLike;
   /** Optional committed-store lookup for 10-minute post-ack loss verification (§4.1 / TEL M1). */
   readonly isFrameCommittedInStore?: (pvId: string, seq: number) => boolean;
   /** Optional external callback for sanitized quarantine records. */
@@ -142,9 +212,11 @@ export interface CollectorDeps {
   readonly nowMs?: () => number;
 }
 
+export type CollectorDependencies = CollectorDeps;
+
 export interface CustomEventPersistedRecord {
   readonly record_id: string;
-  readonly lane: 'custom_event';
+  readonly lane: Extract<CollectionLane, 'customer_defined'>;
   readonly tenant_id: string;
   readonly site_id: string;
   readonly source_trust: 'customer_declared';

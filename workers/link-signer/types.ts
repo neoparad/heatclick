@@ -182,6 +182,7 @@ export interface ConversionRuleSpec {
 export interface RelaxationPasskeyApproval {
   readonly approver_kid: string;
   readonly prev_seq: number;
+  readonly next_seq?: number;
   readonly diff_sha256: string;
   readonly sig_b64: string;
 }
@@ -197,6 +198,7 @@ export interface ConfigBundlePayload {
   readonly not_after: string; // MUST be <= issued_at + 24h (§10.1 / DEL M1)
   readonly measure: {
     readonly site_default_consent: ConsentMode;
+    readonly allow_cmp_opt_in_from_default_off?: boolean;
     readonly allowed_purposes: readonly ConsentPurpose[];
     readonly param_classes: Readonly<Record<string, UrlParamClass>>;
     readonly protected_regions: readonly string[];
@@ -282,4 +284,23 @@ export interface BundleVerificationResult {
   readonly expired: boolean;
   readonly sectionState: BundleSectionRuntimeState;
   readonly errors: readonly string[];
+}
+
+export interface BundleStateRecord {
+  readonly bundle: SignedConfigBundle;
+  readonly versionToken: string;
+}
+
+/**
+ * Authoritative compare-and-swap (CAS) store for `(tenant_id, site_id)` current ConfigBundle.
+ * Prevents caller-supplied `previousBundle` spoofing or omission on the Signer Service (§10.1 / C-18).
+ */
+export interface BundleStateStore {
+  getCurrent(tenantId: string, siteId: string): Promise<BundleStateRecord | null>;
+  compareAndSwap(params: {
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly expectedVersionToken: string | null;
+    readonly nextBundle: SignedConfigBundle;
+  }): Promise<{ readonly committed: boolean; readonly current: BundleStateRecord | null }>;
 }

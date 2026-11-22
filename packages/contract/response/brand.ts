@@ -4,12 +4,12 @@
  * data layer or model registry via the unforgeable `VerifiedMetricValue<T>` brand
  * (also aliased as `Measured<T>`).
  *
- * Uses a private module-scoped Symbol that is NEVER exported, preventing plain
- * numeric literals or forged plain objects from bypassing the single serializer
- * at both compile time and runtime.
+ * Uses a module-private `WeakSet<object>` closure with zero runtime Symbol properties,
+ * ensuring `Reflect.ownKeys`, `Object.getOwnPropertySymbols`, object spread, and
+ * `Object.create(...)` can NEVER extract or forge a `VerifiedMetricValue`.
  */
 
-const VERIFIED_METRIC_BRAND: unique symbol = Symbol('ugokilink.VerifiedMetricValue');
+declare const VERIFIED_METRIC_BRAND: unique symbol;
 
 export type DataLayerAuthority =
   | 'data_layer'
@@ -18,6 +18,14 @@ export type DataLayerAuthority =
   | 'allocator_experiment';
 
 export type MetricAuthority = DataLayerAuthority | 'model_registry';
+
+const VALID_AUTHORITIES: ReadonlySet<string> = new Set<MetricAuthority>([
+  'data_layer',
+  'sealed_rollup',
+  'edge_live',
+  'allocator_experiment',
+  'model_registry',
+]);
 
 export type VerifiedNumericLeaf = number | Readonly<Record<string, number>>;
 
@@ -32,21 +40,36 @@ export interface VerifiedMetricValue<T extends VerifiedNumericLeaf = number> {
 /** Alias matching SUR M5 I5 (`Measured<T>`). */
 export type Measured<T extends VerifiedNumericLeaf = number> = VerifiedMetricValue<T>;
 
-function assertValidNumericLeaf(value: unknown, path = 'value'): void {
+const MINTED_VERIFIED_METRICS = new WeakSet<object>();
+
+export function assertValidNumericLeaf(value: unknown, path = 'value'): void {
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) {
       throw new TypeError(`${path} must be a finite number (got ${String(value)})`);
     }
     return;
   }
-  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-    const entries = Object.entries(value as Record<string, unknown>);
-    if (entries.length === 0) {
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype
+  ) {
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length === 0) {
       throw new TypeError(`${path} numeric map must not be empty`);
     }
-    for (const [k, v] of entries) {
+    for (const key of ownKeys) {
+      if (typeof key !== 'string') {
+        throw new TypeError(`${path} numeric map must not contain symbol keys`);
+      }
+      const desc = Object.getOwnPropertyDescriptor(value, key);
+      if (!desc || !('value' in desc) || desc.get !== undefined || desc.set !== undefined || !desc.enumerable) {
+        throw new TypeError(`${path}.${key} must be an enumerable data property`);
+      }
+      const v = desc.value;
       if (typeof v !== 'number' || !Number.isFinite(v)) {
-        throw new TypeError(`${path}.${k} must be a finite number (got ${String(v)})`);
+        throw new TypeError(`${path}.${key} must be a finite number (got ${String(v)})`);
       }
     }
     return;
@@ -61,19 +84,29 @@ function mintVerifiedMetric<T extends VerifiedNumericLeaf>(
   createdAt?: string
 ): VerifiedMetricValue<T> {
   assertValidNumericLeaf(value);
+  if (!VALID_AUTHORITIES.has(authority)) {
+    throw new TypeError(`Invalid MetricAuthority: "${String(authority)}"`);
+  }
   if (typeof provenanceRef !== 'string' || provenanceRef.trim().length === 0) {
     throw new TypeError('provenanceRef must be a non-empty evidence/query/model reference');
   }
+  const effectiveCreatedAt = createdAt ?? new Date(0).toISOString();
+  if (typeof effectiveCreatedAt !== 'string' || effectiveCreatedAt.trim().length === 0) {
+    throw new TypeError('createdAt must be a non-empty ISO timestamp string');
+  }
+
   const clonedValue =
     typeof value === 'object' && value !== null ? Object.freeze({ ...value }) : value;
 
-  return Object.freeze({
-    [VERIFIED_METRIC_BRAND]: true as const,
+  const minted = Object.freeze({
     value: clonedValue as T,
     authority,
     provenanceRef: provenanceRef.trim(),
-    createdAt: createdAt ?? new Date(0).toISOString(),
+    createdAt: effectiveCreatedAt,
   });
+
+  MINTED_VERIFIED_METRICS.add(minted);
+  return minted as unknown as VerifiedMetricValue<T>;
 }
 
 /**
@@ -115,16 +148,23 @@ export function createModelRegistryMetric<T extends VerifiedNumericLeaf>(
 export function isVerifiedMetricValue(
   candidate: unknown
 ): candidate is VerifiedMetricValue<VerifiedNumericLeaf> {
-  if (candidate === null || typeof candidate !== 'object') {
+  if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
     return false;
   }
-  const rec = candidate as Record<PropertyKey, unknown>;
-  if (rec[VERIFIED_METRIC_BRAND] !== true) {
+  if (Object.getPrototypeOf(candidate) !== Object.prototype) {
     return false;
   }
+  if (!MINTED_VERIFIED_METRICS.has(candidate)) {
+    return false;
+  }
+  const rec = candidate as Record<string, unknown>;
   if (
+    typeof rec.authority !== 'string' ||
+    !VALID_AUTHORITIES.has(rec.authority) ||
     typeof rec.provenanceRef !== 'string' ||
-    rec.provenanceRef.trim().length === 0
+    rec.provenanceRef.trim().length === 0 ||
+    typeof rec.createdAt !== 'string' ||
+    rec.createdAt.trim().length === 0
   ) {
     return false;
   }

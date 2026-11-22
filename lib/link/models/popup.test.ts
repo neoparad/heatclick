@@ -338,7 +338,7 @@ describe('Wave 6 Bundle 6-F: Pop-up "Whether / Which" 5-Tier Ladder & Unified Ba
     expect(p3Show.decision).toBe('show');
     expect(p3Show.arm_id).toBe('v_strong');
 
-    // Full-unit IPS replay verification
+    // Full-unit IPS replay verification ([M-12]: executes true 10,000 paired bootstrap iterations)
     const loggedUnits = Array.from({ length: 400 }, (_, i) => ({
       logged_arm_id: i % 2 === 0 ? 'v_winner' : 'no_show',
       logged_propensity: 0.5,
@@ -348,10 +348,48 @@ describe('Wave 6 Bundle 6-F: Pop-up "Whether / Which" 5-Tier Ladder & Unified Ba
       loggedUnits,
       newPolicyProbs: { v_winner: 0.8, no_show: 0.2 },
       championIpsValue: 0.08,
+      championPolicyProbs: { v_winner: 0.2, no_show: 0.8 },
+      seed: 42,
     });
     expect(replay.replay_iterations).toBe(10_000);
     expect(replay.ips_estimate).toBeGreaterThan(0.14);
+    expect(replay.paired_diff_lcb).toBeGreaterThan(0);
+    expect(replay.paired_p_value).toBeLessThan(0.01);
     expect(replay.beats_champion).toBe(true);
+
+    // Deterministic under identical seed; distinct seed on continuous-reward units exercises actual resampling draws
+    const continuousUnits = Array.from({ length: 60 }, (_, i) => ({
+      logged_arm_id: i % 2 === 0 ? 'v_winner' : 'no_show',
+      logged_propensity: 0.35 + (i % 5) * 0.07,
+      reward: (i * 0.1731) % 1.0,
+    }));
+    const contSeedA1 = verifyBanditPolicyByFullUnitReplay({
+      loggedUnits: continuousUnits,
+      newPolicyProbs: { v_winner: 0.75, no_show: 0.25 },
+      championIpsValue: 0.2,
+      championPolicyProbs: { v_winner: 0.3, no_show: 0.7 },
+      replayIterations: 1000,
+      seed: 101,
+    });
+    const contSeedA2 = verifyBanditPolicyByFullUnitReplay({
+      loggedUnits: continuousUnits,
+      newPolicyProbs: { v_winner: 0.75, no_show: 0.25 },
+      championIpsValue: 0.2,
+      championPolicyProbs: { v_winner: 0.3, no_show: 0.7 },
+      replayIterations: 1000,
+      seed: 101,
+    });
+    const contSeedB = verifyBanditPolicyByFullUnitReplay({
+      loggedUnits: continuousUnits,
+      newPolicyProbs: { v_winner: 0.75, no_show: 0.25 },
+      championIpsValue: 0.2,
+      championPolicyProbs: { v_winner: 0.3, no_show: 0.7 },
+      replayIterations: 200,
+      seed: 99999,
+    });
+    expect(contSeedA1).toEqual(contSeedA2);
+    expect(contSeedB.replay_iterations).toBe(200);
+    expect(contSeedB.paired_diff_lcb).not.toBe(contSeedA1.paired_diff_lcb);
 
     // 4-F challenger registration
     const registry = new MlModelRegistry();

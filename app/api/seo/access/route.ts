@@ -1,8 +1,10 @@
 /**
  * GET /api/seo/access — Google Search Console Search Analytics
  *
- * Wave 0 (束 0-A 止血):
+ * Wave 0 (束 0-A 止血) + Wave 8 H-23 テナント分離強化:
  *   - GSC 未設定・エラー時のモック返却 (`generateSeoAccessMock`) および `?mock=1` バイパスを完全廃止。
+ *   - `process.env.GSC_SITE_URL` および `'link-th.com'` ハードコードフォールバックを完全廃止し、
+ *     認証済みアクティブサイト自身の `gscProperty` または `canonicalHost` のみを参照する。
  *   - 未設定・取得失敗時は `status: 'not_collected'`, `source: 'not_collected'` + 空データを返す。
  */
 
@@ -75,16 +77,28 @@ export async function GET(req: NextRequest) {
 
   const sp = req.nextUrl.searchParams
   const days = Math.min(90, Math.max(7, Number(sp.get('days') || 28)))
+  const canonicalHost = (site.canonicalHost || '').trim()
   const gscSite =
-    site.gscProperty ||
-    process.env.GSC_SITE_URL ||
-    `sc-domain:${site.canonicalHost || 'link-th.com'}`
+    (site.gscProperty || '').trim() ||
+    (canonicalHost ? `sc-domain:${canonicalHost}` : '')
 
   // GSC data has ~2-3 day lag; shift window back 3 days.
   const endDate = dateStr(3)
   const startDate = dateStr(3 + days - 1)
   const prevEnd = dateStr(3 + days)
   const prevStart = dateStr(3 + days * 2 - 1)
+
+  if (!gscSite) {
+    return NextResponse.json(
+      buildNotCollectedSeoAccess(
+        '',
+        startDate,
+        endDate,
+        days,
+        '対象サイトの GSC プロパティ (gscProperty / canonicalHost) が未設定のため検索データは未収集です (not_collected)',
+      ),
+    )
+  }
 
   if (!isGscConfigured()) {
     return NextResponse.json(

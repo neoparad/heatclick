@@ -184,8 +184,14 @@ export function evaluateMobileOsReplayGate(params: {
 
   const masked = maskMobileViewHierarchy(fixture, DEFAULT_MASK_ALL_CONFIG);
   const key = crypto.randomBytes(32);
-  const enc = encryptReplayPayload(masked, key, `mob_${params.platform}_k1`);
-  const dec = decryptReplayPayload(enc, key);
+  const aad = {
+    tenantId: 'tenant_mob_gate',
+    siteId: `app_${params.platform}`,
+    pvId: `pv_${params.platform}_gate_01`,
+    chunkSeq: 0,
+  } as const;
+  const enc = encryptReplayPayload(masked, key, `mob_${params.platform}_k1`, aad);
+  const dec = decryptReplayPayload(enc, key, aad);
 
   const canaries = [cText, cInput, cPass, cCard, cCustom, cWebview];
   const leaked = canaries.filter((token) => dec.rawDecodedText.includes(token));

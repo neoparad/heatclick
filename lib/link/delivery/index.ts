@@ -6,6 +6,7 @@
 export * from './shadow-weight';
 export * from './trigger-lang';
 export * from './expressions';
+export * from './consent-gate';
 export * from './kill-switch';
 export * from './preflight';
 export * from './feature-flags';

@@ -2,9 +2,9 @@
  * /api/experiments/pool — 宝プロジェクト M5 (横断プール再計算)
  *
  * 2 つの起動経路 (残タスク④ cron 化):
- *   - GET  : **Vercel Cron** (vercel.json crons、毎日 03:00 JST)。認証は既存 cron 様式を踏襲 —
- *            `x-vercel-cron: 1` (Vercel が外部からの x-vercel-* header を strip する前提) または
- *            `x-cron-secret` === CRON_SECRET (手動 invoke 用)。どちらも無ければ 401。
+ *   - GET  : **Vercel Cron** (vercel.json crons、毎日 03:00 JST)。認証は定数時間比較 (`timingSafeEqual`) —
+ *            `x-vercel-cron: 1` (VERCEL === '1' runtime 限定) または
+ *            `Authorization: Bearer <CRON_SECRET>` / `x-cron-secret: <CRON_SECRET>`。どちらも無ければ 401。
  *   - POST : platform operator の手動実行。JWT session (route 内 getServerSession、middleware
  *            非依存) + role owner/admin + **EXPERIMENTS_POOL_OPERATORS allowlist** (fail-closed)。
  *
@@ -22,6 +22,7 @@
  *     仮に二重実行しても upsert は冪等で corpus は同値に収束する。
  */
 
+import * as crypto from 'node:crypto'
 import { NextResponse } from 'next/server'
 
 import { queryArmStats } from '@/lib/experiments/arm-stats'
@@ -48,15 +49,42 @@ function resolveOperatorEmails(): Set<string> | null {
 }
 
 /**
- * 既存 cron 様式 (app/api/cron/daily-site-summary 踏襲) + Vercel runtime guard (Codex LOW):
- * `x-vercel-cron` は Vercel が外部からの x-vercel-* header を strip する前提の信頼だが、
- * 非 Vercel 環境 (local dev / proxy 誤設定) ではその保証がないため、**VERCEL === '1' の
- * runtime でのみ** 信頼する。それ以外は CRON_SECRET 必須。
+ * M-08: Constant-time secret comparison using SHA-256 + `crypto.timingSafeEqual`
+ * so neither secret content nor secret length leaks via timing side-channels.
+ */
+function constantTimeSecretEquals(candidate: string | null, expectedSecret: string): boolean {
+  if (!candidate || !expectedSecret) return false
+  const candidateDigest = crypto.createHash('sha256').update(candidate, 'utf8').digest()
+  const expectedDigest = crypto.createHash('sha256').update(expectedSecret, 'utf8').digest()
+  return crypto.timingSafeEqual(candidateDigest, expectedDigest)
+}
+
+/**
+ * 既存 cron 様式 + Vercel runtime guard + Wave 8 M-08 定数時間比較:
+ * - `VERCEL === '1'` かつ `CRON_SECRET` 未設定の場合のみ `x-vercel-cron: 1` を許容し、
+ *   `CRON_SECRET` が設定されている場合は Bearer / `x-cron-secret` の定数時間一致を検証する。
  */
 function isCronAuthorized(request: Request): boolean {
-  if (process.env.VERCEL === '1' && request.headers.get('x-vercel-cron') === '1') return true
-  const secret = process.env.CRON_SECRET
-  if (secret && request.headers.get('x-cron-secret') === secret) return true
+  const secret = (process.env.CRON_SECRET ?? '').trim()
+  const authHeader = request.headers.get('authorization')
+  const bearerToken =
+    authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null
+  const headerSecret = request.headers.get('x-cron-secret')
+
+  if (secret.length > 0) {
+    if (constantTimeSecretEquals(bearerToken, secret)) return true
+    if (constantTimeSecretEquals(headerSecret, secret)) return true
+    if (process.env.VERCEL === '1' && request.headers.get('x-vercel-cron') === '1') {
+      // Allow legacy Vercel Cron schedules without Authorization header ONLY when VERCEL === '1'
+      // and neither bearer nor x-cron-secret was spoofed with a wrong value.
+      if (!bearerToken && !headerSecret) return true
+    }
+    return false
+  }
+
+  if (process.env.VERCEL === '1' && request.headers.get('x-vercel-cron') === '1') {
+    return true
+  }
   return false
 }
 

@@ -6,7 +6,11 @@
  * exact same implementation under strict tsc checking.
  */
 
-import type { TelemetryFrame } from '../../packages/contract/schema';
+import type {
+  CanonicalLabExclusionMeta,
+  CollectionLane,
+  TelemetryFrame,
+} from '../../packages/contract/schema';
 
 export const VALID_DATA_REGIONS = ['jp', 'eu', 'us'] as const;
 export type DataRegion = (typeof VALID_DATA_REGIONS)[number];
@@ -98,6 +102,8 @@ export interface TenantStorageProfile {
 }
 
 export interface WalQueuePayload {
+  readonly record_id?: string;
+  readonly lane?: CollectionLane | 'standard_telemetry' | 'customer_events' | 'custom_event' | 'visual_replay' | 'replay';
   readonly tenant_id: string;
   readonly site_id: string;
   readonly storage_region: DataRegion;
@@ -106,11 +112,15 @@ export interface WalQueuePayload {
   readonly age_ms?: number;
   readonly retention_days?: number;
   readonly storage_tier?: StorageTier;
-  readonly raw_frame: unknown;
+  readonly raw_frame?: unknown;
+  /** Optional alias accepted when collector sends `frame` instead of `raw_frame` (C-05). */
+  readonly frame?: unknown;
   readonly edge_acked?: boolean;
+  readonly lab_exclusion?: CanonicalLabExclusionMeta;
 }
 
 export interface WalRecord {
+  readonly lane?: CollectionLane;
   readonly tenant_id: string;
   readonly site_id: string;
   readonly storage_region: DataRegion;
@@ -123,17 +133,35 @@ export interface WalRecord {
   readonly partial: boolean;
   readonly state_incomplete: boolean;
   readonly rej: readonly string[];
+  readonly lab_exclusion?: CanonicalLabExclusionMeta;
 }
 
 export interface WalObject {
   readonly wal_version: 1;
   readonly region: DataRegion;
+  readonly tenant_id: string;
+  readonly site_id: string;
   readonly shard_id: number;
   readonly minute_utc: string;
   readonly sha256: string;
   readonly created_at_ms: number;
   readonly record_count: number;
   readonly records: readonly WalRecord[];
+}
+
+export interface EncryptedQuarantineEnvelope {
+  readonly quarantine_version: 1;
+  readonly encrypted: true;
+  readonly alg: 'AES-256-GCM';
+  readonly region: DataRegion;
+  readonly tenant_id: string;
+  readonly site_id: string;
+  readonly shard_id: number;
+  readonly received_at_ms: number;
+  readonly expires_at_ms: number;
+  readonly iv_b64: string;
+  readonly tag_b64: string;
+  readonly ciphertext_b64: string;
 }
 
 export interface QuarantineObject {

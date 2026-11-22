@@ -1,6 +1,6 @@
 -- ============================================================================
 -- UGOKI LINK v2 — Generated Postgres Control-Plane DDL (schema v2.0.0)
--- Deletion Plan Hash: 034b649a67b3d3f56f1471827699d7e69baacdb9cf6360d9caf2e5fb91591860
+-- Deletion Plan Hash: 165924f413a3272a7c66be027976bcfedb93c80dbeacd6ba6532152fecec0ce6
 -- DO NOT EDIT MANUALLY. Regenerate from packages/contract/schema/canonical.ts
 -- ============================================================================
 -- Table: audit_log (Append-only hash-chained R0-R5 audit log (R2+ retained >=1 year on every plan, SUR §5.2).)
@@ -29,8 +29,10 @@ COMMENT ON COLUMN audit_log.occurred_at IS 'Event timestamp UTC [pii=none;deleta
 CREATE INDEX IF NOT EXISTS idx_audit_log_tenant_time ON audit_log (tenant_id, occurred_at);
 ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_log FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS rls_audit_log_tenant_permissive ON audit_log;
+CREATE POLICY rls_audit_log_tenant_permissive ON audit_log AS PERMISSIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 DROP POLICY IF EXISTS rls_audit_log_tenant ON audit_log;
-CREATE POLICY rls_audit_log_tenant ON audit_log AS RESTRICTIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+CREATE POLICY rls_audit_log_tenant ON audit_log AS RESTRICTIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
 -- Table: deletion_requests (14-day subject erasure state machine (scheduled -> masked <=24h -> purged <=5d -> certified <=14d).)
 -- Retention: audit_min_1y | Deletion: by_subject_row
@@ -64,8 +66,10 @@ COMMENT ON COLUMN deletion_requests.certificate_json IS 'Matched counts and name
 CREATE INDEX IF NOT EXISTS idx_deletion_requests_tenant_state ON deletion_requests (tenant_id, site_id);
 ALTER TABLE deletion_requests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE deletion_requests FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS rls_deletion_requests_tenant_permissive ON deletion_requests;
+CREATE POLICY rls_deletion_requests_tenant_permissive ON deletion_requests AS PERMISSIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 DROP POLICY IF EXISTS rls_deletion_requests_tenant ON deletion_requests;
-CREATE POLICY rls_deletion_requests_tenant ON deletion_requests AS RESTRICTIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+CREATE POLICY rls_deletion_requests_tenant ON deletion_requests AS RESTRICTIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
 -- Table: disclosure_records (Generated privacy disclosure records and policy URL verification states (D-30 / tel.G12).)
 -- Retention: tenant_lifetime | Deletion: not_applicable_non_personal
@@ -95,8 +99,10 @@ COMMENT ON COLUMN disclosure_records.verified_at IS 'Last SSRF-guarded verificat
 CREATE INDEX IF NOT EXISTS idx_disclosure_records_site_state ON disclosure_records (tenant_id, site_id);
 ALTER TABLE disclosure_records ENABLE ROW LEVEL SECURITY;
 ALTER TABLE disclosure_records FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS rls_disclosure_records_tenant_permissive ON disclosure_records;
+CREATE POLICY rls_disclosure_records_tenant_permissive ON disclosure_records AS PERMISSIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 DROP POLICY IF EXISTS rls_disclosure_records_tenant ON disclosure_records;
-CREATE POLICY rls_disclosure_records_tenant ON disclosure_records AS RESTRICTIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+CREATE POLICY rls_disclosure_records_tenant ON disclosure_records AS RESTRICTIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
 -- Table: tenant_sites (Site configuration, retention grid selection, industry class, minors flag, and data residency.)
 -- Retention: tenant_lifetime | Deletion: not_applicable_non_personal
@@ -124,5 +130,7 @@ COMMENT ON COLUMN tenant_sites.created_at IS 'Created UTC [pii=none;deletable=fa
 CREATE INDEX IF NOT EXISTS idx_tenant_sites_tenant ON tenant_sites (tenant_id, site_id);
 ALTER TABLE tenant_sites ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_sites FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS rls_tenant_sites_tenant_permissive ON tenant_sites;
+CREATE POLICY rls_tenant_sites_tenant_permissive ON tenant_sites AS PERMISSIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 DROP POLICY IF EXISTS rls_tenant_sites_tenant ON tenant_sites;
-CREATE POLICY rls_tenant_sites_tenant ON tenant_sites AS RESTRICTIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+CREATE POLICY rls_tenant_sites_tenant ON tenant_sites AS RESTRICTIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);

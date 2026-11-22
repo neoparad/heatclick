@@ -176,6 +176,8 @@ interface GrantBudgetState extends GrantBudgetConfig {
 export interface LinkSchedulerOptions {
   readonly expectedConformance: ExecutorConformance;
   readonly starvationMaxWaitMs?: Partial<Readonly<Record<JobPriorityClass, number>>>;
+  /** Maximum bounded history entries retained in memory for completed jobs, settled receipts, and unmatched receipts (L-03). */
+  readonly maxRetainedHistoryEntries?: number;
 }
 
 export interface SubmitJobInput {
@@ -244,6 +246,7 @@ export type SettleReceiptResult =
 export class LinkScheduler {
   private readonly expectedConformance: ExecutorConformance;
   private readonly starvationMaxWaitMs: Record<JobPriorityClass, number>;
+  private readonly maxRetainedHistoryEntries: number;
 
   private readonly budgets = new Map<string, GrantBudgetState>();
   private readonly executors = new Map<string, ExecutorNode>();
@@ -259,6 +262,42 @@ export class LinkScheduler {
       ...DEFAULT_STARVATION_POLICIES,
       ...(options.starvationMaxWaitMs ?? {}),
     };
+    this.maxRetainedHistoryEntries = Math.max(16, options.maxRetainedHistoryEntries ?? 10_000);
+  }
+
+  private evictBoundedHistoryIfNeeded(): void {
+    if (this.jobsById.size >= this.maxRetainedHistoryEntries) {
+      for (const [jid, j] of this.jobsById.entries()) {
+        if (j.state === 'completed' || j.state === 'failed') {
+          this.jobsById.delete(jid);
+          this.jobIdByIdempotencyKey.delete(j.idempotencyKey);
+          this.reservations.delete(j.reservationId);
+          break;
+        }
+      }
+    }
+    if (this.jobIdByIdempotencyKey.size >= this.maxRetainedHistoryEntries) {
+      const oldestIdem = this.jobIdByIdempotencyKey.keys().next().value;
+      if (oldestIdem !== undefined) {
+        this.jobIdByIdempotencyKey.delete(oldestIdem);
+      }
+    }
+    if (this.reservations.size >= this.maxRetainedHistoryEntries) {
+      for (const [rid, r] of this.reservations.entries()) {
+        if (r.status === 'settled') {
+          this.reservations.delete(rid);
+          break;
+        }
+      }
+    }
+    while (this.settledReceipts.size > this.maxRetainedHistoryEntries) {
+      const oldestReceiptId = this.settledReceipts.keys().next().value;
+      if (oldestReceiptId === undefined) break;
+      this.settledReceipts.delete(oldestReceiptId);
+    }
+    while (this.unmatchedReceipts.length > this.maxRetainedHistoryEntries) {
+      this.unmatchedReceipts.shift();
+    }
   }
 
   // ---- Setup: Budgets & Executors ----
@@ -477,6 +516,7 @@ export class LinkScheduler {
       submittedAt: now.toISOString(),
     };
 
+    this.evictBoundedHistoryIfNeeded();
     this.reservations.set(reservationId, reservation);
     this.jobsById.set(jobId, job);
     this.jobIdByIdempotencyKey.set(idempotencyKey, jobId);
@@ -643,6 +683,7 @@ export class LinkScheduler {
     const executor = this.executors.get(receipt.executorId);
     if (!job || !executor || job.grantId !== receipt.grantId) {
       this.unmatchedReceipts.push(receipt);
+      this.evictBoundedHistoryIfNeeded();
       return {
         ok: false,
         code: 'UNMATCHED_RECEIPT',
@@ -737,6 +778,7 @@ export class LinkScheduler {
     };
 
     this.settledReceipts.set(receipt.receiptId, ledgerEntry);
+    this.evictBoundedHistoryIfNeeded();
     return { ok: true, idempotentReplay: false, ledgerEntry };
   }
 

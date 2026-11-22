@@ -99,4 +99,68 @@ describe('packages/sdk-runtime — Closed-Grammar Interpreter, Reversible Rollba
     );
     expect(report.passed).toBe(true);
   });
+
+  test('[M-17] rollbackClosedGrammarPatch blocks prototype pollution (__proto__, constructor, prototype) and forbidden attributes (onclick, srcdoc, style)', () => {
+    const el: RuntimeDomElement = {
+      matchKey: 'sec_target_1',
+      textContent: 'Hello',
+      hidden: false,
+      attributes: { 'aria-label': 'safe-old' },
+      styles: {},
+    };
+    const dom: RuntimeDomAdapter = {
+      findByMatchKey: (k) => (k === 'sec_target_1' ? [el] : []),
+      getHistoryLength: () => 1,
+    };
+
+    const poisonedPrevAttrs = JSON.parse(
+      '{"__proto__":"polluted","constructor":"bad","prototype":"bad","onclick":"alert(1)","srcdoc":"<script>x</script>","style":"background:url(evil)","aria-label":"restored-clean"}'
+    ) as Record<string, string>;
+
+    const reverted = rollbackClosedGrammarPatch(dom, [
+      {
+        opId: 'adv_1',
+        targetMatchKey: 'sec_target_1',
+        kind: 'set_attribute',
+        propOrAttrName: '__proto__',
+        previousValue: 'polluted',
+      },
+      {
+        opId: 'adv_2',
+        targetMatchKey: 'sec_target_1',
+        kind: 'set_attribute',
+        propOrAttrName: 'onclick',
+        previousValue: 'alert(1)',
+      },
+      {
+        opId: 'adv_3',
+        targetMatchKey: 'sec_target_1',
+        kind: 'set_attribute',
+        propOrAttrName: 'srcdoc',
+        previousValue: '<script>1</script>',
+      },
+      {
+        opId: 'adv_4',
+        targetMatchKey: 'sec_target_1',
+        kind: 'set_style',
+        propOrAttrName: 'constructor',
+        previousValue: 'polluted',
+      },
+      {
+        opId: 'adv_5',
+        targetMatchKey: 'sec_target_1',
+        kind: 'set_attribute',
+        previousValue: undefined,
+        prevAttributes: poisonedPrevAttrs,
+      },
+    ]);
+
+    expect(reverted).toBe(1); // Only safe `aria-label` in prevAttributes was applied
+    expect(el.attributes['aria-label']).toBe('restored-clean');
+    expect(Object.prototype.hasOwnProperty.call(el.attributes, 'onclick')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(el.attributes, 'srcdoc')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(el.attributes, 'style')).toBe(false);
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+    expect(typeof el.attributes.constructor).toBe('function');
+  });
 });

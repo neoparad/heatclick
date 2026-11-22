@@ -2,15 +2,17 @@
  * UGOKI LINK v2 — Customer-Defined Custom Events & Segment Browser Compat Client (Bundle 3-B)
  *
  * Implements §11.11 (Lane Separation Preamble, #2 Segment Compat, #3 Customer-Defined Events):
- * - Strict lane separation: EVERY envelope emitted here carries `lane: 'custom_event'` and
- *   NEVER mixes into `lane: 'standard'` frames, standard PV billing, or cross-tenant pooling!
+ * - Strict lane separation: EVERY envelope emitted here carries canonical `lane: 'customer_defined'`
+ *   (normalizing legacy `'custom_event'` aliases via `normalizeCollectionLane`) and NEVER mixes into
+ *   `lane: 'standard'` frames, standard PV billing, or cross-tenant pooling!
  * - Limits per §11.11 #3: max 500 event types per site, max 32 KiB per event, max 100 properties.
  * - Schema registry validation (strict tracking plan vs explicit loose mode excluded from
  *   sealed rollups & ML training).
- * - Automatic PII shape guard (emails, phones, credit cards, SSN/MyNumber-like patterns) blocked
- *   unless explicitly declared & consented.
+ * - Automatic PII shape guard (including safe partial-percent `%XX` decoding) blocked unless
+ *   explicitly declared & consented.
  * - Freeform string properties tagged `untrusted: true` & `ml_feature_eligible: false`; ONLY
- *   `number | boolean | enum` properties are `ml_feature_eligible: true`.
+ *   `number | boolean | enum` properties are `ml_feature_eligible: true`, and `ml_training_eligible`
+ *   defaults to `false` unless explicitly schema-verified non-PII ([H-14]).
  * - Thin Segment-compatible browser shim (`track`, `page`, `screen`, `identify`, `group`, `alias`):
  *   honors `off` (drop all), `cookieless` (never persists `anonymousId`), and `stats_exempt`
  *   (forbids cross-visit linking via `identify`/`group`/`alias`).
@@ -18,12 +20,14 @@
 
 import {
   canonicalJsonStringify,
+  normalizeCollectionLane,
   sha256Hex,
   utf8ToBytes,
+  type CollectionLane,
   type ConsentMode,
   type ConsentPurpose,
 } from '../contract/schema';
-import type { MeasurementLane } from './types';
+import type { MeasurementLaneInput } from './types';
 
 export const CUSTOM_EVENT_MAX_TYPES_PER_SITE = 500 as const;
 export const CUSTOM_EVENT_MAX_BYTES = 32 * 1024; // 32 KiB
@@ -44,6 +48,11 @@ export interface CustomEventDefinition {
   readonly event_name: string;
   readonly def_ver: number;
   readonly properties: readonly CustomPropertySchema[];
+  /**
+   * Explicit schema attestation that every property on this event is verified non-PII
+   * (`number | boolean | enum`, zero freeform strings or `allowsPii`). Defaults to `false` ([H-14]).
+   */
+  readonly mlTrainingVerifiedNonPii?: boolean;
 }
 
 export interface SiteCustomEventRegistry {
@@ -61,7 +70,7 @@ export interface ValidatedCustomProperty {
 }
 
 export interface CustomEventEnvelope {
-  readonly lane: Extract<MeasurementLane, 'custom_event'>;
+  readonly lane: Extract<CollectionLane, 'customer_defined'>;
   readonly event_id: string;
   readonly site_id: string;
   readonly event_name: string;
@@ -94,14 +103,64 @@ export interface CustomEventValidationResult {
 const PII_EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 const PII_PHONE_RE = /(?:\+?\d{1,3}[-\s]?)?(?:\(?\d{2,4}\)?[-\s]?)\d{3,4}[-\s]?\d{4}/;
 const PII_CARD_RE = /\b(?:\d[ -]*?){13,19}\b/;
+const PII_SSN_MYNUMBER_RE = /\b(?:\d{3}-\d{2}-\d{4}|\d{4}-\d{4}-\d{4})\b/;
+
+const HEX_PAIR_RE = /^[0-9a-fA-F]{2}$/;
+const UTF8_FATAL_DECODER = new TextDecoder('utf-8', { fatal: true });
+
+/**
+ * Safe per-sequence `%XX` UTF-8 decoder: decodes valid percent-encoded bytes (e.g. `%40` -> `@`)
+ * while leaving malformed `%ZZ` sequences literal so attackers cannot bypass PII detection!
+ */
+export function safeDecodePercentForPiiCheck(raw: string): string {
+  if (!raw.includes('%')) return raw;
+  let out = '';
+  let i = 0;
+  while (i < raw.length) {
+    if (raw[i] === '%' && i + 2 < raw.length && HEX_PAIR_RE.test(raw.slice(i + 1, i + 3))) {
+      const bytes: number[] = [];
+      let j = i;
+      while (j + 2 < raw.length && raw[j] === '%' && HEX_PAIR_RE.test(raw.slice(j + 1, j + 3))) {
+        bytes.push(parseInt(raw.slice(j + 1, j + 3), 16));
+        j += 3;
+      }
+      try {
+        out += UTF8_FATAL_DECODER.decode(new Uint8Array(bytes));
+        i = j;
+        continue;
+      } catch {
+        const single = bytes[0];
+        if (single < 0x80) {
+          out += String.fromCharCode(single);
+          i += 3;
+          continue;
+        }
+      }
+    }
+    out += raw[i];
+    i += 1;
+  }
+  return out;
+}
 
 export function containsPiiShape(value: string): boolean {
-  return PII_EMAIL_RE.test(value) || PII_CARD_RE.test(value) || PII_PHONE_RE.test(value);
+  const candidates = value.includes('%') ? [value, safeDecodePercentForPiiCheck(value)] : [value];
+  for (const s of candidates) {
+    if (
+      PII_EMAIL_RE.test(s) ||
+      PII_CARD_RE.test(s) ||
+      PII_PHONE_RE.test(s) ||
+      PII_SSN_MYNUMBER_RE.test(s)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
  * Validates and packages a customer-defined custom event with strict lane separation
- * (`lane: 'custom_event'`), schema checks, 32 KiB / 100-property / 500-type caps, and PII blocking.
+ * (`lane: 'customer_defined'`), schema checks, 32 KiB / 100-property / 500-type caps, and PII blocking.
  */
 export function buildValidatedCustomEvent(params: {
   readonly registry: SiteCustomEventRegistry;
@@ -110,6 +169,7 @@ export function buildValidatedCustomEvent(params: {
   readonly consentMode: ConsentMode;
   readonly purposes: readonly ConsentPurpose[];
   readonly occurredAtIso: string;
+  readonly lane?: MeasurementLaneInput;
   readonly eventId?: string;
   readonly source?: 'browser_custom_event' | 'browser_segment_compat';
   readonly segmentType?: 'track' | 'page' | 'screen' | 'identify' | 'group' | 'alias';
@@ -117,6 +177,17 @@ export function buildValidatedCustomEvent(params: {
   readonly anonymousId?: string | null;
   readonly userIdHash?: string | null;
 }): CustomEventValidationResult {
+  const normalizedLane = normalizeCollectionLane(params.lane ?? 'customer_defined');
+  if (normalizedLane !== 'customer_defined') {
+    return {
+      accepted: false,
+      quarantined: true,
+      reason: 'invalid_custom_event_lane',
+      envelope: null,
+      errors: [`Custom events must resolve to lane "customer_defined", got "${normalizedLane}"`],
+    };
+  }
+
   // 1. Consent `off` forbids all outbound events
   if (params.consentMode === 'off') {
     return {
@@ -217,17 +288,16 @@ export function buildValidatedCustomEvent(params: {
 
     const eventId =
       params.eventId ??
-      sha256Hex(`${params.registry.site_id}:${params.eventName}:${params.occurredAtIso}:${canonicalJsonStringify(validatedProps)}`).slice(
-        0,
-        32
-      );
+      sha256Hex(
+        `${params.registry.site_id}:${params.eventName}:${params.occurredAtIso}:${canonicalJsonStringify(validatedProps)}`
+      ).slice(0, 32);
 
     return {
       accepted: true,
       quarantined: false,
       reason: 'loose_unregistered_event',
       envelope: {
-        lane: 'custom_event',
+        lane: 'customer_defined',
         event_id: eventId,
         site_id: params.registry.site_id,
         event_name: params.eventName,
@@ -335,19 +405,25 @@ export function buildValidatedCustomEvent(params: {
     };
   }
 
+  // [H-14]: ml_training_eligible defaults to false unless explicitly schema-verified non-PII
+  // (zero freeform string / allowsPii properties on the definition AND mlTrainingVerifiedNonPii === true)
+  const schemaStrictlyNonPii =
+    def.mlTrainingVerifiedNonPii === true &&
+    def.properties.every((p) => p.type !== 'string' && !p.allowsPii) &&
+    validatedProps.every((p) => p.ml_feature_eligible && !p.untrusted);
+
   const eventId =
     params.eventId ??
-    sha256Hex(`${params.registry.site_id}:${def.event_name}@${def.def_ver}:${params.occurredAtIso}:${canonicalJsonStringify(validatedProps)}`).slice(
-      0,
-      32
-    );
+    sha256Hex(
+      `${params.registry.site_id}:${def.event_name}@${def.def_ver}:${params.occurredAtIso}:${canonicalJsonStringify(validatedProps)}`
+    ).slice(0, 32);
 
   return {
     accepted: true,
     quarantined: false,
     reason: null,
     envelope: {
-      lane: 'custom_event',
+      lane: 'customer_defined',
       event_id: eventId,
       site_id: params.registry.site_id,
       event_name: def.event_name,
@@ -358,7 +434,7 @@ export function buildValidatedCustomEvent(params: {
       source: params.source ?? 'browser_custom_event',
       ...(params.segmentType ? { segment_type: params.segmentType } : {}),
       sealed_rollup_eligible: true,
-      ml_training_eligible: true,
+      ml_training_eligible: schemaStrictlyNonPii,
       eligible_for_cross_tenant_pool: false,
       eligible_for_standard_pv_billing: false,
       section_join_status: 'not_applicable',
@@ -382,7 +458,7 @@ export interface BrowserSegmentCompatOptions {
 
 /**
  * Thin Segment-compatible browser shim (`analytics.track/page/screen/identify/group/alias`, §11.11 #2).
- * Enforces `lane: 'custom_event'`, never persists `anonymousId` in `cookieless`, and blocks
+ * Enforces canonical `lane: 'customer_defined'`, never persists `anonymousId` in `cookieless`, and blocks
  * `identify`/`group`/`alias` when `member_link` purpose is absent or mode is `stats_exempt`.
  */
 export function createBrowserSegmentCompatClient(options: BrowserSegmentCompatOptions) {
@@ -410,7 +486,7 @@ export function createBrowserSegmentCompatClient(options: BrowserSegmentCompatOp
     const sanitizedPayload: Record<string, unknown> = {
       ...payload,
       type,
-      lane: 'custom_event',
+      lane: 'customer_defined',
       consent_mode: mode,
       purposes,
       timestamp: nowIso(),

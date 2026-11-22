@@ -498,7 +498,7 @@ export function createIngestValidator(schema: ContractSchema): GeneratedIngestVa
     // Check original checksum before any clamping/dropping to track state_incomplete
     const checksumValid = verifyFrameChecksum(frame);
 
-    const sanitizedFrame: TelemetryFrame = {
+    const sanitizedWithoutChk: Omit<TelemetryFrame, 'chk'> = {
       ...frame,
       visitor_id: sanitizedVisitorId,
       session_id: sanitizedSessionId,
@@ -510,7 +510,11 @@ export function createIngestValidator(schema: ContractSchema): GeneratedIngestVa
       ...(sanitizedStringSlots !== undefined ? { string_slots: sanitizedStringSlots } : {}),
     };
 
-    const recomputedChk = computeFrameChecksum(sanitizedFrame);
+    const recomputedChk = computeFrameChecksum(sanitizedWithoutChk);
+    const sanitizedFrame: TelemetryFrame = {
+      ...sanitizedWithoutChk,
+      chk: recomputedChk,
+    };
     const stateIncomplete = !checksumValid;
     if (stateIncomplete) {
       rej.push('flag:state_incomplete:chk_mismatch');

@@ -3,6 +3,7 @@
  */
 
 import type { VerifiedMetricValue, VerifiedNumericLeaf } from './brand';
+import type { UntrustedValue } from './untrusted';
 
 export const MEASURE_STATUSES = [
   'ok',
@@ -62,7 +63,15 @@ export interface ProvenPredicateResult {
   readonly randomisation_audit_p: number;
   readonly alpha: number;
   readonly duration_days?: number;
+  readonly observation_days?: number;
   readonly platform_canary_passed?: boolean;
+  readonly effect_ci_excludes_zero?: boolean;
+  readonly sr_mismatch_p?: number;
+  readonly placebo_pass?: boolean;
+  readonly pre_exposure_balance_pass?: boolean;
+  readonly query_refs?: readonly string[];
+  readonly artifact_refs?: readonly string[];
+  readonly tombstoned?: boolean;
   readonly evaluated_at: string;
 }
 
@@ -301,6 +310,7 @@ export interface CaptureBlock {
 export interface PolicyBlock {
   readonly version: string;
   readonly fallback_reason?: string | null;
+  readonly policy_url?: string | UntrustedValue | null;
 }
 
 export interface PreflightBlock {

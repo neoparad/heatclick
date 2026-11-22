@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {
   DEFAULT_VISUAL_FEATURE_FAMILY,
   MlModelRegistry,
@@ -419,5 +420,58 @@ describe('Bundle 4-F: ML Foundation (Contracts, Decision Tokens, Registry, §8.8
     expect(fallbackRes.used_fallback).toBe(true);
     expect(fallbackRes.fallback_reason).toContain('SHA-256');
     expect(fallbackRes.chosen_arm_index).toBe(0);
+
+    // [M-14]: 1) Multi-arm (numArms = 4) inverse-CDF uses serverUniformU across ALL 4 arms!
+    const seenArms4 = new Set<number>();
+    for (let uStep = 0; uStep < 100; uStep += 1) {
+      const r4 = evaluateInt8ModelArtifact({
+        artifact,
+        expectedSha256: artifact.artifact_sha256,
+        integerFeatures: { scroll_depth_bin: 50, dwell_sec_bin: 20, reversals: 1 },
+        serverUniformU: uStep / 100,
+        numArms: 4,
+      });
+      expect(r4.ok).toBe(true);
+      expect(r4.chosen_arm_index).toBeGreaterThanOrEqual(0);
+      expect(r4.chosen_arm_index).toBeLessThan(4);
+      seenArms4.add(r4.chosen_arm_index);
+    }
+    expect(seenArms4.size).toBe(4); // Every arm 0..3 is reachable via serverUniformU CDF inversion!
+
+    // [M-14]: 2) Actual zlib.gzipSync byte measurement rejects >50KB gzipped payload even when caller lies with measuredGzipBytes=100!
+    const uncompressibleNotice = crypto.randomBytes(56_000).toString('base64'); // >56 KB true entropy (> 50 KB even after gzip!)
+    const hugePayload: Int8ModelArtifactPayload = {
+      ...payload,
+      license_notice: uncompressibleNotice,
+    };
+    expect(() => packageInt8ModelArtifact(hugePayload, 100)).toThrow(/50 KB/);
+    expect(
+      validateInt8ModelArtifact({
+        payload: hugePayload,
+        artifact_sha256: artifact.artifact_sha256,
+        uncompressed_bytes: 60_000,
+        compressed_bytes: 100,
+      }).valid
+    ).toBe(false);
+
+    // [M-14]: 3) verifyDecisionToken uses constant-time comparison and rejects length-mismatched tokens cleanly
+    const dtk = issueDecisionToken(
+      {
+        tenant_id: 'ten_1',
+        site_id: 'site_1',
+        pv_id: 'pv_m14',
+        unit_id: 'u_m14',
+        decision_no: 1,
+        issued_at_ms: 1_750_000_000_000,
+        arm_id: 'arm_a',
+        propensity: 0.25,
+        bundle_hash: 'bh_m14',
+        is_counterfactual_no_show: false,
+      },
+      'secret_m14'
+    );
+    expect(verifyDecisionToken(dtk, 'secret_m14')).toBe(true);
+    expect(verifyDecisionToken({ ...dtk, token: 'dtk1.short' }, 'secret_m14')).toBe(false);
+    expect(verifyDecisionToken({ ...dtk, token: `${dtk.token}extra` }, 'secret_m14')).toBe(false);
   });
 });

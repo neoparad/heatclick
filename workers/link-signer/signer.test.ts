@@ -1,6 +1,9 @@
 import {
+  InMemoryBundleStateStore,
+  SignerCasConflictError,
   SignerPolicyError,
   canonicalJson,
+  createSignedRelaxationApproval,
   createSignerWorkerHandler,
   generateEd25519KeyPair,
   resolveEffectiveConsentMode,
@@ -9,6 +12,7 @@ import {
   signCanonicalObject,
   signConfigBundle,
   signReleaseManifest,
+  validateClosedGrammarAction,
   verifyConfigBundle,
   verifyReleaseManifest,
   type ConfigBundlePayload,
@@ -457,24 +461,21 @@ describe('Bundle 2-D.1: Signer Service, Unified Config Bundle & §10.1 Red-Team 
       );
       expect(verifyForged.valid).toBe(false);
 
-      // Now attach legitimate offline-pinned approver passkey signature -> SUCCEEDS!
-      const diffSha = await sha256Hex(
-        canonicalJson({ prev_seq: bundlePayload.seq, next_measure: relaxedPayload.measure })
-      );
-      const passkeySig = await signCanonicalObject(approverKp.privateKey, {
-        prev_seq: bundlePayload.seq,
-        diff_sha256: diffSha,
+      // Now attach legitimate offline-pinned approver passkey signature bound to (tenant_id, site_id, prev_seq, next_seq) -> SUCCEEDS!
+      const relaxationApproval = await createSignedRelaxationApproval({
+        approverKid: 'passkey-owner-1',
+        approverPrivateKey: approverKp.privateKey,
+        tenantId: relaxedPayload.aud.tenant_id,
+        siteId: relaxedPayload.aud.site_id,
+        prevSeq: bundlePayload.seq,
+        nextSeq: relaxedPayload.seq,
+        nextMeasure: relaxedPayload.measure,
       });
       const approvedPayload: ConfigBundlePayload = {
         ...relaxedPayload,
         measure: {
           ...relaxedPayload.measure,
-          relaxation_approval: {
-            approver_kid: 'passkey-owner-1',
-            prev_seq: bundlePayload.seq,
-            diff_sha256: diffSha,
-            sig_b64: passkeySig.sigB64,
-          },
+          relaxation_approval: relaxationApproval,
         },
       };
       const signedApproved = await signConfigBundle(
@@ -496,6 +497,26 @@ describe('Bundle 2-D.1: Signer Service, Unified Config Bundle & §10.1 Red-Team 
         }
       );
       expect(verifyApproved.valid).toBe(true);
+
+      // Cross-site replay of that exact relaxationApproval onto site_other MUST FAIL (C-18)
+      const crossSiteReplay: ConfigBundlePayload = {
+        ...approvedPayload,
+        aud: { tenant_id: 'tenant_1', site_id: 'site_other' },
+      };
+      await expect(
+        signConfigBundle(
+          crossSiteReplay,
+          onlineKp.privateKey,
+          'online-k1',
+          signedManifest.payload,
+          {
+            previousBundle: {
+              ...bundlePayload,
+              aud: { tenant_id: 'tenant_1', site_id: 'site_other' },
+            },
+          }
+        )
+      ).rejects.toThrow(SignerPolicyError);
     });
 
     it('blocks Hide/SetStyle targeting protected regions and blocks replay below min_config_seq', async () => {
@@ -567,13 +588,42 @@ describe('Bundle 2-D.1: Signer Service, Unified Config Bundle & §10.1 Red-Team 
     });
   });
 
-  it('serves standard Fetch API endpoints on the Signer Worker', async () => {
-    const { offlineKp, onlineKp, signedManifest, bundlePayload } = await buildTestFixtures();
+  it('[C-18] Signer Worker requires constant-time control-plane Bearer auth, ignores caller previousBundle via CAS BundleStateStore, and enforces baseline cookieless relaxation on seq=1', async () => {
+    const { offlineKp, onlineKp, approverKp, signedManifest, bundlePayload } = await buildTestFixtures();
+    const manifestSeq1Floor = await signReleaseManifest(
+      { ...signedManifest.payload, min_config_seq: 1 },
+      offlineKp.privateKey,
+      'offline-root-1'
+    );
+    const stateStore = new InMemoryBundleStateStore();
+
+    // Unconfigured controlPlaneSignerToken -> fails closed 503
+    const unconfiguredWorker = createSignerWorkerHandler({
+      offlinePublicKey: offlineKp.publicKey,
+      onlinePrivateKey: onlineKp.privateKey,
+      onlineKid: 'online-k1',
+      bundleStateStore: stateStore,
+      getReleaseManifest: async () => manifestSeq1Floor,
+      getLoaderData: async () => null,
+      nowMs: () => BASE_NOW_MS + 1000,
+    });
+    const unconfRes = await unconfiguredWorker.fetch(
+      new Request('https://signer.example/v1/signer/bundle/sign', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer any' },
+        body: JSON.stringify({ payload: { ...bundlePayload, seq: 1 } }),
+      })
+    );
+    expect(unconfRes.status).toBe(503);
+
+    const cpToken = 'cp_signer_internal_token_9876543210';
     const worker = createSignerWorkerHandler({
       offlinePublicKey: offlineKp.publicKey,
       onlinePrivateKey: onlineKp.privateKey,
       onlineKid: 'online-k1',
-      getReleaseManifest: async () => signedManifest,
+      controlPlaneSignerToken: cpToken,
+      bundleStateStore: stateStore,
+      getReleaseManifest: async () => manifestSeq1Floor,
       getLoaderData: async (siteRef) => ({
         site_ref: siteRef,
         region_class: 'JP',
@@ -581,7 +631,7 @@ describe('Bundle 2-D.1: Signer Service, Unified Config Bundle & §10.1 Red-Team 
         kill_bits: 0,
         stop_deliver: false,
         coarsen_factor: 1,
-        active_config_seq: 10,
+        active_config_seq: 1,
         ctl_digest: 'ctl_abc',
         server_time_ms: BASE_NOW_MS,
       }),
@@ -590,16 +640,239 @@ describe('Bundle 2-D.1: Signer Service, Unified Config Bundle & §10.1 Red-Team 
 
     const loaderRes = await worker.fetch(new Request('https://signer.example/l/wakegai.json?p=abc'));
     expect(loaderRes.status).toBe(200);
-    const loaderJson = (await loaderRes.json()) as { region_class: string };
-    expect(loaderJson.region_class).toBe('JP');
 
-    const signRes = await worker.fetch(
+    // 1. Unauthenticated or wrong Bearer token -> 401
+    const unauthSign = await worker.fetch(
       new Request('https://signer.example/v1/signer/bundle/sign', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ payload: bundlePayload }),
+        body: JSON.stringify({ payload: { ...bundlePayload, seq: 1 } }),
       })
     );
-    expect(signRes.status).toBe(200);
+    expect(unauthSign.status).toBe(401);
+
+    const badTokenSign = await worker.fetch(
+      new Request('https://signer.example/v1/signer/bundle/sign', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer wrong_token' },
+        body: JSON.stringify({ payload: { ...bundlePayload, seq: 1 } }),
+      })
+    );
+    expect(badTokenSign.status).toBe(401);
+
+    // 2. Initial bundle (!prev) trying to jump to seq=2 or relax consent to 'full' without passkey -> 422
+    const seqJump = await worker.fetch(
+      new Request('https://signer.example/v1/signer/bundle/sign', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${cpToken}` },
+        body: JSON.stringify({ payload: { ...bundlePayload, seq: 2 } }),
+      })
+    );
+    expect(seqJump.status).toBe(422);
+
+    const unapprovedInitialFull = await worker.fetch(
+      new Request('https://signer.example/v1/signer/bundle/sign', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${cpToken}` },
+        body: JSON.stringify({
+          payload: {
+            ...bundlePayload,
+            seq: 1,
+            measure: { ...bundlePayload.measure, site_default_consent: 'full' },
+          },
+          // Attacker tries to smuggle fake previousBundle claiming site was already 'full'
+          previousBundle: {
+            ...bundlePayload,
+            seq: 0,
+            measure: { ...bundlePayload.measure, site_default_consent: 'full' },
+          },
+        }),
+      })
+    );
+    expect(unapprovedInitialFull.status).toBe(422);
+
+    // 3. Valid initial seq=1 with baseline 'cookieless' commits to BundleStateStore
+    const signSeq1 = await worker.fetch(
+      new Request('https://signer.example/v1/signer/bundle/sign', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${cpToken}` },
+        body: JSON.stringify({ payload: { ...bundlePayload, seq: 1 } }),
+      })
+    );
+    expect(signSeq1.status).toBe(200);
+
+    // 4. Omitting previousBundle on seq=2 while relaxing consent to 'full' STILL caught via authoritative store!
+    const omitPrevAttack = await worker.fetch(
+      new Request('https://signer.example/v1/signer/bundle/sign', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${cpToken}` },
+        body: JSON.stringify({
+          payload: {
+            ...bundlePayload,
+            seq: 2,
+            measure: { ...bundlePayload.measure, site_default_consent: 'full' },
+          },
+        }),
+      })
+    );
+    expect(omitPrevAttack.status).toBe(422);
+
+    // 5. With valid Passkey approval bound to (tenant_1, site_wakegai, prev_seq=1, next_seq=2), seq=2 succeeds
+    const seq2FullMeasure = { ...bundlePayload.measure, site_default_consent: 'full' as const };
+    const seq2Approval = await createSignedRelaxationApproval({
+      approverKid: 'passkey-owner-1',
+      approverPrivateKey: approverKp.privateKey,
+      tenantId: 'tenant_1',
+      siteId: 'site_wakegai',
+      prevSeq: 1,
+      nextSeq: 2,
+      nextMeasure: seq2FullMeasure,
+    });
+    const signSeq2 = await worker.fetch(
+      new Request('https://signer.example/v1/signer/bundle/sign', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${cpToken}` },
+        body: JSON.stringify({
+          payload: {
+            ...bundlePayload,
+            seq: 2,
+            measure: { ...seq2FullMeasure, relaxation_approval: seq2Approval },
+          },
+        }),
+      })
+    );
+    expect(signSeq2.status).toBe(200);
+
+    // 6. Simulate CAS race conflict -> throws SignerCasConflictError / returns 409
+    const racingStore: typeof stateStore = {
+      getCurrent: (t, s) => stateStore.getCurrent(t, s),
+      seedBundle: (b) => stateStore.seedBundle(b),
+      compareAndSwap: async () => ({ committed: false, current: null }),
+    } as unknown as InMemoryBundleStateStore;
+    const racingWorker = createSignerWorkerHandler({
+      offlinePublicKey: offlineKp.publicKey,
+      onlinePrivateKey: onlineKp.privateKey,
+      onlineKid: 'online-k1',
+      controlPlaneSignerToken: cpToken,
+      bundleStateStore: racingStore,
+      getReleaseManifest: async () => manifestSeq1Floor,
+      getLoaderData: async () => null,
+      nowMs: () => BASE_NOW_MS + 1000,
+    });
+    await expect(
+      racingWorker.signerService.signAndCommitBundle({
+        ...bundlePayload,
+        seq: 3,
+        measure: { ...seq2FullMeasure },
+      })
+    ).rejects.toThrow(SignerCasConflictError);
+    const casConflictHttp = await racingWorker.fetch(
+      new Request('https://signer.example/v1/signer/bundle/sign', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${cpToken}` },
+        body: JSON.stringify({
+          payload: { ...bundlePayload, seq: 3, measure: { ...seq2FullMeasure } },
+        }),
+      })
+    );
+    expect(casConflictHttp.status).toBe(409);
+  });
+
+  it('[H-09] InsertNode blocks affiliate hosts/params & external outbound hosts, and siteDefault=off blocks CMP escalation unless explicitly permitted', () => {
+    const baseAction = {
+      action_id: 'act_ins_1',
+      rung: 'A2' as const,
+      content_hash: 'h1',
+      seo_class: 'non_indexable' as const,
+      k_class: 'K2' as const,
+    };
+
+    // 1. InsertNode <a href="https://px.a8.net/..."> or amzn.to or external host -> REJECTED
+    expect(
+      validateClosedGrammarAction(
+        {
+          ...baseAction,
+          ops: [
+            {
+              op: 'InsertNode',
+              anchor_id: 'hero',
+              insert_tag: 'a',
+              insert_attrs: { href: 'https://px.a8.net/svt/ejp?a8mat=STEAL' },
+            },
+          ],
+        },
+        []
+      ).valid
+    ).toBe(false);
+
+    expect(
+      validateClosedGrammarAction(
+        {
+          ...baseAction,
+          ops: [
+            {
+              op: 'InsertNode',
+              anchor_id: 'hero',
+              insert_tag: 'a',
+              insert_attrs: { href: 'https://amzn.to/3xyz' },
+            },
+          ],
+        },
+        []
+      ).valid
+    ).toBe(false);
+
+    expect(
+      validateClosedGrammarAction(
+        {
+          ...baseAction,
+          ops: [
+            {
+              op: 'InsertNode',
+              anchor_id: 'hero',
+              insert_tag: 'img',
+              insert_attrs: { src: 'https://evil-tracker.example/pixel.gif' },
+            },
+          ],
+        },
+        []
+      ).valid
+    ).toBe(false);
+
+    // Safe relative internal InsertNode passes
+    expect(
+      validateClosedGrammarAction(
+        {
+          ...baseAction,
+          ops: [
+            {
+              op: 'InsertNode',
+              anchor_id: 'hero',
+              insert_tag: 'a',
+              insert_attrs: { href: '/pricing', class: 'ugk-cta-btn' },
+            },
+          ],
+        },
+        []
+      ).valid
+    ).toBe(true);
+
+    // 2. siteDefault === 'off': CMP 'full' NEVER escalates above 'off' unless allowCmpOptInFromDefaultOff === true
+    expect(
+      resolveEffectiveConsentMode({
+        siteDefault: 'off',
+        cmpResolved: 'full',
+        disclosureVerified: true,
+      })
+    ).toBe('off');
+
+    expect(
+      resolveEffectiveConsentMode({
+        siteDefault: 'off',
+        cmpResolved: 'full',
+        allowCmpOptInFromDefaultOff: true,
+        disclosureVerified: true,
+      })
+    ).toBe('full');
   });
 });

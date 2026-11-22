@@ -9,22 +9,28 @@ import {
 } from '../../packages/contract/schema';
 import { computeUrlKeyV2 } from '../../packages/contract/urlkey';
 import {
+  BoundedTtlLruMap,
   CrossLaneAggregationError,
   LinkCollectorEngine,
   PROTECTED_HUMAN_PIPELINES,
   SegmentCompatIngestEngine,
+  SharedInMemoryAckLedgerStore,
   assertSingleMeasurementLane,
   auditZeroLabLeakage,
   createCollectorWorker,
+  deriveServerNetworkPrefix,
   filterForHumanPipeline,
+  issueEdgeHandoffHeader,
   serializeCustomEventForResponse,
   signLabMarker,
   type CustomEventPersistedRecord,
   type LabMarkerPurpose,
+  type LiveTailFrameEvent,
   type PersistedCollectorRecord,
   type QueueLike,
   type R2BucketLike,
   type SiteKeyRegistration,
+  type SubjectDeletionRequest,
 } from './index';
 
 function makeValidFrame(overrides?: Partial<TelemetryFrame>): TelemetryFrame {
@@ -206,7 +212,7 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
     expect(okRes.status).toBe(200);
     expect(okRes.ack?.accepted_saved).toBe(true);
     expect(okRes.ack?.spilled_to_r2).toBe(false);
-    expect(okRes.ack?.pv_token).toMatch(/^pvt1\./);
+    expect(okRes.ack?.pv_token).toMatch(/^[0-9a-f]{32}\.\d+\.[0-9a-f]{32}$/);
     expect(okRes.ack?.url_key_idempotent).toBe(true);
     expect(q.messages).toHaveLength(1);
 
@@ -361,12 +367,12 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
 
     // 4th request WITH valid edge handoff (`edge_attested`) during the SAME surge -> NEVER HELD!
     const reqUid = '00000000000000000000000000000099';
-    const handoffMac = hmacSha256Hex(site.edgeHandoffMacKey!, reqUid).slice(0, 24);
+    const validHandoff = issueEdgeHandoffHeader(reqUid, site.edgeHandoffMacKey!, 1795000000000);
     const r4Edge = await collector.handleTelemetryFrame({
       publishableKey: site.publishableKey,
       body: makeValidFrame({ seq: 4 }),
       networkPrefix: '203.0.113.0/24',
-      handoffHeader: `${reqUid}.${handoffMac}`,
+      handoffHeader: validHandoff,
     });
     expect(r4Edge.status).toBe(200);
     expect(r4Edge.ack?.held).toBe(false);
@@ -451,9 +457,10 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
     expect(allQueuedJson).not.toContain('usr_9001'); // userId MUST be tenant-hashed!
 
     const identifyRec = customQ.messages[0];
-    expect(identifyRec.lane).toBe('custom_event');
+    expect(identifyRec.lane).toBe('customer_defined');
     expect(identifyRec.allowed_traits).toEqual({ plan: 'pro' });
     expect(identifyRec.dropped_traits_count).toBe(2);
+    expect(identifyRec.ml_training_eligible).toBe(false);
     expect(identifyRec.eligible_for_cross_tenant_pool).toBe(false);
     expect(identifyRec.eligible_for_standard_pv_billing).toBe(false);
 
@@ -504,7 +511,7 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
     // 3. Lane separation penetrates API responses + UntrustedValue wraps freeform strings + cross-lane sum throws!
     const trackRec = customQ.messages[3];
     const serialized = serializeCustomEventForResponse(trackRec);
-    expect(serialized.lane).toBe('custom_event');
+    expect(serialized.lane).toBe('customer_defined');
     expect(serialized.provenance.eligible_for_cross_tenant_pool).toBe(false);
     expect(serialized.properties.total_jpy).toBe(12000);
     expect(isUntrustedValue(serialized.properties.memo)).toBe(true);
@@ -512,9 +519,9 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
     expect(() =>
       assertSingleMeasurementLane([{ lane: 'standard' }, { lane: 'custom_event' }])
     ).toThrow(CrossLaneAggregationError);
-    expect(assertSingleMeasurementLane([{ lane: 'custom_event' }, { lane: 'custom_event' }])).toBe(
-      'custom_event'
-    );
+    expect(
+      assertSingleMeasurementLane([{ lane: 'customer_defined' }, { lane: 'custom_event' }])
+    ).toBe('customer_defined');
   });
 
   test('Bundle 3-C Zero-Leakage Gate: ALL 6 Lab Marker purposes have 0 leakage into human rollups, quorums, experiments, ML training, loss ledger & billing', async () => {
@@ -544,7 +551,7 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
     // 1. Send 3 genuine human PVs (edge_attested so billable=true)
     for (let i = 1; i <= 3; i++) {
       const reqUid = `0000000000000000000000000000000${i}`;
-      const mac = hmacSha256Hex(site.edgeHandoffMacKey!, reqUid).slice(0, 24);
+      const handoff = issueEdgeHandoffHeader(reqUid, site.edgeHandoffMacKey!, now);
       const pvId = i.toString(16).padStart(32, '0');
       const bin = codec.encodeFrame(makeValidFrame({ pv_id: pvId, seq: 1 }));
       const resp = await worker.fetch(
@@ -553,7 +560,8 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
           headers: {
             'content-type': 'application/octet-stream',
             'x-ugk-key': site.publishableKey,
-            'x-ugk-handoff': `${reqUid}.${mac}`,
+            'x-ugk-handoff': handoff,
+            'CF-Connecting-IP': '203.0.113.42',
           },
           body: bin,
         })
@@ -638,5 +646,402 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
     );
     expect(optOutRes.status).toBe(200);
     expect(optOutRes.headers.get('set-cookie')).toContain('ugk_optout=1');
+  });
+
+  test('[C-04] Rejects 1-char/short handoff MAC & stale skew, enforces 30m pv_token TTL, and ignores spoofed x-ugk-prefix in favor of CF-Connecting-IP', async () => {
+    const q = makeMemoryQueue<PersistedCollectorRecord>();
+    const customQ = makeMemoryQueue<CustomEventPersistedRecord>();
+    const spill = makeMemoryR2();
+    const hold = makeMemoryR2();
+    const quarantine = makeMemoryR2();
+    let now = 1795000000000;
+    const site = makeTestSite({ prefixDailyCap: 2, unknownIpDailyCap: 1 });
+
+    const worker = createCollectorWorker({
+      sitesByPublishableKey: new Map([[site.publishableKey, site]]),
+      continuityTokenSecret: 'cont_secret_c04',
+      labMarkerSecret: 'lab_secret_c04',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      nowMs: () => now,
+    });
+
+    // 1. Canonical network prefix derivation
+    expect(deriveServerNetworkPrefix('203.0.113.42')).toBe('203.0.113.0/24');
+    expect(deriveServerNetworkPrefix('::ffff:203.0.113.99')).toBe('203.0.113.0/24');
+    expect(deriveServerNetworkPrefix('2001:db8:abcd:1234::1')).toBe('2001:0db8:abcd::/48');
+    expect(deriveServerNetworkPrefix(null)).toBe('unknown_ip');
+    expect(deriveServerNetworkPrefix('not-an-ip')).toBe('unknown_ip');
+
+    // 2. 1-char / 24-char truncated MAC & stale (>5m) handoff header MUST be rejected!
+    const reqUid = '000000000000000000000000000000aa';
+    const fullMac = hmacSha256Hex(site.edgeHandoffMacKey!, `handoff/1|${reqUid}|${now}`);
+    expect(worker.collector.verifyEdgeHandoffHeader(`${reqUid}.${now}.${fullMac.slice(0, 1)}`, site, now)).toBe(false);
+    expect(worker.collector.verifyEdgeHandoffHeader(`${reqUid}.${now}.${fullMac.slice(0, 24)}`, site, now)).toBe(false);
+    expect(worker.collector.verifyEdgeHandoffHeader(`${reqUid}.${fullMac.slice(0, 32)}`, site, now)).toBe(false);
+    const staleHandoff = issueEdgeHandoffHeader(reqUid, site.edgeHandoffMacKey!, now - 6 * 60_000);
+    expect(worker.collector.verifyEdgeHandoffHeader(staleHandoff, site, now)).toBe(false);
+    const freshHandoff = issueEdgeHandoffHeader(reqUid, site.edgeHandoffMacKey!, now);
+    expect(worker.collector.verifyEdgeHandoffHeader(freshHandoff, site, now)).toBe(true);
+
+    // 3. pv_token strict 30m expiration & pv_id binding
+    const pvId = '0123456789abcdef0123456789abcdef';
+    const pvTok = worker.collector.issuePvContinuityToken(site.tenantId, site.siteId, pvId, now);
+    expect(worker.collector.verifyPvContinuityToken(pvTok, site.tenantId, site.siteId, pvId, now + 29 * 60_000)).toBe(true);
+    expect(worker.collector.verifyPvContinuityToken(pvTok, site.tenantId, site.siteId, pvId, now + 30 * 60_000 + 1)).toBe(false);
+    expect(worker.collector.verifyPvContinuityToken(pvTok, site.tenantId, site.siteId, pvId, now - 61_000)).toBe(false);
+    expect(worker.collector.verifyPvContinuityToken(pvTok, site.tenantId, site.siteId, 'ffffffffffffffffffffffffffffffff', now)).toBe(false);
+
+    // 4. Spoofed `x-ugk-prefix` headers rotating every request CANNOT bypass `CF-Connecting-IP` daily cap!
+    for (let i = 1; i <= 3; i++) {
+      const resp = await worker.fetch(
+        new Request('https://collect.ugokilink.example/v1/collect/events', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-ugk-key': site.publishableKey,
+            'x-ugk-prefix': `198.51.${i}.0/24`, // attacker tries rotating client header!
+            'CF-Connecting-IP': '203.0.113.77', // real edge IP stays in same /24!
+          },
+          body: JSON.stringify(makeValidFrame({ seq: i, pv_token: pvTok })),
+        })
+      );
+      expect(resp.status).toBe(200);
+    }
+    // prefixDailyCap is 2 -> 3rd frame from same CF-Connecting-IP /24 MUST have billable=false!
+    expect(q.messages[0].billable).toBe(true);
+    expect(q.messages[1].billable).toBe(true);
+    expect(q.messages[2].billable).toBe(false);
+  });
+
+  test('[C-05] & [C-08]: CanonicalWalQueueEnvelope alignment, non-blocking liveTailSink fanout, canonical url_key_v2 overwrite & malformed URL 400 quarantine', async () => {
+    const q = makeMemoryQueue<PersistedCollectorRecord>();
+    const spill = makeMemoryR2();
+    const hold = makeMemoryR2();
+    const quarantine = makeMemoryR2();
+    const liveEvents: LiveTailFrameEvent[] = [];
+    let liveMode: 'ok' | 'reject' | 'hang' = 'ok';
+
+    const site = makeTestSite({
+      storageRegion: 'eu',
+      storageTier: 'tier2_link_plus_export',
+      retentionDays: 180,
+      baseline28dHourVolume: 1000,
+    });
+
+    const collector = new LinkCollectorEngine({
+      sitesByPublishableKey: new Map([[site.publishableKey, site]]),
+      continuityTokenSecret: 'cont_secret_c05',
+      labMarkerSecret: 'lab_secret_c05',
+      mainQueue: q.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      liveTailSink: {
+        publishLiveFrame: (ev) => {
+          if (liveMode === 'reject') return Promise.reject(new Error('DO_DOWN'));
+          if (liveMode === 'hang') return new Promise<void>(() => {});
+          liveEvents.push(ev);
+          return Promise.resolve();
+        },
+      },
+      nowMs: () => 1795000000000,
+    });
+
+    // 1. Non-canonical URL with credentials, uppercase host, unsorted query & fragment:
+    // flagged as non-idempotent AND overwritten with canonical url_key_v2 (zero credentials stored!)
+    const dirtyUrlFrame = makeValidFrame({
+      seq: 1,
+      state: {
+        ...makeValidFrame().state,
+        page_url_key: 'HTTPS://User:TopSecretPw@Wakegai.JP/Ranking/?utm_source=x&z=1#frag',
+      },
+    });
+    const res1 = await collector.handleTelemetryFrame({
+      publishableKey: site.publishableKey,
+      body: dirtyUrlFrame,
+      networkPrefix: '203.0.113.0/24',
+    });
+    expect(res1.status).toBe(200);
+    expect(res1.ack?.url_key_idempotent).toBe(false);
+    expect(res1.persistedRecord?.storage_region).toBe('eu');
+    expect(res1.persistedRecord?.storage_tier).toBe('tier2_link_plus_export');
+    expect(res1.persistedRecord?.retention_days).toBe(180);
+    expect(res1.persistedRecord?.edge_acked).toBe(true);
+    expect(res1.persistedRecord?.shard_id).toBeGreaterThanOrEqual(0);
+    expect(res1.persistedRecord?.shard_id).toBeLessThan(64);
+    expect(res1.persistedRecord?.frame.state.page_url_key).toBe('wakegai.jp/Ranking?z=__ugk_len_1_4__');
+    expect(res1.persistedRecord?.raw_frame.state.page_url_key).toBe('wakegai.jp/Ranking?z=__ugk_len_1_4__');
+    expect(JSON.stringify(q.messages[0])).not.toContain('TopSecretPw');
+    expect(liveEvents).toHaveLength(1);
+
+    // 2. Rejecting or hanging liveTailSink NEVER blocks or breaks 200 ACK!
+    liveMode = 'reject';
+    const resReject = await collector.handleTelemetryFrame({
+      publishableKey: site.publishableKey,
+      body: makeValidFrame({ seq: 2 }),
+      networkPrefix: '203.0.113.0/24',
+    });
+    expect(resReject.status).toBe(200);
+
+    liveMode = 'hang';
+    const resHang = await collector.handleTelemetryFrame({
+      publishableKey: site.publishableKey,
+      body: makeValidFrame({ seq: 3 }),
+      networkPrefix: '203.0.113.0/24',
+    });
+    expect(resHang.status).toBe(200);
+
+    // 3. Single-label host:port (`staging:8080/page`) is strictly idempotent
+    const stagingCanonical = computeUrlKeyV2('http://staging:8080/page');
+    const resStaging = await collector.handleTelemetryFrame({
+      publishableKey: site.publishableKey,
+      body: makeValidFrame({
+        seq: 4,
+        url_id: stagingCanonical.url_id,
+        state: { ...makeValidFrame().state, page_url_key: stagingCanonical.url_key_v2 },
+      }),
+      networkPrefix: '203.0.113.0/24',
+    });
+    expect(resStaging.status).toBe(200);
+    expect(resStaging.ack?.url_key_idempotent).toBe(true);
+
+    // 4. Malformed URL (`https:///admin?secret=LEAK_999`) returns 400 + sanitized quarantine (never 500, zero raw secret!)
+    const badUrlFrame = makeValidFrame({
+      seq: 5,
+      state: { ...makeValidFrame().state, page_url_key: 'https:///admin?secret=LEAK_999' },
+    });
+    const resBadUrl = await collector.handleTelemetryFrame({
+      publishableKey: site.publishableKey,
+      body: badUrlFrame,
+      networkPrefix: '203.0.113.0/24',
+    });
+    expect(resBadUrl.status).toBe(400);
+    expect(quarantine.objects.size).toBe(1);
+    const qPayload = Array.from(quarantine.objects.values())[0];
+    expect(qPayload).not.toContain('LEAK_999');
+    expect(qPayload).not.toContain('https:///admin');
+  });
+
+  test('[H-11], [H-14] & [M-02]: /v1/optout deletionSink + fallback receipt, private_scope zero linkable keys, Segment 32KiB/100-prop/PII/undefined-registry fail-closed & shared bounded AckLedgerStore', async () => {
+    const q = makeMemoryQueue<PersistedCollectorRecord>();
+    const customQ = makeMemoryQueue<CustomEventPersistedRecord>();
+    const spill = makeMemoryR2();
+    const hold = makeMemoryR2();
+    const quarantine = makeMemoryR2();
+    const deletionReceived: SubjectDeletionRequest[] = [];
+    let now = 1795000000000;
+
+    // Site WITHOUT customEventRegistry -> must fail closed on track & unapproved properties!
+    const noRegistrySite = makeTestSite({
+      publishableKey: 'ugk_pub_noreg',
+      customEventRegistry: undefined,
+      allowedTraitKeys: ['department'],
+    });
+    // Site WITH looseModeAllowed: true for testing 32KiB / 100-prop / %XX PII on page & identify
+    const looseSite = makeTestSite({
+      publishableKey: 'ugk_pub_loose',
+      allowedTraitKeys: ['contact_hint'],
+      customEventRegistry: {
+        site_id: 'site_wakegai',
+        looseModeAllowed: true,
+        definitions: [],
+      },
+    });
+
+    const sharedLedger = new SharedInMemoryAckLedgerStore({ maxEntries: 50, ackTtlMs: 15 * 60_000 });
+    const committedSet = new Set<string>();
+
+    const workerA = createCollectorWorker({
+      sitesByPublishableKey: new Map([
+        [noRegistrySite.publishableKey, noRegistrySite],
+        [looseSite.publishableKey, looseSite],
+      ]),
+      continuityTokenSecret: 'cont_secret_shared',
+      labMarkerSecret: 'lab_secret_shared',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      ackLedgerStore: sharedLedger,
+      isFrameCommittedInStore: (pvId, seq) => committedSet.has(`${pvId}:${seq}`),
+      deletionSink: {
+        enqueueSubjectDeletion: async (req) => {
+          deletionReceived.push(req);
+          return { receiptId: `sink_${req.receiptId}` };
+        },
+      },
+      nowMs: () => now,
+    });
+
+    // Separate Worker Instance B sharing the same `ackLedgerStore` ([M-02])
+    const workerB = createCollectorWorker({
+      sitesByPublishableKey: new Map([
+        [noRegistrySite.publishableKey, noRegistrySite],
+        [looseSite.publishableKey, looseSite],
+      ]),
+      continuityTokenSecret: 'cont_secret_shared',
+      labMarkerSecret: 'lab_secret_shared',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      ackLedgerStore: sharedLedger,
+      isFrameCommittedInStore: (pvId, seq) => committedSet.has(`${pvId}:${seq}`),
+      nowMs: () => now,
+    });
+
+    // 1. [H-11]: /v1/optout triggers deletionSink with HMACed subject + 14d SLA + clears cookies; fallback works too
+    const optRes1 = await workerA.fetch(
+      new Request('https://collect.ugokilink.example/v1/optout', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-ugk-key': noRegistrySite.publishableKey,
+          cookie: 'ugk_vid=0123456789abcdef0123456789abcdef; ugk_sid=fedcba9876543210fedcba9876543210',
+        },
+        body: JSON.stringify({}),
+      })
+    );
+    expect(optRes1.status).toBe(200);
+    const optJson1 = (await optRes1.json()) as { receipt_id: string; deletion_sla_days: number };
+    expect(optJson1.receipt_id).toMatch(/^sink_del_/);
+    expect(optJson1.deletion_sla_days).toBe(14);
+    expect(deletionReceived).toHaveLength(1);
+    expect(deletionReceived[0].subjectKind).toBe('visitor_id');
+    expect(deletionReceived[0].subjectHmac).not.toContain('0123456789abcdef0123456789abcdef');
+    expect(optRes1.headers.get('set-cookie')).toContain('ugk_vid=; Path=/; Max-Age=0');
+
+    const optResFallback = await workerB.fetch(
+      new Request('https://collect.ugokilink.example/v1/optout', {
+        method: 'POST',
+        headers: { 'x-ugk-key': noRegistrySite.publishableKey },
+        body: JSON.stringify({ member_hash: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789' }),
+      })
+    );
+    expect(optResFallback.status).toBe(200);
+    expect(workerB.deletionFallbackQueue).toHaveLength(1);
+
+    // 2. [H-11]: Collector strips all linkable keys on `private_scope` frames
+    const privFrame = makeValidFrame({
+      seq: 1,
+      consent_mode: 'full',
+      purposes: ['member_link', 'experiment'],
+      visitor_id: '0123456789abcdef0123456789abcdef',
+      session_id: 'fedcba9876543210fedcba9876543210',
+      member_hash: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+      cont_of: '11111111111111111111111111111111',
+      state: { ...makeValidFrame().state, dom_state: 'private_scope' },
+    });
+    const privRes = await workerA.collector.handleTelemetryFrame({
+      publishableKey: noRegistrySite.publishableKey,
+      body: privFrame,
+      networkPrefix: '203.0.113.0/24',
+    });
+    expect(privRes.status).toBe(200);
+    expect(privRes.ack?.pv_token).toBeNull();
+    expect(privRes.persistedRecord?.frame.visitor_id).toBeNull();
+    expect(privRes.persistedRecord?.frame.session_id).toBeNull();
+    expect(privRes.persistedRecord?.frame.member_hash).toBeNull();
+    expect(privRes.persistedRecord?.frame.cont_of).toBeNull();
+
+    // 3. [H-14]: Undefined customEventRegistry fails closed on `track` AND on `page` with custom properties
+    const noRegTrack = await workerA.compat.handleSingleCall(noRegistrySite.publishableKey, {
+      type: 'track',
+      event: 'unregistered_ev',
+      properties: { x: 1 },
+      consent_mode: 'full',
+    });
+    expect(noRegTrack.status).toBe(422);
+    expect(noRegTrack.error).toBe('missing_custom_event_registry');
+
+    const noRegPageProps = await workerA.compat.handleSingleCall(noRegistrySite.publishableKey, {
+      type: 'page',
+      name: 'Home',
+      properties: { sneak_prop: 'secret' },
+      consent_mode: 'cookieless',
+    });
+    expect(noRegPageProps.status).toBe(422);
+    expect(noRegPageProps.error).toBe('unapproved_properties_without_registry');
+
+    // 4. [H-14]: >100 properties, >32 KiB payload, and `%40...%ZZ` PII blocked across `page` & `identify`!
+    const manyProps: Record<string, number> = {};
+    for (let i = 0; i < 101; i++) manyProps[`p_${i}`] = i;
+    const over100Res = await workerA.compat.handleSingleCall(looseSite.publishableKey, {
+      type: 'page',
+      name: 'OverProps',
+      properties: manyProps,
+      consent_mode: 'cookieless',
+    });
+    expect(over100Res.status).toBe(422);
+    expect(over100Res.error).toBe('property_count_exceeded');
+
+    const over32KbRes = await workerA.compat.handleSingleCall(looseSite.publishableKey, {
+      type: 'screen',
+      name: 'HugeScreen',
+      properties: { blob: 'A'.repeat(33 * 1024) },
+      consent_mode: 'session',
+    });
+    expect(over32KbRes.status).toBe(422);
+    expect(over32KbRes.error).toBe('event_size_exceeded');
+
+    const pagePiiRes = await workerA.compat.handleSingleCall(looseSite.publishableKey, {
+      type: 'page',
+      name: 'Contact',
+      properties: { ref_note: 'leak alice%40example.com%ZZ here' },
+      consent_mode: 'cookieless',
+    });
+    expect(pagePiiRes.status).toBe(422);
+    expect(pagePiiRes.error).toBe('pii_detected_in_properties');
+
+    // Even an allowedTraitKey carrying `%40...%ZZ` PII is redacted before queue!
+    const idTraitPii = await workerA.compat.handleSingleCall(looseSite.publishableKey, {
+      type: 'identify',
+      userId: 'usr_55',
+      traits: { contact_hint: 'bob%40secret.jp%ZZ' },
+      consent_mode: 'full',
+      purposes: ['member_link'],
+    });
+    expect(idTraitPii.status).toBe(200);
+    expect(idTraitPii.record?.allowed_traits).toEqual({});
+    expect(idTraitPii.record?.dropped_traits_count).toBe(1);
+    expect(idTraitPii.record?.ml_training_eligible).toBe(false);
+    expect(JSON.stringify(customQ.messages)).not.toContain('bob%40secret.jp');
+
+    // 5. [M-02]: Cross-instance `post_ack_loss` detection via SharedInMemoryAckLedgerStore + LRU/TTL bounds
+    const crossPvId = '99999999999999999999999999999999';
+    const ackResA = await workerA.collector.handleTelemetryFrame({
+      publishableKey: looseSite.publishableKey,
+      body: makeValidFrame({ pv_id: crossPvId, seq: 1 }),
+      networkPrefix: '203.0.113.0/24',
+    });
+    expect(ackResA.status).toBe(200);
+
+    // 11 minutes later, Worker Instance B handles seq=2 echoing ack_echo_seq=1 -> detects post_ack_loss!
+    now += 11 * 60_000;
+    await workerB.collector.handleTelemetryFrame({
+      publishableKey: looseSite.publishableKey,
+      body: makeValidFrame({ pv_id: crossPvId, seq: 2, ack_echo_seq: 1 }),
+      networkPrefix: '203.0.113.0/24',
+    });
+    expect(workerB.collector.postAckLosses).toHaveLength(1);
+    expect(sharedLedger.getPostAckLosses()).toHaveLength(1);
+
+    // Verify BoundedTtlLruMap strictly enforces maxEntries & TTL sweep
+    const tinyMap = new BoundedTtlLruMap<number>(3, 5_000);
+    tinyMap.set('k1', 1, 1000);
+    tinyMap.set('k2', 2, 1000);
+    tinyMap.set('k3', 3, 1000);
+    tinyMap.get('k1', 1500); // touch k1 so k2 becomes LRU
+    tinyMap.set('k4', 4, 2000); // evicts k2!
+    expect(tinyMap.size).toBe(3);
+    expect(tinyMap.get('k2', 2000)).toBeUndefined();
+    expect(tinyMap.get('k1', 2000)).toBe(1);
+    expect(tinyMap.get('k1', 7000)).toBeUndefined(); // expired after 5s TTL!
   });
 });

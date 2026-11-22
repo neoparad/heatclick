@@ -197,7 +197,8 @@ function verifyEcWebhookAuth(
   secret: string | Buffer,
 ): boolean {
   if (reqAuth.scope !== expectedScope) return false
-  if (!reqAuth.signature.startsWith('v1=')) return false
+  if (!Number.isFinite(reqAuth.timestamp_sec) || reqAuth.timestamp_sec <= 0) return false
+  if (!reqAuth.signature || !reqAuth.signature.startsWith('v1=')) return false
   const expected = signEcWebhookPayload({
     tenant_id: tenantId,
     site_id: siteId,
@@ -209,6 +210,92 @@ function verifyEcWebhookAuth(
   const a = Buffer.from(reqAuth.signature, 'utf8')
   const b = Buffer.from(expected, 'utf8')
   return a.length === b.length && timingSafeEqual(a, b)
+}
+
+function deepEqualJsonValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') {
+    return false
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) {
+      if (!deepEqualJsonValue(a[i], b[i])) return false
+    }
+    return true
+  }
+  const objA = a as Record<string, unknown>
+  const objB = b as Record<string, unknown>
+  const keysA = Object.keys(objA).filter((k) => objA[k] !== undefined)
+  const keysB = Object.keys(objB).filter((k) => objB[k] !== undefined)
+  if (keysA.length !== keysB.length) return false
+  for (const k of keysA) {
+    if (!Object.prototype.hasOwnProperty.call(objB, k)) return false
+    if (!deepEqualJsonValue(objA[k], objB[k])) return false
+  }
+  return true
+}
+
+/**
+ * Bounded LRU + TTL cache to prevent unbounded memory growth of webhook event_ids and order logs (§8.13).
+ */
+class BoundedTtlCache<V> {
+  private readonly store = new Map<string, { readonly value: V; readonly expiresAtMs: number }>()
+
+  constructor(
+    private readonly maxEntries: number,
+    private readonly ttlMs: number,
+  ) {}
+
+  private pruneExpired(nowMs: number): void {
+    for (const [k, entry] of this.store.entries()) {
+      if (entry.expiresAtMs <= nowMs) {
+        this.store.delete(k)
+      }
+    }
+  }
+
+  has(key: string, nowMs: number): boolean {
+    const entry = this.store.get(key)
+    if (!entry) return false
+    if (entry.expiresAtMs <= nowMs) {
+      this.store.delete(key)
+      return false
+    }
+    // Refresh LRU order
+    this.store.delete(key)
+    this.store.set(key, entry)
+    return true
+  }
+
+  get(key: string, nowMs: number): V | undefined {
+    const entry = this.store.get(key)
+    if (!entry) return undefined
+    if (entry.expiresAtMs <= nowMs) {
+      this.store.delete(key)
+      return undefined
+    }
+    this.store.delete(key)
+    this.store.set(key, entry)
+    return entry.value
+  }
+
+  set(key: string, value: V, nowMs: number): void {
+    this.pruneExpired(nowMs)
+    if (this.store.has(key)) {
+      this.store.delete(key)
+    } else if (this.store.size >= this.maxEntries) {
+      const oldestKey = this.store.keys().next().value
+      if (oldestKey !== undefined) {
+        this.store.delete(oldestKey)
+      }
+    }
+    this.store.set(key, { value, expiresAtMs: nowMs + this.ttlMs })
+  }
+
+  get size(): number {
+    return this.store.size
+  }
 }
 
 const FORBIDDEN_MARGIN_KEYS = new Set(['gross_margin', 'margin_rate', 'cost_price', 'unit_cost'])
@@ -246,13 +333,21 @@ function isFullSkuPayload(sku: Partial<EcSkuFullPayload>): sku is EcSkuFullPaylo
     typeof sku.in_stock === 'boolean' &&
     typeof sku.published === 'boolean' &&
     typeof sku.price === 'number' &&
+    Number.isFinite(sku.price) &&
+    sku.price >= 0 &&
     typeof sku.currency === 'string' &&
     typeof sku.category === 'string' &&
     typeof sku.durability === 'string' &&
     typeof sku.sensitive_category === 'boolean' &&
-    typeof sku.updated_at === 'string'
+    typeof sku.updated_at === 'string' &&
+    !Number.isNaN(Date.parse(sku.updated_at))
   )
 }
+
+export const DEFAULT_MAX_WEBHOOK_DEDUPE_ENTRIES = 10_000
+export const DEFAULT_WEBHOOK_DEDUPE_TTL_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
+export const DEFAULT_MAX_ORDER_LOG_ENTRIES = 10_000
+export const DEFAULT_ORDER_LOG_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 
 // ---------------------------------------------------------------------------
 // EC Catalog & Inventory State Engine
@@ -266,22 +361,42 @@ export interface EcCatalogServiceOptions {
   readonly stock_freshness_ttl_ms?: number
   readonly price_freshness_ttl_ms?: number
   readonly heartbeat_ttl_ms?: number
+  readonly max_dedupe_entries?: number
+  readonly dedupe_ttl_ms?: number
+  readonly max_order_log_entries?: number
+  readonly order_log_ttl_ms?: number
 }
 
 export class EcCatalogService {
   private readonly strongStore: StrongStoreCommitAdapter
   private readonly skus = new Map<string, StoredPublicSku>() // tenant|site|sku_id
   private readonly serverOnlyGrossMargin = new Map<string, number>() // tenant|site|sku_id (ISOLATED)
-  private readonly processedEventIds = new Set<string>()
+  private readonly processedEventIds: BoundedTtlCache<true>
   private readonly siteHeartbeats = new Map<string, number>() // tenant|site -> epoch ms
   private readonly siteLastSeq = new Map<string, number>()
   private readonly siteGapActive = new Map<string, boolean>()
   private readonly pageProductIndex = new Map<string, Set<string>>() // tenant|site|page_id -> product_ids
   private readonly productPageReverseIndex = new Map<string, Set<string>>() // tenant|site|product_id -> page_urls
-  private readonly orders = new Map<string, EcOrderNotificationRequest>()
+  private readonly orders: BoundedTtlCache<EcOrderNotificationRequest>
 
   constructor(private readonly options: EcCatalogServiceOptions) {
     this.strongStore = options.strong_store ?? new InMemoryStrongUnavailableStore()
+    this.processedEventIds = new BoundedTtlCache<true>(
+      options.max_dedupe_entries ?? DEFAULT_MAX_WEBHOOK_DEDUPE_ENTRIES,
+      options.dedupe_ttl_ms ?? DEFAULT_WEBHOOK_DEDUPE_TTL_MS,
+    )
+    this.orders = new BoundedTtlCache<EcOrderNotificationRequest>(
+      options.max_order_log_entries ?? DEFAULT_MAX_ORDER_LOG_ENTRIES,
+      options.order_log_ttl_ms ?? DEFAULT_ORDER_LOG_TTL_MS,
+    )
+  }
+
+  getDedupeCacheSize(): number {
+    return this.processedEventIds.size
+  }
+
+  getOrderLogSize(): number {
+    return this.orders.size
   }
 
   private siteKey(tenantId: string, siteId: string): string {
@@ -343,14 +458,48 @@ export class EcCatalogService {
     })
     this.skus.set(k, pubSku)
 
-    // Store gross margin ONLY in isolated server-only map (§8.13 #1)
+    // Store gross margin ONLY in isolated server-only map (§8.13 #1);
+    // explicitly delete prior margin when updated SKU omits or nulls gross_margin!
     if (typeof payload.gross_margin === 'number' && Number.isFinite(payload.gross_margin)) {
       this.serverOnlyGrossMargin.set(k, payload.gross_margin)
+    } else {
+      this.serverOnlyGrossMargin.delete(k)
     }
   }
 
+  private shouldAcceptIncomingSku(
+    existing: StoredPublicSku | undefined,
+    incoming: EcSkuFullPayload,
+    mode: 'feed' | 'delta',
+  ): { readonly accept: boolean; readonly reason: string } {
+    if (!existing) return { accept: true, reason: 'new_sku' }
+    if (incoming.sku_version < existing.sku_version) {
+      return {
+        accept: false,
+        reason: `stale_sku_version:${incoming.sku_version}<${existing.sku_version}`,
+      }
+    }
+    const prevTs = Date.parse(existing.updated_at)
+    const nextTs = Date.parse(incoming.updated_at)
+    if (Number.isFinite(prevTs) && Number.isFinite(nextTs) && nextTs < prevTs) {
+      return {
+        accept: false,
+        reason: `stale_updated_at:${incoming.updated_at}<${existing.updated_at}`,
+      }
+    }
+    if (mode === 'delta' && incoming.sku_version === existing.sku_version) {
+      return {
+        accept: false,
+        reason: `stale_sku_version:${incoming.sku_version}<=${existing.sku_version}`,
+      }
+    }
+    return { accept: true, reason: 'monotonic_advance' }
+  }
+
   /**
-   * 受け口 (a): 全件商品フィード取込。連番欠番フラグを解消し強い整合性ストアへ確定する。
+   * 受け口 (a): 全件商品フィード取込。
+   * - 単調増加 `(sku_version, updated_at)` を満たす項目のみ反映（未掲載の他 SKU は消去しない）
+   * - 強い整合性ストア確定失敗 (`503` / 例外) 時はメモリ上の全変更を完全ロールバックする。
    */
   ingestFullProductFeed(params: {
     readonly tenant_id: string
@@ -358,14 +507,27 @@ export class EcCatalogService {
     readonly items: readonly EcSkuFullPayload[]
     readonly synced_at: string
   }): { readonly http_status: 200 | 503; readonly ingested_count: number; readonly gap_cleared: boolean } {
+    const sk = this.siteKey(params.tenant_id, params.site_id)
+    const prevSkus = new Map<string, StoredPublicSku | undefined>()
+    const prevMargins = new Map<string, number | undefined>()
+    const prevGap = this.siteGapActive.get(sk)
+    const prevHb = this.siteHeartbeats.get(sk)
+
+    let appliedCount = 0
     for (const item of params.items) {
+      if (!isFullSkuPayload(item)) continue
       const k = this.skuKey(params.tenant_id, params.site_id, item.sku_id)
       const prev = this.skus.get(k)
-      if (!prev || item.sku_version >= prev.sku_version) {
+      if (this.shouldAcceptIncomingSku(prev, item, 'feed').accept) {
+        if (!prevSkus.has(k)) {
+          prevSkus.set(k, prev)
+          prevMargins.set(k, this.serverOnlyGrossMargin.get(k))
+        }
         this.storeSkuInternal(params.tenant_id, params.site_id, item)
+        appliedCount++
       }
     }
-    const sk = this.siteKey(params.tenant_id, params.site_id)
+
     this.siteGapActive.set(sk, false)
     this.siteHeartbeats.set(sk, Date.parse(params.synced_at))
 
@@ -374,17 +536,37 @@ export class EcCatalogService {
       params.site_id,
       params.synced_at,
     )
-    const committed = this.strongStore.commitUnavailableSet(
-      params.tenant_id,
-      params.site_id,
-      unavailable,
-    )
+    let committed = false
+    try {
+      committed = this.strongStore.commitUnavailableSet(
+        params.tenant_id,
+        params.site_id,
+        unavailable,
+      )
+    } catch {
+      committed = false
+    }
+
     if (!committed) {
+      // Full atomic rollback of all mutated SKUs, margins, gap state, and heartbeat!
+      for (const [k, oldSku] of prevSkus.entries()) {
+        if (oldSku !== undefined) this.skus.set(k, oldSku)
+        else this.skus.delete(k)
+      }
+      for (const [k, oldMargin] of prevMargins.entries()) {
+        if (oldMargin !== undefined) this.serverOnlyGrossMargin.set(k, oldMargin)
+        else this.serverOnlyGrossMargin.delete(k)
+      }
+      if (prevGap !== undefined) this.siteGapActive.set(sk, prevGap)
+      else this.siteGapActive.delete(sk)
+      if (prevHb !== undefined) this.siteHeartbeats.set(sk, prevHb)
+      else this.siteHeartbeats.delete(sk)
+
       return Object.freeze({ http_status: 503, ingested_count: 0, gap_cleared: false })
     }
     return Object.freeze({
       http_status: 200,
-      ingested_count: params.items.length,
+      ingested_count: appliedCount,
       gap_cleared: true,
     })
   }
@@ -392,10 +574,11 @@ export class EcCatalogService {
   /**
    * 受け口 (b): SKU 単位差分 Webhook。
    * - `products:write` 署名認証必須
+   * - 署名検証済みの `raw_body` から JSON を直接復元し、`req.sku` との乖離を `400` 拒否
    * - 全項目必須（部分更新は `400` 拒否）
-   * - 単調増加 `sku_version`（古い版は無害に無視）
-   * - `event_id` 重複排除
-   * - 強い整合性ストア書込確定後にのみ `200`、失敗時は `503`
+   * - 単調増加 `(sku_version, updated_at)`（古い版・古い時刻は無害に無視）
+   * - `event_id` 重複排除（LRU + TTL 上限付き）
+   * - 強い整合性ストア書込確定後にのみ `200`、失敗時は全状態を完全ロールバックし `503`
    */
   ingestSkuDeltaWebhook(
     req: EcSkuDeltaWebhookRequest,
@@ -428,8 +611,93 @@ export class EcCatalogService {
       })
     }
 
+    // Parse SKU directly from HMAC-verified raw_body so caller-constructed DTO can NEVER diverge!
+    let parsedBody: unknown
+    try {
+      parsedBody = JSON.parse(req.raw_body)
+    } catch {
+      return Object.freeze({
+        http_status: 400,
+        applied: false,
+        deduplicated: false,
+        stale_version_ignored: false,
+        sequence_gap_detected: false,
+        reason: 'invalid_raw_body_json',
+      })
+    }
+    if (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) {
+      return Object.freeze({
+        http_status: 400,
+        applied: false,
+        deduplicated: false,
+        stale_version_ignored: false,
+        sequence_gap_detected: false,
+        reason: 'invalid_raw_body_object',
+      })
+    }
+
+    const bodyObj = parsedBody as Record<string, unknown>
+    const isEnvelope =
+      typeof bodyObj.sku === 'object' && bodyObj.sku !== null && !Array.isArray(bodyObj.sku)
+    if (isEnvelope) {
+      if (bodyObj.event_id !== undefined && bodyObj.event_id !== req.event_id) {
+        return Object.freeze({
+          http_status: 400,
+          applied: false,
+          deduplicated: false,
+          stale_version_ignored: false,
+          sequence_gap_detected: false,
+          reason: 'raw_body_event_id_mismatch',
+        })
+      }
+      if (bodyObj.sequence_no !== undefined && bodyObj.sequence_no !== req.sequence_no) {
+        return Object.freeze({
+          http_status: 400,
+          applied: false,
+          deduplicated: false,
+          stale_version_ignored: false,
+          sequence_gap_detected: false,
+          reason: 'raw_body_sequence_no_mismatch',
+        })
+      }
+      if (bodyObj.tenant_id !== undefined && bodyObj.tenant_id !== req.tenant_id) {
+        return Object.freeze({
+          http_status: 400,
+          applied: false,
+          deduplicated: false,
+          stale_version_ignored: false,
+          sequence_gap_detected: false,
+          reason: 'raw_body_tenant_id_mismatch',
+        })
+      }
+      if (bodyObj.site_id !== undefined && bodyObj.site_id !== req.site_id) {
+        return Object.freeze({
+          http_status: 400,
+          applied: false,
+          deduplicated: false,
+          stale_version_ignored: false,
+          sequence_gap_detected: false,
+          reason: 'raw_body_site_id_mismatch',
+        })
+      }
+    }
+
+    const authoritativeSku = (isEnvelope ? bodyObj.sku : bodyObj) as Partial<EcSkuFullPayload>
+    if (!deepEqualJsonValue(authoritativeSku, req.sku)) {
+      return Object.freeze({
+        http_status: 400,
+        applied: false,
+        deduplicated: false,
+        stale_version_ignored: false,
+        sequence_gap_detected: false,
+        reason: 'raw_body_sku_payload_mismatch',
+      })
+    }
+
+    const nowMs = Date.parse(nowIso)
+    const safeNowMs = Number.isFinite(nowMs) ? nowMs : Date.now()
     const dedupeKey = `${req.tenant_id}|${req.site_id}|sku|${req.event_id}`
-    if (this.processedEventIds.has(dedupeKey)) {
+    if (this.processedEventIds.has(dedupeKey, safeNowMs)) {
       return Object.freeze({
         http_status: 200,
         applied: false,
@@ -441,7 +709,7 @@ export class EcCatalogService {
     }
 
     // Reject partial updates — MUST contain full SKU fields + monotonic sku_version (§8.13 #1)
-    if (!isFullSkuPayload(req.sku)) {
+    if (!isFullSkuPayload(authoritativeSku)) {
       return Object.freeze({
         http_status: 400,
         applied: false,
@@ -452,39 +720,49 @@ export class EcCatalogService {
       })
     }
 
-    // Check monotonic sequence gap per site
     const sk = this.siteKey(req.tenant_id, req.site_id)
+    const prevSeq = this.siteLastSeq.get(sk)
+    const prevGap = this.siteGapActive.get(sk)
+    const prevHb = this.siteHeartbeats.get(sk)
+
     let gapDetected = false
     if (typeof req.sequence_no === 'number') {
-      const prevSeq = this.siteLastSeq.get(sk)
       if (prevSeq !== undefined && req.sequence_no > prevSeq + 1) {
         gapDetected = true
-        this.siteGapActive.set(sk, true)
-      }
-      if (prevSeq === undefined || req.sequence_no > prevSeq) {
-        this.siteLastSeq.set(sk, req.sequence_no)
       }
     }
 
-    const k = this.skuKey(req.tenant_id, req.site_id, req.sku.sku_id)
+    const k = this.skuKey(req.tenant_id, req.site_id, authoritativeSku.sku_id)
     const existing = this.skus.get(k)
-    if (existing && req.sku.sku_version <= existing.sku_version) {
-      this.processedEventIds.add(dedupeKey)
+    const ordering = this.shouldAcceptIncomingSku(existing, authoritativeSku, 'delta')
+    if (!ordering.accept) {
+      if (gapDetected) this.siteGapActive.set(sk, true)
+      if (typeof req.sequence_no === 'number' && (prevSeq === undefined || req.sequence_no > prevSeq)) {
+        this.siteLastSeq.set(sk, req.sequence_no)
+      }
+      this.processedEventIds.set(dedupeKey, true, safeNowMs)
       return Object.freeze({
         http_status: 200,
         applied: false,
         deduplicated: false,
         stale_version_ignored: true,
         sequence_gap_detected: gapDetected,
-        reason: `stale_sku_version:${req.sku.sku_version}<=${existing.sku_version}`,
+        reason: ordering.reason,
       })
     }
 
     // Stage & strongly commit unavailable-product set before returning 200!
     const prevSnapshot = existing
     const prevMargin = this.serverOnlyGrossMargin.get(k)
-    this.storeSkuInternal(req.tenant_id, req.site_id, req.sku)
-    this.siteHeartbeats.set(sk, Date.parse(nowIso))
+
+    if (gapDetected) {
+      this.siteGapActive.set(sk, true)
+    }
+    if (typeof req.sequence_no === 'number' && (prevSeq === undefined || req.sequence_no > prevSeq)) {
+      this.siteLastSeq.set(sk, req.sequence_no)
+    }
+    this.storeSkuInternal(req.tenant_id, req.site_id, authoritativeSku)
+    this.siteHeartbeats.set(sk, safeNowMs)
 
     const unavailable = this.computeUnavailableProductIds(req.tenant_id, req.site_id, nowIso)
     let committed = false
@@ -495,11 +773,17 @@ export class EcCatalogService {
     }
 
     if (!committed) {
-      // Roll back in-memory state and return 503 so EC retries!
-      if (prevSnapshot) this.skus.set(k, prevSnapshot)
+      // Full atomic rollback of SKU, margin, heartbeat, sequence, and gap state on 503!
+      if (prevSnapshot !== undefined) this.skus.set(k, prevSnapshot)
       else this.skus.delete(k)
       if (prevMargin !== undefined) this.serverOnlyGrossMargin.set(k, prevMargin)
       else this.serverOnlyGrossMargin.delete(k)
+      if (prevHb !== undefined) this.siteHeartbeats.set(sk, prevHb)
+      else this.siteHeartbeats.delete(sk)
+      if (prevSeq !== undefined) this.siteLastSeq.set(sk, prevSeq)
+      else this.siteLastSeq.delete(sk)
+      if (prevGap !== undefined) this.siteGapActive.set(sk, prevGap)
+      else this.siteGapActive.delete(sk)
 
       return Object.freeze({
         http_status: 503,
@@ -511,7 +795,7 @@ export class EcCatalogService {
       })
     }
 
-    this.processedEventIds.add(dedupeKey)
+    this.processedEventIds.set(dedupeKey, true, safeNowMs)
     return Object.freeze({
       http_status: 200,
       applied: true,
@@ -524,9 +808,10 @@ export class EcCatalogService {
 
   /**
    * 受け口 (c): 注文通知 (`orders:write`)・返品/キャンセル遅延反映。
+   * `raw_body` の JSON と DTO の整合性を厳密検査し、LRU+TTL 上限付きログへ記録する。
    */
   ingestOrderNotification(req: EcOrderNotificationRequest): {
-    readonly http_status: 200 | 401
+    readonly http_status: 200 | 400 | 401
     readonly recorded: boolean
     readonly deduplicated: boolean
     readonly member_update_status: 'not_applicable' | 'updated' | 'rejected_by_suppression_epoch'
@@ -549,8 +834,47 @@ export class EcCatalogService {
       })
     }
 
+    let parsedOrder: unknown
+    try {
+      parsedOrder = JSON.parse(req.raw_body)
+    } catch {
+      return Object.freeze({
+        http_status: 400,
+        recorded: false,
+        deduplicated: false,
+        member_update_status: 'not_applicable',
+      })
+    }
+    if (!parsedOrder || typeof parsedOrder !== 'object' || Array.isArray(parsedOrder)) {
+      return Object.freeze({
+        http_status: 400,
+        recorded: false,
+        deduplicated: false,
+        member_update_status: 'not_applicable',
+      })
+    }
+    const orderObj = parsedOrder as Record<string, unknown>
+    if (
+      (orderObj.order_event_id !== undefined && orderObj.order_event_id !== req.order_event_id) ||
+      (orderObj.order_id !== undefined && orderObj.order_id !== req.order_id) ||
+      (orderObj.order_status !== undefined && orderObj.order_status !== req.order_status) ||
+      (orderObj.member_key !== undefined && orderObj.member_key !== req.member_key) ||
+      (orderObj.data_epoch !== undefined && orderObj.data_epoch !== req.data_epoch) ||
+      (orderObj.occurred_at !== undefined && orderObj.occurred_at !== req.occurred_at) ||
+      (orderObj.items !== undefined && !deepEqualJsonValue(orderObj.items, req.items))
+    ) {
+      return Object.freeze({
+        http_status: 400,
+        recorded: false,
+        deduplicated: false,
+        member_update_status: 'not_applicable',
+      })
+    }
+
+    const occurredMs = Date.parse(req.occurred_at)
+    const safeNowMs = Number.isFinite(occurredMs) ? occurredMs : req.auth.timestamp_sec * 1000
     const dedupeKey = `${req.tenant_id}|${req.site_id}|order|${req.order_event_id}`
-    if (this.processedEventIds.has(dedupeKey)) {
+    if (this.processedEventIds.has(dedupeKey, safeNowMs)) {
       return Object.freeze({
         http_status: 200,
         recorded: false,
@@ -559,8 +883,8 @@ export class EcCatalogService {
       })
     }
 
-    this.processedEventIds.add(dedupeKey)
-    this.orders.set(`${req.tenant_id}|${req.site_id}|${req.order_id}`, req)
+    this.processedEventIds.set(dedupeKey, true, safeNowMs)
+    this.orders.set(`${req.tenant_id}|${req.site_id}|${req.order_id}`, req, safeNowMs)
 
     let memberStatus: 'not_applicable' | 'updated' | 'rejected_by_suppression_epoch' =
       'not_applicable'
@@ -593,6 +917,27 @@ export class EcCatalogService {
   }
 
   /**
+   * 粗利が `null` / `undefined` / `<= 0` の場合は `0` ブーストへ保守フォールバックする推薦重み計算 (§8.13)。
+   */
+  computeConservativeMarginBoost(
+    tenantId: string,
+    siteId: string,
+    skuId: string,
+    options?: { readonly reference_margin?: number; readonly max_boost?: number },
+  ): number {
+    const margin = this.getServerOnlyGrossMargin(tenantId, siteId, skuId)
+    if (margin === null || !Number.isFinite(margin) || margin <= 0) {
+      return 0
+    }
+    const ref = options?.reference_margin ?? 10_000
+    const maxBoost = options?.max_boost ?? 0.25
+    if (!Number.isFinite(ref) || ref <= 0 || !Number.isFinite(maxBoost) || maxBoost <= 0) {
+      return 0
+    }
+    return Math.min(maxBoost, (margin / ref) * maxBoost)
+  }
+
+  /**
    * 親商品の販売可否を子 SKU 状態・鮮度期限・死活合図・連番欠番からフェイルクローズ評価する。
    */
   evaluateParentProductState(
@@ -604,6 +949,7 @@ export class EcCatalogService {
     readonly product_id: string
     readonly available: boolean
     readonly hide_price: boolean
+    readonly price_sensitive_recommendation_eligible: boolean
     readonly representative_sku: StoredPublicSku | null
     readonly reason: string
   } {
@@ -629,6 +975,7 @@ export class EcCatalogService {
         product_id: parentProductId,
         available: false,
         hide_price: true,
+        price_sensitive_recommendation_eligible: false,
         representative_sku: null,
         reason: 'no_child_skus',
       })
@@ -642,6 +989,7 @@ export class EcCatalogService {
         product_id: parentProductId,
         available: false,
         hide_price: true,
+        price_sensitive_recommendation_eligible: false,
         representative_sku: rep,
         reason: 'sequence_gap_fail_closed',
       })
@@ -649,25 +997,27 @@ export class EcCatalogService {
 
     // Fail-closed on expired site heartbeat (§8.13 #1)
     const lastHb = this.siteHeartbeats.get(sk)
-    if (lastHb === undefined || nowMs - lastHb > hbTtl) {
+    if (!Number.isFinite(nowMs) || lastHb === undefined || nowMs - lastHb > hbTtl) {
       return Object.freeze({
         product_id: parentProductId,
         available: false,
         hide_price: true,
+        price_sensitive_recommendation_eligible: false,
         representative_sku: rep,
         reason: 'site_heartbeat_expired_fail_closed',
       })
     }
 
     let anySellable = false
-    let allPricesStale = true
-    let sellableRep: StoredPublicSku = rep
+    let sellableFreshPriceCandidate: StoredPublicSku | null = null
+    let sellableAnyCandidate: StoredPublicSku | null = null
 
     for (const sku of children) {
-      const ageMs = nowMs - Date.parse(sku.updated_at)
+      const updatedMs = Date.parse(sku.updated_at)
+      if (!Number.isFinite(updatedMs)) continue
+      const ageMs = nowMs - updatedMs
       const stockFresh = ageMs <= stockTtl
       const priceFresh = ageMs <= priceTtl
-      if (priceFresh) allPricesStale = false
 
       const withinSaleWindow =
         (sku.sale_start_at === null || nowMs >= Date.parse(sku.sale_start_at)) &&
@@ -675,15 +1025,25 @@ export class EcCatalogService {
 
       if (stockFresh && sku.published && sku.in_stock && withinSaleWindow) {
         anySellable = true
-        sellableRep = sku
+        sellableAnyCandidate = sku
+        if (priceFresh) {
+          sellableFreshPriceCandidate = sku
+        }
       }
     }
+
+    // Prefer a sellable SKU with fresh price; otherwise check price freshness strictly on the chosen representative SKU
+    // (NEVER let a sold-out sibling SKU's fresh timestamp unmask a stale price on the sellable representative SKU!)
+    const chosenRep = sellableFreshPriceCandidate ?? sellableAnyCandidate ?? rep
+    const chosenAgeMs = nowMs - Date.parse(chosenRep.updated_at)
+    const hidePrice = !Number.isFinite(chosenAgeMs) || chosenAgeMs > priceTtl
 
     return Object.freeze({
       product_id: parentProductId,
       available: anySellable,
-      hide_price: allPricesStale,
-      representative_sku: sellableRep,
+      hide_price: hidePrice,
+      price_sensitive_recommendation_eligible: anySellable && !hidePrice,
+      representative_sku: chosenRep,
       reason: anySellable ? 'available' : 'all_child_skus_unavailable_or_stale',
     })
   }

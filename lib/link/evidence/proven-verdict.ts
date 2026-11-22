@@ -410,6 +410,25 @@ export function buildProvenVerdictEnvelope(params: {
   };
 
   const mostSkeptical = params.verdict.stats.skepticalPosteriors[0];
+  const brandNumericLeaves = (node: unknown): unknown => {
+    if (typeof node === 'number' && Number.isFinite(node)) {
+      return createDataLayerMetric(node, params.input.interventionRefId, {
+        authority: 'allocator_experiment',
+        createdAt: nowIso,
+      });
+    }
+    if (Array.isArray(node)) {
+      return node.map((item) => brandNumericLeaves(item));
+    }
+    if (node !== null && typeof node === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+        out[k] = brandNumericLeaves(v);
+      }
+      return out;
+    }
+    return node;
+  };
 
   return buildResponseEnvelope({
     window: { start: params.windowStart, end: params.windowEnd },
@@ -488,7 +507,7 @@ export function buildProvenVerdictEnvelope(params: {
     data: {
       verdict: params.verdict.verdict,
       verdictSummary: params.verdict.verdictSummary,
-      stats: params.verdict.stats,
+      stats: brandNumericLeaves(params.verdict.stats),
       blockingReasons: params.verdict.blockingReasons,
     },
   });

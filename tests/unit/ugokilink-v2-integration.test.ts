@@ -244,30 +244,28 @@ describe('UGOKI LINK v2 — Wave 7-F Cross-Module E2E Pipeline & Repository Inva
     );
 
     // -----------------------------------------------------------------------
-    // Stage 4: Write-Ahead Log Worker (2-B)
+    // Stage 4: Write-Ahead Log Worker (2-B) — Direct zero-adapter queue wire [C-05]
     // -----------------------------------------------------------------------
     const walBucket = new InMemoryR2Bucket();
     const walWriter = new WalWriter({ region: 'jp', bucket: walBucket });
-    const walPayloads: WalQueuePayload[] = enqueuedRecords.map((rec) => ({
-      tenant_id: rec.tenant_id,
-      site_id: rec.site_id,
-      storage_region: 'jp',
-      shard_id: 0,
-      received_at_ms: rec.received_at_ms,
-      raw_frame: rec.frame,
-      edge_acked: true,
-    }));
+    const directShardId = enqueuedRecords[0].shard_id;
+    expect(Number.isInteger(directShardId)).toBe(true);
+    expect(enqueuedRecords.every((rec) => rec.shard_id === directShardId)).toBe(true);
+
+    // Pass PersistedCollectorRecord[] directly as-is without any manual adapter!
+    const walPayloads: WalQueuePayload[] = enqueuedRecords;
 
     const walRes = await walWriter.consumeBatch(walPayloads, baseWallMs + 5_000);
     expect(walRes.acceptedCount).toBe(enqueuedRecords.length);
     expect(walRes.quarantinedCount).toBe(0);
     expect(walRes.walKeys.length).toBeGreaterThanOrEqual(1);
-    expect(walRes.walKeys[0]).toMatch(/^wal\/jp\/0000\//);
+    const shardPad = String(directShardId).padStart(4, '0');
+    expect(walRes.walKeys[0]).toMatch(new RegExp(`^wal\\/jp\\/${shardPad}\\/ten_e2e_1\\/site_e2e_1\\/`));
 
     // -----------------------------------------------------------------------
     // Stage 5: Single-Writer Shard Loader & R2 WAL Replay Parity (2-B)
     // -----------------------------------------------------------------------
-    const loader = new ShardLoader({ region: 'jp', shardId: 0, bucket: walBucket });
+    const loader = new ShardLoader({ region: 'jp', shardId: directShardId, bucket: walBucket });
     const loadRes = await loader.loadPendingWalObjects(baseWallMs + 6_000);
     expect(loadRes.committed).toBe(true);
     expect(loadRes.doublePlacementCount).toBe(0);
@@ -280,7 +278,7 @@ describe('UGOKI LINK v2 — Wave 7-F Cross-Module E2E Pipeline & Repository Inva
 
     const replayRes = await replayAllFromWal({
       region: 'jp',
-      shardId: 0,
+      shardId: directShardId,
       walBucket,
       nowMs: baseWallMs + 7_000,
     });
@@ -681,15 +679,18 @@ describe('UGOKI LINK v2 — Wave 7-F Cross-Module E2E Pipeline & Repository Inva
     const v1Root = path.join(REPO_ROOT, 'app/api/v1');
     const routeFiles = walkFiles(v1Root).filter((f) => path.basename(f) === 'route.ts');
 
-    expect(routeFiles.length).toBeGreaterThanOrEqual(10);
+    expect(routeFiles.length).toBeGreaterThanOrEqual(20);
 
     const canonicalGuardPattern =
       /\b(?:handleV1RestRoute|handleMcpPostRoute|getSurfaceRuntimeContext|executeRecommendRequest|buildResponseEnvelope|extractBearerToken|AuthorizationGateway|HeatmapRenderService)\b/;
     const forbiddenDummyPattern =
       /\b(?:MOCK_[A-Z0-9_]+|DUMMY_[A-Z0-9_]+|FAKE_[A-Z0-9_]+|fallbackMock|getMockData)\b|Math\.random\s*\(/;
+    const forbiddenSpoofHeaderPattern =
+      /headers\.get\s*\(\s*['"]x-ugk-(?:principal-id|tenant-id|scopes|audience|allowed-sites|revocation-epoch)['"]\s*\)/i;
 
     const missingGuard: string[] = [];
     const dummyFallbackHits: string[] = [];
+    const spoofHeaderHits: string[] = [];
 
     for (const file of routeFiles) {
       const code = stripJsTsComments(fs.readFileSync(file, 'utf8'));
@@ -700,9 +701,13 @@ describe('UGOKI LINK v2 — Wave 7-F Cross-Module E2E Pipeline & Repository Inva
       if (forbiddenDummyPattern.test(code)) {
         dummyFallbackHits.push(rel);
       }
+      if (forbiddenSpoofHeaderPattern.test(code)) {
+        spoofHeaderHits.push(rel);
+      }
     }
 
     expect(missingGuard).toEqual([]);
     expect(dummyFallbackHits).toEqual([]);
+    expect(spoofHeaderHits).toEqual([]);
   });
 });

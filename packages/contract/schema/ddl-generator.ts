@@ -5,10 +5,12 @@
  * coverage for all person-linkable columns before emitting a single line of DDL.
  *
  * Enforces:
- * - ClickHouse: ORDER BY (tenant_id, site_id, ...), PARTITION BY, ttl_only_drop_parts=1,
- *   non_replicated_deduplication_window=10000, permissive + restrictive Row Policies,
- *   ZERO materialized views or projections on tenant tables (STORE M2, M7, A2).
- * - Postgres: PRIMARY KEY, indexes, ENABLE/FORCE ROW LEVEL SECURITY + tenant RLS policies (SUR §5.2).
+ * - ClickHouse: ORDER BY (tenant_id, site_id, ...), PARTITION BY, aligned ttl_only_drop_parts=1,
+ *   allow_nullable_key=1 when ORDER BY contains Nullable columns,
+ *   non_replicated_deduplication_window=10000, permissive + restrictive Row Policies matching
+ *   32-hex SHA-256 `ugk_ro_<sha256_prefix32>` per-tenant read-only identities,
+ *   read-only SQL `CREATE VIEW` definitions (ZERO materialized views or projections on tenant tables — STORE M2, M7, A2).
+ * - Postgres: PRIMARY KEY, indexes, ENABLE/FORCE ROW LEVEL SECURITY + paired PERMISSIVE and RESTRICTIVE tenant RLS policies (SUR §5.2).
  */
 
 import {
@@ -22,6 +24,60 @@ import type { ContractSchema, TableSpec } from './types';
 function escapeSqlComment(text: string): string {
   return text.replace(/'/g, "''");
 }
+
+function hasNullableOrderByColumn(table: TableSpec): boolean {
+  const colTypeByName = new Map(table.columns.map((c) => [c.name, c.clickhouseType ?? '']));
+  return table.orderBy.some((colName) => /\bNullable\s*\(/i.test(colTypeByName.get(colName) ?? ''));
+}
+
+/**
+ * Only emit `ttl_only_drop_parts = 1` when the `PARTITION BY` expression is anchored
+ * on the same time/expiry column as `TTL`, preventing premature or multi-year delayed part drops (H-18).
+ */
+function isTtlDropPartsAligned(table: TableSpec): boolean {
+  if (!table.ttlExpr || !table.partitionBy) return false;
+  const ttlColMatch = /^\s*([a-zA-Z_][a-zA-Z0-9_]*)\b/.exec(table.ttlExpr);
+  if (!ttlColMatch) return false;
+  const ttlCol = ttlColMatch[1]!;
+  return new RegExp(`\\b${ttlCol}\\b`).test(table.partitionBy);
+}
+
+const CLICKHOUSE_PUBLIC_VIEW_DEFINITIONS: ReadonlyArray<{
+  readonly name: string;
+  readonly description: string;
+  readonly selectSql: string;
+}> = [
+  {
+    name: 'v_site_hourly',
+    description: 'Public read-only hourly site summary view over rollup_page_hourly (§11.11 #7)',
+    selectSql:
+      'SELECT tenant_id, site_id, pv_hour, sum(pvs) AS pvs, sum(sum_vis_ms) AS sum_vis_ms, sum(sum_scroll_max_px) AS sum_scroll_max_px FROM rollup_page_hourly GROUP BY tenant_id, site_id, pv_hour',
+  },
+  {
+    name: 'v_page_hourly',
+    description: 'Public read-only hourly page summary view over rollup_page_hourly (§11.11 #7)',
+    selectSql:
+      'SELECT tenant_id, site_id, pv_hour, bucket_start, page_id, pvs, pv_count, sum_vis_ms, sum_scroll_max_px FROM rollup_page_hourly',
+  },
+  {
+    name: 'v_conversion_daily',
+    description: 'Public read-only daily conversion view over rollup_site_daily (§11.11 #7)',
+    selectSql:
+      'SELECT tenant_id, site_id, day_local, pvs, conversions FROM rollup_site_daily',
+  },
+  {
+    name: 'v_loss_ledger_daily',
+    description: 'Public read-only daily telemetry loss-ledger view over rollup_site_daily (§11.11 #7)',
+    selectSql:
+      'SELECT tenant_id, site_id, day_local, pvs, loss_frames FROM rollup_site_daily',
+  },
+  {
+    name: 'v_actor_daily',
+    description: 'Public read-only verified crawler/actor monthly-daily summary view over access_bot_lt (§11.11 #7)',
+    selectSql:
+      'SELECT tenant_id, site_id, month_utc AS day_local, verified_actor_id, count() AS requests FROM access_bot_lt GROUP BY tenant_id, site_id, month_utc, verified_actor_id',
+  },
+];
 
 function renderClickHouseTable(table: TableSpec): string {
   const lines: string[] = [];
@@ -58,23 +114,37 @@ function renderClickHouseTable(table: TableSpec): string {
     `index_granularity = ${table.indexGranularity ?? 8192}`,
     'non_replicated_deduplication_window = 10000',
   ];
-  if (table.ttlExpr) {
+  if (hasNullableOrderByColumn(table)) {
+    settings.push('allow_nullable_key = 1');
+  }
+  if (isTtlDropPartsAligned(table)) {
     settings.push('ttl_only_drop_parts = 1');
   }
   lines.push(`SETTINGS ${settings.join(', ')};`);
 
   if (table.tenantScoped) {
+    const tenantHashExpr =
+      "substring(lower(hex(SHA256(toString(tenant_id)))), 1, 32) = replaceRegexpOne(currentUser(), '^ugk_ro_', '')";
     lines.push('');
     lines.push(`-- Dual-layer ClickHouse tenant isolation row policies for ${table.name} (§5.6 / STORE M7)`);
     lines.push(
-      `CREATE ROW POLICY IF NOT EXISTS rp_${table.name}_tenant_permissive ON ${table.name} AS PERMISSIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;`
+      `CREATE ROW POLICY IF NOT EXISTS rp_${table.name}_tenant_permissive ON ${table.name} AS PERMISSIVE FOR SELECT USING ${tenantHashExpr} TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;`
     );
     lines.push(
-      `CREATE ROW POLICY IF NOT EXISTS rp_${table.name}_tenant_restrictive ON ${table.name} AS RESTRICTIVE FOR SELECT USING tenant_id = replaceRegexpOne(currentUser(), '^ugk_ro_', '') TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;`
+      `CREATE ROW POLICY IF NOT EXISTS rp_${table.name}_tenant_restrictive ON ${table.name} AS RESTRICTIVE FOR SELECT USING ${tenantHashExpr} TO ALL EXCEPT ugk_admin, ugk_loader, ugk_builder, ugk_eraser;`
     );
   }
 
   return lines.join('\n');
+}
+
+function renderClickHousePublicViews(): string {
+  return CLICKHOUSE_PUBLIC_VIEW_DEFINITIONS.map((v) =>
+    [
+      `-- Public View: ${v.name} (${v.description})`,
+      `CREATE VIEW IF NOT EXISTS ${v.name} AS ${v.selectSql};`,
+    ].join('\n')
+  ).join('\n\n');
 }
 
 function renderPostgresTable(table: TableSpec): string {
@@ -110,11 +180,16 @@ function renderPostgresTable(table: TableSpec): string {
   }
 
   if (table.tenantScoped) {
+    const rlsExpr = "tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid";
     lines.push(`ALTER TABLE ${table.name} ENABLE ROW LEVEL SECURITY;`);
     lines.push(`ALTER TABLE ${table.name} FORCE ROW LEVEL SECURITY;`);
+    lines.push(`DROP POLICY IF EXISTS rls_${table.name}_tenant_permissive ON ${table.name};`);
+    lines.push(
+      `CREATE POLICY rls_${table.name}_tenant_permissive ON ${table.name} AS PERMISSIVE USING (${rlsExpr}) WITH CHECK (${rlsExpr});`
+    );
     lines.push(`DROP POLICY IF EXISTS rls_${table.name}_tenant ON ${table.name};`);
     lines.push(
-      `CREATE POLICY rls_${table.name}_tenant ON ${table.name} AS RESTRICTIVE USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);`
+      `CREATE POLICY rls_${table.name}_tenant ON ${table.name} AS RESTRICTIVE USING (${rlsExpr}) WITH CHECK (${rlsExpr});`
     );
   }
 
@@ -148,7 +223,8 @@ export function generateClickHouseDdl(schema: ContractSchema): GeneratedDdlArtif
   ].join('\n');
 
   const body = chTables.map(renderClickHouseTable).join('\n\n');
-  const sql = `${header}${body}\n`;
+  const viewsSection = renderClickHousePublicViews();
+  const sql = `${header}${body}\n\n${viewsSection}\n`;
 
   return {
     dialect: 'clickhouse',

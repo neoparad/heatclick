@@ -41,8 +41,25 @@ export interface ParsedServerTimingHandoff {
   readonly version: string
   readonly request_id: string
   readonly issued_at_sec: number
+  readonly issued_at_ms: number
+  readonly issued_at_raw: string
   readonly mac_hex: string | null
   readonly raw_desc: string
+}
+
+/**
+ * Nginx `$msec` (`"1763640000.123"`) または整数秒 (`"1763640000"`) をミリ秒整数へ厳密変換する。
+ */
+export function parseNginxMsecToMs(raw: string | number): number | null {
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw) || raw < 100_000_000 || raw > 99_999_999_999) return null
+    return Math.round(raw * 1000)
+  }
+  const trimmed = raw.trim()
+  if (!/^\d{9,11}(?:\.\d{1,6})?$/.test(trimmed)) return null
+  const val = Number(trimmed)
+  if (!Number.isFinite(val) || val < 100_000_000 || val > 99_999_999_999) return null
+  return Math.round(val * 1000)
 }
 
 export interface MintServerTimingParams {
@@ -122,8 +139,11 @@ export function mintServerTimingHandoffHeader(
   })
 }
 
+const DESC_TOKEN_RE = /^1\.([A-Za-z0-9_-]{4,64})\.(\d{9,11}(?:\.\d{1,6})?)(?:\.([0-9a-f]{16}))?$/i
+
 /**
  * `Server-Timing` ヘッダ全文または `desc` 値単体から UGOKI 橋渡しトークンを抽出する。
+ * Nginx `$msec` の小数秒 (`1.<rid>.1763640000.123[.<mac16>]`) と整数秒の両方に対応。
  */
 export function parseServerTimingHandoffHeader(
   rawHeaderOrDesc: string | null | undefined,
@@ -132,30 +152,30 @@ export function parseServerTimingHandoffHeader(
   const input = rawHeaderOrDesc.trim()
 
   let desc: string | null = null
-  // Full Server-Timing header form: `..., ugk;desc="1.rid.12345[.mac]", ...`
+  // Full Server-Timing header form: `..., ugk;desc="1.rid.12345[.123][.mac]", ...`
   const headerRe = /(?:^|,\s*)ugk\s*;\s*desc\s*=\s*(?:"([^"]+)"|([^,;\s]+))/i
   const hm = headerRe.exec(input)
   if (hm) {
     desc = (hm[1] ?? hm[2] ?? '').trim()
-  } else if (/^1\.[A-Za-z0-9_-]{4,64}\.\d+(?:\.[0-9a-f]{16})?$/i.test(input)) {
+  } else if (DESC_TOKEN_RE.test(input)) {
     // Direct desc value from `performance.getEntriesByType('navigation')[0].serverTiming`
     desc = input
   }
 
   if (!desc) return null
-  const parts = desc.split('.')
-  if (parts.length !== 3 && parts.length !== 4) return null
-  const [version, requestId, issuedStr, macHex] = parts
-  if (version !== SERVER_TIMING_PROTOCOL_VERSION) return null
-  if (!/^[A-Za-z0-9_-]{4,64}$/.test(requestId)) return null
-  const issuedSec = Number(issuedStr)
-  if (!Number.isSafeInteger(issuedSec) || issuedSec <= 0) return null
-  if (macHex !== undefined && !/^[0-9a-f]{16}$/i.test(macHex)) return null
+  const m = DESC_TOKEN_RE.exec(desc)
+  if (!m) return null
+  const [, requestId, issuedRaw, macHex] = m
+  const issuedAtMs = parseNginxMsecToMs(issuedRaw)
+  if (issuedAtMs === null) return null
+  const issuedSec = Math.floor(issuedAtMs / 1000)
 
   return Object.freeze({
-    version,
+    version: SERVER_TIMING_PROTOCOL_VERSION,
     request_id: requestId,
     issued_at_sec: issuedSec,
+    issued_at_ms: issuedAtMs,
+    issued_at_raw: issuedRaw,
     mac_hex: macHex ? macHex.toLowerCase() : null,
     raw_desc: desc,
   })
@@ -170,17 +190,40 @@ export function verifyServerTimingHandoffMac(
   },
 ): boolean {
   if (!parsed.mac_hex) return false
-  const expected = computeHandoffMac16({
-    version: parsed.version,
-    request_id: parsed.request_id,
-    issued_at_sec: parsed.issued_at_sec,
-    host: params.host,
-    path: params.path,
-    edge_secret: params.edge_secret,
-  })
   const actualBuf = Buffer.from(parsed.mac_hex, 'utf8')
-  const expectedBuf = Buffer.from(expected, 'utf8')
-  return actualBuf.length === expectedBuf.length && timingSafeEqual(actualBuf, expectedBuf)
+  if (actualBuf.length !== 16) return false
+
+  // Support MAC over exact issued_at_raw (e.g. Nginx $msec) as well as integer issued_at_sec
+  const candidates = new Set<string>([
+    computeHandoffMac16({
+      version: parsed.version,
+      request_id: parsed.request_id,
+      issued_at_sec: parsed.issued_at_sec,
+      host: params.host,
+      path: params.path,
+      edge_secret: params.edge_secret,
+    }),
+  ])
+  if (parsed.issued_at_raw !== String(parsed.issued_at_sec)) {
+    const rawPayload = [
+      parsed.version,
+      parsed.request_id,
+      parsed.issued_at_raw,
+      params.host.trim().toLowerCase(),
+      params.path || '/',
+    ].join('|')
+    candidates.add(
+      createHmac('sha256', params.edge_secret).update(rawPayload, 'utf8').digest('hex').slice(0, 16),
+    )
+  }
+
+  for (const expected of candidates) {
+    const expectedBuf = Buffer.from(expected, 'utf8')
+    if (actualBuf.length === expectedBuf.length && timingSafeEqual(actualBuf, expectedBuf)) {
+      return true
+    }
+  }
+  return false
 }
 
 // ---------------------------------------------------------------------------

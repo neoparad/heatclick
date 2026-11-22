@@ -1,6 +1,8 @@
 import {
   CANONICAL_SCHEMA,
   createSdkFrameCodec,
+  normalizeCollectionLane,
+  type CanonicalConversionRuleSpec,
   type TelemetryFrame,
 } from '../contract/schema';
 import { EMPTY_FILE_SRI, SNIPPET_MAX_BYTES } from '../sdk-snippet';
@@ -14,6 +16,7 @@ import {
   resolveBrowserConsent,
   rewriteOutboundForLabSink,
   runQuickstartSelfDiagnostics,
+  type BrowserTelemetryFrame,
   type CollectorAckPayload,
   type CookieJarLike,
   type LabMarkerToken,
@@ -98,7 +101,7 @@ function makeInstrumentedCookieJar() {
   };
 }
 
-describe('packages/sdk-browser — Bundles 3-A, 3-B, 3-C (SDK, Consent, tel.G7, Replay, Custom Events, Quickstart, Lab Sink)', () => {
+describe('packages/sdk-browser — Bundles 3-A, 3-B, 3-C & Wave 8 Regressions ([C-05], [H-10], [H-11], [H-14], [L-01])', () => {
   test('tel.G7 Non-Interference: runs differing ONLY in typed text, chosen options, password, and clipboard produce 100% byte-identical outbound payloads', async () => {
     const runScenario = async (scenarioCanary: {
       readonly typedSecret: string;
@@ -665,6 +668,7 @@ describe('packages/sdk-browser — Bundles 3-A, 3-B, 3-C (SDK, Consent, tel.G7, 
     // Valid strict event
     const okEv = buildValidatedCustomEvent({
       registry,
+      lane: 'custom_event',
       eventName: 'plan_upgraded',
       properties: { amount_jpy: 9800, plan_tier: 'pro', note: 'upgraded via dashboard' },
       consentMode: 'full',
@@ -672,18 +676,20 @@ describe('packages/sdk-browser — Bundles 3-A, 3-B, 3-C (SDK, Consent, tel.G7, 
       occurredAtIso: '2026-11-20T12:00:00.000Z',
     });
     expect(okEv.accepted).toBe(true);
-    expect(okEv.envelope?.lane).toBe('custom_event');
+    expect(okEv.envelope?.lane).toBe('customer_defined');
+    expect(normalizeCollectionLane('custom_event')).toBe('customer_defined');
+    expect(okEv.envelope?.ml_training_eligible).toBe(false);
     expect(okEv.envelope?.eligible_for_cross_tenant_pool).toBe(false);
     expect(okEv.envelope?.eligible_for_standard_pv_billing).toBe(false);
     expect(okEv.envelope?.properties.find((p) => p.name === 'amount_jpy')?.ml_feature_eligible).toBe(true);
     expect(okEv.envelope?.properties.find((p) => p.name === 'note')?.ml_feature_eligible).toBe(false);
     expect(okEv.envelope?.properties.find((p) => p.name === 'note')?.untrusted).toBe(true);
 
-    // PII in freeform string blocked & quarantined!
+    // PII in freeform string (including malformed %ZZ + %40) blocked & quarantined!
     const piiEv = buildValidatedCustomEvent({
       registry,
       eventName: 'plan_upgraded',
-      properties: { amount_jpy: 9800, plan_tier: 'pro', note: 'contact alice@example.com' },
+      properties: { amount_jpy: 9800, plan_tier: 'pro', note: 'contact alice%40example.com%ZZ' },
       consentMode: 'full',
       purposes: [],
       occurredAtIso: '2026-11-20T12:00:00.000Z',
@@ -694,7 +700,7 @@ describe('packages/sdk-browser — Bundles 3-A, 3-B, 3-C (SDK, Consent, tel.G7, 
     // Browser Segment compat shim blocks identify in stats_exempt & omits anonymousId in cookieless
     const dispatched: Array<{ path: string; body: Record<string, unknown> }> = [];
     let currentMode: 'cookieless' | 'stats_exempt' | 'full' = 'stats_exempt';
-    let currentPurposes: Array<'member_link' | 'experiment'> = ['experiment'];
+    const currentPurposes: Array<'member_link' | 'experiment'> = ['experiment'];
     const segClient = createBrowserSegmentCompatClient({
       getConsentMode: () => currentMode,
       getPurposes: () => currentPurposes,
@@ -708,7 +714,7 @@ describe('packages/sdk-browser — Bundles 3-A, 3-B, 3-C (SDK, Consent, tel.G7, 
     expect((await segClient.identify('u_123', { email: 'x@y.com' })).sent).toBe(false);
     currentMode = 'cookieless';
     expect((await segClient.track('cta_seen', { slot: 1 })).sent).toBe(true);
-    expect(dispatched[0].body.lane).toBe('custom_event');
+    expect(dispatched[0].body.lane).toBe('customer_defined');
     expect(dispatched[0].body.anonymousId).toBeUndefined();
 
     // 5-minute Quickstart onboarding + JP disclosure verification gate
@@ -819,5 +825,331 @@ describe('packages/sdk-browser — Bundles 3-A, 3-B, 3-C (SDK, Consent, tel.G7, 
     });
     await renderSdk.init();
     expect(sentCount).toBe(0);
+  });
+
+  test('[H-10] All 20+ computed behaviour metrics wired into buildFrame + CanonicalConversionRuleSpec match_kind/match_value aliases', async () => {
+    const codec = createSdkFrameCodec(CANONICAL_SCHEMA);
+    const captured: BrowserTelemetryFrame[] = [];
+    let mono = 1000;
+
+    const canonicalHrefPrefixRule = {
+      cv_key: 'aff_prefix_cv',
+      rule_ver: 3,
+      match_kind: 'href_prefix',
+      match_value: 'https://partner.example/go/',
+    } as unknown as CanonicalConversionRuleSpec;
+
+    const sdk = new UgokiBrowserSdk({
+      siteKey: 'ugk_pub_h10',
+      collectorEndpoint: 'https://collect.ugokilink.example/v1/collect/events',
+      sdkBuild: 'v3.0.0',
+      defVer: 1,
+      profileRev: 1,
+      armBits: 0,
+      dimTupleCode: 1,
+      initialUrl: 'https://wakegai.jp/lp/',
+      skelFp: '1111222233334444',
+      conversionRules: [
+        canonicalHrefPrefixRule,
+        { cv_key: 'cta_fp_cv', rule_ver: 1, match_kind: 'el_fp', match_value: 'aabbccddeeff' },
+      ],
+      consent: {
+        siteDefaultMode: 'cookieless',
+        originRegionClass: 'JP',
+        disclosureStatus: 'verified',
+      },
+      nowMonoMs: () => mono,
+      transport: {
+        sendFetch: async (_ep, bytes, frame) => {
+          expect(codec.validateFrame(frame).valid).toBe(true);
+          captured.push(codec.decodeFrame(bytes) as BrowserTelemetryFrame);
+          return { seq: frame.seq, i_hw: frame.chk.logHighWater, srv_t: Date.now() };
+        },
+        sendBeacon: (_ep, bytes, frame) => {
+          expect(codec.validateFrame(frame).valid).toBe(true);
+          captured.push(codec.decodeFrame(bytes) as BrowserTelemetryFrame);
+          return true;
+        },
+      },
+    });
+
+    await sdk.init();
+
+    sdk.advance({
+      scrollY: 0,
+      sections: [
+        { sec_fp: '111111111111', topPx: 0, bottomPx: 700 },
+        { sec_fp: '222222222222', topPx: 700, bottomPx: 1600 },
+      ],
+      blocks: [{ blk_fp: 'b1b2b3b4b5b6', alwaysWatch: true, inViewport: true }],
+      isInputTick: true,
+    });
+    mono = 3000;
+    sdk.advance({
+      scrollY: 100,
+      sections: [
+        { sec_fp: '111111111111', topPx: 0, bottomPx: 700 },
+        { sec_fp: '222222222222', topPx: 700, bottomPx: 1600 },
+      ],
+      blocks: [{ blk_fp: 'b1b2b3b4b5b6', alwaysWatch: true, inViewport: true }],
+    });
+    mono = 12000;
+    sdk.advance({
+      scrollY: 800,
+      sections: [
+        { sec_fp: '111111111111', topPx: 0, bottomPx: 700 },
+        { sec_fp: '222222222222', topPx: 700, bottomPx: 1600 },
+      ],
+    });
+
+    mono = 13000;
+    sdk.recordFormFocus({ tMono: mono, form_fp: 'f001f001f001', el_fp: 'e001e001e001', isSensitive: false });
+    mono = 13450;
+    sdk.recordFormInteraction({
+      tMono: mono,
+      form_fp: 'f001f001f001',
+      el_fp: 'e001e001e001',
+      isSensitive: false,
+      isComposition: true,
+      isDeletion: false,
+    });
+    mono = 13600;
+    sdk.recordFormInteraction({
+      tMono: mono,
+      form_fp: 'f001f001f001',
+      el_fp: 'e001e001e001',
+      isSensitive: false,
+      isComposition: false,
+      isDeletion: true,
+      becameFilled: true,
+    });
+    mono = 14000;
+    sdk.recordFormBlur('e001e001e001', mono);
+    mono = 14200;
+    sdk.recordFormFocus({ tMono: mono, form_fp: 'f001f001f001', el_fp: 'e001e001e001', isSensitive: false });
+    sdk.recordFormError({ tMono: mono, form_fp: 'f001f001f001', el_fp: 'e001e001e001', source: 'aria_invalid' });
+    await sdk.recordFormSubmit('f001f001f001', true);
+
+    sdk.recordMediaProgress('c001c001c001', 15000, true);
+    sdk.recordVital('lcp_ms', 1850);
+    sdk.recordVital('inp_ms', 95);
+    sdk.recordJsError('TypeError', 42, 13);
+
+    mono = 15000;
+    const click1 = await sdk.recordClick({
+      tMono: mono,
+      el_fp: 'aabbccddeeff',
+      activation_kind: 'click',
+      xPermille: 250,
+      yPermille: 750,
+      yDocPx: 820,
+      effectBits: 0,
+      timeToFirstEffectMs: 3500,
+    });
+    expect(click1.matchedConversions).toEqual(['cta_fp_cv@1']);
+
+    mono = 15150;
+    await sdk.recordClick({ tMono: mono, el_fp: 'aabbccddeeff', activation_kind: 'click', yDocPx: 822 });
+    mono = 15300;
+    const click3 = await sdk.recordClick({
+      tMono: mono,
+      el_fp: 'aabbccddeeff',
+      activation_kind: 'click',
+      href: 'https://partner.example/go/offer-99',
+      xPermille: 300,
+      yPermille: 600,
+      yDocPx: 824,
+    });
+    expect(click3.matchedConversions).toEqual(['aff_prefix_cv@3']);
+
+    mono = 16000;
+    await sdk.handleVisibilityHidden();
+    const finalFrame = captured[captured.length - 1];
+
+    const sec1 = finalFrame.sections.find((s) => s.sec_fp === '111111111111');
+    expect(sec1?.gap_ms).toEqual([2000, 0, 0, 0]);
+    expect(sec1?.vel_ms).toEqual([2000, 0, 0, 0]);
+
+    const blk = finalFrame.blocks?.[0];
+    expect(blk?.always_watch).toBe(true);
+    expect(blk?.sample_pi).toBe(1);
+
+    const fld = finalFrame.fields?.find((f) => f.el_fp === 'e001e001e001');
+    expect(fld?.form_fp).toBe('f001f001f001');
+    expect(fld?.first_input_latency_ms).toBe(450);
+    expect(fld?.focus_n).toBe(2);
+    expect(fld?.refocus_n).toBe(1);
+    expect(fld?.composition_inputs).toBe(1);
+    expect(fld?.correction_bursts).toBe(1);
+    expect(fld?.total_inputs).toBe(2);
+    expect(fld?.validation_observable).toBe(true);
+    expect(fld?.filled_ever).toBe(true);
+
+    const frm = finalFrame.forms?.find((f) => f.form_fp === 'f001f001f001');
+    expect(frm?.started).toBe(true);
+    expect(frm?.t_first_ms).toBe(13000);
+    expect(frm?.blocked_submits).toBe(1);
+    expect(frm?.last_field_fp).toBe('e001e001e001');
+
+    const med = finalFrame.media?.[0];
+    expect(med?.played_ms).toBe(15000);
+    expect(med?.plays).toBe(1);
+    expect(med?.completed).toBe(true);
+
+    expect(finalFrame.vitals?.lcp_ms?.value).toBe(1850);
+    expect(finalFrame.vitals?.inp_ms?.value).toBe(95);
+    expect(finalFrame.state.section_tokens).toEqual(['111111111111', '222222222222']);
+    expect(finalFrame.state.error_hashes).toHaveLength(1);
+
+    const allLogs = captured.flatMap((f) => f.log_items);
+    expect(allLogs.some((l) => l.kind === 'section_tokens' && l.section_tokens?.length === 2)).toBe(true);
+    expect(allLogs.some((l) => l.kind === 'activation' && l.x_permille === 250 && l.y_permille === 750 && l.dead_click === true)).toBe(true);
+    expect(allLogs.some((l) => l.kind === 'multi_click_burst' && l.rage_click === true && l.click_count === 3)).toBe(true);
+  });
+
+  test('[H-11] & [L-01]: UNKNOWN fail-closed off, consent downgrade purges cookies/storage/WAL/fetchLater AbortSignal, private_scope zero linkable keys, UK->GB & SPA skelFp recompute', async () => {
+    const unknownRes = resolveBrowserConsent({
+      siteDefaultMode: 'full',
+      disclosureStatus: 'verified',
+    });
+    expect(unknownRes.mode).toBe('off');
+    expect(unknownRes.effectiveRegion).toBe('UNKNOWN');
+    expect(unknownRes.telemetryAllowed).toBe(false);
+
+    const ukRes = resolveBrowserConsent({
+      siteDefaultMode: 'full',
+      originRegionClass: 'UK',
+      disclosureStatus: 'verified',
+      jurisdictionPolicies: {
+        UK: {
+          region: 'UK',
+          defaultMode: 'off',
+          legalSignedOff: true,
+          signedOffMode: 'stats_exempt',
+          privacySignalAction: 'off',
+        },
+      },
+    });
+    expect(ukRes.effectiveRegion).toBe('GB');
+    expect(ukRes.mode).toBe('stats_exempt');
+
+    const cookie = makeInstrumentedCookieJar();
+    const sess = makeInstrumentedStorage();
+    const local = makeInstrumentedStorage();
+    const signals: AbortSignal[] = [];
+    let failFetch = false;
+
+    const sdk = new UgokiBrowserSdk({
+      siteKey: 'ugk_pub_downgrade',
+      collectorEndpoint: 'https://collect.ugokilink.example/v1/collect/events',
+      sdkBuild: 'v3.0.0',
+      defVer: 1,
+      profileRev: 1,
+      armBits: 0,
+      dimTupleCode: 1,
+      initialUrl: 'https://wakegai.jp/shop/',
+      skelFp: 'aaaa1111bbbb2222',
+      cookieJar: cookie.jar,
+      sessionStorage: sess.storage,
+      localStorage: local.storage,
+      consent: {
+        siteDefaultMode: 'full',
+        originRegionClass: 'JP',
+        explicitConsentMode: 'full',
+        explicitPurposes: ['member_link', 'experiment'],
+        disclosureStatus: 'verified',
+      },
+      transport: {
+        sendFetch: async (_ep, _b, frame) => {
+          if (failFetch) return null;
+          return { seq: frame.seq, i_hw: frame.chk.logHighWater, srv_t: Date.now(), pv_token: 'tok.1' };
+        },
+        sendBeacon: () => true,
+        armFetchLater: (_ep, _bytes, _frame, _after, signal) => {
+          if (signal) signals.push(signal);
+          return { activated: false, abort: () => undefined };
+        },
+      },
+    });
+
+    await sdk.init();
+    sdk.identify('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef');
+    expect(cookie.cookies.has('ugk_vid')).toBe(true);
+    expect(cookie.cookies.has('ugk_sid')).toBe(true);
+    const preDowngradeSignal = signals[signals.length - 1];
+    expect(preDowngradeSignal.aborted).toBe(false);
+
+    failFetch = true;
+    await sdk.flush('heartbeat');
+    expect(sess.store.size).toBe(1);
+    expect(local.store.size).toBe(1);
+    expect(sdk.getInMemoryWalQueue().length).toBe(1);
+
+    const downgraded = sdk.consent('cookieless', ['experiment']);
+    expect(downgraded.mode).toBe('cookieless');
+    expect(preDowngradeSignal.aborted).toBe(true);
+    expect(cookie.cookies.size).toBe(0);
+    expect(sess.store.size).toBe(0);
+    expect(local.store.size).toBe(0);
+    expect(sdk.getInMemoryWalQueue().length).toBe(0);
+
+    failFetch = false;
+    sdk.advance({
+      scrollY: 200,
+      sections: [{ sec_fp: '112233445566', topPx: 0, bottomPx: 800 }],
+    });
+    expect(Object.keys(sdk.state().section_dwell_ms)).toContain('112233445566');
+    const initialSkel = sdk.state().skel_fp;
+
+    const navOutcome = await sdk.handlePushState('https://wakegai.jp/shop/product-2', {
+      html: '<!doctype html><html><body><main><h1>Product Two</h1><section><h2>Specs</h2><p>Details</p></section></main></body></html>',
+    });
+    expect(navOutcome).toBe('new_pv');
+    expect(sdk.state().skel_fp).not.toBe(initialSkel);
+    expect(sdk.state().skel_fp).toMatch(/^[0-9a-f]{16}$/);
+    expect(sdk.state().section_dwell_ms).toEqual({});
+    expect(sdk.lastSentFrame?.state.skel_fp).toBe(sdk.state().skel_fp);
+
+    const privFrames: TelemetryFrame[] = [];
+    const privSdk = new UgokiBrowserSdk({
+      siteKey: 'ugk_pub_priv',
+      collectorEndpoint: 'https://collect.ugokilink.example/v1/collect/events',
+      sdkBuild: 'v3.0.0',
+      defVer: 1,
+      profileRev: 1,
+      armBits: 0,
+      dimTupleCode: 1,
+      initialUrl: 'https://wakegai.jp/mypage/orders',
+      domState: 'private_scope',
+      skelFp: '0000000000000000',
+      handoffToken: 'req123.1795000000000.0123456789abcdef0123456789abcdef',
+      cookieJar: cookie.jar,
+      sessionStorage: sess.storage,
+      localStorage: local.storage,
+      consent: {
+        siteDefaultMode: 'full',
+        explicitConsentMode: 'full',
+        explicitPurposes: ['member_link', 'experiment'],
+        disclosureStatus: 'verified',
+      },
+      transport: {
+        sendFetch: async (_ep, _b, frame) => {
+          privFrames.push(frame);
+          return null;
+        },
+        sendBeacon: () => true,
+      },
+    });
+    await privSdk.init();
+    expect(privSdk.identify('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef')).toBe(false);
+    expect(privFrames).toHaveLength(1);
+    expect(privFrames[0].visitor_id).toBeNull();
+    expect(privFrames[0].session_id).toBeNull();
+    expect(privFrames[0].member_hash).toBeNull();
+    expect(privFrames[0].handoff_token).toBeNull();
+    expect(privFrames[0].pv_token).toBeNull();
+    expect(privFrames[0].cont_of).toBeNull();
+    expect(sess.store.size).toBe(0);
+    expect(local.store.size).toBe(0);
   });
 });

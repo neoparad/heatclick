@@ -124,7 +124,11 @@ export interface AskDataExecutor {
 export interface PreLlmFilterVerdict {
   readonly allowed: boolean;
   readonly blockedCode?:
+    | 'CONSENT_OFF_BLOCKED'
+    | 'CONSENT_PURPOSE_MISMATCH'
+    | 'NON_READ_ONLY_TOOL'
     | 'NON_WHITELISTED_VIEW'
+    | 'NON_ALLOWED_METRIC'
     | 'SQL_AST_VIOLATION'
     | 'IDENTIFIER_COLUMN_BLOCKED'
     | 'FREE_TEXT_COLUMN_BLOCKED'
@@ -134,6 +138,7 @@ export interface PreLlmFilterVerdict {
   readonly reason?: string;
   readonly safeRows: ReadonlyArray<AggregateQueryRow>;
   readonly suppressedCount: number;
+  readonly secondarySuppressedCount?: number;
 }
 
 // =========================================================================

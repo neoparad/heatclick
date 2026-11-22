@@ -36,6 +36,18 @@ export function run4PlatformMobileConformance(): MobileConformanceSummary {
     if (!source.includes(schemaVersion)) issues.push('Missing canonical schema version');
     if (!source.includes('not_applicable')) issues.push('Missing section_join=not_applicable');
     if (!source.includes('revokeConsent')) issues.push('Missing revokeConsent() zero-send wipe');
+    if (!source.includes('optOut')) issues.push('Missing optOut() handler');
+    if (!source.includes('setConsent')) issues.push('Missing setConsent() handler');
+    if (!source.includes('track')) issues.push('Missing track() implementation');
+    if (!source.includes('flushIfOnline')) issues.push('Missing flushIfOnline() implementation');
+    if (/flushIfOnline\s*\([^)]*\)\s*(?::\s*[^{]+)?\{\s*\}/.test(source)) {
+      issues.push('Detected empty flushIfOnline() {} stub');
+    }
+    if (!/POST|postUrl/i.test(source)) issues.push('Missing HTTP POST batching in flushIfOnline');
+    if (!source.includes('429')) issues.push('Missing 4xx vs 429 retry/drop handling');
+    if (platform === 'ios' && /bounds:\s*\(Double,\s*Double/.test(source)) {
+      issues.push('Detected invalid Swift tuple passed to JSONSerialization');
+    }
     if (!source.includes('bounding_box_only')) issues.push('Missing custom-drawn bounding_box_only mask');
     for (const ct of ['identify', 'page', 'screen', 'track', 'group', 'alias']) {
       if (!source.includes(ct)) issues.push(`Missing Segment call type ${ct}`);

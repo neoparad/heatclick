@@ -87,18 +87,31 @@ describe('Bundle 2-D.3: Customer-Deployed Single Zone Worker', () => {
       mintReqUid: () => '00000000000000000000000000000001',
     });
 
-    // Self-test check
+    // Self-test check: unauthenticated MUST be rejected (401); authenticated diagnostic token returns minimal redacted JSON ([L-05])
+    const unauthStCtx = makeCtx();
+    const unauthSelfTestRes = await worker.fetch(
+      new Request('https://wakegai.jp/_ugk/selftest'),
+      unauthStCtx.ctx
+    );
+    expect(unauthSelfTestRes.status).toBe(401);
+
+    const derived = await deriveZoneSubKeys('ugk_edge_secret_1');
     const stCtx = makeCtx();
-    const selfTestRes = await worker.fetch(new Request('https://wakegai.jp/_ugk/selftest'), stCtx.ctx);
+    const selfTestRes = await worker.fetch(
+      new Request('https://wakegai.jp/_ugk/selftest', {
+        headers: { 'x-ugk-selftest-token': derived.selftestToken },
+      }),
+      stCtx.ctx
+    );
     expect(selfTestRes.status).toBe(200);
-    const selfTest = (await selfTestRes.json()) as {
-      release_hash: string;
-      delivery_before_capture: boolean;
-      conformance_passed: boolean;
-    };
-    expect(selfTest.release_hash).toBe('rel_sha_256_demo');
+    const selfTest = (await selfTestRes.json()) as Record<string, unknown>;
     expect(selfTest.delivery_before_capture).toBe(true);
     expect(selfTest.conformance_passed).toBe(true);
+    // Redacted: must NEVER expose release_hash, tenant_id, site_id, key IDs, or internal config
+    expect(selfTest.release_hash).toBeUndefined();
+    expect(selfTest.tenant_id).toBeUndefined();
+    expect(selfTest.site_id).toBeUndefined();
+    expect(selfTest.modules).toBeUndefined();
 
     // HTML request: deliver first, capture deferred in waitUntil AFTER response returns
     const reqCtx = makeCtx();
@@ -328,5 +341,84 @@ describe('Bundle 2-D.3: Customer-Deployed Single Zone Worker', () => {
     const labHtml = await labRes.text();
     expect(labHtml).toContain('/_ugk/lab-sink?run_id=run_canary_99');
     expect(labHtml).not.toContain('https://px.a8.net/svt/ejp');
+  });
+
+  it('[M-16 & L-05] blocks Cache-Control: public on Server-Timing/passthrough/personalized responses, sinks Amazon affiliate links in lab mode, and enforces constant-time selftest auth', async () => {
+    const amazonOriginHtml = [
+      '<!doctype html><html><head><title>Amazon Lab Test</title></head><body>',
+      '<a href="https://www.amazon.co.jp/dp/B09XYZ1234?tag=wakegai-22">Amazon.co.jpで見る</a>',
+      '<a href="https://amzn.to/3ShortLink">短縮リンク</a>',
+      '<a href="https://www.amazon.com/dp/B001?tag=us-assoc-20">Amazon US</a>',
+      '</body></html>',
+    ].join('');
+
+    const worker = createZoneWorkerHandler({
+      tenantId: 't_cache',
+      siteId: 's_cache',
+      releaseHash: 'rel_secret_hash_internal',
+      abi: 2,
+      edgeIntegritySecret: 'ugk_edge_secret_m16',
+      selftestDiagnosticToken: 'diag_tok_m16_secret',
+      modules: { deliver: true, handoff: true, origin_kit: true, capture: true, lab_sink: true },
+      passthroughShare: 1.0, // force 100% passthrough arm so deliver is skipped while handoff & x-ugk-passthrough run!
+      regionClass: 'JP',
+      fetchOrigin: async () =>
+        new Response(amazonOriginHtml, {
+          status: 200,
+          headers: {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'public, max-age=86400, s-maxage=86400',
+            'cdn-cache-control': 'public, max-age=86400',
+            'surrogate-control': 'max-age=86400',
+          },
+        }),
+      fetchDecisionContext: async () => null,
+      verifyLabToken: async (tok) =>
+        tok === 'lab_amz_ok' ? { run_id: 'run_amz_1', purpose: 'preflight' } : null,
+      shipObservation: async () => {},
+    });
+
+    // 1. Even on passthrough arm where origin returned Cache-Control: public, Server-Timing + x-ugk-passthrough force private, no-store!
+    const c1 = makeCtx();
+    const passRes = await worker.fetch(new Request('https://wakegai.jp/item/'), c1.ctx);
+    await c1.flush();
+    expect(passRes.headers.get('server-timing')).toBeTruthy();
+    expect(passRes.headers.get('x-ugk-passthrough')).toBe('1');
+    expect(passRes.headers.get('cache-control')).toBe('private, no-store');
+    expect(passRes.headers.get('cdn-cache-control')).toBeNull();
+    expect(passRes.headers.get('surrogate-control')).toBeNull();
+
+    // 2. Lab sink rewrites ALL Amazon affiliate domains (amazon.co.jp, amzn.to, amazon.com) so 0 lab clicks hit Amazon
+    const c2 = makeCtx();
+    const labRes = await worker.fetch(
+      new Request('https://wakegai.jp/item/', {
+        headers: { 'x-ugk-lab-token': 'lab_amz_ok' },
+      }),
+      c2.ctx
+    );
+    await c2.flush();
+    const labBody = await labRes.text();
+    expect(labBody).not.toContain('amazon.co.jp');
+    expect(labBody).not.toContain('amzn.to');
+    expect(labBody).not.toContain('amazon.com');
+    expect((labBody.match(/\/_ugk\/lab-sink\?run_id=run_amz_1/g) ?? []).length).toBe(3);
+
+    // 3. /_ugk/selftest rejects wrong token (401) and accepts Bearer / header token with redacted output
+    const badSt = await worker.fetch(
+      new Request('https://wakegai.jp/_ugk/selftest', {
+        headers: { authorization: 'Bearer wrong_token' },
+      }),
+      makeCtx().ctx
+    );
+    expect(badSt.status).toBe(401);
+
+    const okSt = await worker.fetch(
+      new Request('https://wakegai.jp/_ugk/selftest', {
+        headers: { authorization: 'Bearer diag_tok_m16_secret' },
+      }),
+      makeCtx().ctx
+    );
+    expect(okSt.status).toBe(200);
+    expect(okSt.headers.get('cache-control')).toBe('private, no-store');
   });
 });

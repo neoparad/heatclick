@@ -8,6 +8,7 @@ import {
   type TelemetryFrame,
 } from '../../packages/contract/schema';
 import {
+  CrossTenantWalViolationError,
   CustomerSorStorageAdapter,
   DEFAULT_POST_ACK_GRACE_MS,
   DEFAULT_QUARANTINE_RETENTION_DAYS,
@@ -130,7 +131,9 @@ describe('workers/link-wal', () => {
     expect(first.quarantinedCount).toBe(0);
     expect(first.bisectSplits).toBe(0);
     expect(first.walKeys).toHaveLength(1);
-    expect(first.walKeys[0]).toMatch(/^wal\/jp\/0000\/20261120T1015Z\/[0-9a-f]{64}\.json$/);
+    expect(first.walKeys[0]).toMatch(
+      /^wal\/jp\/0000\/tenant-alpha\/site-main\/20261120T1015Z\/[0-9a-f]{64}\.json$/
+    );
     expect(first.dedupedObjectsCount).toBe(0);
 
     // Exact retry produces identical content hash -> conditional put deduplicates cleanly
@@ -199,12 +202,21 @@ describe('workers/link-wal', () => {
     expect(res.bisectSplits).toBeGreaterThanOrEqual(2);
     expect(res.quarantineKeys).toHaveLength(2);
 
-    // Inspect quarantine object #2: raw string must be sanitized, 7-day retention set
+    // Inspect quarantine object #2: stored encrypted in R2 (AES-256-GCM), raw string sanitized, 7-day retention set
     const qObj2Raw = await bucket.get(res.quarantineKeys[1]!);
     expect(qObj2Raw).not.toBeNull();
     const qText = await qObj2Raw!.text();
     expect(qText).not.toContain('secret-raw-user-input-should-not-leak');
-    const qObj2 = JSON.parse(qText) as QuarantineObject;
+    expect(qText).not.toContain('deadbeefdeadbeefdeadbeefdeadbeef');
+    const qEnvelope = JSON.parse(qText) as { encrypted?: boolean; alg?: string };
+    expect(qEnvelope.encrypted).toBe(true);
+    expect(qEnvelope.alg).toBe('AES-256-GCM');
+    const qObj2 = (await writer.readQuarantineObject(
+      res.quarantineKeys[1]!,
+      'tenant-alpha',
+      'site-main'
+    ))!;
+    expect(qObj2).not.toBeNull();
     expect(qObj2.pv_id).toBe('deadbeefdeadbeefdeadbeefdeadbeef');
     expect(qObj2.expires_at_ms - qObj2.received_at_ms).toBe(
       DEFAULT_QUARANTINE_RETENTION_DAYS * 86_400_000
@@ -411,5 +423,112 @@ describe('workers/link-wal', () => {
     const res = await handleWalQueueBatch(batch, writer);
     expect(res.acceptedCount).toBe(2);
     expect(ackedIds).toEqual(['msg-1', 'msg-2']);
+  });
+
+  test('Wave 8 Regressions (C-05, C-15): accepts CanonicalWalQueueEnvelope (frame + lane + lab_exclusion), splits mixed-tenant batches per (tenant, site), blocks cross-tenant Tier 2/3 WAL objects, and enforces tenant AAD on encrypted quarantine', async () => {
+    const bucket = new InMemoryR2Bucket();
+    const writer = new WalWriter({ region: 'jp', bucket });
+    const t0 = Date.UTC(2026, 10, 20, 17, 0, 0);
+
+    const res = await writer.consumeBatch(
+      [
+        {
+          tenant_id: 'tenant-one',
+          site_id: 'site-a',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: t0,
+          lane: 'standard',
+          lab_exclusion: true,
+          frame: makeValidFrame({ pv_id: '11111111111111111111111111111111', seq: 0 }),
+        },
+        {
+          tenant_id: 'tenant-two',
+          site_id: 'site-b',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: t0,
+          lane: 'customer_defined',
+          frame: makeValidFrame({ pv_id: '22222222222222222222222222222222', seq: 0 }),
+        },
+        {
+          tenant_id: 'tenant-one',
+          site_id: 'site-a',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: t0,
+          frame: '{corrupt-quarantine',
+        },
+      ],
+      t0
+    );
+
+    expect(res.acceptedCount).toBe(2);
+    expect(res.walKeys).toHaveLength(2);
+    expect(res.walKeys.some((k) => k.includes('/tenant-one/site-a/'))).toBe(true);
+    expect(res.walKeys.some((k) => k.includes('/tenant-two/site-b/'))).toBe(true);
+
+    for (const wk of res.walKeys) {
+      const obj = JSON.parse(await (await bucket.get(wk))!.text()) as WalObject;
+      expect(new Set(obj.records.map((r) => r.tenant_id)).size).toBe(1);
+    }
+
+    expect(res.quarantineKeys).toHaveLength(1);
+    expect(
+      await writer.readQuarantineObject(res.quarantineKeys[0]!, 'tenant-two', 'site-b')
+    ).toBeNull();
+    expect(
+      await writer.readQuarantineObject(res.quarantineKeys[0]!, 'tenant-one', 'site-a')
+    ).not.toBeNull();
+
+    const tier2 = new LinkPlusExportStorageAdapter(
+      new InMemoryR2Bucket(),
+      new InMemoryExportSink('sink-1', 'jp'),
+      'jp'
+    );
+    const mixedWal: WalObject = {
+      wal_version: 1,
+      region: 'jp',
+      shard_id: 0,
+      tenant_id: 'tenant-one',
+      site_id: 'site-a',
+      minute_utc: '20261120T1700Z',
+      created_at_ms: t0,
+      content_sha256: 'a'.repeat(64),
+      record_count: 2,
+      records: [
+        {
+          tenant_id: 'tenant-one',
+          site_id: 'site-a',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: t0,
+          age_ms: 0,
+          retention_days: 395,
+          frame_hash: 'h1',
+          frame: makeValidFrame({ seq: 0 }),
+        },
+        {
+          tenant_id: 'tenant-two',
+          site_id: 'site-b',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: t0,
+          age_ms: 0,
+          retention_days: 395,
+          frame_hash: 'h2',
+          frame: makeValidFrame({ seq: 1 }),
+        },
+      ],
+    };
+    await expect(
+      tier2.putWalImmutable({
+        key: 'wal/jp/0000/test.json',
+        body: JSON.stringify(mixedWal),
+        tenantIds: ['tenant-one', 'tenant-two'],
+        deletionEpoch: 1,
+        nowMs: t0,
+      })
+    ).rejects.toThrow(CrossTenantWalViolationError);
   });
 });

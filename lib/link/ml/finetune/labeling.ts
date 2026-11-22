@@ -13,6 +13,13 @@
  *   sign-off is recorded; default triage uses in-house model uncertainty + random audit sampling.
  */
 
+import {
+  JevTrainingProhibitedError,
+  MAX_PROVENANCE_SCAN_NODES,
+  scanDeepProhibitedProvenance,
+} from './dataset-builder';
+import { JevTeacherProhibitedError } from './deletion-distill';
+
 export type FinetuneTaskKind = 'section_reading' | 'naming_explanation' | 'hypothesis_quality';
 
 export class BlindLabelingViolationError extends Error {
@@ -55,21 +62,62 @@ export interface BlindAnnotationTaskPayload {
   readonly jev_output?: never;
 }
 
+function scanBlindUiLeaksIterative(root: unknown): readonly string[] {
+  if (root === null || root === undefined || typeof root !== 'object') return [];
+  const visited = new WeakSet<object>();
+  const stack: unknown[] = [root];
+  let scannedNodes = 0;
+  const leaked = new Set<string>();
+
+  while (stack.length > 0) {
+    const curr = stack.pop();
+    if (curr === null || curr === undefined || typeof curr !== 'object') continue;
+    if (visited.has(curr)) continue;
+    visited.add(curr);
+    scannedNodes += 1;
+    if (scannedNodes > MAX_PROVENANCE_SCAN_NODES) {
+      leaked.add('__node_limit_exceeded_100000__');
+      break;
+    }
+    if (Array.isArray(curr)) {
+      for (let i = curr.length - 1; i >= 0; i -= 1) stack.push(curr[i]);
+      continue;
+    }
+    const rec = curr as Record<string, unknown>;
+    for (const k of Object.keys(rec)) {
+      const v = rec[k];
+      if (v !== undefined && v !== null) {
+        if (FORBIDDEN_BLIND_UI_KEYS.has(k)) {
+          leaked.add(k);
+        }
+        if (typeof v === 'object') {
+          stack.push(v);
+        }
+      }
+    }
+  }
+  return Array.from(leaked).sort();
+}
+
 /**
- * Constructs a verified blind annotation task for human labelers.
- * Throws `BlindLabelingViolationError` if any model answer/confidence is present.
+ * Constructs a verified blind annotation task for human labelers (`[M-18]`).
+ * Uses unbounded-depth explicit stack traversal (`WeakSet` + 100k-node fail-closed cap):
+ * - Throws `JevTeacherProhibitedError` / `JevTrainingProhibitedError` if any Jev provenance is smuggled at any depth!
+ * - Throws `BlindLabelingViolationError` if any model answer/confidence is present at any depth!
  */
 export function buildBlindAnnotationTask(
   rawTask: BlindAnnotationTaskPayload
 ): BlindAnnotationTaskPayload {
-  const leaked: string[] = [];
-  for (const [k, v] of Object.entries(rawTask as unknown as Record<string, unknown>)) {
-    if (FORBIDDEN_BLIND_UI_KEYS.has(k) && v !== undefined && v !== null) {
-      leaked.push(k);
-    }
-  }
+  const leaked = scanBlindUiLeaksIterative(rawTask);
   if (leaked.length > 0) {
     throw new BlindLabelingViolationError(leaked);
+  }
+  const deepProv = scanDeepProhibitedProvenance(rawTask);
+  if (deepProv.hasJevTeacher) {
+    throw new JevTeacherProhibitedError(deepProv.matchedJevDetail ?? 'jev');
+  }
+  if (deepProv.hasJevProvenance) {
+    throw new JevTrainingProhibitedError([rawTask.task_item_id || '__blind_task__']);
   }
   if (!Number.isFinite(rawTask.p_select) || rawTask.p_select <= 0 || rawTask.p_select > 1) {
     throw new Error(`p_select must be in (0, 1], got ${rawTask.p_select}`);
@@ -168,6 +216,13 @@ export function adjudicateAndEvaluateLabelBatch(
 
   const byCategory = new Map<string, DualAnnotationPair[]>();
   for (const p of pairs) {
+    const deepProv = scanDeepProhibitedProvenance(p);
+    if (deepProv.hasJevTeacher) {
+      throw new JevTeacherProhibitedError(deepProv.matchedJevDetail ?? 'jev');
+    }
+    if (deepProv.hasJevProvenance) {
+      throw new JevTrainingProhibitedError([p.item_id || '__dual_pair__']);
+    }
     if (p.annotator_a_id === p.annotator_b_id) {
       throw new Error(`Dual annotation for "${p.item_id}" requires two distinct annotators`);
     }

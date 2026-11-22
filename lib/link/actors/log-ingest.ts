@@ -214,15 +214,26 @@ function extractRfc9421FromHeaders(
 
 function toIsoTimestamp(raw: unknown): string | null {
   if (typeof raw === 'number' && Number.isFinite(raw)) {
-    // Support seconds, ms, or ns (Cloudflare Logpush often emits ns or s)
+    if (raw <= 0) return null
+    // Support seconds (including fractional Nginx $msec), ms, or ns (Cloudflare Logpush)
     let ms = raw
     if (raw > 1e15) ms = Math.floor(raw / 1e6) // nanoseconds
-    else if (raw < 1e12) ms = Math.floor(raw * 1000) // seconds
+    else if (raw < 1e12) ms = Math.round(raw * 1000) // seconds / $msec decimal
     const d = new Date(ms)
     return Number.isNaN(d.getTime()) ? null : d.toISOString()
   }
   if (typeof raw === 'string' && raw.trim()) {
     const s = raw.trim()
+    // Numeric epoch seconds / Nginx $msec string (e.g. "1763640000.123") or ms/ns string
+    if (/^\d+(?:\.\d{1,9})?$/.test(s)) {
+      const num = Number(s)
+      if (!Number.isFinite(num) || num <= 0) return null
+      let ms = num
+      if (num > 1e15) ms = Math.floor(num / 1e6)
+      else if (num < 1e12) ms = Math.round(num * 1000)
+      const d = new Date(ms)
+      return Number.isNaN(d.getTime()) ? null : d.toISOString()
+    }
     // Apache Combined Log timestamp: 20/Nov/2026:12:00:00 +0900
     const apacheRe = /^(\d{2})\/([A-Za-z]{3})\/(\d{4}):(\d{2}:\d{2}:\d{2})\s*([+-]\d{4})$/
     const m = apacheRe.exec(s)
@@ -366,7 +377,7 @@ export function adaptHostingLogRecord(
     }
 
     case 'nginx': {
-      const ts = toIsoTimestamp(r.time_iso8601 ?? r.time_local ?? r.timestamp)
+      const ts = toIsoTimestamp(r.time_iso8601 ?? r.msec ?? r.time_local ?? r.timestamp)
       if (!ts) return null
       const { path, query } = splitPathAndQuery(String(r.request_uri ?? r.uri ?? '/'))
       const sigHeaders = extractRfc9421FromHeaders({
@@ -879,7 +890,7 @@ export function ingestSignedLogBatch(
       )
     }
 
-    // Unknown non-browser UA quorum tracking (10 req AND 3 distinct networks — §7.3)
+    // Unknown non-browser UA quorum tracking (10 req AND 3 distinct networks within same salt epoch — §7.3)
     if (
       options.unknown_ua_quorum &&
       row.user_agent &&
@@ -887,10 +898,12 @@ export function ingestSignedLogBatch(
       !decision.has_request_time_automation_evidence
     ) {
       const networkKey = pseudonyms.quorum ?? prefix ?? 'unknown_net'
+      const quorumEpoch = row.observed_at.slice(0, 7)
       const qEntry = options.unknown_ua_quorum.record({
         raw_ua: row.user_agent,
         network_key: networkKey,
         observed_at: row.observed_at,
+        quorum_epoch: quorumEpoch,
       })
       quorumUpdates.push(qEntry)
     }

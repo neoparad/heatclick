@@ -92,26 +92,93 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-function normalizeProbsWithFloor(
+/**
+ * Exact idempotent projection onto the floored probability simplex (`[H-07]`):
+ * $$\Delta_{\epsilon} = \left\{ p \in \mathbb{R}^K : p_k \ge \epsilon,\; \sum_{k=0}^{K-1} p_k = 1 \right\}$$
+ *
+ * Uses active-set proportional water-filling:
+ * 1. Normalizes positive weights $w_k$ onto $\Delta_0$ ($q_k = w_k / \sum_j w_j$).
+ * 2. Iteratively clamps any coordinate $p_k < \epsilon$ to $\epsilon$ and redistributes remaining
+ *    mass $1 - m \epsilon$ proportionally across unclamped coordinates (converges in $\le K$ steps).
+ * 3. Strictly idempotent: for any $p \in \Delta_\epsilon$, `normalizeProbsWithFloor(p, K, eps)`
+ *    returns $p$ unchanged (`max |f(f(w)) - f(w)| < 1e-15`), eliminating double-flooring shrinkage!
+ */
+export function normalizeProbsWithFloor(
   raw: readonly number[],
   numArms: number,
   floor: number
 ): number[] {
-  const out = new Array<number>(numArms);
-  let sum = 0;
-  for (let k = 0; k < numArms; k++) {
+  const kCount = Math.max(1, numArms);
+  const effectiveFloor = Math.min(Math.max(0, floor), 1 / kCount);
+  const q = new Array<number>(kCount);
+  let rawSum = 0;
+  for (let k = 0; k < kCount; k += 1) {
     const v = Number.isFinite(raw[k]) && raw[k] > 0 ? raw[k] : 0;
-    out[k] = v;
-    sum += v;
+    q[k] = v;
+    rawSum += v;
   }
-  if (sum <= 0) {
-    for (let k = 0; k < numArms; k++) out[k] = 1 / numArms;
-    return out;
+  if (rawSum <= 0) {
+    for (let k = 0; k < kCount; k += 1) q[k] = 1 / kCount;
+    return q;
   }
-  const freeMass = Math.max(0, 1 - numArms * floor);
-  for (let k = 0; k < numArms; k++) {
-    out[k] = floor + freeMass * (out[k] / sum);
+  for (let k = 0; k < kCount; k += 1) {
+    q[k] /= rawSum;
   }
+
+  const out = new Array<number>(kCount).fill(0);
+  const clamped = new Uint8Array(kCount);
+  let clampedCount = 0;
+
+  for (let iter = 0; iter < kCount; iter += 1) {
+    const remMass = Math.max(0, 1 - clampedCount * effectiveFloor);
+    const unclampedCount = kCount - clampedCount;
+    if (unclampedCount <= 0) {
+      break;
+    }
+
+    let activeSum = 0;
+    for (let k = 0; k < kCount; k += 1) {
+      if (clamped[k] === 0) activeSum += q[k];
+    }
+
+    if (activeSum <= 1e-15) {
+      const share = remMass / unclampedCount;
+      for (let k = 0; k < kCount; k += 1) {
+        if (clamped[k] === 0) out[k] = share;
+      }
+      break;
+    }
+
+    let newlyClamped = false;
+    for (let k = 0; k < kCount; k += 1) {
+      if (clamped[k] === 1) continue;
+      const candidate = remMass * (q[k] / activeSum);
+      if (candidate < effectiveFloor - 1e-15) {
+        clamped[k] = 1;
+        out[k] = effectiveFloor;
+        clampedCount += 1;
+        newlyClamped = true;
+      } else {
+        out[k] = candidate;
+      }
+    }
+
+    if (!newlyClamped) {
+      break;
+    }
+  }
+
+  // Exact final normalization drift cleanup (< 1e-16) preserving floor
+  let finalSum = 0;
+  let maxIdx = 0;
+  for (let k = 0; k < kCount; k += 1) {
+    finalSum += out[k];
+    if (out[k] > out[maxIdx]) maxIdx = k;
+  }
+  if (Math.abs(1 - finalSum) > 0 && out[maxIdx] + (1 - finalSum) >= effectiveFloor) {
+    out[maxIdx] += 1 - finalSum;
+  }
+
   return out;
 }
 

@@ -8,6 +8,7 @@ export {
   DEFAULT_JURISDICTION_MATRIX,
   GuardedStorageAdapter,
   minConsentMode,
+  normalizeRegionClass,
   resolveBrowserConsent,
   stepDownConsentMode,
 } from './consent';
@@ -22,6 +23,7 @@ export {
 export {
   BehaviourCaptureEngine,
   MAX_CONVERSION_RULES,
+  normalizeConversionRule,
   type BehaviourEngineOptions,
   type InternalBlockState,
   type InternalFieldState,
@@ -30,6 +32,7 @@ export {
   type InternalSectionState,
   type MultiClickStat,
   type NoEffectClickStat,
+  type NormalizedConversionRule,
   type ReplayEmissionDecision,
 } from './behaviour';
 export { UgokiBrowserSdk, computeAdaptiveHeartbeatSec } from './sdk';
@@ -40,6 +43,7 @@ export {
   buildValidatedCustomEvent,
   containsPiiShape,
   createBrowserSegmentCompatClient,
+  safeDecodePercentForPiiCheck,
   type BrowserSegmentCompatOptions,
   type CustomEventDefinition,
   type CustomEventEnvelope,

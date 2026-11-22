@@ -508,4 +508,57 @@ describe('Bundle 4-G: Generative Model Thin Layer (Muse Glimmer 30B / Gemma 4), 
     expect(brief.ranked_next_actions[0].rank).toBe(1);
     expect(brief.cannot_say).toHaveLength(1);
   });
+
+  test('[M-18] iterative stack scanners in jev-client and provider reject forbidden payloads nested at depth 25 and handle cyclic graphs safely', async () => {
+    const costGuard = new LlmCostBudgetGuard({ inference_max_usd: 1, jev_max_usd: 1, retry_max_usd: 1 });
+    const publicText = wrapPublicPageTextForLlm('公開ページ本文テキスト');
+    const jev = new JevPublicPageClient({
+      gates: {
+        contractRetentionDeletionSigned: true,
+        crossBorderRegionApproved: true,
+        japaneseHumanEvalPassed300: true,
+      },
+      costGuard,
+    });
+
+    // Build depth-25 nested object with a cycle AND forbidden `visitor_id` / `search_query` at depth 25
+    const makeDeepNested = (leaf: Record<string, unknown>, depth = 25): Record<string, unknown> => {
+      let cur: Record<string, unknown> = { ...leaf };
+      for (let d = 0; d < depth; d += 1) {
+        cur = { [`level_${d}`]: cur };
+      }
+      cur.self_cycle = cur; // cyclic reference -> WeakSet prevents infinite loop!
+      return cur;
+    };
+
+    const deepJevReq = {
+      request_id: 'req_deep_25',
+      pinned_model_version: 'jev-judge-2026-10-01',
+      question_category: 'section_role',
+      public_section_text: publicText,
+      options: [
+        { option_id: 'a', label_ja: 'A' },
+        { option_id: 'b', label_ja: 'B' },
+      ],
+      extra_meta: makeDeepNested({ search_query: '格安SIM 比較' }, 25),
+    } as unknown as Parameters<JevPublicPageClient['judgePublicPageText']>[0];
+
+    await expect(jev.judgePublicPageText(deepJevReq)).rejects.toThrow(JevProhibitedPayloadError);
+
+    const provider = createDeterministicGenerativeProvider({
+      model_id: 'muse-glimmer-30b',
+      model_version: 'muse-30b-v1',
+      costGuard,
+    });
+    await expect(
+      provider.invoke({
+        task: 'cluster_naming',
+        runtime: 'server_gpu',
+        prompt_version: 'p1',
+        taxonomy_version: 't1',
+        preprocess_version: 'pr1',
+        aggregate_context: makeDeepNested({ visitor_id: 'vis_deep_25' }, 25),
+      })
+    ).rejects.toThrow(VisitorRowProhibitedError);
+  });
 });

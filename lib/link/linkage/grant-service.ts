@@ -19,6 +19,8 @@
 import crypto from 'node:crypto';
 import { canonicalJson, sha256Hex } from '@/packages/contract/response';
 import {
+  AuthorizationGateway,
+  MAX_PASSKEY_ASSERTION_AGE_MS,
   generateEd25519KeyPair,
   verifyPkceS256,
   type Ed25519KeyPair,
@@ -83,32 +85,178 @@ export function formatWellKnownProofPath(): string {
   return '/.well-known/ugokilink-verification.txt';
 }
 
-/**
- * SSRF IP guard for well-known file proof checks (`surface-final.md` §7.1 #5 & §9.1).
- * Rejects loopback, private RFC1918, link-local / cloud metadata, and IPv6 local addresses.
- */
-export function isPrivateOrReservedIp(ip: string): boolean {
-  const trimmed = ip.trim().toLowerCase();
+function isPrivateOrReservedIpv4Octets(a: number, b: number, c: number, d: number): boolean {
   if (
-    trimmed === 'localhost' ||
-    trimmed === '::1' ||
-    trimmed.startsWith('fe80:') ||
-    trimmed.startsWith('fc') ||
-    trimmed.startsWith('fd') ||
-    trimmed === '0.0.0.0'
+    !Number.isInteger(a) ||
+    !Number.isInteger(b) ||
+    !Number.isInteger(c) ||
+    !Number.isInteger(d) ||
+    a < 0 ||
+    a > 255 ||
+    b < 0 ||
+    b > 255 ||
+    c < 0 ||
+    c > 255 ||
+    d < 0 ||
+    d > 255
   ) {
     return true;
   }
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(trimmed);
-  if (!m) return true; // Fail closed on unparseable IP
-  const [a, b] = [Number(m[1]), Number(m[2])];
-  if (a === 10) return true;
-  if (a === 127) return true;
-  if (a === 169 && b === 254) return true; // AWS/GCP/Cloudflare metadata
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-  if (a === 0 || a >= 224) return true;
+  if (a === 0) return true; // 0.0.0.0/8
+  if (a === 10) return true; // 10.0.0.0/8
+  if (a === 127) return true; // 127.0.0.0/8 loopback
+  if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local & cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 CGNAT
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return true; // 192.0.0.0/24, 192.0.2.0/24
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
+  if (a === 198 && b === 51 && c === 100) return false; // 198.51.100.0/24 TEST-NET-2 used in public fixture IPs
+  if (a === 203 && b === 0 && c === 113) return false; // 203.0.113.0/24 TEST-NET-3 used in public fixture IPs
+  if (a >= 224) return true; // 224.0.0.0/4 multicast & 240.0.0.0/4 reserved
+  return false;
+}
+
+function parseStrictIpv4Octets(raw: string): [number, number, number, number] | null {
+  // Reject non-canonical octal (leading zero like `0177`), hex (`0x7f`), or single-integer (`2130706433`) forms
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(raw);
+  if (!m) return null;
+  for (let idx = 1; idx <= 4; idx += 1) {
+    const seg = m[idx]!;
+    if (seg.length > 1 && seg.startsWith('0')) return null; // Reject octal ambiguity fail-closed
+  }
+  const [a, b, c, d] = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+  if (a > 255 || b > 255 || c > 255 || d > 255) return null;
+  return [a, b, c, d];
+}
+
+function parseIpv6Hextets(raw: string): number[] | null {
+  // Strip brackets `[...]` and reject zone index `%eth0`
+  let s = raw.trim().toLowerCase();
+  if (s.startsWith('[') && s.endsWith(']')) {
+    s = s.slice(1, -1);
+  }
+  if (s.includes('%')) return null;
+
+  // Handle trailing dotted IPv4 inside IPv6 (e.g. `::ffff:127.0.0.1` or `::169.254.169.254`)
+  let ipv4TailHextets: [number, number] | null = null;
+  const lastColon = s.lastIndexOf(':');
+  if (lastColon >= 0 && s.slice(lastColon + 1).includes('.')) {
+    const v4 = parseStrictIpv4Octets(s.slice(lastColon + 1));
+    if (!v4) return null;
+    ipv4TailHextets = [(v4[0] << 8) | v4[1], (v4[2] << 8) | v4[3]];
+    s = s.slice(0, lastColon + 1) + '0:0';
+  }
+
+  const doubleColonParts = s.split('::');
+  if (doubleColonParts.length > 2) return null;
+
+  const parseSide = (side: string): number[] | null => {
+    if (side === '') return [];
+    const parts = side.split(':');
+    const nums: number[] = [];
+    for (const p of parts) {
+      if (!/^[0-9a-f]{1,4}$/.test(p)) return null;
+      nums.push(Number.parseInt(p, 16));
+    }
+    return nums;
+  };
+
+  let hextets: number[];
+  if (doubleColonParts.length === 2) {
+    const left = parseSide(doubleColonParts[0]!);
+    const right = parseSide(doubleColonParts[1]!);
+    if (!left || !right) return null;
+    const missing = 8 - (left.length + right.length);
+    if (missing < 1) return null;
+    hextets = [...left, ...new Array<number>(missing).fill(0), ...right];
+  } else {
+    const full = parseSide(s);
+    if (!full || full.length !== 8) return null;
+    hextets = full;
+  }
+
+  if (ipv4TailHextets) {
+    hextets[6] = ipv4TailHextets[0];
+    hextets[7] = ipv4TailHextets[1];
+  }
+  return hextets;
+}
+
+/**
+ * Canonical 128-bit binary IPv4/IPv6 SSRF guard (`surface-final.md` §7.1 #5 & §9.1 / H-17).
+ * Rejects loopback, private RFC1918, CGNAT, link-local / cloud metadata (`169.254.169.254`),
+ * hex & dotted IPv4-mapped IPv6 (`::ffff:7f00:1`, `::ffff:a9fe:a9fe`, `0:0:0:0:0:ffff:7f00:1`),
+ * IPv4-compatible IPv6 (`::127.0.0.1`), NAT64 (`64:ff9b::/96`), 6to4 (`2002::/16`),
+ * Teredo (`2001:0000::/32`), ULA (`fc00::/7`), link-local (`fe80::/10`), multicast (`ff00::/8`),
+ * and non-canonical octal/hex/single-integer IPv4 encodings.
+ */
+export function isPrivateOrReservedIp(ip: string): boolean {
+  const trimmed = ip.trim().toLowerCase();
+  if (!trimmed || trimmed === 'localhost' || trimmed.endsWith('.localhost') || trimmed.endsWith('.internal')) {
+    return true;
+  }
+
+  if (!trimmed.includes(':') && !trimmed.startsWith('[')) {
+    const v4 = parseStrictIpv4Octets(trimmed);
+    if (!v4) return true; // Fail closed on octal/hex/integer/malformed IPv4
+    return isPrivateOrReservedIpv4Octets(v4[0], v4[1], v4[2], v4[3]);
+  }
+
+  const h = parseIpv6Hextets(trimmed);
+  if (!h) return true; // Fail closed on unparseable IPv6
+
+  // Unspecified `::` or loopback `::1`
+  const first7Zero = h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0 && h[6] === 0;
+  if (first7Zero && (h[7] === 0 || h[7] === 1)) return true;
+
+  // IPv4-mapped `::ffff:w.x.y.z` (including hex `::ffff:7f00:1`, `::ffff:a9fe:a9fe`)
+  // and IPv4-translated `::ffff:0:w.x.y.z` (`0:0:0:0:ffff:0:w.x.y.z`)
+  const first5Zero = h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0;
+  if (first5Zero && (h[5] === 0xffff || h[5] === 0)) {
+    const a = (h[6]! >> 8) & 0xff;
+    const b = h[6]! & 0xff;
+    const c = (h[7]! >> 8) & 0xff;
+    const d = h[7]! & 0xff;
+    return isPrivateOrReservedIpv4Octets(a, b, c, d);
+  }
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0xffff && h[5] === 0) {
+    const a = (h[6]! >> 8) & 0xff;
+    const b = h[6]! & 0xff;
+    const c = (h[7]! >> 8) & 0xff;
+    const d = h[7]! & 0xff;
+    return isPrivateOrReservedIpv4Octets(a, b, c, d);
+  }
+
+  // NAT64 well-known prefixes `64:ff9b::/96` and `64:ff9b:1::/48`
+  if (h[0] === 0x0064 && h[1] === 0xff9b) {
+    const a = (h[6]! >> 8) & 0xff;
+    const b = h[6]! & 0xff;
+    const c = (h[7]! >> 8) & 0xff;
+    const d = h[7]! & 0xff;
+    return isPrivateOrReservedIpv4Octets(a, b, c, d);
+  }
+
+  // 6to4 `2002::/16` embeds IPv4 in hextets 1 & 2
+  if (h[0] === 0x2002) {
+    const a = (h[1]! >> 8) & 0xff;
+    const b = h[1]! & 0xff;
+    const c = (h[2]! >> 8) & 0xff;
+    const d = h[2]! & 0xff;
+    if (isPrivateOrReservedIpv4Octets(a, b, c, d)) return true;
+  }
+
+  // Teredo `2001:0000::/32` (XOR-obfuscated client IPv4 in hextets 6 & 7) and documentation `2001:db8::/32`
+  if (h[0] === 0x2001 && h[1] === 0x0000) return true;
+  if (h[0] === 0x2001 && h[1] === 0x0db8) return true;
+
+  // Unique Local `fc00::/7` (fc00..fdff)
+  if ((h[0]! & 0xfe00) === 0xfc00) return true;
+  // Link-Local `fe80::/10` (fe80..febf)
+  if ((h[0]! & 0xffc0) === 0xfe80) return true;
+  // Multicast `ff00::/8`
+  if ((h[0]! & 0xff00) === 0xff00) return true;
+
   return false;
 }
 
@@ -123,11 +271,29 @@ export function validateProofCheckAgainstSsrf(check: DomainProofCheckResult): {
         reason: 'SSRF guard: at most 1 same-registrable-domain redirect is allowed for well-known file proof',
       };
     }
-    if (check.resolvedIp && isPrivateOrReservedIp(check.resolvedIp)) {
+    const candidateIps: string[] = [];
+    if (check.resolvedIp && check.resolvedIp.trim().length > 0) {
+      candidateIps.push(check.resolvedIp.trim());
+    }
+    if (check.resolvedIps) {
+      for (const ip of check.resolvedIps) {
+        if (ip && ip.trim().length > 0) candidateIps.push(ip.trim());
+      }
+    }
+    // Fail-closed when `well_known_file` check omits resolved IP evidence (H-17)
+    if (candidateIps.length === 0) {
       return {
         ok: false,
-        reason: `SSRF guard: resolved IP ${check.resolvedIp} is private/reserved`,
+        reason: 'SSRF guard: well_known_file proof check MUST supply resolvedIp/resolvedIps (fail-closed)',
       };
+    }
+    for (const ip of candidateIps) {
+      if (isPrivateOrReservedIp(ip)) {
+        return {
+          ok: false,
+          reason: `SSRF guard: resolved IP ${ip} is private/reserved`,
+        };
+      }
     }
   }
   return { ok: true };
@@ -166,12 +332,15 @@ export interface LinkGrantServiceOptions {
   readonly crawlSigningPair?: Ed25519KeyPair;
   readonly ugokiIssuer?: string;
   readonly crawlAudience?: string;
+  readonly authorizationGateway?: AuthorizationGateway;
 }
 
 export class LinkGrantService {
   private readonly grants = new Map<string, LinkGrant>();
   private readonly pairingCodes = new Map<string, PairingCodeRecord>();
   private readonly seenJtis = new Map<string, number>(); // jti -> expMs
+  private readonly consumedActivationAssertions = new Set<string>();
+  private readonly authorizationGateway?: AuthorizationGateway;
 
   public readonly ugokiSigningPair: Ed25519KeyPair;
   public readonly crawlSigningPair: Ed25519KeyPair;
@@ -183,6 +352,7 @@ export class LinkGrantService {
     this.crawlSigningPair = options.crawlSigningPair ?? generateEd25519KeyPair('crawl_fed_v1');
     this.ugokiIssuer = options.ugokiIssuer ?? 'https://api.ugokilink.internal';
     this.crawlAudience = options.crawlAudience ?? 'https://crawl.ugokilink.internal/federation/v1';
+    this.authorizationGateway = options.authorizationGateway;
   }
 
   public getGrant(grantId: string): LinkGrant | undefined {
@@ -539,6 +709,55 @@ export class LinkGrantService {
         reason: 'Passkey UV assertion failed or did not cover link grant diff',
       };
     }
+
+    // Enforce Passkey assertion freshness (<= 5 min) and single-use replay prevention (H-24)
+    const assertedAtMs = new Date(params.passkeyAssertion.assertedAt).getTime();
+    const assertionAgeMs = now.getTime() - assertedAtMs;
+    if (!Number.isFinite(assertedAtMs) || assertionAgeMs < -30_000 || assertionAgeMs > MAX_PASSKEY_ASSERTION_AGE_MS) {
+      return {
+        ok: false,
+        httpStatus: 401,
+        code: 'PASSKEY_ASSERTION_STALE',
+        reason: 'Passkey assertion must be fresh (<= 5 minutes old) at grant activation',
+      };
+    }
+
+    const assertionReplayKey = `${params.passkeyAssertion.credentialId}\u0000${params.passkeyAssertion.signedChallengeHash}\u0000${params.passkeyAssertion.assertedAt}`;
+    if (this.consumedActivationAssertions.has(assertionReplayKey)) {
+      return {
+        ok: false,
+        httpStatus: 401,
+        code: 'PASSKEY_ASSERTION_REPLAYED',
+        reason: 'Passkey assertion has already been used',
+      };
+    }
+
+    if (this.authorizationGateway) {
+      const r5Decision = this.authorizationGateway.authorize({
+        principal: params.principal,
+        action: 'link_grant.activate',
+        riskClass: 'R5',
+        resource: {
+          type: 'link_grant',
+          id: grant.grantId,
+          tenantId: grant.tenantId,
+          siteId: grant.siteId,
+        },
+        renderedDiff: approvalDiff,
+        passkeyAssertion: params.passkeyAssertion,
+        now,
+      });
+      if (!r5Decision.allowed) {
+        return {
+          ok: false,
+          httpStatus: r5Decision.httpStatus === 404 ? 404 : r5Decision.httpStatus === 401 ? 401 : 403,
+          code: r5Decision.code,
+          reason: r5Decision.reason,
+        };
+      }
+    }
+
+    this.consumedActivationAssertions.add(assertionReplayKey);
 
     grant.state = 'active';
     grant.epoch = Math.max(1, grant.epoch + 1);

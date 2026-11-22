@@ -19,7 +19,10 @@ import {
 } from '@/packages/contract/ledgers';
 import {
   buildResponseEnvelope,
+  canonicalJson,
   createDataLayerMetric,
+  isUntrustedValue,
+  isVerifiedMetricValue,
   sha256Hex,
   wrapUntrusted,
   type EvidenceRef,
@@ -176,17 +179,148 @@ export class EmptyUnconnectedRepository implements SurfaceDataRepository {
 }
 
 // =========================================================================
-// 2. Cost-Unit Rate Limiter (§11.9)
+// 2. Bounded TTL Store & Cost-Unit Rate Limiter (§11.9 & [L-03])
 // =========================================================================
+
+/**
+ * Bounded LRU/FIFO + TTL map preventing unbounded memory growth on idempotency,
+ * rate-limit, and MCP session state (`[L-03]`).
+ */
+export class BoundedTtlMap<V> {
+  private readonly store = new Map<string, { value: V; expiresAtMs: number }>();
+  public readonly maxEntries: number;
+  public readonly ttlMs: number;
+
+  constructor(options?: { readonly maxEntries?: number; readonly ttlMs?: number }) {
+    this.maxEntries = Math.max(1, Math.floor(options?.maxEntries ?? 4_096));
+    this.ttlMs = Math.max(1, Math.floor(options?.ttlMs ?? 3_600_000));
+  }
+
+  public get(key: string, nowMs: number = Date.now()): V | undefined {
+    const entry = this.store.get(key);
+    if (!entry) return undefined;
+    if (nowMs >= entry.expiresAtMs) {
+      this.store.delete(key);
+      return undefined;
+    }
+    // Refresh LRU order
+    this.store.delete(key);
+    this.store.set(key, entry);
+    return entry.value;
+  }
+
+  public set(key: string, value: V, nowMs: number = Date.now()): void {
+    if (this.store.has(key)) {
+      this.store.delete(key);
+    }
+    if (this.store.size >= this.maxEntries) {
+      this.sweepExpired(nowMs);
+    }
+    while (this.store.size >= this.maxEntries) {
+      const oldestKey = this.store.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.store.delete(oldestKey);
+    }
+    this.store.set(key, { value, expiresAtMs: nowMs + this.ttlMs });
+  }
+
+  public delete(key: string): boolean {
+    return this.store.delete(key);
+  }
+
+  public sweepExpired(nowMs: number = Date.now()): number {
+    let removed = 0;
+    for (const [k, entry] of this.store.entries()) {
+      if (nowMs >= entry.expiresAtMs) {
+        this.store.delete(k);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  public getActiveCount(nowMs: number = Date.now()): number {
+    this.sweepExpired(nowMs);
+    return this.store.size;
+  }
+}
+
+export function brandDataNumericLeaves<T>(
+  value: T,
+  provenanceRef: string,
+  createdAt: string
+): T {
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === 'boolean' ||
+    typeof value === 'string'
+  ) {
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return value;
+    return createDataLayerMetric(value, provenanceRef, {
+      authority: 'data_layer',
+      createdAt,
+    }) as unknown as T;
+  }
+  if (isVerifiedMetricValue(value) || isUntrustedValue(value)) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, idx) =>
+      brandDataNumericLeaves(item, `${provenanceRef}[${idx}]`, createdAt)
+    ) as unknown as T;
+  }
+  if (typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = brandDataNumericLeaves(v, `${provenanceRef}.${k}`, createdAt);
+    }
+    return out as T;
+  }
+  return value;
+}
 
 export class CostUnitRateLimiter {
   private readonly buckets = new Map<string, { used: number; windowStartMs: number }>();
   private readonly windowMs: number;
   private readonly maxUnitsPerWindow: number;
+  private readonly maxBuckets: number;
 
-  constructor(options?: { readonly windowMs?: number; readonly maxUnitsPerWindow?: number }) {
+  constructor(options?: {
+    readonly windowMs?: number;
+    readonly maxUnitsPerWindow?: number;
+    readonly maxBuckets?: number;
+  }) {
     this.windowMs = options?.windowMs ?? 60_000;
     this.maxUnitsPerWindow = options?.maxUnitsPerWindow ?? 120;
+    this.maxBuckets = Math.max(1, Math.floor(options?.maxBuckets ?? 4_096));
+  }
+
+  private evictExpiredAndBound(nowMs: number): void {
+    if (this.buckets.size < this.maxBuckets) return;
+    for (const [k, b] of this.buckets.entries()) {
+      if (nowMs - b.windowStartMs >= this.windowMs) {
+        this.buckets.delete(k);
+      }
+    }
+    while (this.buckets.size >= this.maxBuckets) {
+      const oldestKey = this.buckets.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.buckets.delete(oldestKey);
+    }
+  }
+
+  public getActiveBucketCount(now: Date = new Date()): number {
+    const nowMs = now.getTime();
+    for (const [k, b] of this.buckets.entries()) {
+      if (nowMs - b.windowStartMs >= this.windowMs) {
+        this.buckets.delete(k);
+      }
+    }
+    return this.buckets.size;
   }
 
   public consume(
@@ -200,6 +334,10 @@ export class CostUnitRateLimiter {
     const nowMs = now.getTime();
     let bucket = this.buckets.get(key);
     if (!bucket || nowMs - bucket.windowStartMs >= this.windowMs) {
+      if (bucket) {
+        this.buckets.delete(key);
+      }
+      this.evictExpiredAndBound(nowMs);
       bucket = { used: 0, windowStartMs: nowMs };
       this.buckets.set(key, bucket);
     }
@@ -393,9 +531,31 @@ export interface SurfacePipelineDependencies {
   readonly segments?: SegmentRegistry;
   readonly goals?: GoalRegistry;
   readonly rateLimiter?: CostUnitRateLimiter;
+  readonly idempotencyMaxEntries?: number;
+  readonly idempotencyTtlMs?: number;
   readonly askHandler?: (ctx: {
     readonly principal: VerifiedPrincipal;
     readonly site: SiteRuntimeConfig;
+    readonly body: Readonly<Record<string, unknown>>;
+    readonly now: Date;
+  }) => SurfaceExecutionResult;
+  readonly recommendHandler?: (ctx: {
+    readonly principal: VerifiedPrincipal;
+    readonly site: SiteRuntimeConfig;
+    readonly body: Readonly<Record<string, unknown>>;
+    readonly now: Date;
+  }) => SurfaceExecutionResult;
+  readonly decisionHandler?: (ctx: {
+    readonly principal: VerifiedPrincipal;
+    readonly site: SiteRuntimeConfig;
+    readonly body: Readonly<Record<string, unknown>>;
+    readonly now: Date;
+  }) => SurfaceExecutionResult;
+  readonly heatmapHandler?: (ctx: {
+    readonly operationId: 'getHeatmapArtifact' | 'renderHeatmapImage';
+    readonly principal: VerifiedPrincipal;
+    readonly site: SiteRuntimeConfig;
+    readonly params: Readonly<Record<string, unknown>>;
     readonly body: Readonly<Record<string, unknown>>;
     readonly now: Date;
   }) => SurfaceExecutionResult;
@@ -409,7 +569,14 @@ export class SurfacePipeline {
   public readonly segments: SegmentRegistry;
   public readonly goals: GoalRegistry;
   public readonly rateLimiter: CostUnitRateLimiter;
+  private readonly idempotencyStore: BoundedTtlMap<{
+    readonly payloadHash: string;
+    readonly result: SurfaceExecutionResult;
+  }>;
   private readonly askHandler?: SurfacePipelineDependencies['askHandler'];
+  private readonly recommendHandler?: SurfacePipelineDependencies['recommendHandler'];
+  private readonly decisionHandler?: SurfacePipelineDependencies['decisionHandler'];
+  private readonly heatmapHandler?: SurfacePipelineDependencies['heatmapHandler'];
   private readonly notificationsBySite = new Map<string, SiteNotification[]>();
 
   constructor(deps: SurfacePipelineDependencies) {
@@ -420,7 +587,57 @@ export class SurfacePipeline {
     this.segments = deps.segments ?? new SegmentRegistry();
     this.goals = deps.goals ?? new GoalRegistry();
     this.rateLimiter = deps.rateLimiter ?? new CostUnitRateLimiter();
+    this.idempotencyStore = new BoundedTtlMap({
+      maxEntries: deps.idempotencyMaxEntries ?? 4_096,
+      ttlMs: deps.idempotencyTtlMs ?? 24 * 3_600_000,
+    });
     this.askHandler = deps.askHandler;
+    this.recommendHandler = deps.recommendHandler;
+    this.decisionHandler = deps.decisionHandler;
+    this.heatmapHandler = deps.heatmapHandler;
+  }
+
+  public getIdempotencyEntryCount(now: Date = new Date()): number {
+    return this.idempotencyStore.getActiveCount(now.getTime());
+  }
+
+  public authenticateCaller(params: {
+    readonly bearerToken?: string;
+    readonly sessionPrincipal?: VerifiedPrincipal;
+    readonly clientIp?: string;
+    readonly dpopThumbprint?: string;
+    readonly siteId?: string;
+    readonly forbidPublicBrowserKey?: boolean;
+    readonly now?: Date;
+  }):
+    | { readonly ok: true; readonly principal: VerifiedPrincipal }
+    | { readonly ok: false; readonly httpStatus: number; readonly code: string; readonly reason: string } {
+    const now = params.now ?? new Date();
+    const res = this.resolvePrincipal(
+      {
+        operationId: '__auth_only__',
+        channel: 'rest',
+        bearerToken: params.bearerToken,
+        sessionPrincipal: params.sessionPrincipal,
+        clientIp: params.clientIp,
+        dpopThumbprint: params.dpopThumbprint,
+        siteId: params.siteId,
+        now,
+      },
+      now
+    );
+    if (!res.ok) {
+      return res;
+    }
+    if (params.forbidPublicBrowserKey && res.principal.credentialKind === 'ugk_pub') {
+      return {
+        ok: false,
+        httpStatus: 403,
+        code: 'BROWSER_KEY_FORBIDDEN',
+        reason: 'Publishable browser keys (ugk_pub_*) are forbidden on this endpoint',
+      };
+    }
+    return res;
   }
 
   public addNotification(notification: SiteNotification): void {
@@ -510,7 +727,9 @@ export class SurfacePipeline {
     const targetSiteId =
       inv.siteId ??
       (typeof inv.body?.siteId === 'string' ? inv.body.siteId : undefined) ??
-      (typeof inv.params?.siteId === 'string' ? inv.params.siteId : undefined);
+      (typeof inv.body?.site_id === 'string' ? inv.body.site_id : undefined) ??
+      (typeof inv.params?.siteId === 'string' ? inv.params.siteId : undefined) ??
+      (typeof inv.params?.site_id === 'string' ? inv.params.site_id : undefined);
 
     if (!targetSiteId) {
       return {
@@ -576,6 +795,46 @@ export class SurfacePipeline {
       };
     }
 
+    // Step 3b: Bounded Idempotency-Key store check on mutating operations ([L-03])
+    const idemRaw = inv.idempotencyKey?.trim();
+    const idemStoreKey =
+      op.riskClass !== 'R0' && idemRaw
+        ? `${principal.tenantId}:${principal.principalId}:${op.operationId}:${idemRaw}`
+        : null;
+    const idemPayloadHash = idemStoreKey
+      ? sha256Hex(
+          canonicalJson({
+            siteId: targetSiteId,
+            params: inv.params ?? {},
+            body: inv.body ?? {},
+          })
+        )
+      : null;
+
+    if (idemStoreKey && idemPayloadHash) {
+      const cachedIdem = this.idempotencyStore.get(idemStoreKey, now.getTime());
+      if (cachedIdem) {
+        if (cachedIdem.payloadHash !== idemPayloadHash) {
+          return {
+            httpStatus: 409,
+            headers: versionHeaders,
+            error: {
+              code: 'IDEMPOTENCY_KEY_PAYLOAD_MISMATCH',
+              message: 'Idempotency-Key was already used with a different request payload',
+              auditEntryId: authz.auditEntryId,
+            },
+          };
+        }
+        return {
+          ...cachedIdem.result,
+          headers: {
+            ...cachedIdem.result.headers,
+            'X-UGOKI-Idempotent-Replay': 'true',
+          },
+        };
+      }
+    }
+
     // Step 4: Cost-unit rate limiter (§11.9)
     const rateCheck = this.rateLimiter.consume(
       `${principal.tenantId}:${principal.credentialId}`,
@@ -622,7 +881,15 @@ export class SurfacePipeline {
     };
 
     // Step 6: Execute operation and serialize through single `buildResponseEnvelope` (I1–I7)
-    return this.dispatchOperation(op, principal, siteCfg, inv, authz, enrichedHeaders, now);
+    const execResult = this.dispatchOperation(op, principal, siteCfg, inv, authz, enrichedHeaders, now);
+    if (idemStoreKey && idemPayloadHash && execResult.httpStatus >= 200 && execResult.httpStatus < 300) {
+      this.idempotencyStore.set(
+        idemStoreKey,
+        { payloadHash: idemPayloadHash, result: execResult },
+        now.getTime()
+      );
+    }
+    return execResult;
   }
 
   private defaultResidency(site: SiteRuntimeConfig): ResidencyBlock {
@@ -705,7 +972,7 @@ export class SurfacePipeline {
               interval: null,
             },
           },
-          data: cap,
+          data: brandDataNumericLeaves(cap, `cap:${site.siteId}`, nowIso),
         });
         return { httpStatus: 200, headers, envelope };
       }
@@ -965,7 +1232,7 @@ export class SurfacePipeline {
               interval: null,
             },
           },
-          data: { rows: safeRows },
+          data: brandDataNumericLeaves({ rows: safeRows }, ref.ref_id, nowIso),
         });
         return { httpStatus: 200, headers, envelope };
       }
@@ -990,7 +1257,7 @@ export class SurfacePipeline {
               interval: null,
             },
           },
-          data: { segments: list },
+          data: brandDataNumericLeaves({ segments: list }, ref.ref_id, nowIso),
         });
         return { httpStatus: 200, headers, envelope };
       }
@@ -1032,7 +1299,7 @@ export class SurfacePipeline {
               interval: null,
             },
           },
-          data: { segment: created },
+          data: brandDataNumericLeaves({ segment: created }, ref.ref_id, nowIso),
         });
         return { httpStatus: 200, headers, envelope };
       }
@@ -1144,11 +1411,15 @@ export class SurfacePipeline {
           residency,
           usage: usageBlock,
           measures: funnel.measures,
-          data: {
-            consentBlocked: funnel.consentBlocked,
-            funnelSteps: funnel.steps,
-            pathEdges: paths.edges,
-          },
+          data: brandDataNumericLeaves(
+            {
+              consentBlocked: funnel.consentBlocked,
+              funnelSteps: funnel.steps,
+              pathEdges: paths.edges,
+            },
+            ref.ref_id,
+            nowIso
+          ),
         });
         return { httpStatus: 200, headers, envelope };
       }
@@ -1215,7 +1486,7 @@ export class SurfacePipeline {
               interval: null,
             },
           },
-          data: summary,
+          data: brandDataNumericLeaves(summary, ref.ref_id, nowIso),
         });
         return { httpStatus: 200, headers, envelope };
       }
@@ -1251,7 +1522,7 @@ export class SurfacePipeline {
               interval: null,
             },
           },
-          data: { notifications: all },
+          data: brandDataNumericLeaves({ notifications: all }, ref.ref_id, nowIso),
         });
         return { httpStatus: 200, headers, envelope };
       }
@@ -1290,7 +1561,7 @@ export class SurfacePipeline {
                 interval: null,
               },
             },
-            data: { certificate: cert },
+            data: brandDataNumericLeaves({ certificate: cert }, ref.ref_id, nowIso),
           });
           return { httpStatus: 200, headers, envelope };
         }
@@ -1316,7 +1587,7 @@ export class SurfacePipeline {
               interval: null,
             },
           },
-          data: { disclosure },
+          data: brandDataNumericLeaves({ disclosure }, ref.ref_id, nowIso),
         });
         return { httpStatus: 200, headers, envelope };
       }
@@ -1342,7 +1613,7 @@ export class SurfacePipeline {
               unmet_gates: [{ id: 'surf.deletion', required: 1, observed: 0, unlock: 'Complete daily mask (<=24h), purge (<=7d), and certify (<=14d)' }],
             },
           },
-          data: { deletionRequest: authz.destructionRequest },
+          data: brandDataNumericLeaves({ deletionRequest: authz.destructionRequest }, ref.ref_id, nowIso),
         });
         return { httpStatus: 202, headers, envelope };
       }
@@ -1367,7 +1638,7 @@ export class SurfacePipeline {
               interval: null,
             },
           },
-          data: { goals: list },
+          data: brandDataNumericLeaves({ goals: list }, ref.ref_id, nowIso),
         });
         return { httpStatus: 200, headers, envelope };
       }
@@ -1409,7 +1680,7 @@ export class SurfacePipeline {
               interval: null,
             },
           },
-          data: { goal },
+          data: brandDataNumericLeaves({ goal }, ref.ref_id, nowIso),
         });
         return { httpStatus: 200, headers, envelope };
       }
@@ -1510,6 +1781,110 @@ export class SurfacePipeline {
             },
           },
           data: { operationId: op.operationId, siteId: site.siteId, auditEntryId: authz.auditEntryId },
+        });
+        return { httpStatus: 200, headers, envelope };
+      }
+
+      case 'evaluateDecision': {
+        if (this.decisionHandler) {
+          const res = this.decisionHandler({ principal, site, body: inv.body ?? {}, now });
+          return { ...res, headers: { ...headers, ...res.headers } };
+        }
+        const ref = makeRef('ledger', `decision_unwired:${site.siteId}`);
+        const envelope = buildResponseEnvelope({
+          window,
+          freshness: { data_through: nowIso, lag_s: 0, sources: {}, stale: true },
+          coverage: { ratio: 0, denominator_n: 0 },
+          lineage: { schema_version: '2.0', def_ver: 1, collection_gen: 'v3' },
+          residency,
+          usage: usageBlock,
+          measures: {
+            decision_issued: {
+              value: null,
+              unit: 'decisions',
+              status: 'not_collected',
+              reason: 'Strongly-consistent decision control store not connected',
+              evidence: { level: 'observed', exactness: 'exact', criteria: [], refs: [ref], scope: `site:${site.siteId}` },
+              sample: null,
+              interval: null,
+              unmet_gates: [{ id: 'del.D3', required: 1, observed: 0, unlock: 'Connect strongly-consistent control store' }],
+            },
+          },
+          data: { siteId: site.siteId, status: 'control_store_unconnected' },
+        });
+        return { httpStatus: 200, headers, envelope };
+      }
+
+      case 'recommendItems':
+      case 'recommendSiteItems': {
+        if (this.recommendHandler) {
+          const res = this.recommendHandler({
+            principal,
+            site,
+            body: { ...(inv.body ?? {}), site_id: site.siteId },
+            now,
+          });
+          return { ...res, headers: { ...headers, ...res.headers } };
+        }
+        const ref = makeRef('query', `rec_unwired:${site.siteId}`);
+        const envelope = buildResponseEnvelope({
+          window,
+          freshness: { data_through: nowIso, lag_s: 0, sources: {}, stale: false },
+          coverage: { ratio: 0, denominator_n: 0 },
+          lineage: { schema_version: '2.0', def_ver: 2, collection_gen: 'v3' },
+          residency,
+          usage: usageBlock,
+          measures: {
+            items_returned: {
+              value: null,
+              unit: 'count',
+              status: 'not_collected',
+              reason: 'Recommendation catalog not connected for this site',
+              evidence: { level: 'observed', exactness: 'exact', criteria: [], refs: [ref], scope: `site:${site.siteId}` },
+              sample: null,
+              interval: null,
+              unmet_gates: [{ id: 'rec.ec_catalog_connected', required: 1, observed: 0, unlock: 'Connect product or content catalog provider' }],
+            },
+          },
+          data: { siteId: site.siteId, items: [] },
+        });
+        return { httpStatus: 200, headers, envelope };
+      }
+
+      case 'getHeatmapArtifact':
+      case 'renderHeatmapImage': {
+        if (this.heatmapHandler) {
+          const res = this.heatmapHandler({
+            operationId: op.operationId,
+            principal,
+            site,
+            params: inv.params ?? {},
+            body: inv.body ?? {},
+            now,
+          });
+          return { ...res, headers: { ...headers, ...res.headers } };
+        }
+        const ref = makeRef('query', `heatmap_unwired:${site.siteId}`);
+        const envelope = buildResponseEnvelope({
+          window,
+          freshness: { data_through: nowIso, lag_s: 0, sources: {}, stale: false },
+          coverage: { ratio: 0, denominator_n: 0 },
+          lineage: { schema_version: '2.0', def_ver: 1, collection_gen: 'v3' },
+          residency,
+          usage: usageBlock,
+          measures: {
+            heatmap_units: {
+              value: null,
+              unit: 'units',
+              status: 'not_collected',
+              reason: 'Heatmap server telemetry dataset provider not connected for this site',
+              evidence: { level: 'observed', exactness: 'exact', criteria: [], refs: [ref], scope: `site:${site.siteId}` },
+              sample: null,
+              interval: null,
+              unmet_gates: [{ id: 'store.G-7', required: 1, observed: 0, unlock: 'Connect server-side heatmap dataset provider' }],
+            },
+          },
+          data: { siteId: site.siteId, artifacts: [] },
         });
         return { httpStatus: 200, headers, envelope };
       }

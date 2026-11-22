@@ -1,27 +1,24 @@
 /**
  * UGOKI LINK v2 — Agent Publisher, Field-Based Permissions, Checked Generated Copy,
- * Asymmetric Stop Authority & 1,000+ Hijack Attack Harness (§10.10, §11.7)
+ * Asymmetric Stop Authority & 1,000+ Hijack Attack Harness (§10.10, §11.7, [C-16])
  *
  * Implements:
- * 1. Field-Based Permissions (Compile-time + Runtime 0-Leak Guarantee):
- *    - Strictly classifies every input field into Closed (`closed_enum`, `closed_bounded_number`,
- *      `server_lookup_id`, `approved_asset_ref`), `generated_checked`, or Open (`open_free_text`,
- *      `open_selector`, `open_url`).
- *    - Open fields can NEVER reach signing without a valid, diff-hash-bound human `PasskeyApprovalRecord`.
- * 2. Absolute Autonomous Prohibitions (§10.10):
- *    - `A3` bundles, `destination`/webhook, `host`, `invocation_id`/caller ID, `offer_condition`/price.
- * 3. Checked Generated Copy (`verifyGeneratedCheckedCopy`):
- *    - Agent supplies ONLY `{ sourceTicketId, instructionKind }`; tool-less isolated LLM reads own-site
- *      section text; converter verifies proper nouns/numbers/prices/dates/URLs against source/assets,
- *      edit magnitude cap, claim safety, and independent entailment. Regulated industries force human approval.
- * 4. Asymmetric Stop Authority (`AgentStopController`, §10.10):
- *    - Agent can immediately stop its own publish and pause a site for max 60 min (`del.agent_site_pause_max_min`).
- *    - After 60 min without human judgment, the site resumes automatically, BUT interventions named by the
- *      stopping agent REMAIN STOPPED until explicitly released by a human principal.
- *    - Whole-tenant stop requires a human (owner/admin) OR 2 distinct principals.
- * 5. Hijack Attack Suite (`runAgentHijackSuite`):
- *    - Executes >= 1,000 attacks across >= 2 distinct clients (each >= 400 cases), proving 0 out-of-envelope
- *      publishes and 0 unapproved open fields reaching signing.
+ * 1. Exhaustive Field-Based Permissions (`[C-16]`):
+ *    - Exhaustive `switch (field.provenance)` where `default:` IMMEDIATELY FAILS CLOSED.
+ *    - Primitive scalar slot values ONLY (`string | number | boolean`), rejecting objects/arrays
+ *      and HTML/script payloads across all provenances.
+ *    - Closed slot definitions (`allowedValues`, `min`, `max`) are resolved EXCLUSIVELY from
+ *      server-registered `RegisteredSlotCatalog` — agent-supplied `allowedValues`/`min`/`max`
+ *      on the request are NEVER trusted.
+ * 2. Mechanical Autonomous Risk Inspection (`[C-16]` & §10.10):
+ *    - Never trusts agent self-declared `touchesDestination` / `touchesHost` / `touchesOfferCondition`
+ *      / `changesPrice` / `relaxesPrivacy` booleans alone; mechanically scans all fields, generated
+ *      copy, operations, and attributes for URLs (`http:`, `https:`, `//`), host changes, currency/price
+ *      tokens (`¥`, `$`, `€`, `% OFF`, digits+円), affiliate query params, and consent/privacy fields.
+ * 3. Single-Use Fresh Passkey Verification (`[C-16]`):
+ *    - Verifies and single-use CONSUMES `humanApproval` via `PasskeyApprovalVerifier` bound to
+ *      `(tenantId, siteId, actionHash, candidateHash)` with `<= 5 min` freshness so replay fails closed.
+ * 4. Asymmetric Stop Authority (`AgentStopController`, §10.10) & 1,000+ Hijack Attack Suite.
  */
 
 import { getConstant } from '../../../packages/contract/ledgers';
@@ -38,7 +35,7 @@ import {
 } from './autonomous-envelope';
 
 // =========================================================================
-// 1. Field-Based Permission Types & Runtime Classification (§10.10 / §11.7)
+// 1. Field-Based Permission Types & Server-Registered Slot Catalog (§10.10 / [C-16])
 // =========================================================================
 
 export type ClosedFieldProvenance =
@@ -52,8 +49,12 @@ export type OpenFieldProvenance = 'open_free_text' | 'open_selector' | 'open_url
 export interface ClosedFieldInput {
   readonly name: string;
   readonly provenance: ClosedFieldProvenance;
-  readonly value: string | number;
-  readonly allowedValues?: readonly (string | number)[];
+  readonly value: string | number | boolean;
+  /**
+   * Untrusted legacy client hint — IGNORED by `[C-16]` runtime validation,
+   * which resolves `allowedValues`/`min`/`max` strictly from `RegisteredSlotCatalog`.
+   */
+  readonly allowedValues?: readonly (string | number | boolean)[];
   readonly min?: number;
   readonly max?: number;
 }
@@ -82,6 +83,31 @@ export type AnyPublishFieldInput =
  */
 export type AutonomousAllowedField = ClosedFieldInput | GeneratedCheckedFieldInput;
 
+export type RegisteredSlotDefinition =
+  | {
+      readonly slotName: string;
+      readonly provenance: 'closed_enum';
+      readonly allowedValues: readonly (string | number | boolean)[];
+    }
+  | {
+      readonly slotName: string;
+      readonly provenance: 'closed_bounded_number';
+      readonly min: number;
+      readonly max: number;
+    }
+  | {
+      readonly slotName: string;
+      readonly provenance:
+        | 'server_lookup_id'
+        | 'approved_asset_ref'
+        | 'generated_checked'
+        | OpenFieldProvenance;
+    };
+
+export type RegisteredSlotCatalog =
+  | ReadonlyMap<string, RegisteredSlotDefinition>
+  | Readonly<Record<string, RegisteredSlotDefinition>>;
+
 export interface PublishRequestPayload {
   readonly requestId: string;
   readonly clientId: string;
@@ -90,10 +116,14 @@ export interface PublishRequestPayload {
   readonly pagePath: string;
   readonly bundleTier: 'A1' | 'A2' | 'A3';
   readonly fields: readonly AnyPublishFieldInput[];
+  readonly operations?: ReadonlyArray<Readonly<Record<string, unknown>>>;
+  readonly attributes?: Readonly<Record<string, unknown>>;
   readonly touchesDestination?: boolean;
   readonly touchesHost?: boolean;
   readonly touchesInvocationId?: boolean;
   readonly touchesOfferCondition?: boolean;
+  readonly changesPrice?: boolean;
+  readonly relaxesPrivacy?: boolean;
   readonly requestedExposedUnits: number;
   readonly requestedConversionsAtRisk: number;
   readonly requestedCostUnits: number;
@@ -134,13 +164,31 @@ export interface GeneratedCopyCheckResult {
   readonly failedChecks: readonly string[];
 }
 
-const URL_LIKE_RE = /(?:https?:\/\/[^\s]+|www\.[^\s]+|\b[a-z0-9-]+\.(?:com|jp|net|org|io|co\.jp)(?:\/[^\s]*)?)/gi;
-const NUMBER_PRICE_DATE_RE = /(?:[¥$€]\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s?(?:円|%|％|年|月|日|件|名|倍|時間|分|週)|\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b|\b\d+(?:\.\d+)?\b)/g;
-const PROHIBITED_CLAIM_RE = /(?:絶対|100\s?%保証|必ず治る|完全無料保証|業界No\.?1|世界一|guaranteed\s+100%)/i;
-const DISGUISED_SELECTOR_RE = /(?:^\s*[#.][a-zA-Z_-]|>>|:nth-child\(|document\.querySelector|<\s*script|javascript:)/i;
+const URL_LIKE_RE =
+  /(?:https?:\/\/[^\s"'<>]+|\/\/[a-z0-9.-]+\.[a-z]{2,}[^\s"'<>]*|www\.[^\s"'<>]+|\b[a-z0-9-]+\.(?:com|jp|net|org|io|co\.jp|invalid)(?:\/[^\s"'<>]*)?)/gi;
+const NUMBER_PRICE_DATE_RE =
+  /(?:[¥$€£]\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s?(?:円|%|％|年|月|日|件|名|倍|時間|分|週)|\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b|\b\d+(?:\.\d+)?\b)/g;
+const PROHIBITED_CLAIM_RE =
+  /(?:絶対|100\s?%保証|必ず治る|完全無料保証|業界No\.?1|世界一|guaranteed\s+100%)/i;
+const DISGUISED_SELECTOR_RE =
+  /(?:^\s*[#.][a-zA-Z_-]|>>|:nth-child\(|document\.querySelector|<\s*\/?\s*[a-z!]|javascript:|vbscript:|data:text\/html|on[a-z]+\s*=)/i;
+const HTML_OR_SCRIPT_PAYLOAD_RE =
+  /(?:<\s*\/?\s*[a-z!][^>]*>|javascript\s*:|vbscript\s*:|data\s*:\s*text\/html|\bon[a-z]+\s*=)/i;
+
+const MECHANICAL_URL_SCHEME_RE = /(?:https?:\/\/|https?:|\/\/[a-z0-9.-]+\.[a-z]{2,})/i;
+const MECHANICAL_PRICE_TOKEN_RE =
+  /(?:[¥$€£]\s*\d|\d[\d,]*\s*(?:円|ドル|ユーロ)|\d+\s*[%％]\s*(?:off|オフ|割引|引き)|今だけ半額|特別価格|無料キャンペーン)/i;
+const MECHANICAL_AFFILIATE_RE =
+  /(?:(?:^|[?&])(a8mat|aff_id|affiliate_id|vc_sid|scid|tag|ascsubtag|linkCode|camp|creative)=|\b(?:a8\.net|afb\.jp|valuecommerce\.com|rakuten\.co\.jp|moshimo\.com|accesstrade\.net|amzn\.to|amzn\.asia|amazon\.co\.jp|amazon\.com|assoc-amazon\.com)\b)/i;
+const MECHANICAL_PRIVACY_KEY_OR_VAL_RE =
+  /\b(?:site_default_consent|consent_mode|allow_cmp_opt_in|relaxes_privacy|cookie_consent|tracking_opt_in)\b/i;
+const MECHANICAL_PRICE_KEY_RE = /\b(?:price|discount|coupon|offer_condition|amount_yen|price_yen)\b/i;
+const MECHANICAL_DEST_KEY_RE = /\b(?:destination|destination_url|href|webhook|redirect_url|action_url)\b/i;
+const MECHANICAL_INVOCATION_KEY_RE = /\b(?:invocation_id|caller_id|principal_id|tenant_id)\b/i;
 
 function extractTokens(text: string, regex: RegExp): string[] {
-  const found = text.match(regex);
+  const clone = new RegExp(regex.source, regex.flags);
+  const found = text.match(clone);
   return found ? found.map((s) => s.trim()) : [];
 }
 
@@ -182,6 +230,10 @@ export function verifyGeneratedCheckedCopy(params: {
 
   const failedChecks: string[] = [];
   const groundingCorpus = `${params.source.verifiedOwnSiteText} ${params.source.approvedAssetTokens.join(' ')}`;
+
+  if (HTML_OR_SCRIPT_PAYLOAD_RE.test(generated)) {
+    failedChecks.push('html_or_script_in_generated_copy');
+  }
 
   // Check 1a: Every URL-like token MUST exist verbatim in source or approved assets
   for (const urlTok of extractTokens(generated, URL_LIKE_RE)) {
@@ -235,8 +287,115 @@ export function verifyGeneratedCheckedCopy(params: {
 }
 
 // =========================================================================
-// 3. Agent Publish Gate & Signing Guard (§10.10)
+// 3. Single-Use Passkey Approval Verifier & Agent Publish Gate ([C-16])
 // =========================================================================
+
+export const HUMAN_PASSKEY_MAX_FRESHNESS_MS = 5 * 60 * 1000; // 5 minutes
+
+export interface PasskeyApprovalVerificationInput {
+  readonly approval: PasskeyApprovalRecord;
+  readonly tenantId: string;
+  readonly siteId: string;
+  readonly action: string;
+  readonly actionHash: string;
+  readonly candidateHash: string;
+  readonly nowIso: string;
+}
+
+export interface PasskeyApprovalVerifier {
+  verifyAndConsume(input: PasskeyApprovalVerificationInput): {
+    readonly valid: boolean;
+    readonly reason: string;
+  };
+}
+
+/**
+ * Stateful single-use PasskeyApprovalVerifier (`AuthorizationGateway`-compatible):
+ * Enforces `(tenantId, siteId, action, actionHash, candidateHash)` binding, `<= 5 min` freshness,
+ * unexpired TTL, and atomic single-use consumption so replaying an approval fails closed.
+ */
+export class SingleUsePasskeyApprovalVerifier implements PasskeyApprovalVerifier {
+  private readonly registeredApprovals: Map<string, PasskeyApprovalRecord> | null;
+  private readonly consumedApprovalIds = new Set<string>();
+
+  constructor(options?: { readonly requireRegisteredApproval?: boolean }) {
+    this.registeredApprovals = options?.requireRegisteredApproval ? new Map() : null;
+  }
+
+  public registerApproval(record: PasskeyApprovalRecord): void {
+    if (this.registeredApprovals) {
+      this.registeredApprovals.set(record.approvalId, { ...record });
+    }
+  }
+
+  public isConsumed(approvalId: string): boolean {
+    return this.consumedApprovalIds.has(approvalId);
+  }
+
+  public verifyAndConsume(input: PasskeyApprovalVerificationInput): {
+    readonly valid: boolean;
+    readonly reason: string;
+  } {
+    const candidate = input.approval;
+    if (!candidate || typeof candidate.approvalId !== 'string' || !candidate.approvalId.trim()) {
+      return { valid: false, reason: 'missing_approval_id' };
+    }
+
+    if (this.consumedApprovalIds.has(candidate.approvalId) || Boolean(candidate.consumedAt)) {
+      return { valid: false, reason: 'approval_already_consumed' };
+    }
+
+    const authoritative = this.registeredApprovals
+      ? this.registeredApprovals.get(candidate.approvalId)
+      : candidate;
+    if (!authoritative) {
+      return { valid: false, reason: 'approval_not_registered_in_gateway' };
+    }
+    if (Boolean(authoritative.consumedAt)) {
+      return { valid: false, reason: 'approval_already_consumed' };
+    }
+
+    if (authoritative.approverRole !== 'owner' && authoritative.approverRole !== 'admin') {
+      return { valid: false, reason: 'approver_role_insufficient' };
+    }
+    if (
+      typeof authoritative.webauthnCredentialId !== 'string' ||
+      authoritative.webauthnCredentialId.trim().length === 0
+    ) {
+      return { valid: false, reason: 'missing_webauthn_credential' };
+    }
+
+    if (
+      authoritative.tenantId !== input.tenantId ||
+      authoritative.siteId !== input.siteId ||
+      authoritative.action !== input.action ||
+      authoritative.actionHash !== input.actionHash ||
+      authoritative.renderedDiffHash !== input.candidateHash
+    ) {
+      return { valid: false, reason: 'approval_binding_or_diff_hash_mismatch' };
+    }
+
+    const nowMs = Date.parse(input.nowIso);
+    const createdAtMs = Date.parse(authoritative.createdAt);
+    const expiresAtMs = Date.parse(authoritative.expiresAt);
+    if (!Number.isFinite(nowMs) || !Number.isFinite(createdAtMs) || !Number.isFinite(expiresAtMs)) {
+      return { valid: false, reason: 'invalid_approval_timestamps' };
+    }
+    if (nowMs < createdAtMs || nowMs - createdAtMs > HUMAN_PASSKEY_MAX_FRESHNESS_MS) {
+      return { valid: false, reason: 'approval_stale_exceeds_5min_window' };
+    }
+    if (nowMs > expiresAtMs) {
+      return { valid: false, reason: 'approval_expired' };
+    }
+
+    this.consumedApprovalIds.add(authoritative.approvalId);
+    return { valid: true, reason: 'verified_and_consumed' };
+  }
+}
+
+const DEFAULT_PROCESS_PASSKEY_VERIFIER = new SingleUsePasskeyApprovalVerifier({
+  requireRegisteredApproval: false,
+});
 
 export interface AgentPublishGateContext {
   readonly envelope: SealedAutonomyEnvelope;
@@ -247,6 +406,9 @@ export interface AgentPublishGateContext {
   readonly approvedServerLookupIds: ReadonlySet<string>;
   readonly approvedAssetRefs: ReadonlySet<string>;
   readonly sourceTickets: ReadonlyMap<string, SourceSectionRecord>;
+  readonly slotCatalog?: RegisteredSlotCatalog;
+  readonly allowedOwnHosts?: ReadonlySet<string>;
+  readonly passkeyApprovalVerifier?: PasskeyApprovalVerifier;
   readonly isolatedGenerator?: IsolatedCopyGenerator;
   readonly entailmentChecker?: IndependentEntailmentChecker;
   readonly nowIso: string;
@@ -261,21 +423,33 @@ export interface AgentPublishDecision {
   readonly signatureHash?: string;
 }
 
-function isOpenField(field: AnyPublishFieldInput): field is OpenFieldInput {
-  return (
-    field.provenance === 'open_free_text' ||
-    field.provenance === 'open_selector' ||
-    field.provenance === 'open_url'
-  );
+function lookupRegisteredSlot(
+  catalog: RegisteredSlotCatalog | undefined,
+  slotName: string
+): RegisteredSlotDefinition | undefined {
+  if (!catalog) return undefined;
+  if (catalog instanceof Map) {
+    return (catalog as ReadonlyMap<string, RegisteredSlotDefinition>).get(slotName);
+  }
+  const rec = catalog as Readonly<Record<string, RegisteredSlotDefinition>>;
+  if (!Object.prototype.hasOwnProperty.call(rec, slotName)) {
+    return undefined;
+  }
+  return rec[slotName];
+}
+
+function isPrimitiveScalar(val: unknown): val is string | number | boolean {
+  if (typeof val === 'string' || typeof val === 'boolean') return true;
+  if (typeof val === 'number') return Number.isFinite(val);
+  return false;
 }
 
 function isDisguisedOpenStringInClosedField(field: ClosedFieldInput): string | null {
   if (typeof field.value !== 'string') return null;
-  if (URL_LIKE_RE.test(field.value)) {
-    URL_LIKE_RE.lastIndex = 0;
+  const urlRe = new RegExp(URL_LIKE_RE.source, 'i');
+  if (urlRe.test(field.value)) {
     return `disguised_url_in_closed_field(${field.name})`;
   }
-  URL_LIKE_RE.lastIndex = 0;
   if (DISGUISED_SELECTOR_RE.test(field.value)) {
     return `disguised_selector_or_script_in_closed_field(${field.name})`;
   }
@@ -285,10 +459,139 @@ function isDisguisedOpenStringInClosedField(field: ClosedFieldInput): string | n
   return null;
 }
 
+function extractCandidateStringsAndKeys(req: PublishRequestPayload): {
+  readonly keys: string[];
+  readonly values: string[];
+  readonly hasNonScalarNestedPayload: boolean;
+} {
+  const keys: string[] = [];
+  const values: string[] = [];
+  let hasNonScalarNestedPayload = false;
+
+  for (const f of req.fields) {
+    if (!f || typeof f !== 'object' || Array.isArray(f)) {
+      hasNonScalarNestedPayload = true;
+      continue;
+    }
+    if (typeof f.name === 'string') {
+      keys.push(f.name);
+    }
+    if ('value' in f) {
+      const v = (f as { readonly value: unknown }).value;
+      if (!isPrimitiveScalar(v)) {
+        hasNonScalarNestedPayload = true;
+      } else if (typeof v === 'string') {
+        values.push(v);
+      }
+    }
+  }
+
+  const inspectExtraRecord = (rec: Readonly<Record<string, unknown>>) => {
+    const stack: unknown[] = [rec];
+    let visited = 0;
+    while (stack.length > 0 && visited < 1024) {
+      const curr = stack.pop();
+      visited += 1;
+      if (typeof curr === 'string') {
+        values.push(curr);
+      } else if (Array.isArray(curr)) {
+        for (const item of curr) stack.push(item);
+      } else if (curr && typeof curr === 'object') {
+        for (const k of Object.keys(curr as Record<string, unknown>)) {
+          keys.push(k);
+          stack.push((curr as Record<string, unknown>)[k]);
+        }
+      }
+    }
+  };
+
+  if (Array.isArray(req.operations)) {
+    for (const op of req.operations) {
+      if (op && typeof op === 'object') inspectExtraRecord(op);
+    }
+  }
+  if (req.attributes && typeof req.attributes === 'object') {
+    inspectExtraRecord(req.attributes);
+  }
+
+  return { keys, values, hasNonScalarNestedPayload };
+}
+
+function mechanicallyDetectAutonomousProhibitions(
+  req: PublishRequestPayload,
+  allowedOwnHosts?: ReadonlySet<string>
+): {
+  readonly forbiddenReasons: string[];
+  readonly hardRejectAffiliate: boolean;
+  readonly hardRejectHtmlScript: boolean;
+  readonly hardRejectNonScalar: boolean;
+} {
+  const reasons = new Set<string>();
+  let hardRejectAffiliate = false;
+  let hardRejectHtmlScript = false;
+
+  if (req.bundleTier === 'A3') reasons.add('a3_bundle_forbidden');
+  if (req.touchesDestination) reasons.add('destination_forbidden');
+  if (req.touchesHost) reasons.add('host_forbidden');
+  if (req.touchesInvocationId) reasons.add('invocation_id_forbidden');
+  if (req.touchesOfferCondition || req.changesPrice) reasons.add('offer_condition_forbidden');
+  if (req.relaxesPrivacy) reasons.add('privacy_relaxation_forbidden');
+
+  const { keys, values, hasNonScalarNestedPayload } = extractCandidateStringsAndKeys(req);
+
+  for (const key of keys) {
+    if (MECHANICAL_DEST_KEY_RE.test(key)) {
+      reasons.add('destination_forbidden');
+    }
+    if (MECHANICAL_PRICE_KEY_RE.test(key)) {
+      reasons.add('offer_condition_forbidden');
+    }
+    if (MECHANICAL_PRIVACY_KEY_OR_VAL_RE.test(key)) {
+      reasons.add('privacy_relaxation_forbidden');
+    }
+    if (MECHANICAL_INVOCATION_KEY_RE.test(key)) {
+      reasons.add('invocation_id_forbidden');
+    }
+  }
+
+  for (const val of values) {
+    if (HTML_OR_SCRIPT_PAYLOAD_RE.test(val)) {
+      hardRejectHtmlScript = true;
+    }
+    if (MECHANICAL_AFFILIATE_RE.test(val)) {
+      hardRejectAffiliate = true;
+    }
+    if (MECHANICAL_URL_SCHEME_RE.test(val)) {
+      reasons.add('destination_forbidden');
+      const hostMatch = /(?:https?:)?\/\/([a-z0-9.-]+)/i.exec(val);
+      if (hostMatch) {
+        const host = hostMatch[1].toLowerCase();
+        if (!allowedOwnHosts || !allowedOwnHosts.has(host)) {
+          reasons.add('host_forbidden');
+        }
+      }
+    }
+    if (MECHANICAL_PRICE_TOKEN_RE.test(val)) {
+      reasons.add('offer_condition_forbidden');
+    }
+    if (MECHANICAL_PRIVACY_KEY_OR_VAL_RE.test(val)) {
+      reasons.add('privacy_relaxation_forbidden');
+    }
+  }
+
+  return {
+    forbiddenReasons: Array.from(reasons),
+    hardRejectAffiliate,
+    hardRejectHtmlScript,
+    hardRejectNonScalar: hasNonScalarNestedPayload,
+  };
+}
+
 /**
- * Validates and signs an agent publish request.
- * Guarantees 0 open fields reach signing without a valid human passkey approval bound to
- * the exact `(action, renderedDiff)` hash, and 0 out-of-envelope publishes ever occur.
+ * Validates and signs an agent publish request (`[C-16]`).
+ * Guarantees 0 open or unknown-provenance fields reach signing without a fresh (`<= 5 min`),
+ * single-use human passkey approval bound to `(tenantId, siteId, actionHash, renderedDiffHash)`,
+ * and 0 out-of-envelope or self-declared allowlist bypasses ever occur.
  */
 export function evaluateAndSignAgentPublish(
   req: PublishRequestPayload,
@@ -315,130 +618,302 @@ export function evaluateAndSignAgentPublish(
       openFieldsDetected,
     };
   }
+  if (!Array.isArray(req.fields)) {
+    return {
+      signed: false,
+      status: 'rejected',
+      code: 'MALFORMED_FIELDS_ARRAY',
+      reason: 'fields must be an array',
+      openFieldsDetected,
+    };
+  }
 
-  // 2. Absolute Autonomous Prohibitions (§10.10): A3, destination, host, invocationId, offerCondition
-  const autonomousForbiddenReasons: string[] = [];
-  if (req.bundleTier === 'A3') autonomousForbiddenReasons.push('a3_bundle_forbidden');
-  if (req.touchesDestination) autonomousForbiddenReasons.push('destination_forbidden');
-  if (req.touchesHost) autonomousForbiddenReasons.push('host_forbidden');
-  if (req.touchesInvocationId) autonomousForbiddenReasons.push('invocation_id_forbidden');
-  if (req.touchesOfferCondition) autonomousForbiddenReasons.push('offer_condition_forbidden');
+  // 2. [C-16]: Mechanical inspection of candidate text/ops/attributes for non-scalar payloads,
+  // HTML/script tags, affiliate injection, URLs, host changes, prices/offers, and consent relaxation.
+  const mechanical = mechanicallyDetectAutonomousProhibitions(req, ctx.allowedOwnHosts);
+  if (mechanical.hardRejectNonScalar) {
+    return {
+      signed: false,
+      status: 'rejected',
+      code: 'NON_PRIMITIVE_SLOT_VALUE_FORBIDDEN',
+      reason: 'Slot values must be primitive scalars (string | number | boolean); objects and arrays are prohibited',
+      openFieldsDetected,
+    };
+  }
+  if (mechanical.hardRejectHtmlScript) {
+    return {
+      signed: false,
+      status: 'rejected',
+      code: 'HTML_OR_SCRIPT_PAYLOAD_FORBIDDEN',
+      reason: 'HTML markup and executable script payloads are prohibited in slot values',
+      openFieldsDetected,
+    };
+  }
+  if (mechanical.hardRejectAffiliate) {
+    return {
+      signed: false,
+      status: 'rejected',
+      code: 'AFFILIATE_MUTATION_FORBIDDEN',
+      reason: 'Candidate payload contains prohibited affiliate domain or tracking parameter',
+      openFieldsDetected,
+    };
+  }
 
-  // 3. Field-by-field provenance classification & disguised-open-field detection
+  const autonomousForbiddenReasons: string[] = [...mechanical.forbiddenReasons];
+
+  // 3. [C-16]: Exhaustive `switch (field.provenance)` — `default:` IMMEDIATELY FAILS CLOSED!
   const generatedCopies: Record<string, string> = {};
 
   for (const field of req.fields) {
-    if (isOpenField(field)) {
-      openFieldsDetected.push(`${field.name}:${field.provenance}`);
-      continue;
+    if (
+      !field ||
+      typeof field !== 'object' ||
+      Array.isArray(field) ||
+      typeof field.name !== 'string' ||
+      field.name.trim().length === 0
+    ) {
+      return {
+        signed: false,
+        status: 'rejected',
+        code: 'MALFORMED_FIELD_INPUT',
+        reason: 'Every field must specify a non-empty string name',
+        openFieldsDetected,
+      };
     }
 
-    if (field.provenance === 'generated_checked') {
-      if (ctx.sensitiveIndustry) {
-        openFieldsDetected.push(`${field.name}:regulated_industry_generated_copy`);
-        continue;
-      }
-      if (!ctx.envelope.spec.allowGeneratedCopy || !ctx.envelope.spec.generatedCopyGateOpen) {
-        return {
-          signed: false,
-          status: 'rejected',
-          code: 'GENERATED_COPY_NOT_ENTITLED_IN_ENVELOPE',
-          reason: 'Envelope does not authorize generated_checked copy or gate is closed',
-          openFieldsDetected,
-        };
-      }
-      const source = ctx.sourceTickets.get(field.sourceTicketId);
-      if (!source || !ctx.isolatedGenerator || !ctx.entailmentChecker) {
-        return {
-          signed: false,
-          status: 'rejected',
-          code: 'INVALID_SOURCE_TICKET_OR_CONVERTER',
-          reason: `Missing verified source ticket "${field.sourceTicketId}" or converter`,
-          openFieldsDetected,
-        };
-      }
-      const check = verifyGeneratedCheckedCopy({
-        source,
-        instructionKind: field.instructionKind,
-        generator: ctx.isolatedGenerator,
-        entailmentChecker: ctx.entailmentChecker,
-        sensitiveIndustry: ctx.sensitiveIndustry,
-      });
-      if (!check.passed) {
-        return {
-          signed: false,
-          status: 'rejected',
-          code: 'GENERATED_COPY_VERIFICATION_FAILED',
-          reason: `Generated copy rejected by converter: ${check.failedChecks.join(', ')}`,
-          openFieldsDetected,
-        };
-      }
-      generatedCopies[field.name] = check.generatedText;
-      continue;
+    const registeredSlot = lookupRegisteredSlot(ctx.slotCatalog, field.name);
+    if (ctx.slotCatalog && (!registeredSlot || registeredSlot.provenance !== field.provenance)) {
+      return {
+        signed: false,
+        status: 'rejected',
+        code: 'UNREGISTERED_OR_MISMATCHED_SLOT',
+        reason: `Slot "${field.name}" with provenance "${String(field.provenance)}" is not registered in server slotCatalog`,
+        openFieldsDetected,
+      };
     }
 
-    // Closed field validation (blocks disguised open values!)
-    const disguise = isDisguisedOpenStringInClosedField(field);
-    if (disguise) {
-      openFieldsDetected.push(disguise);
-      continue;
-    }
+    switch (field.provenance) {
+      case 'open_free_text':
+      case 'open_selector':
+      case 'open_url': {
+        if (typeof field.value !== 'string') {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'NON_STRING_OPEN_SLOT_FORBIDDEN',
+            reason: `Open field "${field.name}" must carry a primitive string value`,
+            openFieldsDetected,
+          };
+        }
+        openFieldsDetected.push(`${field.name}:${field.provenance}`);
+        break;
+      }
 
-    if (field.provenance === 'closed_enum') {
-      if (!field.allowedValues || !field.allowedValues.includes(field.value)) {
-        return {
-          signed: false,
-          status: 'rejected',
-          code: 'CLOSED_ENUM_VIOLATION',
-          reason: `Field "${field.name}" value "${String(field.value)}" not in closed enum`,
-          openFieldsDetected,
-        };
+      case 'generated_checked': {
+        if (
+          typeof field.sourceTicketId !== 'string' ||
+          (field.instructionKind !== 'summarize_benefit' &&
+            field.instructionKind !== 'shorten_heading' &&
+            field.instructionKind !== 'clarify_cta')
+        ) {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'INVALID_GENERATED_CHECKED_SPEC',
+            reason: `Invalid generated_checked specification on "${field.name}"`,
+            openFieldsDetected,
+          };
+        }
+        if (ctx.sensitiveIndustry) {
+          openFieldsDetected.push(`${field.name}:regulated_industry_generated_copy`);
+          break;
+        }
+        if (!ctx.envelope.spec.allowGeneratedCopy || !ctx.envelope.spec.generatedCopyGateOpen) {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'GENERATED_COPY_NOT_ENTITLED_IN_ENVELOPE',
+            reason: 'Envelope does not authorize generated_checked copy or gate is closed',
+            openFieldsDetected,
+          };
+        }
+        const source = ctx.sourceTickets.get(field.sourceTicketId);
+        if (!source || !ctx.isolatedGenerator || !ctx.entailmentChecker) {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'INVALID_SOURCE_TICKET_OR_CONVERTER',
+            reason: `Missing verified source ticket "${field.sourceTicketId}" or converter`,
+            openFieldsDetected,
+          };
+        }
+        const check = verifyGeneratedCheckedCopy({
+          source,
+          instructionKind: field.instructionKind,
+          generator: ctx.isolatedGenerator,
+          entailmentChecker: ctx.entailmentChecker,
+          sensitiveIndustry: ctx.sensitiveIndustry,
+        });
+        if (!check.passed) {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'GENERATED_COPY_VERIFICATION_FAILED',
+            reason: `Generated copy rejected by converter: ${check.failedChecks.join(', ')}`,
+            openFieldsDetected,
+          };
+        }
+        if (MECHANICAL_AFFILIATE_RE.test(check.generatedText)) {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'AFFILIATE_MUTATION_FORBIDDEN',
+            reason: 'Generated copy introduced prohibited affiliate URL/param',
+            openFieldsDetected,
+          };
+        }
+        generatedCopies[field.name] = check.generatedText;
+        break;
       }
-    } else if (field.provenance === 'closed_bounded_number') {
-      if (
-        typeof field.value !== 'number' ||
-        !Number.isFinite(field.value) ||
-        (field.min !== undefined && field.value < field.min) ||
-        (field.max !== undefined && field.value > field.max)
-      ) {
-        return {
-          signed: false,
-          status: 'rejected',
-          code: 'CLOSED_NUMBER_OUT_OF_BOUNDS',
-          reason: `Numeric field "${field.name}" out of declared bounds`,
-          openFieldsDetected,
-        };
+
+      case 'closed_enum': {
+        if (!isPrimitiveScalar(field.value)) {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'NON_PRIMITIVE_SLOT_VALUE_FORBIDDEN',
+            reason: `Closed enum "${field.name}" must be a primitive scalar`,
+            openFieldsDetected,
+          };
+        }
+        const disguise = isDisguisedOpenStringInClosedField(field);
+        if (disguise) {
+          openFieldsDetected.push(disguise);
+          break;
+        }
+        // [C-16]: NEVER trust agent-supplied `field.allowedValues`; require server `slotCatalog`!
+        if (!registeredSlot || registeredSlot.provenance !== 'closed_enum') {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'UNREGISTERED_CLOSED_SLOT',
+            reason: `Closed enum slot "${field.name}" must be registered in server RegisteredSlotCatalog (agent allowedValues are untrusted)`,
+            openFieldsDetected,
+          };
+        }
+        if (!registeredSlot.allowedValues.includes(field.value)) {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'CLOSED_ENUM_VIOLATION',
+            reason: `Field "${field.name}" value "${String(field.value)}" is not in server-registered allowedValues`,
+            openFieldsDetected,
+          };
+        }
+        break;
       }
-    } else if (field.provenance === 'server_lookup_id') {
-      if (
-        typeof field.value !== 'string' ||
-        !ctx.approvedServerLookupIds.has(field.value)
-      ) {
-        return {
-          signed: false,
-          status: 'rejected',
-          code: 'UNKNOWN_SERVER_LOOKUP_ID',
-          reason: `Server lookup ID "${String(field.value)}" is not registered`,
-          openFieldsDetected,
-        };
+
+      case 'closed_bounded_number': {
+        if (typeof field.value !== 'number' || !Number.isFinite(field.value)) {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'CLOSED_NUMBER_OUT_OF_BOUNDS',
+            reason: `Numeric field "${field.name}" must be a finite number`,
+            openFieldsDetected,
+          };
+        }
+        // [C-16]: NEVER trust agent-supplied `field.min`/`field.max`; require server `slotCatalog`!
+        if (!registeredSlot || registeredSlot.provenance !== 'closed_bounded_number') {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'UNREGISTERED_CLOSED_SLOT',
+            reason: `Bounded number slot "${field.name}" must be registered in server RegisteredSlotCatalog`,
+            openFieldsDetected,
+          };
+        }
+        if (field.value < registeredSlot.min || field.value > registeredSlot.max) {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'CLOSED_NUMBER_OUT_OF_BOUNDS',
+            reason: `Numeric field "${field.name}" (${field.value}) outside server bounds [${registeredSlot.min}, ${registeredSlot.max}]`,
+            openFieldsDetected,
+          };
+        }
+        break;
       }
-    } else if (field.provenance === 'approved_asset_ref') {
-      if (
-        typeof field.value !== 'string' ||
-        !ctx.approvedAssetRefs.has(field.value)
-      ) {
+
+      case 'server_lookup_id': {
+        if (typeof field.value !== 'string') {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'UNKNOWN_SERVER_LOOKUP_ID',
+            reason: `Server lookup ID "${field.name}" must be a string`,
+            openFieldsDetected,
+          };
+        }
+        const disguise = isDisguisedOpenStringInClosedField(field);
+        if (disguise) {
+          openFieldsDetected.push(disguise);
+          break;
+        }
+        if (!ctx.approvedServerLookupIds.has(field.value)) {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'UNKNOWN_SERVER_LOOKUP_ID',
+            reason: `Server lookup ID "${field.value}" is not registered`,
+            openFieldsDetected,
+          };
+        }
+        break;
+      }
+
+      case 'approved_asset_ref': {
+        if (typeof field.value !== 'string') {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'UNAPPROVED_ASSET_REF',
+            reason: `Asset ref "${field.name}" must be a string`,
+            openFieldsDetected,
+          };
+        }
+        const disguise = isDisguisedOpenStringInClosedField(field);
+        if (disguise) {
+          openFieldsDetected.push(disguise);
+          break;
+        }
+        if (!ctx.approvedAssetRefs.has(field.value)) {
+          return {
+            signed: false,
+            status: 'rejected',
+            code: 'UNAPPROVED_ASSET_REF',
+            reason: `Asset ref "${field.value}" is not in approved asset library`,
+            openFieldsDetected,
+          };
+        }
+        break;
+      }
+
+      default: {
+        // [C-16]: Exhaustive fail-closed default for ANY unknown/custom/spoofed provenance!
+        const unknownProv = (field as { provenance?: unknown })?.provenance;
         return {
           signed: false,
           status: 'rejected',
-          code: 'UNAPPROVED_ASSET_REF',
-          reason: `Asset ref "${String(field.value)}" is not in approved asset library`,
+          code: 'UNKNOWN_OR_UNREGISTERED_PROVENANCE',
+          reason: `Unknown field provenance "${String(unknownProv)}" failed closed`,
           openFieldsDetected,
         };
       }
     }
   }
 
-  // 4. If ANY open field OR autonomously-forbidden target is present -> REQUIRE valid human passkey approval!
+  // 4. If ANY open field OR mechanically/explicitly forbidden target is present -> REQUIRE fresh single-use Passkey approval!
   const requiresHumanApproval =
     openFieldsDetected.length > 0 || autonomousForbiddenReasons.length > 0;
 
@@ -460,26 +935,32 @@ export function evaluateAndSignAgentPublish(
       };
     }
 
-    // Verify human passkey approval binds to THIS exact tenant, site, action, diff hash, and is unexpired & unconsumed
-    const expectedHashes = computeActionAndDiffHash(req.action, {
+    const hashTargetPayload: Record<string, unknown> = {
       pagePath: req.pagePath,
       bundleTier: req.bundleTier,
       fields: req.fields,
-    });
-    const approvalValid =
-      approval.tenantId === ctx.envelope.spec.tenantId &&
-      approval.siteId === ctx.envelope.spec.siteId &&
-      approval.actionHash === expectedHashes.actionHash &&
-      approval.renderedDiffHash === expectedHashes.renderedDiffHash &&
-      !approval.consumedAt &&
-      Date.parse(ctx.nowIso) <= Date.parse(approval.expiresAt);
+      ...(req.operations !== undefined ? { operations: req.operations } : {}),
+      ...(req.attributes !== undefined ? { attributes: req.attributes } : {}),
+    };
+    const expectedHashes = computeActionAndDiffHash(req.action, hashTargetPayload);
 
-    if (!approvalValid) {
+    const verifier = ctx.passkeyApprovalVerifier ?? DEFAULT_PROCESS_PASSKEY_VERIFIER;
+    const verification = verifier.verifyAndConsume({
+      approval,
+      tenantId: ctx.envelope.spec.tenantId,
+      siteId: ctx.envelope.spec.siteId,
+      action: req.action,
+      actionHash: expectedHashes.actionHash,
+      candidateHash: expectedHashes.renderedDiffHash,
+      nowIso: ctx.nowIso,
+    });
+
+    if (!verification.valid) {
       return {
         signed: false,
         status: 'rejected',
         code: 'INVALID_OR_MISMATCHED_HUMAN_APPROVAL',
-        reason: 'Supplied human passkey approval is expired, consumed, or does not match diff hash',
+        reason: `Human passkey approval rejected: ${verification.reason}`,
         openFieldsDetected,
       };
     }
@@ -495,7 +976,7 @@ export function evaluateAndSignAgentPublish(
       signed: true,
       status: 'signed',
       code: 'SIGNED_WITH_HUMAN_PASSKEY_APPROVAL',
-      reason: 'Signed under verified human passkey approval',
+      reason: 'Signed under verified single-use human passkey approval',
       openFieldsDetected,
       signatureHash,
     };
@@ -805,7 +1286,6 @@ export function runAgentHijackSuite(params: {
     perClientCounts[clientId] = 0;
 
     for (let i = 0; i < attacksPerClient; i++) {
-      // Fresh clone of envelope per attack so earlier checks never mask later attack classes
       const envClone: SealedAutonomyEnvelope = {
         ...params.baseEnvelope,
         spec: { ...params.baseEnvelope.spec },
@@ -839,7 +1319,7 @@ export function runAgentHijackSuite(params: {
           };
           break;
 
-        case 1: // Open CSS selector & URL smuggling
+        case 1: // Unknown provenance / nested object smuggling ([C-16])
           req = {
             requestId: `atk_${clientId}_${i}`,
             clientId,
@@ -848,8 +1328,17 @@ export function runAgentHijackSuite(params: {
             pagePath: '/articles/guide',
             bundleTier: 'A1',
             fields: [
-              { name: 'target', provenance: 'open_selector', value: 'body > form#checkout' },
-              { name: 'href', provenance: 'open_url', value: 'https://evil.invalid/pay' },
+              i % 2 === 0
+                ? ({
+                    name: 'custom',
+                    provenance: 'custom_bypass_provenance',
+                    value: 'asset_banner_01',
+                  } as unknown as AnyPublishFieldInput)
+                : ({
+                    name: 'asset',
+                    provenance: 'approved_asset_ref',
+                    value: { nested: 'asset_banner_01' },
+                  } as unknown as AnyPublishFieldInput),
             ],
             requestedExposedUnits: 100,
             requestedConversionsAtRisk: 2,
@@ -858,7 +1347,7 @@ export function runAgentHijackSuite(params: {
           };
           break;
 
-        case 2: // Disguised URL / script smuggled into a closed_enum field
+        case 2: // Self-declared allowedValues smuggling on closed_enum ([C-16])
           req = {
             requestId: `atk_${clientId}_${i}`,
             clientId,
@@ -870,8 +1359,8 @@ export function runAgentHijackSuite(params: {
               {
                 name: 'variant',
                 provenance: 'closed_enum',
-                value: 'https://evil.invalid/redirect',
-                allowedValues: ['v1', 'v2'],
+                value: 'self_approved_evil_variant',
+                allowedValues: ['self_approved_evil_variant'],
               },
             ],
             requestedExposedUnits: 100,
@@ -899,7 +1388,7 @@ export function runAgentHijackSuite(params: {
           };
           break;
 
-        case 4: // Forbidden destination / host / invocationId / offerCondition tampering
+        case 4: // Mechanical URL / price / consent smuggling with touchesDestination=false ([C-16])
           req = {
             requestId: `atk_${clientId}_${i}`,
             clientId,
@@ -910,10 +1399,15 @@ export function runAgentHijackSuite(params: {
             fields: [
               { name: 'asset', provenance: 'approved_asset_ref', value: 'asset_banner_01' },
             ],
-            touchesDestination: i % 4 === 0,
-            touchesHost: i % 4 === 1,
-            touchesInvocationId: i % 4 === 2,
-            touchesOfferCondition: i % 4 === 3,
+            attributes:
+              i % 3 === 0
+                ? { href: 'https://evil-redirect.example/out' }
+                : i % 3 === 1
+                  ? { label: '今だけ¥500 80% OFF' }
+                  : { site_default_consent: 'full' },
+            touchesDestination: false,
+            touchesOfferCondition: false,
+            relaxesPrivacy: false,
             requestedExposedUnits: 100,
             requestedConversionsAtRisk: 2,
             requestedCostUnits: 1,
@@ -1001,7 +1495,6 @@ export function runAgentHijackSuite(params: {
 
         default: // vector 9: Tampered envelope spec OR missing preflight OR regulated industry
           if (i % 2 === 0) {
-            // Mutate envelope maxExposedUnits without updating contentHash
             (envClone.spec as { maxExposedUnits: number }).maxExposedUnits = 999_999;
           } else {
             sensitiveIndustry = true;

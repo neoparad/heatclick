@@ -1,3 +1,5 @@
+import { generateKeyPairSync } from 'node:crypto'
+
 import {
   SEGMENTER_CONTENT_HASH,
   segmentHtml,
@@ -18,6 +20,7 @@ import {
   SecondaryLabRenderer,
   allocateSectionUid,
   assertNotStubInProduction,
+  assertValidLinkGrant,
   computeDailyRenderCapacity,
   createPlaywrightRenderDriver,
   createSnapshotFromRender,
@@ -26,6 +29,7 @@ import {
   evaluateRobotsTxt,
   resolveSectionLineage,
   runOperabilityAudit,
+  signLinkGrantAssertion,
   type LinkGrantAssertion,
   type PlaywrightLikeBrowser,
   type PlaywrightLikeRoute,
@@ -41,14 +45,15 @@ function makeValidGrant(
     'probe:run',
   ],
 ): LinkGrantAssertion {
-  return {
+  return signLinkGrantAssertion({
     link_grant_id: 'grant_site_bihada_01',
+    tenant_id: 'tenant_1',
+    site_id: 'site_bihada',
     issued_at: '2026-11-20T11:58:00.000Z',
     expires_at: '2026-11-20T12:03:00.000Z', // 300s lifetime
     scopes,
     host_patterns: ['bihadashop.jp'],
-    signature: 'ed25519_sig_valid_test_assertion',
-  }
+  })
 }
 
 const SAMPLE_ARTICLE_HTML = `<!DOCTYPE html>
@@ -867,6 +872,154 @@ Disallow: /column/lotion-guide
       )
       expect(partialValidation.valid).toBe(true)
       expect(DEFAULT_LAB_BLOCKLIST.affiliateHosts.length).toBeGreaterThanOrEqual(20)
+    })
+  })
+
+  describe('5. [M-11] Cryptographic LinkGrantAssertion Verification & Canonical RenderJobClass Alignment', () => {
+    it('cryptographically verifies HMAC & Ed25519 LinkGrantAssertions and enforces host_patterns, tenant/site binding, and clock skew', async () => {
+      const stub = new DeterministicCrawlContractStub({
+        now: () => FIXED_NOW,
+        webhookSecret: 'custom-hmac-grant-secret',
+      })
+      const url = 'https://bihadashop.jp/column/lotion-guide'
+      stub.seedPage({ url, html: SAMPLE_ARTICLE_HTML })
+
+      const validSignedGrant = signLinkGrantAssertion(
+        {
+          link_grant_id: 'grant_hmac_01',
+          tenant_id: 'tenant_1',
+          site_id: 'site_bihada',
+          issued_at: '2026-11-20T11:58:00.000Z',
+          expires_at: '2026-11-20T12:02:00.000Z',
+          scopes: ['url:probe', 'structure:render', 'structure:identity', 'probe:run'],
+          host_patterns: ['*.bihadashop.jp', 'bihadashop.jp'],
+        },
+        { kind: 'hmac', secret: 'custom-hmac-grant-secret' },
+      )
+
+      const okRes = await stub.probeUrls({
+        tenant_id: 'tenant_1',
+        site_id: 'site_bihada',
+        link_grant: validSignedGrant,
+        urls: [url],
+      })
+      expect(okRes.results[0].status).toBe('ok')
+
+      // 1) Forged unverified string signature MUST be rejected
+      await expect(
+        stub.probeUrls({
+          tenant_id: 'tenant_1',
+          site_id: 'site_bihada',
+          link_grant: { ...validSignedGrant, signature: 'ed25519_sig_forged_dummy' },
+          urls: [url],
+        }),
+      ).rejects.toThrow(/signature/)
+
+      // 2) Post-signing payload tampering (widening host_patterns while keeping <=300s) MUST fail HMAC verification
+      await expect(
+        stub.probeUrls({
+          tenant_id: 'tenant_1',
+          site_id: 'site_bihada',
+          link_grant: {
+            ...validSignedGrant,
+            host_patterns: ['bihadashop.jp', 'attacker.example'],
+          },
+          urls: ['https://attacker.example/steal'],
+        }),
+      ).rejects.toThrow(/signature verification failed/)
+
+      // 3) Authorized signature used against an unauthorized target URL host MUST fail host_patterns check
+      await expect(
+        stub.probeUrls({
+          tenant_id: 'tenant_1',
+          site_id: 'site_bihada',
+          link_grant: validSignedGrant,
+          urls: ['https://other-unlisted-host.jp/secret'],
+        }),
+      ).rejects.toThrow(/host_patterns/)
+
+      // 4) Cross-tenant / cross-site replay of a valid signed grant MUST be rejected
+      await expect(
+        stub.probeUrls({
+          tenant_id: 'tenant_attacker',
+          site_id: 'site_bihada',
+          link_grant: validSignedGrant,
+          urls: [url],
+        }),
+      ).rejects.toThrow(/tenant_id mismatch/)
+
+      // 5) Ed25519 asymmetric signing & verification (matching key passes, wrong key fails)
+      const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+      const { publicKey: wrongPublicKey } = generateKeyPairSync('ed25519')
+      const edGrant = signLinkGrantAssertion(
+        {
+          link_grant_id: 'grant_ed25519_01',
+          tenant_id: 'tenant_1',
+          site_id: 'site_bihada',
+          issued_at: '2026-11-20T11:59:00.000Z',
+          expires_at: '2026-11-20T12:03:00.000Z',
+          scopes: ['url:probe', 'structure:render'],
+          host_patterns: ['bihadashop.jp'],
+        },
+        { kind: 'ed25519', privateKey },
+      )
+
+      expect(() =>
+        assertValidLinkGrant(edGrant, 'url:probe', FIXED_NOW, {
+          tenant_id: 'tenant_1',
+          site_id: 'site_bihada',
+          target_urls: [url],
+          ed25519_public_key: publicKey,
+        }),
+      ).not.toThrow()
+
+      expect(() =>
+        assertValidLinkGrant(edGrant, 'url:probe', FIXED_NOW, {
+          tenant_id: 'tenant_1',
+          site_id: 'site_bihada',
+          target_urls: [url],
+          ed25519_public_key: wrongPublicKey,
+        }),
+      ).toThrow(/signature verification failed/)
+    })
+
+    it('supports canonical full_render and identity_render job classes identically to full and id_only across renderer and snapshot export', async () => {
+      const stub = new DeterministicCrawlContractStub({ now: () => FIXED_NOW })
+      const grant = makeValidGrant()
+      const url = 'https://bihadashop.jp/column/lotion-guide'
+      stub.seedPage({ url, html: SAMPLE_ARTICLE_HTML })
+
+      const fullRenderExport = await stub.exportImmutableSnapshot({
+        tenant_id: 'tenant_1',
+        site_id: 'site_bihada',
+        page_id: 'page_101',
+        link_grant: grant,
+        url,
+        source_job_id: 'job_full_render_canonical',
+        job_class: 'full_render',
+      })
+      expect(fullRenderExport.status).toBe('ok')
+      expect(fullRenderExport.snapshot?.job_class).toBe('full_render')
+      expect(fullRenderExport.snapshot?.identity_key.dataset_kind).toBe('structure_snapshot_v2')
+      expect(fullRenderExport.snapshot?.doc_h_px).not.toBeNull()
+      expect(fullRenderExport.snapshot?.section_geometries).not.toBeNull()
+      expect(fullRenderExport.snapshot?.screenshot).not.toBeNull()
+
+      const idRenderExport = await stub.exportImmutableSnapshot({
+        tenant_id: 'tenant_1',
+        site_id: 'site_bihada',
+        page_id: 'page_101',
+        link_grant: grant,
+        url,
+        source_job_id: 'job_identity_render_canonical',
+        job_class: 'identity_render',
+      })
+      expect(idRenderExport.status).toBe('ok')
+      expect(idRenderExport.snapshot?.job_class).toBe('identity_render')
+      expect(idRenderExport.snapshot?.identity_key.dataset_kind).toBe('structure_identity_v1')
+      expect(idRenderExport.snapshot?.doc_h_px).toBeNull()
+      expect(idRenderExport.snapshot?.section_geometries).toBeNull()
+      expect(idRenderExport.snapshot?.screenshot).toBeNull()
     })
   })
 })

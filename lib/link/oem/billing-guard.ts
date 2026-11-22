@@ -88,6 +88,10 @@ export interface BillingUnitCandidate {
   readonly credentialKind: 'ugk_pub' | 'ugk_sec' | 'ugk_edge';
   readonly trust: TrustLevel;
   readonly stored: boolean;
+  /** UTC calendar day `YYYY-MM-DD` for daily prefix cap partitioning (M-04). */
+  readonly dayUtc?: string;
+  /** Event/receipt epoch ms used to derive `dayUtc` when `dayUtc` is omitted. */
+  readonly occurredAtMs?: number;
   readonly deliverySucceeded?: boolean; // Required true for destination_delivery
   readonly isRetry?: boolean;
   readonly isLabToken?: boolean;
@@ -160,9 +164,23 @@ function getInvoicingRecountRelTol(): number {
   return typeof entry?.value === 'number' ? entry.value : 0.001;
 }
 
+export const SHARED_DAILY_CONTINUITY_PREFIX_CAP = 500;
+const MAX_BILLING_GUARD_CACHE_ENTRIES = 50_000;
+
+function resolveBillingDayUtc(unit: BillingUnitCandidate): string {
+  if (unit.dayUtc && /^\d{4}-\d{2}-\d{2}$/.test(unit.dayUtc)) {
+    return unit.dayUtc;
+  }
+  if (typeof unit.occurredAtMs === 'number' && Number.isFinite(unit.occurredAtMs)) {
+    return new Date(unit.occurredAtMs).toISOString().slice(0, 10);
+  }
+  return new Date().toISOString().slice(0, 10);
+}
+
 export class LaneBillingGuard {
   private readonly seenDedupeKeys = new Set<string>();
   private readonly perPrefixLaneCounts = new Map<string, number>();
+  private readonly perPrefixDailyContinuityCounts = new Map<string, number>();
 
   /**
    * Evaluates whether a single unit is billable or held under §11.8 & §11.11 rules.
@@ -176,6 +194,8 @@ export class LaneBillingGuard {
       readonly siteBaselineSpikeExceeded?: boolean;
       /** For strict public-key flood defense: unattested public-key traffic above cap is held & non-billable. */
       readonly customNetworkCap?: number;
+      /** Optional cross-lane shared daily cap for non-attested `continuity` units from one network prefix (M-04). */
+      readonly sharedDailyContinuityCap?: number;
     }
   ): BillingUnitDecision {
     if (unit.isLabToken) {
@@ -208,14 +228,25 @@ export class LaneBillingGuard {
       };
     }
 
-    if (unit.lane === 'destination_delivery' && unit.deliverySucceeded !== true) {
-      return {
-        billable: false,
-        routedToAbuseHold: false,
-        ackAsSaved: false,
-        deduplicated: false,
-        reason: 'failed_destination_delivery_not_billed',
-      };
+    if (unit.lane === 'destination_delivery') {
+      if (unit.credentialKind === 'ugk_pub') {
+        return {
+          billable: false,
+          routedToAbuseHold: true,
+          ackAsSaved: false,
+          deduplicated: false,
+          reason: 'public_key_cannot_bill_destination_delivery',
+        };
+      }
+      if (unit.deliverySucceeded !== true) {
+        return {
+          billable: false,
+          routedToAbuseHold: false,
+          ackAsSaved: false,
+          deduplicated: false,
+          reason: 'failed_destination_delivery_not_billed',
+        };
+      }
     }
 
     const dedupeComposite = `${unit.tenantId}\u0000${unit.siteId}\u0000${unit.lane}\u0000${unit.dedupeId}`;
@@ -265,16 +296,28 @@ export class LaneBillingGuard {
       };
     }
 
-    // Per-network daily cap (applies tightly to non-edge-attested traffic, higher cap on origin_attested)
+    // Per-network daily cap partitioned by UTC day `dayUtc` + shared cross-lane continuity cap (M-04)
     if (unit.trust !== 'edge_attested') {
+      const dayUtc = resolveBillingDayUtc(unit);
       const rule = LANE_BILLING_RULES[unit.lane];
       const baseCap = options?.customNetworkCap ?? rule.perNetworkDailyUnattestedCap;
       const effectiveCap =
         unit.trust === 'origin_attested' ? baseCap * 10 : baseCap;
-      const prefixKey = `${unit.tenantId}\u0000${unit.siteId}\u0000${unit.lane}\u0000${unit.networkPrefix}`;
-      const used = this.perPrefixLaneCounts.get(prefixKey) ?? 0;
+      const prefixKey = `${unit.tenantId}\u0000${unit.siteId}\u0000${dayUtc}\u0000${unit.lane}\u0000${unit.networkPrefix}`;
+      const usedInLane = this.perPrefixLaneCounts.get(prefixKey) ?? 0;
 
-      if (used >= effectiveCap) {
+      // Cross-lane shared daily cap prevents stacking 500 + 2500 + 2500 + 250 = 5,750 continuity units from 1 prefix
+      const sharedContinuityKey = `${unit.tenantId}\u0000${unit.siteId}\u0000${dayUtc}\u0000${unit.networkPrefix}`;
+      const usedShared = this.perPrefixDailyContinuityCounts.get(sharedContinuityKey) ?? 0;
+      const sharedCap =
+        options?.sharedDailyContinuityCap ??
+        options?.customNetworkCap ??
+        SHARED_DAILY_CONTINUITY_PREFIX_CAP;
+
+      if (
+        usedInLane >= effectiveCap ||
+        (!isAttested && usedShared >= sharedCap)
+      ) {
         return {
           billable: false,
           routedToAbuseHold: true,
@@ -283,9 +326,26 @@ export class LaneBillingGuard {
           reason: 'per_network_prefix_daily_cap_exceeded',
         };
       }
-      this.perPrefixLaneCounts.set(prefixKey, used + 1);
+
+      if (this.perPrefixLaneCounts.size >= MAX_BILLING_GUARD_CACHE_ENTRIES) {
+        const oldest = this.perPrefixLaneCounts.keys().next().value;
+        if (oldest !== undefined) this.perPrefixLaneCounts.delete(oldest);
+      }
+      this.perPrefixLaneCounts.set(prefixKey, usedInLane + 1);
+
+      if (!isAttested) {
+        if (this.perPrefixDailyContinuityCounts.size >= MAX_BILLING_GUARD_CACHE_ENTRIES) {
+          const oldest = this.perPrefixDailyContinuityCounts.keys().next().value;
+          if (oldest !== undefined) this.perPrefixDailyContinuityCounts.delete(oldest);
+        }
+        this.perPrefixDailyContinuityCounts.set(sharedContinuityKey, usedShared + 1);
+      }
     }
 
+    if (this.seenDedupeKeys.size >= MAX_BILLING_GUARD_CACHE_ENTRIES) {
+      const oldest = this.seenDedupeKeys.values().next().value;
+      if (oldest !== undefined) this.seenDedupeKeys.delete(oldest);
+    }
     this.seenDedupeKeys.add(dedupeComposite);
     return {
       billable: true,

@@ -2994,6 +2994,9 @@ export async function executeDataReadinessQuery(params: {
   dateRange: AnalyticsDateRange
   timezone: string
 }): Promise<DataReadinessResult> {
+  if (!params.tenantId || params.tenantId.trim() === '') {
+    throw new Error('executeDataReadinessQuery requires a non-empty tenantId')
+  }
   const client = getClickHouseClient('analytics_reader')
   const baseParams = {
     tenant_id: params.tenantId,
@@ -3030,7 +3033,7 @@ SETTINGS max_execution_time = 30`.trim()
 
   const gscSql = `
 SELECT count() AS c FROM clickinsight.gsc_data
-WHERE site_id = {site_id:String}
+WHERE tenant_id = {tenant_id:String} AND site_id = {site_id:String}
   AND date >= toDate(toDateTime({start:String}, {tz:String}))
   AND date < toDate(toDateTime({end:String}, {tz:String}))
 SETTINGS max_execution_time = 30`.trim()

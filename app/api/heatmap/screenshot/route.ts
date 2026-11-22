@@ -87,7 +87,7 @@ async function tenantVerifySiteAccess(
   sessionSiteIds: string | null,
   perfReqId?: string,
 ): Promise<{ allowed: boolean; registeredHost: string | null }> {
-  if (!tenantHasSite(sessionSiteIds, siteId)) {
+  if (!tenantId || tenantId.trim() === '' || !tenantHasSite(sessionSiteIds, siteId)) {
     return { allowed: false, registeredHost: null }
   }
 
@@ -111,10 +111,10 @@ async function tenantVerifySiteAccess(
       query: `
         SELECT tenant_id, url
         FROM clickinsight.sites
-        WHERE tracking_id = {site_id:String}
+        WHERE tenant_id = {tenant_id:String} AND tracking_id = {site_id:String}
         LIMIT 1
       `,
-      query_params: { site_id: siteId },
+      query_params: { tenant_id: tenantId, site_id: siteId },
       format: 'JSONEachRow',
       ...(perfReqId
         ? { clickhouse_settings: perfLogComment('heatmap-screenshot', 'own-site', perfReqId) }

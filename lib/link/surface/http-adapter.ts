@@ -4,23 +4,60 @@
  * Centralizes extraction of Bearer token, Idempotency-Key, API revision header,
  * query params, JSON body, and caller-supplied `tenant_id` probe detection,
  * delegating every request through the single `SurfacePipeline` and `LinkMcpServer`.
+ *
+ * Security invariants (`[C-01]` & `[C-02]`):
+ *   - Fails closed with HTTP 503 (`UGOKILINK_KEY_PEPPER_UNCONFIGURED`) in `NODE_ENV === 'production'`
+ *     when `UGOKILINK_KEY_PEPPER` is unset; uses a per-process CSPRNG `randomBytes(32)` secret in
+ *     non-production (zero static fallback strings!).
+ *   - Enforces Bearer token authentication + tenant-scoped session isolation on ALL `/api/v1/mcp`
+ *     GET & POST methods (`tools/list`, `tools/search`, `tools/enable`, `tools/call`).
  */
 
+import { randomBytes } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { IdentityKeyRegistry } from '@/lib/link/auth';
 import { AskService, type AskDataExecutor } from '@/lib/link/ask';
-import { LinkMcpServer, type McpClientFamily } from './mcp';
+import type { HeatmapRenderRequest, HeatmapRenderService } from '@/lib/link/heatmap-render';
+import { LinkMcpServer } from './mcp';
 import {
   EmptyUnconnectedRepository,
   SurfacePipeline,
   type SurfaceExecutionResult,
 } from './pipeline';
 
+export class KeyPepperUnconfiguredError extends Error {
+  public readonly code = 'UGOKILINK_KEY_PEPPER_UNCONFIGURED' as const;
+  public readonly httpStatus = 503 as const;
+
+  constructor(
+    message = 'UGOKILINK_KEY_PEPPER must be configured in production; refusing to start with unconfigured pepper'
+  ) {
+    super(message);
+    this.name = 'KeyPepperUnconfiguredError';
+  }
+}
+
+export interface HeatmapDatasetProvider {
+  loadUnitDatasets(params: {
+    readonly tenantId: string;
+    readonly siteId: string;
+    readonly pageUrl: string;
+    readonly periodStart: string;
+    readonly periodEnd: string;
+    readonly kind: HeatmapRenderRequest['kind'];
+    readonly actorBucket: HeatmapRenderRequest['actor_bucket'];
+    readonly deviceClass?: HeatmapRenderRequest['device_class'];
+    readonly segmentId?: string;
+  }): HeatmapRenderRequest['unit_datasets'] | null;
+}
+
 export interface SurfaceRuntimeContext {
   readonly pipeline: SurfacePipeline;
   readonly mcpServer: LinkMcpServer;
   readonly askService: AskService;
   readonly repository: EmptyUnconnectedRepository;
+  readonly heatmapService?: HeatmapRenderService;
+  readonly heatmapDatasetProvider?: HeatmapDatasetProvider;
 }
 
 const UNCONNECTED_ASK_EXECUTOR: AskDataExecutor = {
@@ -34,6 +71,21 @@ const UNCONNECTED_ASK_EXECUTOR: AskDataExecutor = {
 };
 
 let defaultContext: SurfaceRuntimeContext | null = null;
+let nonProdEphemeralPepper: string | null = null;
+
+export function resolveRuntimePepperSecret(): string {
+  const configured = process.env.UGOKILINK_KEY_PEPPER?.trim();
+  if (configured && configured.length > 0) {
+    return configured;
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new KeyPepperUnconfiguredError();
+  }
+  if (!nonProdEphemeralPepper) {
+    nonProdEphemeralPepper = randomBytes(32).toString('hex');
+  }
+  return nonProdEphemeralPepper;
+}
 
 /**
  * Returns the process-scoped default SurfaceRuntimeContext backed by `EmptyUnconnectedRepository`
@@ -42,9 +94,10 @@ let defaultContext: SurfaceRuntimeContext | null = null;
  */
 export function getSurfaceRuntimeContext(): SurfaceRuntimeContext {
   if (!defaultContext) {
+    const pepperSecret = resolveRuntimePepperSecret();
     const keyRegistry = new IdentityKeyRegistry({
       pepperVersion: 'runtime_v1',
-      pepperSecret: process.env.UGOKILINK_KEY_PEPPER ?? 'unconfigured_ephemeral_pepper_do_not_use_in_prod',
+      pepperSecret,
     });
     const repository = new EmptyUnconnectedRepository();
     const askService = new AskService({ executor: UNCONNECTED_ASK_EXECUTOR });
@@ -131,13 +184,37 @@ export function toNextResponse(result: SurfaceExecutionResult): NextResponse {
   });
 }
 
+function pepperUnconfiguredResponse(err: KeyPepperUnconfiguredError): NextResponse {
+  return NextResponse.json(
+    {
+      error: {
+        code: err.code,
+        message: err.message,
+      },
+    },
+    {
+      status: err.httpStatus,
+      headers: { 'Cache-Control': 'no-store' },
+    }
+  );
+}
+
 export async function handleV1RestRoute(params: {
   readonly req: NextRequest;
   readonly operationId: string;
   readonly siteId?: string;
   readonly parseBody?: boolean;
 }): Promise<NextResponse> {
-  const ctx = getSurfaceRuntimeContext();
+  let ctx: SurfaceRuntimeContext;
+  try {
+    ctx = getSurfaceRuntimeContext();
+  } catch (err) {
+    if (err instanceof KeyPepperUnconfiguredError) {
+      return pepperUnconfiguredResponse(err);
+    }
+    throw err;
+  }
+
   const queryParams = extractQueryParams(params.req);
   const body = params.parseBody ? await readOptionalJsonBody(params.req) : undefined;
 
@@ -153,7 +230,10 @@ export async function handleV1RestRoute(params: {
     operationId: params.operationId,
     channel: 'rest',
     bearerToken: extractBearerToken(params.req),
-    clientIp: params.req.headers.get('x-forwarded-for')?.split(',')[0]?.trim(),
+    clientIp:
+      params.req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
+      params.req.headers.get('x-real-ip')?.trim() ??
+      undefined,
     dpopThumbprint: params.req.headers.get('x-dpop-jkt') ?? undefined,
     callerSuppliedTenantId,
     siteId: params.siteId,
@@ -170,52 +250,76 @@ export async function handleV1RestRoute(params: {
   return toNextResponse(result);
 }
 
+export async function handleMcpGetRoute(req: NextRequest): Promise<NextResponse> {
+  let ctx: SurfaceRuntimeContext;
+  try {
+    ctx = getSurfaceRuntimeContext();
+  } catch (err) {
+    if (err instanceof KeyPepperUnconfiguredError) {
+      return pepperUnconfiguredResponse(err);
+    }
+    throw err;
+  }
+
+  const queryParams = extractQueryParams(req);
+  const callerSuppliedTenantId =
+    queryParams.tenant_id ??
+    queryParams.tenantId ??
+    req.headers.get('x-tenant-id') ??
+    undefined;
+
+  const result = ctx.mcpServer.handleAuthenticatedRpc({
+    method: 'tools/list',
+    body: {
+      clientFamily: queryParams.clientFamily ?? 'generic_mcp',
+      sessionId: queryParams.sessionId,
+    },
+    bearerToken: extractBearerToken(req),
+    dpopThumbprint: req.headers.get('x-dpop-jkt') ?? undefined,
+    clientIp:
+      req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
+      req.headers.get('x-real-ip')?.trim() ??
+      undefined,
+    callerSuppliedTenantId,
+  });
+
+  return toNextResponse(result);
+}
+
 export async function handleMcpPostRoute(req: NextRequest): Promise<NextResponse> {
-  const ctx = getSurfaceRuntimeContext();
+  let ctx: SurfaceRuntimeContext;
+  try {
+    ctx = getSurfaceRuntimeContext();
+  } catch (err) {
+    if (err instanceof KeyPepperUnconfiguredError) {
+      return pepperUnconfiguredResponse(err);
+    }
+    throw err;
+  }
+
+  const queryParams = extractQueryParams(req);
   const body = await readOptionalJsonBody(req);
   const method = typeof body.method === 'string' ? body.method : '';
 
-  if (method === 'tools/list') {
-    const rawFamily = typeof body.clientFamily === 'string' ? body.clientFamily : 'generic_mcp';
-    const clientFamily: McpClientFamily =
-      rawFamily === 'claude_desktop' || rawFamily === 'cursor' || rawFamily === 'chatgpt'
-        ? rawFamily
-        : 'generic_mcp';
-    const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined;
-    const listed = ctx.mcpServer.listVisibleTools({ clientFamily, sessionId });
-    return NextResponse.json(listed, { status: 200 });
-  }
+  const callerSuppliedTenantId =
+    queryParams.tenant_id ??
+    queryParams.tenantId ??
+    (typeof body.tenant_id === 'string' ? body.tenant_id : undefined) ??
+    (typeof body.tenantId === 'string' ? body.tenantId : undefined) ??
+    req.headers.get('x-tenant-id') ??
+    undefined;
 
-  if (method === 'tools/search') {
-    const q = typeof body.query === 'string' ? body.query : '';
-    return NextResponse.json({ tools: ctx.mcpServer.searchTools(q) }, { status: 200 });
-  }
+  const result = ctx.mcpServer.handleAuthenticatedRpc({
+    method,
+    body,
+    bearerToken: extractBearerToken(req),
+    dpopThumbprint: req.headers.get('x-dpop-jkt') ?? undefined,
+    clientIp:
+      req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
+      req.headers.get('x-real-ip')?.trim() ??
+      undefined,
+    callerSuppliedTenantId,
+  });
 
-  if (method === 'tools/enable') {
-    const sessionId = typeof body.sessionId === 'string' ? body.sessionId : 'default';
-    const toolName = typeof body.toolName === 'string' ? body.toolName : '';
-    const res = ctx.mcpServer.enableTool(sessionId, toolName);
-    return NextResponse.json(res, { status: res.ok ? 200 : 404 });
-  }
-
-  if (method === 'tools/call') {
-    const toolName = typeof body.toolName === 'string' ? body.toolName : '';
-    const args =
-      body.arguments !== null && typeof body.arguments === 'object' && !Array.isArray(body.arguments)
-        ? (body.arguments as Record<string, unknown>)
-        : {};
-    const execRes = ctx.mcpServer.callTool({
-      toolName,
-      arguments: args,
-      bearerToken: extractBearerToken(req),
-      dpopThumbprint: req.headers.get('x-dpop-jkt') ?? undefined,
-      clientIp: req.headers.get('x-forwarded-for')?.split(',')[0]?.trim(),
-    });
-    return toNextResponse(execRes);
-  }
-
-  return NextResponse.json(
-    { error: { code: 'UNKNOWN_MCP_METHOD', message: `Unsupported MCP method "${method}"` } },
-    { status: 400 }
-  );
+  return toNextResponse(result);
 }

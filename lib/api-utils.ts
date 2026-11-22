@@ -76,6 +76,7 @@ function getErrorCode(status: number): string {
 
 export interface AuthContext {
   userId: string
+  tenantId: string
   email: string
   plan: string
 }
@@ -83,13 +84,15 @@ export interface AuthContext {
 // middlewareが注入したヘッダーから認証情報を取得
 export function getAuthContext(request: NextRequest): AuthContext | null {
   const userId = request.headers.get('x-user-id')
+  const tenantId = (request.headers.get('x-tenant-id') || '').trim()
   const email = request.headers.get('x-user-email')
   const plan = request.headers.get('x-user-plan')
 
-  if (!userId) return null
+  if (!userId || userId.trim() === '') return null
 
   return {
     userId,
+    tenantId,
     email: email || '',
     plan: plan || 'free',
   }
@@ -97,6 +100,7 @@ export function getAuthContext(request: NextRequest): AuthContext | null {
 
 // ユーザーがサイトにアクセスする権限があるか確認
 // siteId は sites.id (UUID) または sites.tracking_id (CIP_xxx) のどちらでも可
+// H-23: tenant_id が空の場合は fail-closed で拒否し、ClickHouse 照合時も tenant_id を必須バインドする
 export async function verifySiteAccess(
   request: NextRequest,
   siteId: string,
@@ -104,11 +108,18 @@ export async function verifySiteAccess(
 ): Promise<{ authorized: boolean; auth: AuthContext | null }> {
   const auth = getAuthContext(request)
   if (!auth) return { authorized: false, auth: null }
+  if (!auth.tenantId || !siteId || siteId.trim() === '') {
+    return { authorized: false, auth }
+  }
 
   try {
     const result = await clickhouse.query({
-      query: `SELECT count() as count FROM clickinsight.sites WHERE (id = {site_id:String} OR tracking_id = {site_id:String}) AND user_id = {user_id:String}`,
-      query_params: { site_id: siteId, user_id: auth.userId },
+      query: `SELECT count() as count FROM clickinsight.sites WHERE tenant_id = {tenant_id:String} AND (id = {site_id:String} OR tracking_id = {site_id:String}) AND user_id = {user_id:String}`,
+      query_params: {
+        tenant_id: auth.tenantId,
+        site_id: siteId,
+        user_id: auth.userId,
+      },
       format: 'JSONEachRow',
     })
     const data = await result.json() as any[]

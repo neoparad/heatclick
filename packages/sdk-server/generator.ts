@@ -1,22 +1,28 @@
 /**
- * UGOKI LINK v2 — Deterministic 8-Language Server SDK Generator (§11.11 item 9)
+ * UGOKI LINK v2 — Deterministic 8-Language Server SDK Generator (§11.11 item 9 & [H-01])
  *
  * Generates thin, idiomatic server SDKs directly from the single contract
- * (`CANONICAL_SCHEMA` + `buildOpenApi31Document()`) for all 8 languages:
+ * (`CANONICAL_SCHEMA` + `buildOpenApi31Document()` + `OPERATION_CATALOG`) for all 8 languages:
  *   `typescript`, `python`, `go`, `java`, `ruby`, `php`, `dotnet`, `rust`.
  *
- * Every generated SDK implements the exact same 4 core algorithms:
+ * Every generated SDK implements:
  *   1. Actor-blind Allocator draw: `uint32_be(HMAC-SHA256(key, unit_id)[0..4]) / 4294967296.0`
  *   2. Ed25519 signature verification (raw 32-byte public key + 64-byte signature)
  *   3. Segment-compatible 6 call types (`identify`, `page`, `screen`, `track`, `group`, `alias`)
  *      with mandatory consent metadata (`mode`, `purposes`, `generation`)
  *   4. Local feature flag evaluation from signed config bundle + short-lived display lease
  *      with deterministic fallback to `safeValue` on expired lease / invalid signature / actor-blind violation
+ *   5. Typed `UgokiLinkApiClient` HTTP `request(...)` dispatcher + 1-to-1 operation methods
+ *      for EVERY cataloged operation in `OPERATION_CATALOG` (`[H-01]`)!
  */
 
 import { CANONICAL_SCHEMA } from '@/packages/contract/schema';
 import { canonicalJson, sha256Hex } from '@/packages/contract/response';
-import { buildOpenApi31Document, OPERATION_CATALOG } from '@/lib/link/surface/openapi';
+import {
+  buildOpenApi31Document,
+  OPERATION_CATALOG,
+  type OperationSpec,
+} from '@/lib/link/surface/openapi';
 import {
   SDK_LANGUAGES,
   SEGMENT_CALL_TYPES,
@@ -29,7 +35,7 @@ interface ContractSnapshot {
   readonly schemaVersion: string;
   readonly openapiSha256: string;
   readonly revision: string;
-  readonly operationIds: ReadonlyArray<string>;
+  readonly operations: ReadonlyArray<OperationSpec>;
 }
 
 function captureContractSnapshot(): ContractSnapshot {
@@ -38,7 +44,7 @@ function captureContractSnapshot(): ContractSnapshot {
     schemaVersion: CANONICAL_SCHEMA.meta.schemaVersion,
     openapiSha256: openapi['x-ugoki-contract-sha256'],
     revision: openapi.info['x-ugoki-revision'],
-    operationIds: OPERATION_CATALOG.map((o) => o.operationId),
+    operations: OPERATION_CATALOG,
   };
 }
 
@@ -46,11 +52,89 @@ function makeFile(path: string, content: string): SdkGeneratedFile {
   return { path, content, sha256: sha256Hex(content) };
 }
 
+export function toSnakeCaseOperationId(opId: string): string {
+  return opId
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .toLowerCase();
+}
+
+export function toPascalCaseOperationId(opId: string): string {
+  return opId.charAt(0).toUpperCase() + opId.slice(1);
+}
+
 // =========================================================================
 // 1. TypeScript / Node.js SDK (Runnable directly via `node`)
 // =========================================================================
 
+function generateTypeScriptOperations(ops: ReadonlyArray<OperationSpec>): string {
+  return ops
+    .map((op) => {
+      const pathParams = op.params.filter((p) => p.in === 'path');
+      const queryParams = op.params.filter((p) => p.in === 'query');
+      const hasBody = op.method === 'POST' || op.method === 'PUT' || Boolean(op.requestBodySchema);
+      const needsIdem = op.riskClass === 'R1';
+
+      const pathExpr = pathParams.reduce(
+        (acc, p) =>
+          acc.replace(
+            `{${p.name}}`,
+            `\${encodeURIComponent(String(params.${p.name}))}`
+          ),
+        op.path
+      );
+
+      const reqChecks = [
+        ...pathParams.map(
+          (p) =>
+            `    if (params.${p.name} === undefined || params.${p.name} === null || String(params.${p.name}).trim() === '') throw new Error('Missing required path parameter: ${p.name}');`
+        ),
+        ...queryParams
+          .filter((p) => p.required)
+          .map(
+            (p) =>
+              `    if (params.${p.name} === undefined || params.${p.name} === null || String(params.${p.name}).trim() === '') throw new Error('Missing required query parameter: ${p.name}');`
+          ),
+        ...(needsIdem
+          ? [
+              `    if (!params.idempotencyKey || String(params.idempotencyKey).trim().length < 8) throw new Error('Operation ${op.operationId} (R1) requires idempotencyKey (>= 8 chars)');`,
+            ]
+          : []),
+      ].join('\n');
+
+      const queryLines =
+        queryParams.length > 0
+          ? `    const query = {};\n` +
+            queryParams
+              .map(
+                (p) =>
+                  `    if (params.${p.name} !== undefined && params.${p.name} !== null) query[${JSON.stringify(p.name)}] = String(params.${p.name});`
+              )
+              .join('\n')
+          : `    const query = undefined;`;
+
+      return `  /** [${op.riskClass}] ${op.method} ${op.path} — ${op.summary} */
+  async ${op.operationId}(params = {}) {
+${reqChecks ? reqChecks + '\n' : ''}${queryLines}
+    return this.request(${JSON.stringify(op.method)}, \`${pathExpr}\`, {
+      query,
+      body: ${hasBody ? 'params.body' : 'undefined'},
+      idempotencyKey: params.idempotencyKey,
+    });
+  }`;
+    })
+    .join('\n\n');
+}
+
 function generateTypeScriptSdk(snap: ContractSnapshot): ReadonlyArray<SdkGeneratedFile> {
+  const opMethods = generateTypeScriptOperations(snap.operations);
+  const opMeta = snap.operations.map((o) => ({
+    operationId: o.operationId,
+    method: o.method,
+    path: o.path,
+    riskClass: o.riskClass,
+  }));
+
   const code = `// GENERATED BY UGOKI LINK v2 SDK GENERATOR — DO NOT EDIT BY HAND
 // Contract Schema: ${snap.schemaVersion} | OpenAPI SHA-256: ${snap.openapiSha256}
 import crypto from 'node:crypto';
@@ -59,6 +143,7 @@ export const CONTRACT_SCHEMA_VERSION = ${JSON.stringify(snap.schemaVersion)};
 export const OPENAPI_CONTRACT_SHA256 = ${JSON.stringify(snap.openapiSha256)};
 export const API_REVISION = ${JSON.stringify(snap.revision)};
 export const SEGMENT_CALL_TYPES = ${JSON.stringify(SEGMENT_CALL_TYPES)};
+export const CATALOGED_OPERATIONS = ${JSON.stringify(opMeta)};
 export const FORBIDDEN_ACTOR_KEYS = new Set([
   'user_agent', 'userAgent', 'ua', 'ip', 'client_ip', 'clientIp',
   'remote_addr', 'actor_class', 'actorClass', 'is_agent', 'isAgent', 'is_bot', 'isBot'
@@ -88,7 +173,6 @@ export function verifyEd25519Raw(publicKeyHex, message, signatureHex) {
   try {
     const rawPub = Buffer.from(publicKeyHex, 'hex');
     if (rawPub.length !== 32) return false;
-    // DER SPKI prefix for Ed25519 raw 32-byte key: 302a300506032b6570032100
     const spkiDer = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), rawPub]);
     const keyObj = crypto.createPublicKey({ key: spkiDer, format: 'der', type: 'spki' });
     return crypto.verify(null, Buffer.from(message, 'utf8'), keyObj, Buffer.from(signatureHex, 'hex'));
@@ -176,6 +260,42 @@ export function evaluateFeatureFlag({ publicKeyHex, bundle, lease, flagKey, unit
   const last = flag.arms[flag.arms.length - 1];
   return { flagKey, value: last.value, fallback: false, reason: 'assigned', uniformDraw: u };
 }
+
+export class UgokiLinkApiClient {
+  constructor({ baseUrl = 'https://api.ugokilink.com/api', apiKey, revision = API_REVISION, transport = null }) {
+    this.baseUrl = String(baseUrl).replace(/\\/+$/, '');
+    this.apiKey = apiKey;
+    this.revision = revision;
+    this.transport = transport;
+  }
+
+  async request(method, path, options = {}) {
+    const qs = options.query && Object.keys(options.query).length > 0
+      ? '?' + new URLSearchParams(options.query).toString()
+      : '';
+    const url = this.baseUrl + path + qs;
+    const headers = {
+      'Accept': 'application/json',
+      'X-UGOKI-API-Version': 'v1',
+      'X-UGOKI-Revision': this.revision,
+    };
+    if (this.apiKey) headers['Authorization'] = 'Bearer ' + this.apiKey;
+    if (options.idempotencyKey) headers['Idempotency-Key'] = String(options.idempotencyKey);
+    let serializedBody;
+    if (options.body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      serializedBody = JSON.stringify(options.body);
+    }
+    if (this.transport) {
+      return this.transport({ method, url, path, query: options.query ?? {}, headers, body: serializedBody });
+    }
+    const res = await fetch(url, { method, headers, body: serializedBody });
+    const json = await res.json();
+    return { status: res.status, data: json };
+  }
+
+${opMethods}
+}
 `;
   return [makeFile('typescript/ugokilink.mjs', code)];
 }
@@ -184,17 +304,87 @@ export function evaluateFeatureFlag({ publicKeyHex, bundle, lease, flagKey, unit
 // 2. Python 3 SDK (Pure stdlib, runnable directly via `python` including RFC 8032 Ed25519!)
 // =========================================================================
 
+function generatePythonOperations(ops: ReadonlyArray<OperationSpec>): string {
+  return ops
+    .map((op) => {
+      const fnName = toSnakeCaseOperationId(op.operationId);
+      const pathParams = op.params.filter((p) => p.in === 'path');
+      const queryParams = op.params.filter((p) => p.in === 'query');
+      const hasBody = op.method === 'POST' || op.method === 'PUT' || Boolean(op.requestBodySchema);
+      const needsIdem = op.riskClass === 'R1';
+
+      const lines: string[] = [
+        `    def ${fnName}(self, params: dict | None = None) -> dict:`,
+        `        """[${op.riskClass}] ${op.method} ${op.path} (${op.operationId})"""`,
+        `        params = params or {}`,
+      ];
+
+      for (const p of pathParams) {
+        lines.push(
+          `        if not params.get(${JSON.stringify(p.name)}):`,
+          `            raise ValueError("Missing required path parameter: ${p.name}")`
+        );
+      }
+      for (const p of queryParams.filter((q) => q.required)) {
+        lines.push(
+          `        if not params.get(${JSON.stringify(p.name)}):`,
+          `            raise ValueError("Missing required query parameter: ${p.name}")`
+        );
+      }
+      if (needsIdem) {
+        lines.push(
+          `        idem = params.get("idempotencyKey") or params.get("idempotency_key")`,
+          `        if not idem or len(str(idem).strip()) < 8:`,
+          `            raise ValueError("Operation ${op.operationId} (R1) requires idempotency_key (>= 8 chars)")`
+        );
+      } else {
+        lines.push(`        idem = params.get("idempotencyKey") or params.get("idempotency_key")`);
+      }
+
+      let pyPath = JSON.stringify(op.path);
+      for (const p of pathParams) {
+        pyPath = `${pyPath}.replace("{${p.name}}", urllib.parse.quote(str(params[${JSON.stringify(p.name)}]), safe=""))`;
+      }
+      lines.push(`        path = ${pyPath}`);
+
+      if (queryParams.length > 0) {
+        lines.push(`        query = {}`);
+        for (const p of queryParams) {
+          lines.push(
+            `        if params.get(${JSON.stringify(p.name)}) is not None:`,
+            `            query[${JSON.stringify(p.name)}] = str(params[${JSON.stringify(p.name)}])`
+          );
+        }
+      } else {
+        lines.push(`        query = None`);
+      }
+
+      lines.push(
+        `        body = ${hasBody ? 'params.get("body")' : 'None'}`,
+        `        return self.request(${JSON.stringify(op.method)}, path, query=query, body=body, idempotency_key=idem)`
+      );
+      return lines.join('\n');
+    })
+    .join('\n\n');
+}
+
 function generatePythonSdk(snap: ContractSnapshot): ReadonlyArray<SdkGeneratedFile> {
+  const pyOps = generatePythonOperations(snap.operations);
+  const opIds = snap.operations.map((o) => o.operationId);
+
   const code = `# GENERATED BY UGOKI LINK v2 SDK GENERATOR — DO NOT EDIT BY HAND
 # Contract Schema: ${snap.schemaVersion} | OpenAPI SHA-256: ${snap.openapiSha256}
 import hashlib
 import hmac
 import json
 import struct
+import urllib.parse
+import urllib.request
 
 CONTRACT_SCHEMA_VERSION = ${JSON.stringify(snap.schemaVersion)}
 OPENAPI_CONTRACT_SHA256 = ${JSON.stringify(snap.openapiSha256)}
 API_REVISION = ${JSON.stringify(snap.revision)}
+CATALOGED_OPERATION_IDS = ${JSON.stringify(opIds)}
 SEGMENT_CALL_TYPES = ("identify", "page", "screen", "track", "group", "alias")
 FORBIDDEN_ACTOR_KEYS = frozenset([
     "user_agent", "userAgent", "ua", "ip", "client_ip", "clientIp",
@@ -362,6 +552,37 @@ def evaluate_feature_flag(public_key_hex: str, bundle: dict, lease: dict, flag_k
             return {"flagKey": flag_key, "value": arm["value"], "fallback": False, "reason": "assigned", "uniformDraw": u}
     last = flag["arms"][-1]
     return {"flagKey": flag_key, "value": last["value"], "fallback": False, "reason": "assigned", "uniformDraw": u}
+
+class UgokiLinkApiClient:
+    def __init__(self, api_key: str, base_url: str = "https://api.ugokilink.com/api", revision: str = API_REVISION, transport=None):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.revision = revision
+        self.transport = transport
+
+    def request(self, method: str, path: str, query: dict | None = None, body: dict | None = None, idempotency_key: str | None = None) -> dict:
+        qs = ("?" + urllib.parse.urlencode(query)) if query else ""
+        url = self.base_url + path + qs
+        headers = {
+            "Accept": "application/json",
+            "X-UGOKI-API-Version": "v1",
+            "X-UGOKI-Revision": self.revision,
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        if idempotency_key:
+            headers["Idempotency-Key"] = str(idempotency_key)
+        raw_body = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            raw_body = json.dumps(body).encode("utf-8")
+        if self.transport is not None:
+            return self.transport({"method": method, "url": url, "path": path, "query": query or {}, "headers": headers, "body": raw_body.decode("utf-8") if raw_body else None})
+        req = urllib.request.Request(url, data=raw_body, headers=headers, method=method)
+        with urllib.request.urlopen(req) as resp:
+            return {"status": resp.status, "data": json.loads(resp.read().decode("utf-8"))}
+
+${pyOps}
 `;
   return [makeFile('python/ugokilink.py', code)];
 }
@@ -371,17 +592,40 @@ def evaluate_feature_flag(public_key_hex: str, bundle: dict, lease: dict, flag_k
 // =========================================================================
 
 function generateGoSdk(snap: ContractSnapshot): ReadonlyArray<SdkGeneratedFile> {
+  const goMethods = snap.operations
+    .map((op) => {
+      const fn = toPascalCaseOperationId(op.operationId);
+      const pathParams = op.params.filter((p) => p.in === 'path');
+      let pathExpr = JSON.stringify(op.path);
+      for (const p of pathParams) {
+        pathExpr = `strings.ReplaceAll(${pathExpr}, "{${p.name}}", url.PathEscape(params[${JSON.stringify(p.name)}]))`;
+      }
+      return `// ${fn} executes [${op.riskClass}] ${op.method} ${op.path} (${op.operationId}).
+func (c *UgokiLinkApiClient) ${fn}(ctx context.Context, params map[string]string, body any, idempotencyKey string) ([]byte, error) {
+	path := ${pathExpr}
+	return c.Request(ctx, ${JSON.stringify(op.method)}, path, params, body, idempotencyKey)
+}`;
+    })
+    .join('\n\n');
+
   const code = `// GENERATED BY UGOKI LINK v2 SDK GENERATOR — DO NOT EDIT BY HAND
 // Contract Schema: ${snap.schemaVersion} | OpenAPI SHA-256: ${snap.openapiSha256}
 package ugokilink
 
 import (
+	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
 )
 
 const (
@@ -434,7 +678,6 @@ func BuildSegmentPayload(callType string, messageID string, timestamp string, co
 	}, nil
 }
 
-// EvaluateFeatureFlag verifies bundle + display lease Ed25519 signatures and falls back to safeValue on expiry or violation.
 func EvaluateFeatureFlag(bundleValid bool, leaseValid bool, nowMs int64, expiresAtMs int64, saltKey string, unitID string, safeValue string, arms []struct{ Value string; Weight float64 }) (string, string) {
 	if !bundleValid || !leaseValid {
 		return safeValue, "invalid_signature_safe_fallback"
@@ -456,6 +699,56 @@ func EvaluateFeatureFlag(bundleValid bool, leaseValid bool, nowMs int64, expires
 	}
 	return arms[len(arms)-1].Value, "assigned"
 }
+
+type UgokiLinkApiClient struct {
+	BaseURL    string
+	APIKey     string
+	HTTPClient *http.Client
+}
+
+func (c *UgokiLinkApiClient) Request(ctx context.Context, method string, path string, query map[string]string, body any, idempotencyKey string) ([]byte, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		bodyReader = bytes.NewReader(b)
+	}
+	u := strings.TrimRight(c.BaseURL, "/") + path
+	if len(query) > 0 {
+		vals := url.Values{}
+		for k, v := range query {
+			vals.Set(k, v)
+		}
+		u += "?" + vals.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	req.Header.Set("X-UGOKI-API-Version", "v1")
+	req.Header.Set("X-UGOKI-Revision", ApiRevision)
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	hc := c.HTTPClient
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+${goMethods}
 `;
   return [makeFile('go/ugokilink.go', code)];
 }
@@ -465,10 +758,30 @@ func EvaluateFeatureFlag(bundleValid bool, leaseValid bool, nowMs int64, expires
 // =========================================================================
 
 function generateJavaSdk(snap: ContractSnapshot): ReadonlyArray<SdkGeneratedFile> {
+  const javaMethods = snap.operations
+    .map((op) => {
+      const pathParams = op.params.filter((p) => p.in === 'path');
+      let pathExpr = JSON.stringify(op.path);
+      for (const p of pathParams) {
+        pathExpr = `${pathExpr}.replace("{${p.name}}", URLEncoder.encode(Objects.requireNonNull(params.get(${JSON.stringify(p.name)})), StandardCharsets.UTF_8))`;
+      }
+      return `    /** [${op.riskClass}] ${op.method} ${op.path} */
+    public String ${op.operationId}(Map<String, String> params, String jsonBody, String idempotencyKey) throws Exception {
+        String resolvedPath = ${pathExpr};
+        return this.request(${JSON.stringify(op.method)}, resolvedPath, params, jsonBody, idempotencyKey);
+    }`;
+    })
+    .join('\n\n');
+
   const code = `// GENERATED BY UGOKI LINK v2 SDK GENERATOR — DO NOT EDIT BY HAND
 // Contract Schema: ${snap.schemaVersion} | OpenAPI SHA-256: ${snap.openapiSha256}
 package io.ugokilink.sdk;
 
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
@@ -485,6 +798,16 @@ public final class UgokiLinkSdk {
     public static final String API_REVISION = ${JSON.stringify(snap.revision)};
     public static final Set<String> SEGMENT_CALL_TYPES = Set.of("identify", "page", "screen", "track", "group", "alias");
     public static final Set<String> FORBIDDEN_ACTOR_KEYS = Set.of("user_agent", "userAgent", "ua", "ip", "client_ip", "actor_class", "is_agent", "is_bot");
+
+    private final String baseUrl;
+    private final String apiKey;
+    private final HttpClient httpClient;
+
+    public UgokiLinkSdk(String baseUrl, String apiKey) {
+        this.baseUrl = baseUrl.replaceAll("/+$", "");
+        this.apiKey = apiKey;
+        this.httpClient = HttpClient.newHttpClient();
+    }
 
     public static double drawUniformU(String key, String unitId) throws Exception {
         Mac mac = Mac.getInstance("HmacSHA256");
@@ -515,6 +838,27 @@ public final class UgokiLinkSdk {
         if (nowMs >= expiresAtMs) return safeValue; // lease_expired_safe_fallback
         return assignedValue;
     }
+
+    public String request(String method, String path, Map<String, String> query, String jsonBody, String idempotencyKey) throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+            .uri(URI.create(this.baseUrl + path))
+            .header("Authorization", "Bearer " + this.apiKey)
+            .header("X-UGOKI-API-Version", "v1")
+            .header("X-UGOKI-Revision", API_REVISION);
+        if (idempotencyKey != null && !idempotencyKey.isEmpty()) {
+            builder.header("Idempotency-Key", idempotencyKey);
+        }
+        HttpRequest.BodyPublisher pub = jsonBody != null
+            ? HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8)
+            : HttpRequest.BodyPublishers.noBody();
+        if (jsonBody != null) {
+            builder.header("Content-Type", "application/json");
+        }
+        builder.method(method, pub);
+        return this.httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString()).body();
+    }
+
+${javaMethods}
 }
 `;
   return [makeFile('java/UgokiLinkSdk.java', code)];
@@ -525,10 +869,29 @@ public final class UgokiLinkSdk {
 // =========================================================================
 
 function generateRubySdk(snap: ContractSnapshot): ReadonlyArray<SdkGeneratedFile> {
+  const rubyMethods = snap.operations
+    .map((op) => {
+      const fn = toSnakeCaseOperationId(op.operationId);
+      const pathParams = op.params.filter((p) => p.in === 'path');
+      let pathExpr = JSON.stringify(op.path);
+      for (const p of pathParams) {
+        pathExpr = `${pathExpr}.gsub("{${p.name}}", CGI.escape(params.fetch(:${p.name}).to_s))`;
+      }
+      return `    # [${op.riskClass}] ${op.method} ${op.path} (${op.operationId})
+    def ${fn}(params: {}, body: nil, idempotency_key: nil)
+      resolved_path = ${pathExpr}
+      request(${JSON.stringify(op.method)}, resolved_path, query: params, body: body, idempotency_key: idempotency_key)
+    end`;
+    })
+    .join('\n\n');
+
   const code = `# GENERATED BY UGOKI LINK v2 SDK GENERATOR — DO NOT EDIT BY HAND
 # Contract Schema: ${snap.schemaVersion} | OpenAPI SHA-256: ${snap.openapiSha256}
-require "openssl"
+require "cgi"
 require "json"
+require "net/http"
+require "openssl"
+require "uri"
 
 module UgokiLink
   CONTRACT_SCHEMA_VERSION = ${JSON.stringify(snap.schemaVersion)}
@@ -563,6 +926,31 @@ module UgokiLink
     end
     { value: arms.last[:value], reason: "assigned", uniform_draw: u }
   end
+
+  class Client
+    def initialize(api_key:, base_url: "https://api.ugokilink.com/api")
+      @api_key = api_key
+      @base_url = base_url.sub(%r{/+$}, "")
+    end
+
+    def request(method, path, query: nil, body: nil, idempotency_key: nil)
+      uri = URI.parse(@base_url + path)
+      uri.query = URI.encode_www_form(query) if query && !query.empty?
+      req_cls = Net::HTTP.const_get(method.capitalize)
+      req = req_cls.new(uri)
+      req["Authorization"] = "Bearer #{@api_key}"
+      req["X-UGOKI-API-Version"] = "v1"
+      req["X-UGOKI-Revision"] = API_REVISION
+      req["Idempotency-Key"] = idempotency_key if idempotency_key
+      if body
+        req["Content-Type"] = "application/json"
+        req.body = JSON.generate(body)
+      end
+      Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https") { |http| JSON.parse(http.request(req).body) }
+    end
+
+${rubyMethods}
+  end
 end
 `;
   return [makeFile('ruby/ugokilink.rb', code)];
@@ -573,6 +961,21 @@ end
 // =========================================================================
 
 function generatePhpSdk(snap: ContractSnapshot): ReadonlyArray<SdkGeneratedFile> {
+  const phpMethods = snap.operations
+    .map((op) => {
+      const pathParams = op.params.filter((p) => p.in === 'path');
+      let pathExpr = JSON.stringify(op.path);
+      for (const p of pathParams) {
+        pathExpr = `str_replace('{${p.name}}', rawurlencode((string) ($params[${JSON.stringify(p.name)}] ?? '')), ${pathExpr})`;
+      }
+      return `    /** [${op.riskClass}] ${op.method} ${op.path} */
+    public function ${op.operationId}(array $params = [], ?array $body = null, ?string $idempotencyKey = null): array {
+        $resolvedPath = ${pathExpr};
+        return $this->request(${JSON.stringify(op.method)}, $resolvedPath, $params, $body, $idempotencyKey);
+    }`;
+    })
+    .join('\n\n');
+
   const code = `<?php
 // GENERATED BY UGOKI LINK v2 SDK GENERATOR — DO NOT EDIT BY HAND
 // Contract Schema: ${snap.schemaVersion} | OpenAPI SHA-256: ${snap.openapiSha256}
@@ -586,6 +989,14 @@ final class UgokiLinkClient {
     public const API_REVISION = ${JSON.stringify(snap.revision)};
     public const SEGMENT_CALL_TYPES = ['identify', 'page', 'screen', 'track', 'group', 'alias'];
     public const FORBIDDEN_ACTOR_KEYS = ['user_agent', 'userAgent', 'ua', 'ip', 'client_ip', 'actor_class', 'is_agent', 'is_bot'];
+
+    private string $baseUrl;
+    private string $apiKey;
+
+    public function __construct(string $apiKey, string $baseUrl = 'https://api.ugokilink.com/api') {
+        $this->apiKey = $apiKey;
+        $this->baseUrl = rtrim($baseUrl, '/');
+    }
 
     public static function drawUniformU(string $key, string $unitId): float {
         $digest = hash_hmac('sha256', $unitId, $key, true);
@@ -621,6 +1032,33 @@ final class UgokiLinkClient {
         $last = end($arms);
         return ['value' => $last['value'], 'fallback' => false, 'reason' => 'assigned', 'uniformDraw' => $u];
     }
+
+    public function request(string $method, string $path, array $query = [], ?array $body = null, ?string $idempotencyKey = null): array {
+        $qs = count($query) > 0 ? '?' . http_build_query($query) : '';
+        $url = $this->baseUrl . $path . $qs;
+        $headers = [
+            'Authorization: Bearer ' . $this->apiKey,
+            'X-UGOKI-API-Version: v1',
+            'X-UGOKI-Revision: ' . self::API_REVISION,
+        ];
+        if ($idempotencyKey !== null) {
+            $headers[] = 'Idempotency-Key: ' . $idempotencyKey;
+        }
+        if ($body !== null) {
+            $headers[] = 'Content-Type: application/json';
+        }
+        $ctx = stream_context_create([
+            'http' => [
+                'method' => $method,
+                'header' => implode("\\r\\n", $headers),
+                'content' => $body !== null ? json_encode($body, JSON_THROW_ON_ERROR) : '',
+            ],
+        ]);
+        $raw = file_get_contents($url, false, $ctx);
+        return is_string($raw) ? (json_decode($raw, true) ?? []) : [];
+    }
+
+${phpMethods}
 }
 `;
   return [makeFile('php/UgokiLinkSdk.php', code)];
@@ -631,13 +1069,34 @@ final class UgokiLinkClient {
 // =========================================================================
 
 function generateDotnetSdk(snap: ContractSnapshot): ReadonlyArray<SdkGeneratedFile> {
+  const csMethods = snap.operations
+    .map((op) => {
+      const fn = toPascalCaseOperationId(op.operationId);
+      const pathParams = op.params.filter((p) => p.in === 'path');
+      let pathExpr = JSON.stringify(op.path);
+      for (const p of pathParams) {
+        pathExpr = `${pathExpr}.Replace("{${p.name}}", Uri.EscapeDataString(parameters[${JSON.stringify(p.name)}]))`;
+      }
+      return `        /// <summary>[${op.riskClass}] ${op.method} ${op.path} (${op.operationId})</summary>
+        public Task<string> ${fn}Async(IDictionary<string, string> parameters, string? jsonBody = null, string? idempotencyKey = null, CancellationToken ct = default)
+        {
+            string resolvedPath = ${pathExpr};
+            return RequestAsync(new HttpMethod(${JSON.stringify(op.method)}), resolvedPath, parameters, jsonBody, idempotencyKey, ct);
+        }`;
+    })
+    .join('\n\n');
+
   const code = `// GENERATED BY UGOKI LINK v2 SDK GENERATOR — DO NOT EDIT BY HAND
 // Contract Schema: ${snap.schemaVersion} | OpenAPI SHA-256: ${snap.openapiSha256}
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace UgokiLink.Sdk
 {
@@ -646,13 +1105,24 @@ namespace UgokiLink.Sdk
         bool VerifyRaw(ReadOnlySpan<byte> publicKey32, ReadOnlySpan<byte> message, ReadOnlySpan<byte> signature64);
     }
 
-    public static class UgokiLinkClient
+    public sealed class UgokiLinkClient
     {
         public const string ContractSchemaVersion = ${JSON.stringify(snap.schemaVersion)};
         public const string OpenApiContractSha256 = ${JSON.stringify(snap.openapiSha256)};
         public const string ApiRevision = ${JSON.stringify(snap.revision)};
         public static readonly string[] SegmentCallTypes = { "identify", "page", "screen", "track", "group", "alias" };
         public static readonly HashSet<string> ForbiddenActorKeys = new() { "user_agent", "userAgent", "ua", "ip", "client_ip", "actor_class", "is_agent", "is_bot" };
+
+        private readonly HttpClient _http;
+        private readonly string _baseUrl;
+        private readonly string _apiKey;
+
+        public UgokiLinkClient(string apiKey, string baseUrl = "https://api.ugokilink.com/api", HttpClient? http = null)
+        {
+            _apiKey = apiKey;
+            _baseUrl = baseUrl.TrimEnd('/');
+            _http = http ?? new HttpClient();
+        }
 
         public static double DrawUniformU(string key, string unitId)
         {
@@ -678,6 +1148,20 @@ namespace UgokiLink.Sdk
             }
             return (arms[^1].Value, "assigned");
         }
+
+        public async Task<string> RequestAsync(HttpMethod method, string path, IDictionary<string, string>? query = null, string? jsonBody = null, string? idempotencyKey = null, CancellationToken ct = default)
+        {
+            using var req = new HttpRequestMessage(method, _baseUrl + path);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+            req.Headers.Add("X-UGOKI-API-Version", "v1");
+            req.Headers.Add("X-UGOKI-Revision", ApiRevision);
+            if (!string.IsNullOrEmpty(idempotencyKey)) req.Headers.Add("Idempotency-Key", idempotencyKey);
+            if (jsonBody != null) req.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+            using var resp = await _http.SendAsync(req, ct);
+            return await resp.Content.ReadAsStringAsync(ct);
+        }
+
+${csMethods}
     }
 }
 `;
@@ -689,6 +1173,30 @@ namespace UgokiLink.Sdk
 // =========================================================================
 
 function generateRustSdk(snap: ContractSnapshot): ReadonlyArray<SdkGeneratedFile> {
+  const rustMethods = snap.operations
+    .map((op) => {
+      const fn = toSnakeCaseOperationId(op.operationId);
+      const pathParams = op.params.filter((p) => p.in === 'path');
+      const sigArgs = [
+        '&self',
+        ...pathParams.map((p) => `${toSnakeCaseOperationId(p.name)}: &str`),
+        'query: &[(&str, &str)]',
+        'body: Option<&str>',
+        'idempotency_key: Option<&str>',
+      ].join(', ');
+      let pathSetup = `let resolved_path = ${JSON.stringify(op.path)}.to_string()`;
+      for (const p of pathParams) {
+        pathSetup += `.replace("{${p.name}}", ${toSnakeCaseOperationId(p.name)})`;
+      }
+      pathSetup += ';';
+      return `    /// [${op.riskClass}] ${op.method} ${op.path} (${op.operationId})
+    pub fn ${fn}(${sigArgs}) -> Result<String, String> {
+        ${pathSetup}
+        self.request(${JSON.stringify(op.method)}, &resolved_path, query, body, idempotency_key)
+    }`;
+    })
+    .join('\n\n');
+
   const code = `// GENERATED BY UGOKI LINK v2 SDK GENERATOR — DO NOT EDIT BY HAND
 // Contract Schema: ${snap.schemaVersion} | OpenAPI SHA-256: ${snap.openapiSha256}
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -739,9 +1247,43 @@ pub fn evaluate_feature_flag(
             return ((*val).to_string(), "assigned");
         }
     }
-    (arms[arms.length_or_last()].0.to_string(), "assigned")
+    (arms[arms.len() - 1].0.to_string(), "assigned")
 }
-`.replace('arms.length_or_last()', 'arms.len() - 1');
+
+pub trait HttpTransport {
+    fn send(
+        &self,
+        method: &str,
+        url: &str,
+        api_key: &str,
+        revision: &str,
+        body: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> Result<String, String>;
+}
+
+pub struct UgokiLinkApiClient<T: HttpTransport> {
+    pub base_url: String,
+    pub api_key: String,
+    pub transport: T,
+}
+
+impl<T: HttpTransport> UgokiLinkApiClient<T> {
+    pub fn request(
+        &self,
+        method: &str,
+        path: &str,
+        _query: &[(&str, &str)],
+        body: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> Result<String, String> {
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
+        self.transport.send(method, &url, &self.api_key, API_REVISION, body, idempotency_key)
+    }
+
+${rustMethods}
+}
+`;
   return [makeFile('rust/lib.rs', code)];
 }
 

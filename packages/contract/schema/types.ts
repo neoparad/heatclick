@@ -47,12 +47,95 @@ export const JURISDICTIONS = [
 ] as const;
 export type JurisdictionCode = (typeof JURISDICTIONS)[number];
 
+export function normalizeJurisdictionCode(raw: string | null | undefined): JurisdictionCode {
+  if (!raw) return 'UNKNOWN';
+  const upper = raw.trim().toUpperCase();
+  if (upper === 'UK' || upper === 'GB') return 'GB';
+  if ((JURISDICTIONS as readonly string[]).includes(upper)) {
+    return upper as JurisdictionCode;
+  }
+  return 'UNKNOWN';
+}
+
 export const COLLECTION_LANES = [
   'standard',
   'customer_defined',
   'screen_replay',
 ] as const;
 export type CollectionLane = (typeof COLLECTION_LANES)[number];
+
+export function normalizeCollectionLane(raw: string): CollectionLane {
+  switch (raw) {
+    case 'standard':
+    case 'standard_telemetry':
+      return 'standard';
+    case 'customer_defined':
+    case 'custom_event':
+    case 'customer_events':
+      return 'customer_defined';
+    case 'screen_replay':
+    case 'replay':
+      return 'screen_replay';
+    default:
+      throw new Error(`Invalid collection lane: ${raw}`);
+  }
+}
+
+export const DATA_REGIONS = ['jp', 'eu', 'us'] as const;
+export type DataRegion = (typeof DATA_REGIONS)[number];
+
+export const STORAGE_TIERS = [
+  'tier1_link_managed',
+  'tier2_link_plus_export',
+  'tier3_customer_sor',
+] as const;
+export type StorageTier = (typeof STORAGE_TIERS)[number];
+
+export type ConversionPredicateKind =
+  | 'id'
+  | 'class'
+  | 'selector'
+  | 'text'
+  | 'href'
+  | 'href_prefix'
+  | 'el_fp'
+  | 'el_fp_set';
+
+export interface CanonicalConversionRuleSpec {
+  readonly cv_key: string;
+  readonly rule_ver: number;
+  readonly predicate_kind: ConversionPredicateKind;
+  readonly predicate_value: string;
+}
+
+export interface CanonicalLabExclusionMeta {
+  readonly is_lab_traffic: boolean;
+  readonly lab_run_id: string | null;
+  readonly lab_purpose: string | null;
+  readonly block_ingest: boolean;
+  readonly exclude_human_rollups: boolean;
+  readonly exclude_quorums: boolean;
+  readonly exclude_experiments: boolean;
+  readonly exclude_ml_training: boolean;
+  readonly exclude_loss_ledger: boolean;
+  readonly exclude_billing: boolean;
+}
+
+export interface CanonicalWalQueueEnvelope {
+  readonly record_id?: string;
+  readonly lane: CollectionLane;
+  readonly tenant_id: string;
+  readonly site_id: string;
+  readonly storage_region: DataRegion;
+  readonly shard_id: number;
+  readonly received_at_ms: number;
+  readonly age_ms?: number;
+  readonly retention_days?: number;
+  readonly storage_tier?: StorageTier;
+  readonly raw_frame: unknown;
+  readonly edge_acked?: boolean;
+  readonly lab_exclusion?: CanonicalLabExclusionMeta;
+}
 
 export const RETENTION_GRID_MONTHS = [
   1, 2, 3, 6, 9, 12, 13, 18, 24, 30, 36,
@@ -561,7 +644,21 @@ export interface TableSpec {
 
 export interface ExternalStoreDeletionSpec {
   readonly id: string;
-  readonly storeKind: 'r2_wal' | 'r2_segments' | 'quarantine' | 'abuse_hold' | 'export_manifest' | 'edge_cache' | 'ml_extract' | 'ec_member_summary';
+  readonly storeKind:
+    | 'r2_wal'
+    | 'r2_segments'
+    | 'r2_screen_replay'
+    | 'r2_surge_spill'
+    | 'quarantine'
+    | 'abuse_hold'
+    | 'segment_customer_attributes'
+    | 'ec_order_summary'
+    | 'export_manifest'
+    | 'edge_cache'
+    | 'heatmap_png_cache'
+    | 'ask_query_cache'
+    | 'ml_extract'
+    | 'ec_member_summary';
   readonly locationPattern: string;
   readonly retentionPolicy: RetentionPolicy;
   readonly deletionAction: string;
