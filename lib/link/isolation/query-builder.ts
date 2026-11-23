@@ -84,9 +84,34 @@ export class TenantScopedQueryBuilder {
       );
     }
 
-    // 2. Validate siteId against principal's allowedSiteIds constraint if present
-    if (spec.siteId && principal.allowedSiteIds !== null) {
-      if (!principal.allowedSiteIds.includes(spec.siteId)) {
+    // 2. Validate siteId & allowed_site_ids against principal's allowedSiteIds constraint if present
+    const allowedSites =
+      principal.allowedSiteIds !== null && !principal.allowedSiteIds.includes('*')
+        ? principal.allowedSiteIds
+        : null;
+    const siteRestricted = allowedSites !== null;
+
+    if (allowedSites !== null && allowedSites.length === 0) {
+      throw new TenantScopeViolationError(
+        'SITE_SCOPE_VIOLATION',
+        'Credential has an empty allowedSiteIds allowlist and cannot query tenant tables'
+      );
+    }
+
+    if (
+      spec.siteId !== undefined &&
+      spec.params &&
+      'site_id' in spec.params &&
+      spec.params.site_id !== spec.siteId
+    ) {
+      throw new TenantScopeViolationError(
+        'SITE_SCOPE_VIOLATION',
+        'Conflicting siteId and params.site_id values are forbidden'
+      );
+    }
+
+    if (spec.siteId && allowedSites !== null) {
+      if (!allowedSites.includes(spec.siteId)) {
         throw new TenantScopeViolationError(
           'SITE_SCOPE_VIOLATION',
           `Credential is not authorized for site "${spec.siteId}"`
@@ -96,18 +121,32 @@ export class TenantScopedQueryBuilder {
     if (
       spec.params &&
       typeof spec.params.site_id === 'string' &&
-      principal.allowedSiteIds !== null &&
-      !principal.allowedSiteIds.includes(spec.params.site_id)
+      allowedSites !== null &&
+      !allowedSites.includes(spec.params.site_id)
     ) {
       throw new TenantScopeViolationError(
         'SITE_SCOPE_VIOLATION',
         `Parameter site_id "${spec.params.site_id}" is outside credential allowlist`
       );
     }
+    if (spec.params && 'allowed_site_ids' in spec.params && allowedSites !== null) {
+      const supplied = spec.params.allowed_site_ids;
+      if (
+        !Array.isArray(supplied) ||
+        supplied.length === 0 ||
+        supplied.some((s) => typeof s !== 'string' || !allowedSites.includes(s))
+      ) {
+        throw new TenantScopeViolationError(
+          'SITE_SCOPE_VIOLATION',
+          'Parameter allowed_site_ids cannot widen credential allowedSiteIds'
+        );
+      }
+    }
 
-    // 3. Run strict SQL AST inspection
+    // 3. Run strict SQL AST inspection (requiring top-level site_id predicate when site-scoped)
     const inspection = inspectSqlAst(spec.sql, {
       requireTenantFilter: true,
+      requireSiteFilter: siteRestricted,
       requireTimeBound: true,
     });
     if (!inspection.valid) {
@@ -124,13 +163,17 @@ export class TenantScopedQueryBuilder {
       }
     }
 
-    // 5. Assemble typed query_params, ALWAYS stamping server-side `tenant_id`
+    // 5. Assemble typed query_params, ALWAYS stamping server-side `tenant_id` (and site scope)
     const queryParams: Record<string, string | number | boolean | ReadonlyArray<string | number>> = {
       ...(spec.params ?? {}),
       tenant_id: principal.tenantId,
     };
     if (spec.siteId !== undefined) {
       queryParams.site_id = spec.siteId;
+    }
+    const bindsAllowedSiteIds = inspection.typedBinds.some((b) => b.name === 'allowed_site_ids');
+    if (allowedSites !== null && bindsAllowedSiteIds && !('allowed_site_ids' in queryParams)) {
+      queryParams.allowed_site_ids = [...allowedSites];
     }
 
     // 6. Verify every declared typed bind `{name:Type}` has a supplied value
@@ -140,6 +183,34 @@ export class TenantScopedQueryBuilder {
           'MISSING_TYPED_BIND_PARAM',
           `Missing parameter value for typed bind {${bind.name}:${bind.type}}`
         );
+      }
+    }
+
+    // 7. Defense-in-depth: confirm bound site_id / allowed_site_ids remain inside principal allowlist
+    if (allowedSites !== null) {
+      if (inspection.typedBinds.some((b) => b.name === 'site_id')) {
+        if (
+          typeof queryParams.site_id !== 'string' ||
+          !allowedSites.includes(queryParams.site_id)
+        ) {
+          throw new TenantScopeViolationError(
+            'SITE_SCOPE_VIOLATION',
+            'Bound site_id is missing or outside credential allowlist'
+          );
+        }
+      }
+      if (bindsAllowedSiteIds) {
+        const bound = queryParams.allowed_site_ids;
+        if (
+          !Array.isArray(bound) ||
+          bound.length === 0 ||
+          bound.some((s) => typeof s !== 'string' || !allowedSites.includes(s))
+        ) {
+          throw new TenantScopeViolationError(
+            'SITE_SCOPE_VIOLATION',
+            'Bound allowed_site_ids is outside credential allowlist'
+          );
+        }
       }
     }
 

@@ -21,6 +21,7 @@ export type SqlViolationCode =
   | 'FORBIDDEN_SETTINGS_OR_FILTER_OVERRIDE'
   | 'FORBIDDEN_SELECT_STAR'
   | 'MISSING_TENANT_BIND_PREDICATE'
+  | 'MISSING_SITE_BIND_PREDICATE'
   | 'INLINE_TENANT_OR_ID_LITERAL'
   | 'SUSPECT_SQL_INJECTION_PAYLOAD'
   | 'MISSING_TIME_BOUND_FILTER'
@@ -646,6 +647,8 @@ export function extractSqlFunctionCalls(sql: string): string[] {
 export interface InspectSqlOptions {
   /** Set true ONLY for non-tenant system/health checks; defaults to true (strict tenant mode). */
   readonly requireTenantFilter?: boolean;
+  /** Set true when credential is restricted to specific site IDs (`allowedSiteIds` non-null, non-wildcard). */
+  readonly requireSiteFilter?: boolean;
   /** Set true to enforce bounded time-range filter (default true). */
   readonly requireTimeBound?: boolean;
 }
@@ -876,6 +879,95 @@ function isExactTenantBindConjunct(conjunct: ReadonlyArray<SqlToken>): boolean {
   return false;
 }
 
+function unwrapOuterParens(conjunct: ReadonlyArray<SqlToken>): ReadonlyArray<SqlToken> {
+  let slice = conjunct;
+  while (
+    slice.length >= 2 &&
+    slice[0]!.kind === 'PUNCT' &&
+    slice[0]!.value === '(' &&
+    slice[slice.length - 1]!.kind === 'PUNCT' &&
+    slice[slice.length - 1]!.value === ')'
+  ) {
+    let depth = 0;
+    let wrapsEntire = true;
+    for (let i = 0; i < slice.length - 1; i += 1) {
+      if (slice[i]!.kind === 'PUNCT' && slice[i]!.value === '(') depth += 1;
+      else if (slice[i]!.kind === 'PUNCT' && slice[i]!.value === ')') depth -= 1;
+      if (depth === 0) {
+        wrapsEntire = false;
+        break;
+      }
+    }
+    if (!wrapsEntire) break;
+    slice = slice.slice(1, -1);
+  }
+  return slice;
+}
+
+function isExactSiteBindConjunct(conjunct: ReadonlyArray<SqlToken>): boolean {
+  const slice = unwrapOuterParens(conjunct);
+
+  // Strip optional `alias.` prefix
+  let offset = 0;
+  if (
+    slice.length >= 3 &&
+    slice[0]!.kind === 'IDENT' &&
+    slice[1]!.kind === 'PUNCT' &&
+    slice[1]!.value === '.'
+  ) {
+    offset = 2;
+  }
+
+  const rem = slice.slice(offset);
+  if (rem.length < 3 || rem[0]!.kind !== 'IDENT' || rem[0]!.lower !== 'site_id') {
+    return false;
+  }
+
+  // Case 1: `[alias.]site_id = {site_id:String}`
+  if (
+    rem.length === 3 &&
+    rem[1]!.kind === 'OP' &&
+    rem[1]!.value === '=' &&
+    rem[2]!.kind === 'BIND' &&
+    rem[2]!.bindName === 'site_id' &&
+    rem[2]!.bindType === 'String'
+  ) {
+    return true;
+  }
+
+  // Case 2a: `[alias.]site_id IN ({allowed_site_ids:Array(String)})`
+  if (
+    rem.length === 5 &&
+    rem[1]!.kind === 'IDENT' &&
+    !rem[1]!.quoted &&
+    rem[1]!.lower === 'in' &&
+    rem[2]!.kind === 'PUNCT' &&
+    rem[2]!.value === '(' &&
+    rem[3]!.kind === 'BIND' &&
+    rem[3]!.bindName === 'allowed_site_ids' &&
+    rem[3]!.bindType?.replace(/\s+/g, '') === 'Array(String)' &&
+    rem[4]!.kind === 'PUNCT' &&
+    rem[4]!.value === ')'
+  ) {
+    return true;
+  }
+
+  // Case 2b: `[alias.]site_id IN {allowed_site_ids:Array(String)}`
+  if (
+    rem.length === 3 &&
+    rem[1]!.kind === 'IDENT' &&
+    !rem[1]!.quoted &&
+    rem[1]!.lower === 'in' &&
+    rem[2]!.kind === 'BIND' &&
+    rem[2]!.bindName === 'allowed_site_ids' &&
+    rem[2]!.bindType?.replace(/\s+/g, '') === 'Array(String)'
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function hasTimeComparisonInConjunct(conjunct: ReadonlyArray<SqlToken>): boolean {
   for (let i = 0; i < conjunct.length; i += 1) {
     const tok = conjunct[i]!;
@@ -902,6 +994,7 @@ function hasTimeComparisonInConjunct(conjunct: ReadonlyArray<SqlToken>): boolean
 
 export function inspectSqlAst(sql: string, options: InspectSqlOptions = {}): SqlInspectionResult {
   const requireTenantFilter = options.requireTenantFilter ?? true;
+  const requireSiteFilter = options.requireSiteFilter ?? false;
   const requireTimeBound = options.requireTimeBound ?? true;
   const violations: SqlAstViolation[] = [];
 
@@ -1338,15 +1431,22 @@ export function inspectSqlAst(sql: string, options: InspectSqlOptions = {}): Sql
       }
     }
 
-    // 4. Enforce tenant_id bind & time-range bound per SELECT scope referencing real tables
+    // 4. Enforce tenant_id bind, optional site_id bind, & time-range bound per SELECT scope referencing real tables
     const scopeRequiresChecks = scopeRealTables.length > 0 || (scopes.length === 1 && fromIdx < 0);
 
-    if (scopeRequiresChecks && (requireTenantFilter || requireTimeBound)) {
+    if (scopeRequiresChecks && (requireTenantFilter || requireSiteFilter || requireTimeBound)) {
       if (whereIdx < 0) {
         if (requireTenantFilter) {
           violations.push({
             code: 'MISSING_TENANT_BIND_PREDICATE',
             message: 'Every tenant SELECT scope MUST include a WHERE clause with `tenant_id = {tenant_id:String}`',
+          });
+        }
+        if (requireSiteFilter && scopeRealTables.length > 0) {
+          violations.push({
+            code: 'MISSING_SITE_BIND_PREDICATE',
+            message:
+              'Site-scoped credentials MUST include a WHERE clause with `site_id = {site_id:String}` or `site_id IN ({allowed_site_ids:Array(String)})` in every tenant SELECT scope',
           });
         }
         if (requireTimeBound && scopeRealTables.length > 0) {
@@ -1403,14 +1503,33 @@ export function inspectSqlAst(sql: string, options: InspectSqlOptions = {}): Sql
                 'Top-level `tenant_id = {tenant_id:String}` conjunction is invalidated by top-level OR',
             });
           }
-        } else if (requireTenantFilter) {
-          const hasValidTenantConjunct = conjuncts.some((c) => isExactTenantBindConjunct(c));
-          if (!hasValidTenantConjunct) {
+          if (requireSiteFilter && scopeRealTables.length > 0) {
             violations.push({
-              code: 'MISSING_TENANT_BIND_PREDICATE',
+              code: 'MISSING_SITE_BIND_PREDICATE',
               message:
-                'Every tenant SELECT scope MUST include a top-level `tenant_id = {tenant_id:String}` conjunct in its WHERE clause',
+                'Top-level `site_id` conjunction is invalidated by top-level OR',
             });
+          }
+        } else {
+          if (requireTenantFilter) {
+            const hasValidTenantConjunct = conjuncts.some((c) => isExactTenantBindConjunct(c));
+            if (!hasValidTenantConjunct) {
+              violations.push({
+                code: 'MISSING_TENANT_BIND_PREDICATE',
+                message:
+                  'Every tenant SELECT scope MUST include a top-level `tenant_id = {tenant_id:String}` conjunct in its WHERE clause',
+              });
+            }
+          }
+          if (requireSiteFilter && scopeRealTables.length > 0) {
+            const hasValidSiteConjunct = conjuncts.some((c) => isExactSiteBindConjunct(c));
+            if (!hasValidSiteConjunct) {
+              violations.push({
+                code: 'MISSING_SITE_BIND_PREDICATE',
+                message:
+                  'Site-scoped credentials MUST include a top-level `site_id = {site_id:String}` or `site_id IN ({allowed_site_ids:Array(String)})` conjunct in every tenant SELECT scope',
+              });
+            }
           }
         }
 

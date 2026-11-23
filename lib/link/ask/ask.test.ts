@@ -463,4 +463,123 @@ describe('lib/link/ask — POST /v1/ask Read-Only Planner, Pre-LLM Privacy Filte
     expect(c4.allowed).toBe(false);
     expect(c4.isolatedCount).toBe(1);
   });
+
+  test('[#17] feeds every individually disclosed group row + total into RREF atomically and blocks 1-user group swap/shift sharing the exact same 20-user union', () => {
+    const diffGuard = new DifferencingGuard(10);
+    const sql = lookupPrecompiledPublicViewSql('v_pub_segment_agg', 'page_views')!;
+
+    // Exact same 20-user union U = {u_0..u_19} across Query 1 and Query 2!
+    const users = Array.from({ length: 20 }, (_, i) => `u_${i}`);
+    const g1A = users.slice(0, 10); // u_0..u_9 (10)
+    const g1B = users.slice(10, 20); // u_10..u_19 (10)
+
+    // Query 1: [10, 10] breakdown -> allowed, commits G1A, G1B, and Total(20) atomically
+    const q1 = filterQueryAndRowsBeforeLlm({
+      viewName: 'v_pub_segment_agg',
+      metricName: 'page_views',
+      sql,
+      requestedColumns: ['segment_id', 'page_views'],
+      groupByColumns: ['segment_id'],
+      rows: [
+        { bucketLabel: 'grp_a', unitCount: 10, metricKey: 'page_views', metricValue: 100, unit: 'page_views', cohortMemberIds: g1A },
+        { bucketLabel: 'grp_b', unitCount: 10, metricKey: 'page_views', metricValue: 120, unit: 'page_views', cohortMemberIds: g1B },
+      ],
+      sessionKey: 'tenant_a:site_1:ep_17',
+      filterSignature: 'cohort:grouped_v1',
+      differencingGuard: diffGuard,
+    });
+    expect(q1.allowed).toBe(true);
+    expect(q1.safeRows).toHaveLength(2);
+
+    // Query 2: EXACT SAME union of 20 users, but 1 user swapped across groups ([10, 10]: u_9 <-> u_10)!
+    // Previously, feeding only the union (20 users) saw identical union and ALLOWED the leak!
+    const g2A = [...users.slice(0, 9), users[10]]; // u_0..u_8, u_10 (10)
+    const g2B = [users[9], ...users.slice(11, 20)]; // u_9, u_11..u_19 (10)
+    const q2Swap = filterQueryAndRowsBeforeLlm({
+      viewName: 'v_pub_segment_agg',
+      metricName: 'page_views',
+      sql,
+      requestedColumns: ['segment_id', 'page_views'],
+      groupByColumns: ['segment_id'],
+      rows: [
+        { bucketLabel: 'grp_a2', unitCount: 10, metricKey: 'page_views', metricValue: 101, unit: 'page_views', cohortMemberIds: g2A },
+        { bucketLabel: 'grp_b2', unitCount: 10, metricKey: 'page_views', metricValue: 119, unit: 'page_views', cohortMemberIds: g2B },
+      ],
+      sessionKey: 'tenant_a:site_1:ep_17',
+      filterSignature: 'cohort:grouped_v2_swap',
+      differencingGuard: diffGuard,
+    });
+    expect(q2Swap.allowed).toBe(false);
+    expect(q2Swap.blockedCode).toBe('DIFFERENCING_ATTACK_BLOCKED');
+
+    // Also test atomicity: a rejected batch with [safe_disjoint_group_15, leaky_group_10_swap]
+    // MUST NOT commit safe_disjoint_group_15 to RREF history!
+    const fresh15 = Array.from({ length: 15 }, (_, i) => `fresh_${i}`);
+    const q2PartialLeak = filterQueryAndRowsBeforeLlm({
+      viewName: 'v_pub_segment_agg',
+      metricName: 'page_views',
+      sql,
+      requestedColumns: ['segment_id', 'page_views'],
+      groupByColumns: ['segment_id'],
+      rows: [
+        { bucketLabel: 'fresh_ok', unitCount: 15, metricKey: 'page_views', metricValue: 150, unit: 'page_views', cohortMemberIds: fresh15 },
+        { bucketLabel: 'leaky_swap', unitCount: 10, metricKey: 'page_views', metricValue: 101, unit: 'page_views', cohortMemberIds: g2A },
+      ],
+      sessionKey: 'tenant_a:site_1:ep_17',
+      filterSignature: 'cohort:grouped_v3_partial',
+      differencingGuard: diffGuard,
+    });
+    expect(q2PartialLeak.allowed).toBe(false);
+    expect(q2PartialLeak.blockedCode).toBe('DIFFERENCING_ATTACK_BLOCKED');
+
+    // Because fresh15 was NOT partially committed when q2PartialLeak failed, querying fresh15 minus 1
+    // (14 completely disjoint fresh users) as a new standalone query MUST succeed!
+    const q3AfterRollback = filterQueryAndRowsBeforeLlm({
+      viewName: 'v_pub_segment_agg',
+      metricName: 'page_views',
+      sql,
+      requestedColumns: ['segment_id', 'page_views'],
+      groupByColumns: ['segment_id'],
+      rows: [
+        { bucketLabel: 'fresh_14', unitCount: 14, metricKey: 'page_views', metricValue: 140, unit: 'page_views', cohortMemberIds: fresh15.slice(0, 14) },
+      ],
+      sessionKey: 'tenant_a:site_1:ep_17',
+      filterSignature: 'cohort:fresh_14',
+      differencingGuard: diffGuard,
+    });
+    expect(q3AfterRollback.allowed).toBe(true);
+  });
+
+  test('[#18] evaluates current siteConsentMode BEFORE Ask cache lookup and isolates cache by consent mode', () => {
+    const svc = new AskService({ executor: new EvalGroundTruthExecutor() });
+    const now = new Date('2026-11-20T12:00:00Z');
+    const sharedParams = {
+      principal: CALLER_A,
+      siteId: 'site_eval_a',
+      siteTenantId: 'tenant_eval_a',
+      permissionEpoch: 77,
+      question: '直近28日の合計PV数を集計してください',
+      windowStart: '2026-10-23T00:00:00Z',
+      windowEnd: '2026-11-20T00:00:00Z',
+      now,
+    };
+
+    // 1. Run under siteConsentMode: 'full' -> succeeds and populates cache
+    const fullRes = svc.ask({ ...sharedParams, siteConsentMode: 'full' });
+    expect(fullRes.httpStatus).toBe(200);
+    expect(fullRes.auditCode).toBe('OK');
+    expect(fullRes.citations).toHaveLength(1);
+    expect(fullRes.citations[0].value).toBe(1200);
+    expect(fullRes.answerText).not.toBeNull();
+
+    // 2. Re-run EXACT SAME question, window, and permissionEpoch with siteConsentMode: 'off'
+    //    MUST be refused as not_collected and NEVER return the cached 'full' answer!
+    const offRes = svc.ask({ ...sharedParams, siteConsentMode: 'off' });
+    expect(offRes.auditCode).toBe('REFUSED:not_collected');
+    expect(offRes.answerText).toBeNull();
+    expect(offRes.citations).toHaveLength(0);
+    expect(offRes.executedSql).toBeNull();
+    expect(offRes.envelope?.measures.ask_metric.status).toBe('not_collected');
+    expect(offRes.envelope?.measures.ask_metric.value).toBeNull();
+  });
 });

@@ -139,13 +139,25 @@ export function assertPinnedJevModelVersion(modelVersion: string): void {
   }
 }
 
+export const JEV_MIN_JP_HUMAN_EVAL_SAMPLES = 300;
+
+export interface JevJapaneseEvalRecord {
+  readonly category: string;
+  readonly modelVersion: string;
+  readonly humanLabeledSamples: number;
+  readonly passedAt: string;
+}
+
 export interface JevGateConfig {
   /** Signed contract defining retention period & deletion terms for US Jev processing (§8.14). */
   readonly contractRetentionDeletionSigned: boolean;
   /** Cross-border region gate (§11.11 #13) approved for US Jev processing. */
   readonly crossBorderRegionApproved: boolean;
-  /** >= 300 Japanese human-label evaluation passed for this question category (§8.14). */
-  readonly japaneseHumanEvalPassed300: boolean;
+  /**
+   * Per-`(category, modelVersion)` passed Japanese human evaluation records (`>= 300` human-labeled
+   * samples required per `(question_category, pinned_model_version)` pair, `[#24]`).
+   */
+  readonly passedJapaneseEvaluations?: readonly JevJapaneseEvalRecord[];
 }
 
 export interface JevJudgmentOption {
@@ -231,6 +243,7 @@ export type JevTransportFn = (params: {
 
 export class JevPublicPageClient {
   private readonly gates: JevGateConfig;
+  private readonly passedEvaluations = new Map<string, JevJapaneseEvalRecord>();
   private readonly costGuard: LlmCostBudgetGuard;
   private readonly transport: JevTransportFn | null;
   private readonly recordedStore = new Map<string, JevRawRecordedResponse>();
@@ -244,9 +257,43 @@ export class JevPublicPageClient {
     readonly nowIso?: () => string;
   }) {
     this.gates = { ...options.gates };
+    if (Array.isArray(options.gates.passedJapaneseEvaluations)) {
+      for (const rec of options.gates.passedJapaneseEvaluations) {
+        if (
+          typeof rec.category === 'string' &&
+          rec.category.trim().length > 0 &&
+          typeof rec.modelVersion === 'string' &&
+          rec.modelVersion.trim().length > 0 &&
+          typeof rec.humanLabeledSamples === 'number' &&
+          Number.isFinite(rec.humanLabeledSamples) &&
+          rec.humanLabeledSamples >= JEV_MIN_JP_HUMAN_EVAL_SAMPLES
+        ) {
+          this.passedEvaluations.set(`${rec.category}::${rec.modelVersion}`, { ...rec });
+        }
+      }
+    }
     this.costGuard = options.costGuard;
     this.transport = options.transport ?? null;
     this.nowIso = options.nowIso ?? (() => new Date().toISOString());
+  }
+
+  public registerPassedJapaneseEvaluation(record: JevJapaneseEvalRecord): void {
+    if (
+      !record.category.trim() ||
+      !record.modelVersion.trim() ||
+      !Number.isFinite(record.humanLabeledSamples) ||
+      record.humanLabeledSamples < JEV_MIN_JP_HUMAN_EVAL_SAMPLES
+    ) {
+      throw new Error(
+        `Jev Japanese evaluation requires category, modelVersion, and humanLabeledSamples >= ${JEV_MIN_JP_HUMAN_EVAL_SAMPLES}`
+      );
+    }
+    this.passedEvaluations.set(`${record.category}::${record.modelVersion}`, { ...record });
+  }
+
+  public hasPassedJapaneseEvaluation(category: string, modelVersion: string): boolean {
+    const rec = this.passedEvaluations.get(`${category}::${modelVersion}`);
+    return Boolean(rec && rec.humanLabeledSamples >= JEV_MIN_JP_HUMAN_EVAL_SAMPLES);
   }
 
   public getRecordedResponse(requestDigest: string): JevRawRecordedResponse | undefined {
@@ -267,7 +314,7 @@ export class JevPublicPageClient {
     // 2. Enforce pinned dated model version (no mutable aliases!)
     assertPinnedJevModelVersion(request.pinned_model_version);
 
-    // 3. Enforce contract + cross-border region + 300-label JP eval gates (§8.14)
+    // 3. Enforce contract + cross-border region + per-(category, modelVersion) >=300-label JP eval gate (§8.14 / [#24])
     const unmet: string[] = [];
     if (!this.gates.contractRetentionDeletionSigned) {
       unmet.push('jev.contract_retention_deletion_signed');
@@ -275,8 +322,10 @@ export class JevPublicPageClient {
     if (!this.gates.crossBorderRegionApproved) {
       unmet.push('jev.cross_border_us_region_approved');
     }
-    if (!this.gates.japaneseHumanEvalPassed300) {
-      unmet.push('jev.jp_human_eval_300_passed');
+    if (!this.hasPassedJapaneseEvaluation(request.question_category, request.pinned_model_version)) {
+      unmet.push(
+        `jev.jp_human_eval_300_passed:${request.question_category}:${request.pinned_model_version}`
+      );
     }
     if (unmet.length > 0) {
       return {

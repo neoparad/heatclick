@@ -78,6 +78,413 @@ export function constantTimeHexEquals(a: string, b: string): boolean {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
+function constantTimeUtf8Equals(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+// =========================================================================
+// 1b. RFC 9449 DPoP Proof-of-Possession & RFC 7638 JWK Thumbprint
+// =========================================================================
+
+export const DPOP_DEFAULT_MAX_SKEW_SEC = 60;
+const DPOP_PRIVATE_JWK_FIELDS: ReadonlySet<string> = new Set([
+  'd',
+  'p',
+  'q',
+  'dp',
+  'dq',
+  'qi',
+  'oth',
+  'k',
+]);
+const BASE64URL_SEGMENT_RE = /^[A-Za-z0-9_-]+$/;
+
+export type DpopSupportedAlg = 'EdDSA' | 'ES256';
+
+export interface DpopPublicJwk {
+  readonly kty: 'OKP' | 'EC';
+  readonly crv: 'Ed25519' | 'P-256';
+  readonly x: string;
+  readonly y?: string;
+}
+
+export class DpopReplayCache {
+  private readonly seen = new Map<string, number>();
+  public readonly maxEntries: number;
+  public readonly ttlMs: number;
+
+  constructor(options?: { readonly maxEntries?: number; readonly ttlMs?: number }) {
+    this.maxEntries = Math.max(16, Math.floor(options?.maxEntries ?? 10_000));
+    this.ttlMs = Math.max(1_000, Math.floor(options?.ttlMs ?? 120_000));
+  }
+
+  public checkAndRecord(jti: string, nowMs: number = Date.now()): boolean {
+    const existingExp = this.seen.get(jti);
+    if (existingExp !== undefined) {
+      if (nowMs < existingExp) {
+        return false; // Replay detected
+      }
+      this.seen.delete(jti);
+    }
+
+    if (this.seen.size >= this.maxEntries) {
+      for (const [k, exp] of this.seen.entries()) {
+        if (nowMs >= exp) {
+          this.seen.delete(k);
+        }
+      }
+      while (this.seen.size >= this.maxEntries) {
+        const oldest = this.seen.keys().next().value;
+        if (oldest === undefined) break;
+        this.seen.delete(oldest);
+      }
+    }
+
+    this.seen.set(jti, nowMs + this.ttlMs);
+    return true;
+  }
+
+  public size(): number {
+    return this.seen.size;
+  }
+}
+
+const DEFAULT_DPOP_REPLAY_CACHE = new DpopReplayCache();
+
+/**
+ * Computes canonical RFC 7638 SHA-256 JWK Thumbprint (`jkt`) for public OKP (Ed25519)
+ * or EC (P-256) JWKs. Rejects any JWK containing private key parameters.
+ */
+export function computeJwkThumbprint(jwk: Readonly<Record<string, unknown>>): string {
+  for (const field of DPOP_PRIVATE_JWK_FIELDS) {
+    if (field in jwk && jwk[field] !== undefined) {
+      throw new Error(`DPoP JWK must not contain private key field "${field}"`);
+    }
+  }
+  const kty = jwk.kty;
+  const crv = jwk.crv;
+  const x = jwk.x;
+
+  if (kty === 'OKP' && crv === 'Ed25519' && typeof x === 'string' && x.length > 0) {
+    // Lexicographical order per RFC 7638 §3.2: crv, kty, x
+    const canonical = JSON.stringify({ crv, kty, x });
+    return crypto.createHash('sha256').update(canonical, 'utf8').digest('base64url');
+  }
+
+  if (
+    kty === 'EC' &&
+    crv === 'P-256' &&
+    typeof x === 'string' &&
+    x.length > 0 &&
+    typeof jwk.y === 'string' &&
+    jwk.y.length > 0
+  ) {
+    // Lexicographical order per RFC 7638 §3.2: crv, kty, x, y
+    const canonical = JSON.stringify({ crv, kty, x, y: jwk.y });
+    return crypto.createHash('sha256').update(canonical, 'utf8').digest('base64url');
+  }
+
+  throw new Error('Unsupported or malformed public JWK for RFC 7638 thumbprint (expected OKP/Ed25519 or EC/P-256)');
+}
+
+/**
+ * Computes RFC 9449 §4.2 `ath` (base64url-encoded SHA-256 hash of ASCII access token).
+ */
+export function computeDpopAccessTokenHash(accessToken: string): string {
+  return crypto.createHash('sha256').update(accessToken, 'ascii').digest('base64url');
+}
+
+/**
+ * Normalizes an HTTP URI for RFC 9449 `htu` comparison (scheme + host + path, no query or fragment).
+ */
+export function normalizeDpopHtu(rawUri: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUri);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return null;
+  }
+  if (parsed.username || parsed.password) {
+    return null;
+  }
+  return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+}
+
+export interface DpopVerifyOptions {
+  readonly dpopProof: string;
+  readonly httpMethod: string;
+  readonly httpUri: string;
+  readonly accessToken?: string;
+  readonly expectedJkt?: string;
+  readonly maxClockSkewSec?: number;
+  readonly replayCache?: DpopReplayCache;
+  readonly now?: Date;
+}
+
+export type DpopVerifyResult =
+  | {
+      readonly ok: true;
+      readonly jkt: string;
+      readonly jti: string;
+      readonly alg: DpopSupportedAlg;
+      readonly htm: string;
+      readonly htu: string;
+      readonly iat: number;
+    }
+  | {
+      readonly ok: false;
+      readonly code: string;
+      readonly reason: string;
+    };
+
+/**
+ * Cryptographically verifies an RFC 9449 DPoP Proof JWT (`header.payload.signature`).
+ */
+export function verifyDpopProofJwt(options: DpopVerifyOptions): DpopVerifyResult {
+  const now = options.now ?? new Date();
+  const maxSkew = options.maxClockSkewSec ?? DPOP_DEFAULT_MAX_SKEW_SEC;
+  const replayCache = options.replayCache ?? DEFAULT_DPOP_REPLAY_CACHE;
+
+  const raw = options.dpopProof.trim();
+  const parts = raw.split('.');
+  if (
+    parts.length !== 3 ||
+    !parts[0] ||
+    !parts[1] ||
+    !parts[2] ||
+    !BASE64URL_SEGMENT_RE.test(parts[0]) ||
+    !BASE64URL_SEGMENT_RE.test(parts[1]) ||
+    !BASE64URL_SEGMENT_RE.test(parts[2])
+  ) {
+    return { ok: false, code: 'DPOP_MALFORMED_JWT', reason: 'DPoP proof must be a compact JWS' };
+  }
+
+  const [headerB64, payloadB64, sigB64] = parts;
+
+  let header: Record<string, unknown>;
+  let payload: Record<string, unknown>;
+  try {
+    const h = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf8')) as unknown;
+    const p = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as unknown;
+    if (!h || typeof h !== 'object' || Array.isArray(h) || !p || typeof p !== 'object' || Array.isArray(p)) {
+      return { ok: false, code: 'DPOP_MALFORMED_JWT', reason: 'DPoP header and payload must be JSON objects' };
+    }
+    header = h as Record<string, unknown>;
+    payload = p as Record<string, unknown>;
+  } catch {
+    return { ok: false, code: 'DPOP_MALFORMED_JWT', reason: 'Failed to decode DPoP header or payload JSON' };
+  }
+
+  if (header.typ !== 'dpop+jwt') {
+    return { ok: false, code: 'DPOP_INVALID_TYP', reason: 'DPoP header typ must be "dpop+jwt"' };
+  }
+
+  if (header.alg !== 'EdDSA' && header.alg !== 'ES256') {
+    return { ok: false, code: 'DPOP_UNSUPPORTED_ALG', reason: 'DPoP header alg must be EdDSA or ES256' };
+  }
+  const alg: DpopSupportedAlg = header.alg;
+
+  if (!header.jwk || typeof header.jwk !== 'object' || Array.isArray(header.jwk)) {
+    return { ok: false, code: 'DPOP_MISSING_JWK', reason: 'DPoP header must embed a public jwk' };
+  }
+  const jwkObj = header.jwk as Record<string, unknown>;
+
+  for (const privField of DPOP_PRIVATE_JWK_FIELDS) {
+    if (privField in jwkObj && jwkObj[privField] !== undefined) {
+      return {
+        ok: false,
+        code: 'DPOP_PRIVATE_JWK_FORBIDDEN',
+        reason: `DPoP header jwk must not include private key field "${privField}"`,
+      };
+    }
+  }
+
+  // Enforce algorithm <-> key type consistency
+  if (alg === 'EdDSA' && (jwkObj.kty !== 'OKP' || jwkObj.crv !== 'Ed25519')) {
+    return { ok: false, code: 'DPOP_JWK_ALG_MISMATCH', reason: 'EdDSA requires OKP/Ed25519 public JWK' };
+  }
+  if (alg === 'ES256' && (jwkObj.kty !== 'EC' || jwkObj.crv !== 'P-256')) {
+    return { ok: false, code: 'DPOP_JWK_ALG_MISMATCH', reason: 'ES256 requires EC/P-256 public JWK' };
+  }
+
+  let jkt: string;
+  try {
+    jkt = computeJwkThumbprint(jwkObj);
+  } catch {
+    return { ok: false, code: 'DPOP_INVALID_JWK', reason: 'Invalid embedded public JWK' };
+  }
+
+  if (options.expectedJkt !== undefined && !constantTimeUtf8Equals(jkt, options.expectedJkt)) {
+    return {
+      ok: false,
+      code: 'DPOP_JKT_MISMATCH',
+      reason: 'DPoP proof JWK thumbprint does not match credential bound jkt',
+    };
+  }
+
+  // Cryptographic signature verification
+  const signingInput = Buffer.from(`${headerB64}.${payloadB64}`, 'ascii');
+  const sigBytes = Buffer.from(sigB64, 'base64url');
+  let sigOk = false;
+  try {
+    const publicOnlyJwk: crypto.JsonWebKey =
+      alg === 'EdDSA'
+        ? { kty: 'OKP', crv: 'Ed25519', x: String(jwkObj.x) }
+        : { kty: 'EC', crv: 'P-256', x: String(jwkObj.x), y: String(jwkObj.y) };
+    const pubKey = crypto.createPublicKey({ key: publicOnlyJwk, format: 'jwk' });
+    if (alg === 'EdDSA') {
+      sigOk = crypto.verify(null, signingInput, pubKey, sigBytes);
+    } else {
+      sigOk = crypto.verify(
+        'sha256',
+        signingInput,
+        { key: pubKey, dsaEncoding: 'ieee-p1363' },
+        sigBytes
+      );
+    }
+  } catch {
+    sigOk = false;
+  }
+
+  if (!sigOk) {
+    return {
+      ok: false,
+      code: 'DPOP_SIGNATURE_INVALID',
+      reason: 'DPoP proof cryptographic signature verification failed',
+    };
+  }
+
+  // Claims validation: jti, htm, htu, iat, ath
+  const jti = payload.jti;
+  if (typeof jti !== 'string' || jti.trim().length === 0 || jti.length > 256) {
+    return { ok: false, code: 'DPOP_INVALID_JTI', reason: 'DPoP payload requires a non-empty jti' };
+  }
+
+  const htm = payload.htm;
+  const expectedMethod = options.httpMethod.trim().toUpperCase();
+  if (typeof htm !== 'string' || htm.toUpperCase() !== expectedMethod) {
+    return {
+      ok: false,
+      code: 'DPOP_HTM_MISMATCH',
+      reason: `DPoP htm "${String(htm)}" does not match HTTP method "${expectedMethod}"`,
+    };
+  }
+
+  const htu = payload.htu;
+  if (typeof htu !== 'string' || htu.includes('?') || htu.includes('#')) {
+    return {
+      ok: false,
+      code: 'DPOP_HTU_MISMATCH',
+      reason: 'DPoP htu must be a normalized HTTP URI without query or fragment',
+    };
+  }
+  const normalizedClaimHtu = normalizeDpopHtu(htu);
+  const normalizedReqHtu = normalizeDpopHtu(options.httpUri);
+  if (!normalizedClaimHtu || !normalizedReqHtu || normalizedClaimHtu !== normalizedReqHtu) {
+    return {
+      ok: false,
+      code: 'DPOP_HTU_MISMATCH',
+      reason: `DPoP htu "${htu}" does not match request URI "${options.httpUri}"`,
+    };
+  }
+
+  const iat = payload.iat;
+  const nowSec = Math.floor(now.getTime() / 1000);
+  if (typeof iat !== 'number' || !Number.isFinite(iat) || Math.abs(nowSec - iat) > maxSkew) {
+    return {
+      ok: false,
+      code: 'DPOP_IAT_OUT_OF_RANGE',
+      reason: `DPoP iat is outside allowed ±${maxSkew}s clock skew window`,
+    };
+  }
+
+  if (options.accessToken !== undefined) {
+    const ath = payload.ath;
+    const expectedAth = computeDpopAccessTokenHash(options.accessToken);
+    if (typeof ath !== 'string' || !constantTimeUtf8Equals(ath, expectedAth)) {
+      return {
+        ok: false,
+        code: 'DPOP_ATH_MISMATCH',
+        reason: 'DPoP ath claim does not match SHA-256 hash of access token',
+      };
+    }
+  }
+
+  // Bounded JTI replay check (recorded only after all stateless checks pass)
+  if (!replayCache.checkAndRecord(jti, now.getTime())) {
+    return {
+      ok: false,
+      code: 'DPOP_JTI_REPLAYED',
+      reason: 'DPoP proof jti has already been used (replay detected)',
+    };
+  }
+
+  return {
+    ok: true,
+    jkt,
+    jti,
+    alg,
+    htm: expectedMethod,
+    htu: normalizedClaimHtu,
+    iat,
+  };
+}
+
+/**
+ * Signs an RFC 9449 DPoP Proof JWT using an Ed25519 (EdDSA) or P-256 (ES256) keypair.
+ */
+export function createDpopProofJwt(params: {
+  readonly alg: DpopSupportedAlg;
+  readonly publicJwk: Readonly<Record<string, unknown>>;
+  readonly privateKey: crypto.KeyObject | string;
+  readonly htm: string;
+  readonly htu: string;
+  readonly accessToken?: string;
+  readonly jti?: string;
+  readonly iat?: number;
+  readonly now?: Date;
+}): string {
+  const iat = params.iat ?? Math.floor((params.now ?? new Date()).getTime() / 1000);
+  const jti = params.jti ?? `dpop_${crypto.randomBytes(16).toString('base64url')}`;
+  const header = {
+    typ: 'dpop+jwt',
+    alg: params.alg,
+    jwk: params.publicJwk,
+  };
+  const payload: Record<string, unknown> = {
+    jti,
+    htm: params.htm.toUpperCase(),
+    htu: params.htu,
+    iat,
+  };
+  if (params.accessToken !== undefined) {
+    payload.ath = computeDpopAccessTokenHash(params.accessToken);
+  }
+  const headerB64 = Buffer.from(JSON.stringify(header), 'utf8').toString('base64url');
+  const payloadB64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signingInput = Buffer.from(`${headerB64}.${payloadB64}`, 'ascii');
+  const keyObj =
+    typeof params.privateKey === 'string'
+      ? crypto.createPrivateKey(params.privateKey)
+      : params.privateKey;
+  const sigBuf =
+    params.alg === 'EdDSA'
+      ? crypto.sign(null, signingInput, keyObj)
+      : crypto.sign('sha256', signingInput, {
+          key: keyObj,
+          dsaEncoding: 'ieee-p1363',
+        });
+  return `${headerB64}.${payloadB64}.${sigBuf.toString('base64url')}`;
+}
+
 export function intersectScopes(
   ...scopeLists: ReadonlyArray<ReadonlyArray<Scope>>
 ): Scope[] {
@@ -262,7 +669,12 @@ export interface SecretKeyVerifyContext {
   readonly siteId?: string;
   readonly requestedCredits?: number;
   readonly requestedPublishes?: number;
-  readonly senderThumbprint?: string;
+  /** Signed RFC 9449 DPoP proof JWT from the `DPoP` HTTP header. */
+  readonly dpopProof?: string;
+  readonly httpMethod?: string;
+  readonly httpUri?: string;
+  /** Server-trusted mTLS client certificate thumbprint (NEVER populated from untrusted HTTP headers). */
+  readonly mtlsThumbprint?: string;
   readonly now?: Date;
 }
 
@@ -300,6 +712,7 @@ export class IdentityKeyRegistry {
 
   private readonly publicKeySigningPairs = new Map<string, Ed25519KeyPair>();
   private readonly oemSigningPair: Ed25519KeyPair;
+  private readonly dpopReplayCache = new DpopReplayCache();
 
   constructor(options: {
     readonly pepperVersion: string;
@@ -679,12 +1092,21 @@ export class IdentityKeyRegistry {
       : ROLE_SCOPES[principal.role];
     const effective = intersectScopes(record.scopes, principalScopes, tenant.planScopes);
 
-    // Sender constraint verification (mTLS / DPoP thumbprint match)
-    const senderConstrained = Boolean(
-      record.constraints.senderConstrainedThumbprint &&
-        ctx.senderThumbprint &&
-        record.constraints.senderConstrainedThumbprint === ctx.senderThumbprint
-    );
+    // Sender constraint verification (cryptographic RFC 9449 DPoP proof or server-trusted mTLS)
+    const senderCheck = this.verifySenderConstraint({
+      boundThumbprint: record.constraints.senderConstrainedThumbprint,
+      accessToken: rawKey.trim(),
+      dpopProof: ctx.dpopProof,
+      httpMethod: ctx.httpMethod,
+      httpUri: ctx.httpUri,
+      mtlsThumbprint: ctx.mtlsThumbprint,
+      allowMtls: true,
+      now,
+    });
+    if (!senderCheck.ok) {
+      return senderCheck;
+    }
+    const senderConstrained = senderCheck.senderConstrained;
 
     if (reqCredits > 0) usage.credits += reqCredits;
     if (reqPublishes > 0) usage.publishes += reqPublishes;
@@ -706,6 +1128,101 @@ export class IdentityKeyRegistry {
         constraints: record.constraints,
       },
     };
+  }
+
+  private verifySenderConstraint(params: {
+    readonly boundThumbprint?: string;
+    readonly accessToken: string;
+    readonly dpopProof?: string;
+    readonly httpMethod?: string;
+    readonly httpUri?: string;
+    readonly mtlsThumbprint?: string;
+    readonly allowMtls: boolean;
+    readonly now: Date;
+  }):
+    | { readonly ok: true; readonly senderConstrained: boolean }
+    | { readonly ok: false; readonly httpStatus: 401; readonly code: string; readonly reason: string } {
+    if (params.boundThumbprint) {
+      if (params.dpopProof) {
+        if (!params.httpMethod || !params.httpUri) {
+          return {
+            ok: false,
+            httpStatus: 401,
+            code: 'DPOP_REQUEST_CONTEXT_MISSING',
+            reason: 'DPoP verification requires HTTP method and request URI',
+          };
+        }
+        const dpopRes = verifyDpopProofJwt({
+          dpopProof: params.dpopProof,
+          httpMethod: params.httpMethod,
+          httpUri: params.httpUri,
+          accessToken: params.accessToken,
+          expectedJkt: params.boundThumbprint,
+          replayCache: this.dpopReplayCache,
+          now: params.now,
+        });
+        if (!dpopRes.ok) {
+          return {
+            ok: false,
+            httpStatus: 401,
+            code: dpopRes.code,
+            reason: dpopRes.reason,
+          };
+        }
+        return { ok: true, senderConstrained: true };
+      }
+
+      if (params.allowMtls && params.mtlsThumbprint) {
+        if (!constantTimeUtf8Equals(params.boundThumbprint, params.mtlsThumbprint)) {
+          return {
+            ok: false,
+            httpStatus: 401,
+            code: 'MTLS_THUMBPRINT_MISMATCH',
+            reason: 'Client mTLS certificate thumbprint does not match credential binding',
+          };
+        }
+        return { ok: true, senderConstrained: true };
+      }
+
+      return {
+        ok: false,
+        httpStatus: 401,
+        code: params.allowMtls ? 'SENDER_CONSTRAINT_PROOF_REQUIRED' : 'DPOP_PROOF_REQUIRED',
+        reason: params.allowMtls
+          ? 'Sender-constrained credential requires a verified DPoP proof JWT or server-verified mTLS certificate'
+          : 'DPoP-bound OAuth token requires a cryptographically verified RFC 9449 DPoP proof JWT',
+      };
+    }
+
+    // Credential is not sender-constrained; if a DPoP header was sent anyway, validate it fail-closed
+    if (params.dpopProof) {
+      if (!params.httpMethod || !params.httpUri) {
+        return {
+          ok: false,
+          httpStatus: 401,
+          code: 'DPOP_REQUEST_CONTEXT_MISSING',
+          reason: 'DPoP verification requires HTTP method and request URI',
+        };
+      }
+      const dpopRes = verifyDpopProofJwt({
+        dpopProof: params.dpopProof,
+        httpMethod: params.httpMethod,
+        httpUri: params.httpUri,
+        accessToken: params.accessToken,
+        replayCache: this.dpopReplayCache,
+        now: params.now,
+      });
+      if (!dpopRes.ok) {
+        return {
+          ok: false,
+          httpStatus: 401,
+          code: dpopRes.code,
+          reason: dpopRes.reason,
+        };
+      }
+    }
+
+    return { ok: true, senderConstrained: false };
   }
 
   private getOrResetUsage(keyId: string, dayKey: string): UsageCounter {
@@ -999,7 +1516,13 @@ export class IdentityKeyRegistry {
 
   public verifyOemExchangedToken(
     rawToken: string,
-    ctx: { readonly senderThumbprint?: string; readonly now?: Date } = {}
+    ctx: {
+      readonly dpopProof?: string;
+      readonly httpMethod?: string;
+      readonly httpUri?: string;
+      readonly mtlsThumbprint?: string;
+      readonly now?: Date;
+    } = {}
   ): VerifyCredentialResult {
     const now = ctx.now ?? new Date();
     if (!rawToken.startsWith('ugk_oemx_')) {
@@ -1090,11 +1613,20 @@ export class IdentityKeyRegistry {
       childTenant.delegationPolicy.allowedOemScopes,
       childTenant.planScopes
     );
-    const senderConstrained = Boolean(
-      claims.senderConstrainedThumbprint &&
-        ctx.senderThumbprint &&
-        claims.senderConstrainedThumbprint === ctx.senderThumbprint
-    );
+    const senderCheck = this.verifySenderConstraint({
+      boundThumbprint: claims.senderConstrainedThumbprint,
+      accessToken: rawToken.trim(),
+      dpopProof: ctx.dpopProof,
+      httpMethod: ctx.httpMethod,
+      httpUri: ctx.httpUri,
+      mtlsThumbprint: ctx.mtlsThumbprint,
+      allowMtls: true,
+      now,
+    });
+    if (!senderCheck.ok) {
+      return senderCheck;
+    }
+    const senderConstrained = senderCheck.senderConstrained;
 
     return {
       ok: true,
@@ -1189,7 +1721,12 @@ export class IdentityKeyRegistry {
 
   public verifyMcpOAuthToken(
     accessToken: string,
-    ctx: { readonly dpopThumbprint?: string; readonly now?: Date } = {}
+    ctx: {
+      readonly dpopProof?: string;
+      readonly httpMethod?: string;
+      readonly httpUri?: string;
+      readonly now?: Date;
+    } = {}
   ): VerifyCredentialResult {
     const now = ctx.now ?? new Date();
     const match = /^ugk_oauth_(mcp_[a-f0-9]{16})_([A-Za-z0-9_-]+)$/.exec(accessToken.trim());
@@ -1242,9 +1779,19 @@ export class IdentityKeyRegistry {
       : ROLE_SCOPES[principal.role];
     const effective = intersectScopes(record.scopes, principalScopes, tenant.planScopes);
 
-    const senderConstrained = Boolean(
-      record.dpopThumbprint && ctx.dpopThumbprint && record.dpopThumbprint === ctx.dpopThumbprint
-    );
+    const senderCheck = this.verifySenderConstraint({
+      boundThumbprint: record.dpopThumbprint,
+      accessToken: accessToken.trim(),
+      dpopProof: ctx.dpopProof,
+      httpMethod: ctx.httpMethod,
+      httpUri: ctx.httpUri,
+      allowMtls: false,
+      now,
+    });
+    if (!senderCheck.ok) {
+      return senderCheck;
+    }
+    const senderConstrained = senderCheck.senderConstrained;
 
     return {
       ok: true,

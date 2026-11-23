@@ -278,6 +278,7 @@ export function evaluateEnvelopePublishAllowance(params: {
   readonly envelope: SealedAutonomyEnvelope;
   readonly action: string;
   readonly pagePath: string;
+  readonly fieldProvenances?: readonly FieldProvenance[];
   readonly requestedExposedUnits: number;
   readonly requestedConversionsAtRisk: number;
   readonly requestedCostUnits: number;
@@ -366,6 +367,19 @@ export function evaluateEnvelopePublishAllowance(params: {
       'PAGE_OUT_OF_ENVELOPE',
       `Page "${params.pagePath}" is outside allowedPagePatterns`
     );
+  }
+
+  // Enforce owner-sealed allowedFieldProvenance allowlist across ALL candidate fields (including catalog enums)
+  if (params.fieldProvenances && params.fieldProvenances.length > 0) {
+    const allowedSet = new Set<string>(envelope.spec.allowedFieldProvenance);
+    for (const prov of params.fieldProvenances) {
+      if (prov === 'open' || !allowedSet.has(prov)) {
+        return deny(
+          'FIELD_PROVENANCE_NOT_ALLOWED_IN_ENVELOPE',
+          `Field provenance "${prov}" is not allowed by sealed envelope allowedFieldProvenance [${envelope.spec.allowedFieldProvenance.join(', ')}]`
+        );
+      }
+    }
   }
 
   // Smoke failure & smoke completion gate (`N_smoke = ceil(3 / ε) >= 300`)

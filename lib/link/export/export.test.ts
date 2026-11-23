@@ -451,11 +451,13 @@ describe('lib/link/export/destination-functions (sandboxed transform + LINK-cont
     expect(isForbiddenInternalIp('10.20.30.40')).toBe(true);
     expect(isForbiddenInternalIp('192.168.1.1')).toBe(true);
     expect(isForbiddenInternalIp('::1')).toBe(true);
-    expect(isForbiddenInternalIp('203.0.113.42')).toBe(false);
+    expect(isForbiddenInternalIp('198.51.100.1')).toBe(true);
+    expect(isForbiddenInternalIp('203.0.113.42')).toBe(true);
+    expect(isForbiddenInternalIp('93.184.216.34')).toBe(false);
 
     const dest = getDestinationSpec('stor_webhook_direct')!;
     let dnsMap: Record<string, readonly string[]> = {
-      'hooks.customer.invalid': ['203.0.113.42'],
+      'hooks.customer.invalid': ['93.184.216.34'],
     };
     let transportResp: { status: number; locationHeader?: string } = { status: 200 };
     let lastSentHeaders: Readonly<Record<string, string>> = {};
@@ -520,7 +522,7 @@ describe('lib/link/export/destination-functions (sandboxed transform + LINK-cont
     expect(ssrfRes.status).toBe('ssrf_blocked');
 
     // 3. Redirect to evil host / metadata IP -> redirect blocked!
-    dnsMap = { 'hooks.customer.invalid': ['203.0.113.42'] };
+    dnsMap = { 'hooks.customer.invalid': ['93.184.216.34'] };
     transportResp = {
       status: 302,
       locationHeader: 'http://169.254.169.254/latest/meta-data/',
@@ -784,7 +786,7 @@ describe('lib/link/export/self-serve-billing (§11.11 #1 & #7)', () => {
 
     const dest = getDestinationSpec('stor_webhook_direct')!;
     const sender = new LinkControlledDestinationSender(
-      { async resolveAll() { return ['203.0.113.42']; } },
+      { async resolveAll() { return ['93.184.216.34']; } },
       { async getBoundAuthHeaders() { return { authorization: 'Bearer vault_secret' }; } },
       { async send() { return { status: 307, locationHeader: 'https://other.customer.invalid/x' }; } }
     );
@@ -841,5 +843,92 @@ describe('lib/link/export/self-serve-billing (§11.11 #1 & #7)', () => {
     });
     expect(multiSlice.suppressedCellsCount).toBe(2);
     expect(multiSlice.complementarySuppressedCount).toBe(2);
+  });
+
+  test('Wave 9 Regressions (#1, #26): SQL interface enforces site_id predicate for site-scoped credentials on 2-site dataset, and worker caps >32 KiB output & 200 KiB errors before IPC', async () => {
+    // #1: 2-site dataset (`site_a`, `site_b`) — Site-A-only principal CANNOT run unscoped tenant-wide aggregate
+    const twoSiteTable = [
+      { tenant_id: 'ten-a', site_id: 'site_a', page_id: '/a', pvs: 120 },
+      { tenant_id: 'ten-a', site_id: 'site_b', page_id: '/b', pvs: 880 },
+    ];
+    let executedCount = 0;
+    const sqlApi = new TenantSqlInterface({
+      async execute(q) {
+        executedCount += 1;
+        const filtered = twoSiteTable.filter((r) => {
+          if (r.tenant_id !== q.query_params.tenant_id) return false;
+          if (typeof q.query_params.site_id === 'string') {
+            return r.site_id === q.query_params.site_id;
+          }
+          if (Array.isArray(q.query_params.allowed_site_ids)) {
+            return (q.query_params.allowed_site_ids as readonly string[]).includes(r.site_id);
+          }
+          return true;
+        });
+        return { rows: filtered, scannedRows: filtered.length, costUnitsUsed: 1, durationMs: 5 };
+      },
+    });
+
+    const siteAOnly = makePrincipal({ allowedSiteIds: ['site_a'] });
+    const unscopedAttempt = await sqlApi.executeQuery({
+      principal: siteAOnly,
+      siteId: 'site_a',
+      sql: `
+        SELECT sum(pvs) AS total_pvs
+        FROM rollup_page_hourly
+        WHERE tenant_id = {tenant_id:String}
+          AND pv_hour >= {start_ts:DateTime}
+      `,
+      params: { start_ts: '2026-11-19 00:00:00' },
+      windowStartIso: '2026-11-19T00:00:00.000Z',
+      windowEndIso: '2026-11-20T00:00:00.000Z',
+      storageRegion: 'jp',
+    });
+    expect(unscopedAttempt.allowed).toBe(false);
+    expect(unscopedAttempt.httpStatus).toBe(403);
+    expect(unscopedAttempt.violations.some((v) => v.includes('MISSING_SITE_BIND_PREDICATE'))).toBe(true);
+    expect(executedCount).toBe(0);
+
+    // Properly site-scoped query executes and ONLY ever returns site_a rows (never site_b)
+    const scopedOk = await sqlApi.executeQuery({
+      principal: siteAOnly,
+      siteId: 'site_a',
+      sql: `
+        SELECT page_id, sum(pvs) AS total_pvs
+        FROM rollup_page_hourly
+        WHERE tenant_id = {tenant_id:String}
+          AND site_id = {site_id:String}
+          AND pv_hour >= {start_ts:DateTime}
+        GROUP BY page_id
+      `,
+      params: { start_ts: '2026-11-19 00:00:00' },
+      windowStartIso: '2026-11-19T00:00:00.000Z',
+      windowEndIso: '2026-11-20T00:00:00.000Z',
+      storageRegion: 'jp',
+    });
+    expect(scopedOk.allowed).toBe(true);
+    expect(scopedOk.httpStatus).toBe(200);
+    expect(executedCount).toBe(1);
+    const dataRows = (scopedOk.envelope?.data as { rows: Array<{ site_id: string }> }).rows;
+    expect(dataRows).toHaveLength(1);
+    expect(dataRows[0]?.site_id).toBe('site_a');
+
+    // #26: Oversized >32 KiB output (500 KiB) rejected cleanly inside worker BEFORE IPC
+    const hugeOut = executeDestinationFunctionSandboxed({
+      code: `function transform() { return { method: 'POST', url: 'https://hooks.customer.invalid/ugokilink/events', headers: {}, body: { blob: 'A'.repeat(500 * 1024) } }; }`,
+      eventInput: {},
+    });
+    expect(hugeOut.ok).toBe(false);
+    expect(hugeOut.error).toMatch(/OUTPUT_SIZE_LIMIT_EXCEEDED/);
+    expect(hugeOut.outputBytes).toBeGreaterThan(32 * 1024);
+
+    // #26: Oversized 200 KiB thrown error message truncated to <= 512 bytes inside worker BEFORE IPC
+    const hugeErr = executeDestinationFunctionSandboxed({
+      code: `function transform() { throw new Error('E'.repeat(200 * 1024)); }`,
+      eventInput: {},
+    });
+    expect(hugeErr.ok).toBe(false);
+    expect(hugeErr.error).toBeDefined();
+    expect(Buffer.byteLength(hugeErr.error!, 'utf8')).toBeLessThanOrEqual(512);
   });
 });

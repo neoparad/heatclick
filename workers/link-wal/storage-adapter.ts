@@ -9,6 +9,10 @@
  */
 
 import {
+  canonicalJsonStringify,
+  sha256Hex,
+} from '../../packages/contract/schema';
+import {
   VALID_DATA_REGIONS,
   type DataRegion,
   type R2BucketLike,
@@ -73,7 +77,7 @@ export interface StorageTierAdapter {
     customMetadata?: Readonly<Record<string, string>>
   ): Promise<R2ObjectLike | null>;
   getObject(key: string): Promise<R2ObjectLike | null>;
-  listObjects(prefix: string, limit?: number): Promise<R2ListResult>;
+  listObjects(prefix: string, limit?: number, cursor?: string): Promise<R2ListResult>;
   deleteObjects(keys: string | readonly string[]): Promise<void>;
 }
 
@@ -205,6 +209,16 @@ export function formatQuarantineObjectKey(
   return `quarantine/${region}/${tenantId}/${siteId}/${dayUtc}/${sha256}.json`;
 }
 
+export function formatExportReceiptKey(
+  region: DataRegion,
+  tenantId: string,
+  siteId: string,
+  walKey: string
+): string {
+  const walKeyHash = sha256Hex(walKey);
+  return `export-receipts/${region}/${tenantId}/${siteId}/${walKeyHash}.json`;
+}
+
 /**
  * Tier 1: LINK-managed primary R2 bucket in the pinned region.
  */
@@ -272,8 +286,8 @@ export class LinkManagedStorageAdapter implements StorageTierAdapter {
     return this.bucket.get(key);
   }
 
-  public async listObjects(prefix: string, limit = 1000): Promise<R2ListResult> {
-    return this.bucket.list({ prefix, limit });
+  public async listObjects(prefix: string, limit = 1000, cursor?: string): Promise<R2ListResult> {
+    return this.bucket.list({ prefix, limit, cursor });
   }
 
   public async deleteObjects(keys: string | readonly string[]): Promise<void> {
@@ -287,15 +301,18 @@ export class LinkManagedStorageAdapter implements StorageTierAdapter {
 export class LinkPlusExportStorageAdapter implements StorageTierAdapter {
   public readonly descriptor: StorageAdapterDescriptor;
   private readonly primary: LinkManagedStorageAdapter;
+  private readonly receiptBucket: R2BucketLike;
 
   public constructor(
     primaryBucket: R2BucketLike,
     private readonly exportSink: ExportSinkPort,
     region: DataRegion,
-    private readonly boundScope?: { readonly tenantId: string; readonly siteId?: string }
+    private readonly boundScope?: { readonly tenantId: string; readonly siteId?: string },
+    receiptBucket?: R2BucketLike
   ) {
     assertRegionPinned(region, exportSink.region);
     this.primary = new LinkManagedStorageAdapter(primaryBucket, region);
+    this.receiptBucket = receiptBucket ?? primaryBucket;
     this.descriptor = {
       tier: 'tier2_link_plus_export',
       region,
@@ -303,6 +320,17 @@ export class LinkPlusExportStorageAdapter implements StorageTierAdapter {
       continuousExportSinkId: exportSink.sinkId,
       customerSorBucketId: null,
     };
+  }
+
+  private extractSiteId(body: string): string | null {
+    try {
+      const parsed = JSON.parse(body) as { readonly site_id?: unknown };
+      return typeof parsed.site_id === 'string' && parsed.site_id.length > 0
+        ? parsed.site_id
+        : null;
+    } catch {
+      return null;
+    }
   }
 
   public async putWalImmutable(args: {
@@ -323,16 +351,49 @@ export class LinkPlusExportStorageAdapter implements StorageTierAdapter {
       },
     });
 
-    let exportReceipt: ExportNotificationReceipt | null = null;
-    if (primaryRes.written) {
-      exportReceipt = await this.exportSink.writeExportBatch({
-        walKey: args.key,
-        body: args.body,
-        tenantIds: args.tenantIds,
-        deletionEpoch: args.deletionEpoch,
-        exportedAtMs: args.nowMs,
-      });
+    const tenantId = args.tenantIds[0]!;
+    const siteId =
+      args.customMetadata?.site_id ??
+      this.boundScope?.siteId ??
+      this.extractSiteId(args.body) ??
+      '_default_site';
+    const receiptKey = formatExportReceiptKey(
+      this.descriptor.region,
+      tenantId,
+      siteId,
+      args.key
+    );
+
+    // Codex #12: Always check durable export receipt even when primary was already written
+    // (`primaryRes.written === false`), so a retry after a prior export failure still delivers!
+    const existingReceipt = await this.receiptBucket.get(receiptKey);
+    if (existingReceipt !== null) {
+      return {
+        ...primaryRes,
+        tier: this.descriptor.tier,
+        exportReceipt: null,
+      };
     }
+
+    const exportReceipt = await this.exportSink.writeExportBatch({
+      walKey: args.key,
+      body: args.body,
+      tenantIds: args.tenantIds,
+      deletionEpoch: args.deletionEpoch,
+      exportedAtMs: args.nowMs,
+    });
+
+    await this.receiptBucket.put(receiptKey, canonicalJsonStringify(exportReceipt), {
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: {
+        storage_region: this.descriptor.region,
+        tenant_id: tenantId,
+        site_id: siteId,
+        wal_key: args.key,
+        export_sink_id: this.exportSink.sinkId,
+        export_batch_id: exportReceipt.exportBatchId,
+      },
+    });
 
     return {
       ...primaryRes,
@@ -356,8 +417,8 @@ export class LinkPlusExportStorageAdapter implements StorageTierAdapter {
     return this.primary.getObject(key);
   }
 
-  public async listObjects(prefix: string, limit = 1000): Promise<R2ListResult> {
-    return this.primary.listObjects(prefix, limit);
+  public async listObjects(prefix: string, limit = 1000, cursor?: string): Promise<R2ListResult> {
+    return this.primary.listObjects(prefix, limit, cursor);
   }
 
   public async deleteObjects(keys: string | readonly string[]): Promise<void> {
@@ -437,8 +498,8 @@ export class CustomerSorStorageAdapter implements StorageTierAdapter {
     return this.customerBucket.get(key);
   }
 
-  public async listObjects(prefix: string, limit = 1000): Promise<R2ListResult> {
-    return this.customerBucket.list({ prefix, limit });
+  public async listObjects(prefix: string, limit = 1000, cursor?: string): Promise<R2ListResult> {
+    return this.customerBucket.list({ prefix, limit, cursor });
   }
 
   public async deleteObjects(keys: string | readonly string[]): Promise<void> {

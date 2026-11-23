@@ -760,7 +760,7 @@ describe('Bundle 2-D.1: Signer Service, Unified Config Bundle & §10.1 Red-Team 
       nowMs: () => BASE_NOW_MS + 1000,
     });
     await expect(
-      racingWorker.signerService.signAndCommitBundle({
+      racingWorker.signerService!.signAndCommitBundle({
         ...bundlePayload,
         seq: 3,
         measure: { ...seq2FullMeasure },
@@ -776,6 +776,103 @@ describe('Bundle 2-D.1: Signer Service, Unified Config Bundle & §10.1 Red-Team 
       })
     );
     expect(casConflictHttp.status).toBe(409);
+  });
+
+  it('[#5] fails closed with 503 BUNDLE_STATE_STORE_UNCONFIGURED when store is omitted and enforces cross-instance monotonic seq & concurrent CAS across shared store', async () => {
+    const { offlineKp, onlineKp, signedManifest, bundlePayload } = await buildTestFixtures();
+    const manifestSeq1Floor = await signReleaseManifest(
+      { ...signedManifest.payload, min_config_seq: 1 },
+      offlineKp.privateKey,
+      'offline-root-1'
+    );
+    const cpToken = 'cp_signer_shared_store_token_12345';
+
+    // (a) Omitting bundleStateStore MUST fail closed with 503 BUNDLE_STATE_STORE_UNCONFIGURED
+    const noStoreWorker = createSignerWorkerHandler({
+      offlinePublicKey: offlineKp.publicKey,
+      onlinePrivateKey: onlineKp.privateKey,
+      onlineKid: 'online-k1',
+      controlPlaneSignerToken: cpToken,
+      getReleaseManifest: async () => manifestSeq1Floor,
+      getLoaderData: async () => null,
+      nowMs: () => BASE_NOW_MS + 1000,
+    });
+    expect(noStoreWorker.bundleStateStore).toBeNull();
+    expect(noStoreWorker.signerService).toBeNull();
+
+    const noStoreSign = await noStoreWorker.fetch(
+      new Request('https://signer.example/v1/signer/bundle/sign', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${cpToken}` },
+        body: JSON.stringify({ payload: { ...bundlePayload, seq: 1 } }),
+      })
+    );
+    expect(noStoreSign.status).toBe(503);
+    expect((await noStoreSign.json()) as { error: string }).toEqual({
+      error: 'BUNDLE_STATE_STORE_UNCONFIGURED',
+    });
+
+    // (b) Two independent worker instances sharing one BundleStateStore enforce strict monotonic seq & reject concurrent duplicate seq
+    const sharedStore = new InMemoryBundleStateStore();
+    const workerA = createSignerWorkerHandler({
+      offlinePublicKey: offlineKp.publicKey,
+      onlinePrivateKey: onlineKp.privateKey,
+      onlineKid: 'online-k1',
+      controlPlaneSignerToken: cpToken,
+      bundleStateStore: sharedStore,
+      getReleaseManifest: async () => manifestSeq1Floor,
+      getLoaderData: async () => null,
+      nowMs: () => BASE_NOW_MS + 1000,
+    });
+    const workerB = createSignerWorkerHandler({
+      offlinePublicKey: offlineKp.publicKey,
+      onlinePrivateKey: onlineKp.privateKey,
+      onlineKid: 'online-k1',
+      controlPlaneSignerToken: cpToken,
+      bundleStateStore: sharedStore,
+      getReleaseManifest: async () => manifestSeq1Floor,
+      getLoaderData: async () => null,
+      nowMs: () => BASE_NOW_MS + 1000,
+    });
+
+    // Concurrent seq=1 across workerA and workerB: exactly 1 succeeds (200) and the other fails with CAS conflict (409)
+    const [r1, r2] = await Promise.all([
+      workerA.fetch(
+        new Request('https://signer.example/v1/signer/bundle/sign', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${cpToken}` },
+          body: JSON.stringify({ payload: { ...bundlePayload, seq: 1 } }),
+        })
+      ),
+      workerB.fetch(
+        new Request('https://signer.example/v1/signer/bundle/sign', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${cpToken}` },
+          body: JSON.stringify({ payload: { ...bundlePayload, seq: 1 } }),
+        })
+      ),
+    ]);
+    const statuses = [r1.status, r2.status].sort((a, b) => a - b);
+    expect(statuses).toEqual([200, 409]);
+
+    // Subsequent duplicate seq=1 on workerB is rejected (422) while valid monotonic seq=2 succeeds (200)
+    const dupSeq1 = await workerB.fetch(
+      new Request('https://signer.example/v1/signer/bundle/sign', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${cpToken}` },
+        body: JSON.stringify({ payload: { ...bundlePayload, seq: 1 } }),
+      })
+    );
+    expect(dupSeq1.status).toBe(422);
+
+    const nextSeq2 = await workerB.fetch(
+      new Request('https://signer.example/v1/signer/bundle/sign', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${cpToken}` },
+        body: JSON.stringify({ payload: { ...bundlePayload, seq: 2 } }),
+      })
+    );
+    expect(nextSeq2.status).toBe(200);
   });
 
   it('[H-09] InsertNode blocks affiliate hosts/params & external outbound hosts, and siteDefault=off blocks CMP escalation unless explicitly permitted', () => {

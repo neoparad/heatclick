@@ -421,4 +421,121 @@ describe('lib/link/isolation — Layer A AST Inspector & Query Builder, Layer B 
       expect(selA.rows[0]?.tenant_id).toBe('tenant_a');
     }
   });
+
+  test('Wave 9 Regression (#1): 2-site execution rejects unscoped tenant-wide aggregates for Site-A-only credential and prevents reading Site B rows', () => {
+    const qb = new TenantScopedQueryBuilder();
+    const siteAOnlyPrincipal: VerifiedPrincipal = {
+      ...PRINCIPAL_A,
+      allowedSiteIds: ['site_a'],
+    };
+    const tenantWidePrincipal: VerifiedPrincipal = {
+      ...PRINCIPAL_A,
+      allowedSiteIds: null,
+    };
+
+    const twoSiteRows = [
+      { tenant_id: 'tenant_a', site_id: 'site_a', page_id: 'p_a', pv_count: 100 },
+      { tenant_id: 'tenant_a', site_id: 'site_b', page_id: 'p_b', pv_count: 999 },
+    ];
+
+    const unscopedAggregateSql = `
+      SELECT sum(pv_count) AS total_pvs
+      FROM rollup_page_hourly
+      WHERE tenant_id = {tenant_id:String}
+        AND pv_hour >= {start:DateTime}
+    `;
+
+    // 1. Site-A-only credential MUST be rejected on unscoped tenant-wide aggregate (cannot read Site B!)
+    expect(() =>
+      qb.build(siteAOnlyPrincipal, {
+        sql: unscopedAggregateSql,
+        siteId: 'site_a',
+        params: { start: '2026-11-01 00:00:00' },
+      })
+    ).toThrow(SqlAstViolationError);
+
+    // 2. Unscoped CTE subquery referencing tenant table without site_id MUST also be rejected
+    const unscopedCteSql = `
+      WITH agg AS (
+        SELECT site_id, sum(pv_count) AS pvs
+        FROM rollup_page_hourly
+        WHERE tenant_id = {tenant_id:String}
+          AND pv_hour >= {start:DateTime}
+        GROUP BY site_id
+      )
+      SELECT sum(pvs) AS total FROM agg
+    `;
+    expect(() =>
+      qb.build(siteAOnlyPrincipal, {
+        sql: unscopedCteSql,
+        siteId: 'site_a',
+        params: { start: '2026-11-01 00:00:00' },
+      })
+    ).toThrow(SqlAstViolationError);
+
+    // 3. Site-A-only credential attempting to bind site_b is rejected
+    const scopedSql = `
+      SELECT page_id, sum(pv_count) AS total_pvs
+      FROM rollup_page_hourly
+      WHERE tenant_id = {tenant_id:String}
+        AND site_id = {site_id:String}
+        AND pv_hour >= {start:DateTime}
+      GROUP BY page_id
+    `;
+    expect(() =>
+      qb.build(siteAOnlyPrincipal, {
+        sql: scopedSql,
+        siteId: 'site_b',
+        params: { start: '2026-11-01 00:00:00' },
+      })
+    ).toThrow(TenantScopeViolationError);
+
+    // 4. Site-A-only credential attempting to widen allowed_site_ids to include site_b is rejected
+    const inScopedSql = `
+      SELECT page_id, sum(pv_count) AS total_pvs
+      FROM rollup_page_hourly
+      WHERE tenant_id = {tenant_id:String}
+        AND site_id IN ({allowed_site_ids:Array(String)})
+        AND pv_hour >= {start:DateTime}
+      GROUP BY page_id
+    `;
+    expect(() =>
+      qb.build(siteAOnlyPrincipal, {
+        sql: inScopedSql,
+        params: { allowed_site_ids: ['site_a', 'site_b'], start: '2026-11-01 00:00:00' },
+      })
+    ).toThrow(TenantScopeViolationError);
+
+    // 5. Properly scoped query succeeds and execution only ever sees site_a rows (NEVER site_b)
+    const builtEq = qb.build(siteAOnlyPrincipal, {
+      sql: scopedSql,
+      siteId: 'site_a',
+      params: { start: '2026-11-01 00:00:00' },
+    });
+    const visibleEq = twoSiteRows.filter(
+      (r) => r.tenant_id === builtEq.query_params.tenant_id && r.site_id === builtEq.query_params.site_id
+    );
+    expect(visibleEq).toHaveLength(1);
+    expect(visibleEq[0]?.site_id).toBe('site_a');
+
+    const builtIn = qb.build(siteAOnlyPrincipal, {
+      sql: inScopedSql,
+      params: { start: '2026-11-01 00:00:00' },
+    });
+    expect(builtIn.query_params.allowed_site_ids).toEqual(['site_a']);
+    const visibleIn = twoSiteRows.filter(
+      (r) =>
+        r.tenant_id === builtIn.query_params.tenant_id &&
+        (builtIn.query_params.allowed_site_ids as readonly string[]).includes(r.site_id)
+    );
+    expect(visibleIn).toHaveLength(1);
+    expect(visibleIn[0]?.site_id).toBe('site_a');
+
+    // 6. Tenant-wide principal (allowedSiteIds: null) may still run tenant-wide aggregates
+    const builtTenantWide = qb.build(tenantWidePrincipal, {
+      sql: unscopedAggregateSql,
+      params: { start: '2026-11-01 00:00:00' },
+    });
+    expect(builtTenantWide.query_params.tenant_id).toBe('tenant_a');
+  });
 });

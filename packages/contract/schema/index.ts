@@ -4,11 +4,27 @@
 
 export * from './types';
 export { CANONICAL_SCHEMA } from './canonical';
-export { canonicalJsonStringify, sha256Bytes, sha256Hex, utf8ToBytes, bytesToUtf8 } from './hash';
+export {
+  canonicalJsonStringify,
+  sha256Bytes,
+  sha256Hex,
+  hmacSha256Bytes,
+  hmacSha256Hex,
+  SUBJECT_HMAC_VERSION,
+  computeCanonicalSubjectHmac,
+  computeSubjectHmacLookupCandidates,
+  utf8ToBytes,
+  bytesToUtf8,
+  type CanonicalSubjectHmacVersion,
+  type CanonicalSubjectHmacInput,
+  type SubjectHmacLookupCandidatesInput,
+} from './hash';
 export {
   ContractInvariantError,
   validateContractSchema,
   assertValidContractSchema,
+  isValidRetentionGridMonths,
+  assertValidRetentionGridMonths,
   type SchemaInvariantResult,
   type SchemaViolation,
   type SchemaViolationCode,

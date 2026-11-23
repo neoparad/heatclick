@@ -37,6 +37,7 @@ import {
 export const DEFAULT_SANDBOX_TIMEOUT_MS = 50;
 export const MAX_SANDBOX_TIMEOUT_MS = 200;
 export const DEFAULT_SANDBOX_MAX_OUTPUT_BYTES = 32 * 1024; // 32 KiB
+export const MAX_SANDBOX_ERROR_BYTES = 512;
 export const MAX_VERIFIED_REDIRECTS = 2;
 
 const WORKER_MAX_OLD_GEN_MB = 32;
@@ -139,7 +140,34 @@ const ISOLATED_WORKER_SCRIPT = `
 const { workerData } = require('node:worker_threads');
 const vm = require('node:vm');
 
-const { i32, port, code, inputJson, timeoutMs } = workerData;
+const { i32, port, code, inputJson, timeoutMs, maxOutputBytes, maxErrorBytes } = workerData;
+const effectiveMaxOutputBytes =
+  typeof maxOutputBytes === 'number' && Number.isFinite(maxOutputBytes) && maxOutputBytes > 0
+    ? Math.floor(maxOutputBytes)
+    : 32768;
+const effectiveMaxErrorBytes =
+  typeof maxErrorBytes === 'number' && Number.isFinite(maxErrorBytes) && maxErrorBytes > 0
+    ? Math.floor(maxErrorBytes)
+    : 512;
+
+function truncateUtf8(str, maxBytes) {
+  const s = String(str || '');
+  if (Buffer.byteLength(s, 'utf8') <= maxBytes) return s;
+  const buf = Buffer.from(s, 'utf8').subarray(0, maxBytes);
+  let end = buf.length;
+  while (end > 0 && (buf[end - 1] & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  if (end > 0 && (buf[end - 1] & 0x80) !== 0) {
+    const lead = buf[end - 1];
+    const seqLen = (lead & 0xe0) === 0xc0 ? 2 : (lead & 0xf0) === 0xe0 ? 3 : (lead & 0xf8) === 0xf0 ? 4 : 1;
+    if (end - 1 + seqLen > buf.length) {
+      end -= 1;
+    }
+  }
+  return buf.subarray(0, end).toString('utf8');
+}
+
 if (i32) {
   Atomics.store(i32, 0, 1);
   Atomics.notify(i32, 0);
@@ -180,12 +208,26 @@ try {
     breakOnSigint: true,
   });
 
-  port.postMessage({ ok: true, rawOut: typeof rawOut === 'string' ? rawOut : null });
+  if (typeof rawOut === 'string') {
+    const outBytes = Buffer.byteLength(rawOut, 'utf8');
+    if (outBytes > effectiveMaxOutputBytes) {
+      port.postMessage({
+        ok: false,
+        error: 'OUTPUT_SIZE_LIMIT_EXCEEDED',
+        outputBytes: outBytes,
+      });
+    } else {
+      port.postMessage({ ok: true, rawOut });
+    }
+  } else {
+    port.postMessage({ ok: true, rawOut: null });
+  }
 } catch (err) {
   const msg = err && typeof err === 'object' && typeof err.message === 'string'
     ? err.message
     : String(err);
-  port.postMessage({ ok: false, error: msg || 'sandbox_execution_error' });
+  const safeMsg = truncateUtf8(msg || 'sandbox_execution_error', effectiveMaxErrorBytes);
+  port.postMessage({ ok: false, error: safeMsg || 'sandbox_execution_error' });
 } finally {
   if (i32) {
     Atomics.store(i32, 1, 1);
@@ -215,8 +257,33 @@ function sanitizePlainRecord(raw: Record<string, unknown>): Record<string, unkno
   return clean;
 }
 
+function truncateUtf8Error(str: string, maxBytes: number = MAX_SANDBOX_ERROR_BYTES): string {
+  if (Buffer.byteLength(str, 'utf8') <= maxBytes) return str;
+  const buf = Buffer.from(str, 'utf8').subarray(0, maxBytes);
+  let end = buf.length;
+  while (end > 0 && (buf[end - 1]! & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  if (end > 0 && (buf[end - 1]! & 0x80) !== 0) {
+    const lead = buf[end - 1]!;
+    const seqLen =
+      (lead & 0xe0) === 0xc0 ? 2 : (lead & 0xf0) === 0xe0 ? 3 : (lead & 0xf8) === 0xf0 ? 4 : 1;
+    if (end - 1 + seqLen > buf.length) {
+      end -= 1;
+    }
+  }
+  return buf.subarray(0, end).toString('utf8');
+}
+
 function parseWorkerRawOutput(
-  workerMsg: { readonly ok: boolean; readonly rawOut?: string | null; readonly error?: string } | undefined,
+  workerMsg:
+    | {
+        readonly ok: boolean;
+        readonly rawOut?: string | null;
+        readonly error?: string;
+        readonly outputBytes?: number;
+      }
+    | undefined,
   maxOutputBytes: number,
   durationMs: number,
   fallbackError: string
@@ -231,12 +298,22 @@ function parseWorkerRawOutput(
     };
   }
   if (!workerMsg.ok) {
+    if (workerMsg.error === 'OUTPUT_SIZE_LIMIT_EXCEEDED') {
+      const bytes = typeof workerMsg.outputBytes === 'number' ? workerMsg.outputBytes : 0;
+      return {
+        ok: false,
+        proposed: null,
+        outputBytes: bytes,
+        durationMs,
+        error: `OUTPUT_SIZE_LIMIT_EXCEEDED: Transform output (${bytes} B) exceeded maxOutputBytes (${maxOutputBytes} B)`,
+      };
+    }
     return {
       ok: false,
       proposed: null,
-      outputBytes: 0,
+      outputBytes: typeof workerMsg.outputBytes === 'number' ? workerMsg.outputBytes : 0,
       durationMs,
-      error: workerMsg.error ?? fallbackError,
+      error: truncateUtf8Error(workerMsg.error ?? fallbackError),
     };
   }
   if (typeof workerMsg.rawOut !== 'string') {
@@ -356,6 +433,8 @@ export function executeDestinationFunctionSandboxed(args: {
         code: args.code,
         inputJson,
         timeoutMs,
+        maxOutputBytes,
+        maxErrorBytes: MAX_SANDBOX_ERROR_BYTES,
       },
       transferList: [port2],
       resourceLimits: {
@@ -437,6 +516,8 @@ export async function executeDestinationFunctionIsolatedAsync(args: {
       code: args.code,
       inputJson,
       timeoutMs,
+      maxOutputBytes,
+      maxErrorBytes: MAX_SANDBOX_ERROR_BYTES,
     },
     transferList: [port2],
     resourceLimits: {

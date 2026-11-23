@@ -1,9 +1,16 @@
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   CANONICAL_SCHEMA,
   CODEC_VERSION,
   CONSENT_MODES,
   ContractInvariantError,
+  RETENTION_GRID_MONTHS,
+  assertValidRetentionGridMonths,
+  computeCanonicalSubjectHmac,
   computeFrameChecksum,
+  computeSubjectHmacLookupCandidates,
   createIngestValidator,
   createSdkFrameCodec,
   generateAllContractArtifacts,
@@ -12,6 +19,8 @@ import {
   generatePostgresDdl,
   generatePrivacyDisclosure,
   generateTypeScriptApiTypes,
+  hmacSha256Hex,
+  isValidRetentionGridMonths,
   maskUrlParams,
   validateContractSchema,
   verifyDeletionPlanCoverage,
@@ -759,6 +768,74 @@ describe('Bundle 1-A: Single Authoritative Contract Schema & Deterministic Gener
       ] as const) {
         const tbl = CANONICAL_SCHEMA.tables.find((t) => t.name === name);
         expect(tbl?.partitionBy).toBe(expectedPart);
+      }
+    });
+  });
+
+  describe('Wave 9 Codex Regressions (#9, #14, #27)', () => {
+    it('#9: computeCanonicalSubjectHmac matches Node crypto RFC 2104 HMAC-SHA256 and computeSubjectHmacLookupCandidates covers canonical v1 + legacy formats across rotated keys', () => {
+      const keyV1 = 'tenant-key-v1-secret';
+      const keyV2 = 'tenant-key-v2-secret';
+      const tenantId = 'tenant-alpha';
+      const subjectKind = 'member_hash';
+      const subjectValue = 'member_raw_12345';
+
+      const canonical = computeCanonicalSubjectHmac({
+        tenantId,
+        subjectKind,
+        subjectValue,
+        secretKey: keyV2,
+      });
+      const nodeExpected = crypto
+        .createHmac('sha256', keyV2)
+        .update(`v1\u0000${tenantId}\u0000${subjectKind}\u0000${subjectValue}`, 'utf8')
+        .digest('hex');
+      expect(canonical).toBe(nodeExpected);
+
+      const candidates = computeSubjectHmacLookupCandidates({
+        tenantId,
+        subjectKind,
+        subjectValue,
+        secretKeys: [keyV2, keyV1],
+      });
+      // Canonical v1 + 3 legacy formats across 2 keys = 8 distinct digests
+      expect(candidates).toHaveLength(8);
+      expect(candidates[0]).toBe(canonical);
+      expect(candidates).toContain(hmacSha256Hex(keyV1, subjectValue));
+      expect(candidates).toContain(hmacSha256Hex(keyV1, `${subjectKind}:${subjectValue}`));
+      expect(candidates).toContain(
+        hmacSha256Hex(keyV1, `${tenantId}:${subjectKind}:${subjectValue}`)
+      );
+    });
+
+    it('#14: ClickHouse TTL exp_week removes + INTERVAL 7 DAY lag and matches migrations/link/001_clickhouse_v2.sql byte-for-byte', () => {
+      const ch = generateClickHouseDdl(CANONICAL_SCHEMA);
+      expect(ch.sql).not.toContain('exp_week + INTERVAL 7 DAY');
+      expect(ch.sql).toContain('TTL exp_week DELETE');
+      expect(ch.sql).toContain('ttl_only_drop_parts = 1');
+
+      const migrationPath = path.resolve(__dirname, '../../../migrations/link/001_clickhouse_v2.sql');
+      const onDisk = fs.readFileSync(migrationPath, 'utf8').replace(/\r\n/g, '\n');
+      expect(onDisk).toBe(ch.sql.replace(/\r\n/g, '\n'));
+    });
+
+    it('#27: Postgres DDL enforces RETENTION_GRID_MONTHS via CHECK constraint, matches migrations/link/002_postgres_v2.sql, and assertValidRetentionGridMonths rejects off-grid values like 4', () => {
+      const pg = generatePostgresDdl(CANONICAL_SCHEMA);
+      expect(pg.sql).toContain(
+        `CHECK (retention_months IN (${RETENTION_GRID_MONTHS.join(', ')}))`
+      );
+
+      const migrationPath = path.resolve(__dirname, '../../../migrations/link/002_postgres_v2.sql');
+      const onDisk = fs.readFileSync(migrationPath, 'utf8').replace(/\r\n/g, '\n');
+      expect(onDisk).toBe(pg.sql.replace(/\r\n/g, '\n'));
+
+      for (const m of RETENTION_GRID_MONTHS) {
+        expect(isValidRetentionGridMonths(m)).toBe(true);
+        expect(() => assertValidRetentionGridMonths(m)).not.toThrow();
+      }
+      for (const bad of [0, -1, 4, 5, 7, 15, 37, 12.5]) {
+        expect(isValidRetentionGridMonths(bad)).toBe(false);
+        expect(() => assertValidRetentionGridMonths(bad)).toThrow(/RETENTION_GRID_MONTHS/);
       }
     });
   });

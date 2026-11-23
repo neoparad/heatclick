@@ -640,4 +640,45 @@ describe('lib/link/linkage — Explicit N:M Link Grants, 3 Binding Paths, Ed2551
     });
     expect(replayAttempt.ok).toBe(false);
   });
+
+  test('Wave 9 Regression (#30): rejects IANA documentation/TEST-NET ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32)', () => {
+    expect(isPrivateOrReservedIp('192.0.2.1')).toBe(true);
+    expect(isPrivateOrReservedIp('198.51.100.1')).toBe(true);
+    expect(isPrivateOrReservedIp('203.0.113.10')).toBe(true);
+    expect(isPrivateOrReservedIp('2001:db8::1')).toBe(true);
+    expect(isPrivateOrReservedIp('::ffff:198.51.100.1')).toBe(true);
+    expect(isPrivateOrReservedIp('::ffff:203.0.113.10')).toBe(true);
+    expect(isPrivateOrReservedIp('93.184.216.34')).toBe(false);
+
+    const svc = new LinkGrantService();
+    const now = new Date('2026-11-20T12:00:00Z');
+    const grant = svc.createDraftGrant({
+      tenantId: 'tenant_a',
+      siteId: 'site_testnet',
+      primaryHost: 'example-a.jp',
+      hostPatterns: ['example-a.jp'],
+      payer: 'ugoki_ledger',
+      caps: { monthlyCreditsCap: 10000, dailyExternalSpendCapUsd: 10, maxConcurrentJobs: 2, maxUrlsPerInlineJob: 50 },
+      bindingPath: 'provisioned',
+      reviewBy: '2027-05-20T00:00:00Z',
+      now,
+    });
+
+    for (const reservedIp of ['198.51.100.1', '203.0.113.10', '192.0.2.1', '2001:db8::1']) {
+      const res = svc.recordSideDomainProof({
+        grantId: grant.grantId,
+        side: 'ugoki',
+        check: {
+          host: 'example-a.jp',
+          method: 'well_known_file',
+          outcome: 'verified',
+          observedToken: grant.proofToken,
+          resolvedIp: reservedIp,
+          checkedAt: now.toISOString(),
+        },
+      });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.code).toBe('SSRF_GUARD_BLOCKED');
+    }
+  });
 });

@@ -675,7 +675,11 @@ export class SignerService {
       readonly getReleaseManifest: () => Promise<SignedReleaseManifest>;
       readonly bundleStateStore: BundleStateStore;
     }
-  ) {}
+  ) {
+    if (!deps.bundleStateStore) {
+      throw new SignerPolicyError(['BUNDLE_STATE_STORE_UNCONFIGURED']);
+    }
+  }
 
   /**
    * Signs and atomically commits the next ConfigBundle for `(tenant_id, site_id)` using

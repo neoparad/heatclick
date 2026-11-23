@@ -1040,4 +1040,88 @@ describe('Wave 6 Bundle 6-D.4: POST /v1/recommend Route & MCP Tool Parity', () =
     const fifthRes = await siteRecommendRoutePost(fifthReq, { params: { siteId: 'site_a' } });
     expect(fifthRes.status).toBe(429);
   });
+
+  test('[#20] article recommendation API returns true Plackett-Luce marginal inclusion probability (2/3) for 3 equal-weight articles with topK=2 across both server and browser-rerank paths', () => {
+    const fx = setupSurfaceFixture();
+    const equalArticles: RecommendCandidateItem[] = ['art_1', 'art_2', 'art_3'].map((id) => ({
+      item_id: id,
+      kind: 'article',
+      title: `Equal Article ${id}`,
+      url_key_v2: `https://example.jp/${id}`,
+      content_sim: 0.5,
+      link_proximity: 0.5,
+      coread_score: 0.5,
+      session_knn: 0.5,
+      decayed_popularity: 0.5,
+      item_embedding: [1, 0, 0],
+    }));
+
+    setRecommendRuntimeConfig({
+      catalogProvider: {
+        getContentCandidates: ({ siteId }) => (siteId === 'site_a' ? equalArticles : null),
+      },
+    });
+
+    // 1. Server-side article path
+    const serverRes = executeRecommendRequest({
+      channel: 'rest',
+      bearerToken: fx.secKey,
+      pipeline: fx.pipeline,
+      body: {
+        site_id: 'site_a',
+        placement: 'article',
+        top_k: 2,
+        temperature: 1.0,
+        seed_key: 'art_equal_marginal_server',
+      },
+    });
+    expect(serverRes.httpStatus).toBe(200);
+    const serverItems = (
+      serverRes.envelope?.data as {
+        items: Array<{
+          item_id: string;
+          display_prob: number;
+          slot_cond_prob: number;
+        }>;
+      }
+    ).items;
+    expect(serverItems).toHaveLength(2);
+    for (const it of serverItems) {
+      expect(Math.abs(it.display_prob - 2 / 3)).toBeLessThan(1e-6);
+    }
+    expect(serverItems[0].slot_cond_prob).toBeCloseTo(1 / 3, 5);
+    expect(serverItems[1].slot_cond_prob).toBeCloseTo(1 / 2, 5);
+
+    // 2. Browser rerank article path (with session_embedding)
+    const browserRes = executeRecommendRequest({
+      channel: 'rest',
+      bearerToken: fx.pubKey,
+      pipeline: fx.pipeline,
+      clientIp: '198.51.100.77',
+      body: {
+        site_id: 'site_a',
+        placement: 'article',
+        top_k: 2,
+        temperature: 1.0,
+        session_embedding: [1, 0, 0],
+        seed_key: 'art_equal_marginal_browser',
+      },
+    });
+    expect(browserRes.httpStatus).toBe(200);
+    const browserItems = (
+      browserRes.envelope?.data as {
+        items: Array<{
+          item_id: string;
+          display_prob: number;
+          slot_cond_prob: number;
+        }>;
+      }
+    ).items;
+    expect(browserItems).toHaveLength(2);
+    for (const it of browserItems) {
+      expect(Math.abs(it.display_prob - 2 / 3)).toBeLessThan(1e-6);
+    }
+    expect(browserItems[0].slot_cond_prob).toBeCloseTo(1 / 3, 5);
+    expect(browserItems[1].slot_cond_prob).toBeCloseTo(1 / 2, 5);
+  });
 });

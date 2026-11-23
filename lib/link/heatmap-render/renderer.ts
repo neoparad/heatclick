@@ -483,8 +483,20 @@ function drawClickOverlay(
   clicks: readonly HeatmapClickPointInput[],
 ): void {
   const validClicks = clicks.filter(
-    (c): c is HeatmapClickPointInput & { readonly click_count: number } =>
-      c.status === 'ok' && typeof c.click_count === 'number' && c.click_count > 0,
+    (
+      c,
+    ): c is HeatmapClickPointInput & {
+      readonly click_count: number
+      readonly rel_x: number
+      readonly rel_y: number
+    } =>
+      c.status === 'ok' &&
+      typeof c.click_count === 'number' &&
+      c.click_count > 0 &&
+      typeof c.rel_x === 'number' &&
+      typeof c.rel_y === 'number' &&
+      Number.isFinite(c.rel_x) &&
+      Number.isFinite(c.rel_y),
   )
   const maxClicks = Math.max(1, ...validClicks.map((c) => c.click_count))
   const radius = Math.max(6, Math.round(Math.min(w, h) * 0.04))
@@ -562,7 +574,17 @@ function buildDeterministicSvg(
     }
     if (kind === 'click') {
       for (const c of clicks) {
-        if (c.status !== 'ok' || typeof c.click_count !== 'number') continue
+        if (
+          c.status !== 'ok' ||
+          typeof c.click_count !== 'number' ||
+          c.click_count <= 0 ||
+          typeof c.rel_x !== 'number' ||
+          typeof c.rel_y !== 'number' ||
+          !Number.isFinite(c.rel_x) ||
+          !Number.isFinite(c.rel_y)
+        ) {
+          continue
+        }
         const cx = Math.round((c.box_x + c.box_w * c.rel_x) * w)
         const cy = Math.round((c.box_y + c.box_h * c.rel_y) * h)
         parts.push(

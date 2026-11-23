@@ -328,7 +328,7 @@ describe('workers/link-wal', () => {
   test('enforces Decision 29 data residency region pinning and §5.12 storage tiers 1/2/3', async () => {
     const t0 = Date.UTC(2026, 10, 20, 15, 0, 0);
 
-    // Residency mismatch rejected into quarantine rather than crossing regions
+    // Residency mismatch rejected WITHOUT writing to local WAL or local quarantine (Codex #11 / §11.11.13)
     const jpBucket = new InMemoryR2Bucket();
     const jpWriter = new WalWriter({ region: 'jp', bucket: jpBucket });
     const crossRegionRes = await jpWriter.consumeBatch(
@@ -341,8 +341,11 @@ describe('workers/link-wal', () => {
       t0
     );
     expect(crossRegionRes.acceptedCount).toBe(0);
-    expect(crossRegionRes.quarantinedCount).toBe(1);
+    expect(crossRegionRes.quarantinedCount).toBe(0);
+    expect(crossRegionRes.regionMismatchCount).toBe(1);
+    expect(crossRegionRes.rejectedRegionMismatch).toHaveLength(1);
     expect(jpBucket.keys('wal/')).toHaveLength(0);
+    expect(jpBucket.keys('quarantine/')).toHaveLength(0);
 
     // Tier 2: LINK-hosted primary + continuous export sink
     const primaryBucket = new InMemoryR2Bucket();
@@ -530,5 +533,192 @@ describe('workers/link-wal', () => {
         nowMs: t0,
       })
     ).rejects.toThrow(CrossTenantWalViolationError);
+  });
+
+  test('Wave 9 Codex #11: wrong-region delivery NEVER writes to local region WAL or quarantine, reroutes via sink when configured, and retries when un-rerouted', async () => {
+    const t0 = Date.UTC(2026, 10, 23, 6, 0, 0);
+    const euPayload = makeQueuePayload(makeValidFrame({ seq: 0 }), {
+      storage_region: 'eu',
+      received_at_ms: t0,
+    });
+
+    // 1. Without reroute sink: 0 objects in JP WAL and JP quarantine; queue message is retried (not acked)
+    const jpBucket1 = new InMemoryR2Bucket();
+    const jpWriter1 = new WalWriter({ region: 'jp', bucket: jpBucket1 });
+    let acked = 0;
+    let retried = 0;
+    const res1 = await handleWalQueueBatch(
+      {
+        queue: 'ugokilink-wal-jp',
+        messages: [
+          {
+            id: 'eu-misrouted-1',
+            timestamp: new Date(t0),
+            body: euPayload,
+            ack: () => {
+              acked += 1;
+            },
+            retry: () => {
+              retried += 1;
+            },
+          },
+        ],
+      },
+      jpWriter1,
+      t0
+    );
+    expect(res1.acceptedCount).toBe(0);
+    expect(res1.quarantinedCount).toBe(0);
+    expect(res1.regionMismatchCount).toBe(1);
+    expect(res1.rejectedRegionMismatch).toHaveLength(1);
+    expect(jpBucket1.keys('wal/')).toHaveLength(0);
+    expect(jpBucket1.keys('quarantine/')).toHaveLength(0);
+    expect(jpBucket1.size()).toBe(0);
+    expect(acked).toBe(0);
+    expect(retried).toBe(1);
+
+    // 2. With regionRerouteSink: forwarded to reroute sink with 0 local storage
+    const jpBucket2 = new InMemoryR2Bucket();
+    const rerouted: Array<{ expected: DataRegion; actual: string; payload: WalQueuePayload }> = [];
+    const jpWriter2 = new WalWriter({
+      region: 'jp',
+      bucket: jpBucket2,
+      regionRerouteSink: {
+        reroute: (item, expected, actual) => {
+          rerouted.push({ expected, actual, payload: item });
+        },
+      },
+    });
+    const res2 = await jpWriter2.consumeBatch([euPayload], t0);
+    expect(res2.acceptedCount).toBe(0);
+    expect(res2.quarantinedCount).toBe(0);
+    expect(res2.regionMismatchCount).toBe(1);
+    expect(res2.reroutedPayloads).toHaveLength(1);
+    expect(res2.rejectedRegionMismatch).toHaveLength(0);
+    expect(rerouted).toHaveLength(1);
+    expect(rerouted[0]).toMatchObject({ expected: 'jp', actual: 'eu' });
+    expect(jpBucket2.size()).toBe(0);
+  });
+
+  test('Wave 9 Codex #12: Tier 2 customer export recovers on retry after primary write succeeds and export fails, then becomes an idempotent no-op on attempt 3', async () => {
+    const t0 = Date.UTC(2026, 10, 23, 6, 10, 0);
+    const primaryBucket = new InMemoryR2Bucket();
+    const innerSink = new InMemoryExportSink('customer-gcs-jp-recovery', 'jp');
+    let failNextExport = true;
+    let exportCalls = 0;
+
+    const flakySink = {
+      sinkId: innerSink.sinkId,
+      region: innerSink.region,
+      async writeExportBatch(args: Parameters<InMemoryExportSink['writeExportBatch']>[0]) {
+        exportCalls += 1;
+        if (failNextExport) {
+          failNextExport = false;
+          throw new Error('Customer export sink 503 transient failure');
+        }
+        return innerSink.writeExportBatch(args);
+      },
+    };
+
+    const tier2Adapter = new LinkPlusExportStorageAdapter(primaryBucket, flakySink, 'jp');
+    const writer = new WalWriter({ region: 'jp', adapter: tier2Adapter, deletionEpoch: 9 });
+    const payload = makeQueuePayload(makeValidFrame({ seq: 0 }), { received_at_ms: t0 });
+
+    // Attempt 1: Primary R2 WAL write succeeds, customer export fails -> throws so queue does NOT ACK
+    await expect(writer.consumeBatch([payload], t0)).rejects.toThrow(/503 transient failure/);
+    expect(primaryBucket.keys('wal/jp/')).toHaveLength(1);
+    expect(primaryBucket.keys('export-receipts/jp/')).toHaveLength(0);
+    expect(innerSink.receipts).toHaveLength(0);
+    expect(exportCalls).toBe(1);
+
+    // Attempt 2: Retry same WAL object -> primary is deduped (written === false), YET customer export IS delivered + receipt recorded!
+    const attempt2 = await writer.consumeBatch([payload], t0 + 1000);
+    expect(attempt2.dedupedObjectsCount).toBe(1);
+    expect(attempt2.exportReceipts).toHaveLength(1);
+    expect(innerSink.receipts).toHaveLength(1);
+    expect(primaryBucket.keys('export-receipts/jp/')).toHaveLength(1);
+    expect(exportCalls).toBe(2);
+
+    // Attempt 3: Duplicate retry -> receipt already exists -> clean idempotent no-op (exportSink NOT called again!)
+    const attempt3 = await writer.consumeBatch([payload], t0 + 2000);
+    expect(attempt3.dedupedObjectsCount).toBe(1);
+    expect(attempt3.exportReceipts).toHaveLength(0);
+    expect(innerSink.receipts).toHaveLength(1);
+    expect(exportCalls).toBe(2);
+  });
+
+  test('Wave 9 Codex #13: quarantine subject deletion and expired cleanup paginate beyond 1,000 objects (page 2)', async () => {
+    const bucket = new InMemoryR2Bucket();
+    const writer = new WalWriter({ region: 'jp', bucket });
+    const t0 = Date.UTC(2026, 10, 1, 0, 0, 0);
+    const TOTAL_OBJECTS = 1050;
+    const TARGET_PV_ID = 'ffffffffffffffffffffffffffffffff';
+
+    // Populate 1,050 quarantine objects directly under quarantine/jp/tenant-page/site-page/
+    // Keys are sorted lexicographically, so index 1020 and 1040 are guaranteed to land on page 2 (> 1,000)!
+    for (let i = 0; i < TOTAL_OBJECTS; i += 1) {
+      const idxStr = String(i).padStart(4, '0');
+      const key = `quarantine/jp/tenant-page/site-page/2026-11-01/obj_${idxStr}.json`;
+      const isExpiredOnPage2 = i === 1040;
+      const expiresAtMs = isExpiredOnPage2 ? t0 - 1000 : t0 + 14 * 86_400_000;
+      await bucket.put(
+        key,
+        JSON.stringify({ expires_at_ms: expiresAtMs }),
+        {
+          customMetadata: {
+            tenant_id: 'tenant-page',
+            site_id: 'site-page',
+            expires_at_ms: String(expiresAtMs),
+          },
+        }
+      );
+    }
+
+    // Write one real encrypted quarantine entry for TARGET_PV_ID on a later day so it sorts onto page 2 (> 1,000)!
+    const targetRes = await writer.consumeBatch(
+      [
+        makeQueuePayload(
+          {
+            codec_ver: CODEC_VERSION,
+            schema_ver: 1,
+            pv_id: TARGET_PV_ID,
+            seq: 'invalid-seq-triggers-quarantine',
+            frame_class: 'first',
+          },
+          {
+            tenant_id: 'tenant-page',
+            site_id: 'site-page',
+            storage_region: 'jp',
+            received_at_ms: t0 + 2 * 86_400_000, // 2026-11-03 sorts after all 1,050 2026-11-01 keys!
+          }
+        ),
+      ],
+      t0 + 2 * 86_400_000
+    );
+    expect(targetRes.quarantinedCount).toBe(1);
+    const targetKey = targetRes.quarantineKeys[0]!;
+    const allBefore = bucket.keys('quarantine/jp/tenant-page/site-page/');
+    expect(allBefore).toHaveLength(TOTAL_OBJECTS + 1);
+    expect(allBefore.indexOf(targetKey)).toBeGreaterThanOrEqual(1000);
+
+    // 1. Subject deletion scans ALL pages (> 1,000) and deletes page-2 target PV!
+    const delRes = await writer.deleteQuarantineByPvIds(
+      'tenant-page',
+      'site-page',
+      [TARGET_PV_ID]
+    );
+    expect(delRes.scannedCount).toBe(TOTAL_OBJECTS + 1);
+    expect(delRes.deletedKeys).toEqual([targetKey]);
+    expect(await bucket.get(targetKey)).toBeNull();
+
+    // 2. Expired quarantine sweep scans ALL pages (> 1,000) and purges page-2 expired entry!
+    const purgeRes = await writer.purgeExpiredQuarantine(t0);
+    expect(purgeRes.scannedCount).toBe(TOTAL_OBJECTS);
+    expect(purgeRes.purgedKeys).toEqual([
+      'quarantine/jp/tenant-page/site-page/2026-11-01/obj_1040.json',
+    ]);
+    expect(
+      await bucket.get('quarantine/jp/tenant-page/site-page/2026-11-01/obj_1040.json')
+    ).toBeNull();
   });
 });

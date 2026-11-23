@@ -732,7 +732,11 @@ describe('lib/link/store/reconciliation (Independent Closures ①–④)', () =>
   test('Wave 8 Regressions (H-19, H-21): RFC 2104 computeTenantSubjectHmac matches TenantKeyVersionRegistry and DownstreamDeletionSinks execute across mask + purge + WAL tombstones', async () => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const nodeCrypto = require('node:crypto') as typeof import('node:crypto');
-    const expectedRfc2104 = nodeCrypto
+    const expectedCanonicalV1 = nodeCrypto
+      .createHmac('sha256', 'secret-salt-v3')
+      .update('v1\u0000tenant-hmac\u0000visitor_id\u0000vis-raw-999', 'utf8')
+      .digest('hex');
+    const expectedLegacyDigest = nodeCrypto
       .createHmac('sha256', 'secret-salt-v3')
       .update('tenant-hmac:visitor_id:vis-raw-999', 'utf8')
       .digest('hex');
@@ -746,18 +750,25 @@ describe('lib/link/store/reconciliation (Independent Closures ①–④)', () =>
       activeRowCount: 1,
       createdAtMs: 1000,
     });
-    expect(
-      reg.computeSubjectDigestsAcrossAllVersions('tenant-hmac', 'visitor_id', 'vis-raw-999')
-    ).toEqual([{ keyVersion: 3, hmacHex: expectedRfc2104 }]);
+    const digests = reg.computeSubjectDigestsAcrossAllVersions(
+      'tenant-hmac',
+      'visitor_id',
+      'vis-raw-999'
+    );
+    expect(digests).toHaveLength(1);
+    expect(digests[0]!.keyVersion).toBe(3);
+    expect(digests[0]!.hmacHex).toBe(expectedCanonicalV1);
+    expect(digests[0]!.lookupCandidates).toContain(expectedCanonicalV1);
+    expect(digests[0]!.lookupCandidates).toContain(expectedLegacyDigest);
     expect(
       computeTenantSubjectHmac('secret-salt-v3', 'tenant-hmac', 'visitor_id', 'vis-raw-999')
-    ).toBe(expectedRfc2104);
+    ).toBe(expectedCanonicalV1);
 
     let tombstoneRegistered = false;
     const adapter: DeletionStoreAdapter = {
       async resolveSubjectKeys() {
         return {
-          visitorKeys: [expectedRfc2104],
+          visitorKeys: [expectedCanonicalV1],
           sessionKeys: ['s1'],
           pvIds: ['pv-del-1'],
           reqUids: [],

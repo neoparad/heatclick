@@ -650,15 +650,26 @@ export function verifyZeroSplitOverlap(
   };
 }
 
+export class InsufficientSplitComponentsError extends Error {
+  public readonly componentCount: number;
+
+  constructor(componentCount: number, detail: string) {
+    super(`INSUFFICIENT_SPLIT_COMPONENTS (components=${componentCount}): ${detail}`);
+    this.name = 'InsufficientSplitComponentsError';
+    this.componentCount = componentCount;
+  }
+}
+
 /**
  * Builds a provenance-verified, poisoning-quarantined, deduplicated 3-way split dataset
- * (`train` / `select_tune` / `final_eval`, `[H-04]`):
+ * (`train` / `select_tune` / `final_eval`, `[H-04]` / `[#23]`):
  * 0. Checks `D-31b` Jev provenance FIRST across ALL input records (before quarantine or dedup!).
  * 1. Quarantines poisoning / prompt-injection records.
- * 2. Builds Union-Find connected components across ALL near-duplicate pairs (Unicode MinHash LSH +
- *    Jaccard >= 0.65), `page_lineage_id`, `site_id`, `skeleton_hash`, and `experiment_id` BEFORE dedup!
+ * 2. Builds Union-Find connected components strictly on `(page_lineage_id, near_duplicate_cluster,
+ *    skeleton_hash, experiment_id)` BEFORE dedup (never collapsing unrelated pages sharing `site_id`
+ *    unless `splitBoundaryMode: 'site'` is explicitly requested).
  * 3. Assigns each connected component atomically to ONE split (`train` / `select_tune` / `final_eval`),
- *    then deduplicates near-duplicates WITHIN each split and enforces exact water-filling owner weight cap.
+ *    failing closed with `INSUFFICIENT_SPLIT_COMPONENTS` if all 3 splits cannot be populated!
  */
 export function buildThreeWayTrainingDataset(params: {
   readonly examples: readonly CandidateTrainingExample[];
@@ -669,6 +680,12 @@ export function buildThreeWayTrainingDataset(params: {
   readonly decision31dSharedExternalApproved?: boolean;
   readonly maxOwnerShare?: number;
   readonly nearDuplicateJaccardThreshold?: number;
+  /**
+   * Controls whether `site_id` is included as a Union-Find boundary (`[#23]`).
+   * Defaults to `'lineage'` (page_lineage_id + near-dup + skeleton_hash + experiment_id)
+   * so single-site corpora do NOT collapse into 1 component.
+   */
+  readonly splitBoundaryMode?: 'lineage' | 'site';
   readonly ratios?: { readonly train: number; readonly select_tune: number; readonly final_eval: number };
 }): ThreeWayDatasetBuildResult {
   // 0. [H-04]: Run D-31b Jev provenance check FIRST on ALL raw examples (even if text looks like poisoning!)
@@ -739,7 +756,9 @@ export function buildThreeWayTrainingDataset(params: {
     }
   };
 
-  // 3a. Union by lineage, site_id, skeleton_hash, experiment_id, and exact MinHash cluster
+  // 3a. [#23] Union strictly by page_lineage_id, near-dup cluster, skeleton_hash, and experiment_id.
+  // NEVER unconditionally union unrelated pages by `site_id` unless `splitBoundaryMode === 'site'`!
+  const splitBoundaryMode = params.splitBoundaryMode ?? 'lineage';
   const keyFirstIndex = new Map<string, number>();
   for (let i = 0; i < n; i += 1) {
     const ex = weightedExamples[i];
@@ -748,7 +767,7 @@ export function buildThreeWayTrainingDataset(params: {
       `lin_ten:${ex.tenant_id}:${ex.page_lineage_id}`,
       `ndc:${rawClusterIds[i]}`,
     ];
-    if (ex.site_id) {
+    if (splitBoundaryMode === 'site' && ex.site_id) {
       boundaryKeys.push(`site:${ex.tenant_id}:${ex.site_id}`);
     }
     if (ex.skeleton_hash) {
@@ -801,8 +820,63 @@ export function buildThreeWayTrainingDataset(params: {
     components.set(r, list);
   }
 
+  // [#23] Fail closed if fewer than 3 independent connected components exist for a 3-way split!
+  if (components.size < 3) {
+    throw new InsufficientSplitComponentsError(
+      components.size,
+      'At least 3 disjoint connected components are required to populate train, select_tune, and final_eval'
+    );
+  }
+
   // 4. Assign each connected component atomically to ONE split, then deduplicate WITHIN that split!
   const ratios = params.ratios ?? { train: 0.6, select_tune: 0.2, final_eval: 0.2 };
+  const componentList = Array.from(components.entries()).map(([compRoot, indices]) => {
+    const groupKey = indices
+      .map((idx) => weightedExamples[idx].page_lineage_id)
+      .sort()[0];
+    const hashU =
+      parseInt(sha256Hex(`${params.seed}:split:${groupKey}`).slice(0, 8), 16) / 0x100000000;
+    const initialSplit: SplitName =
+      hashU < ratios.train
+        ? 'train'
+        : hashU < ratios.train + ratios.select_tune
+          ? 'select_tune'
+          : 'final_eval';
+    return { compRoot, indices, groupKey, hashU, split: initialSplit };
+  });
+
+  // Ensure every split receives at least 1 atomic component when components.size >= 3
+  const splitOrder: readonly SplitName[] = ['train', 'select_tune', 'final_eval'];
+  const bySplitMap = new Map<SplitName, typeof componentList>([
+    ['train', []],
+    ['select_tune', []],
+    ['final_eval', []],
+  ]);
+  for (const comp of componentList) {
+    bySplitMap.get(comp.split)!.push(comp);
+  }
+  for (const targetSplit of splitOrder) {
+    if (bySplitMap.get(targetSplit)!.length === 0) {
+      // Deterministically move the highest-hashU atomic component from the largest split
+      let donorSplit: SplitName = 'train';
+      let maxLen = -1;
+      for (const s of splitOrder) {
+        const len = bySplitMap.get(s)!.length;
+        if (len > maxLen) {
+          maxLen = len;
+          donorSplit = s;
+        }
+      }
+      const donorList = bySplitMap.get(donorSplit)!;
+      if (donorList.length > 1) {
+        donorList.sort((a, b) => a.hashU - b.hashU);
+        const moved = donorList.pop()!;
+        moved.split = targetSplit;
+        bySplitMap.get(targetSplit)!.push(moved);
+      }
+    }
+  }
+
   const survivingBySplit: Record<SplitName, Array<{ idx: number; compClusterId: string }>> = {
     train: [],
     select_tune: [],
@@ -810,19 +884,7 @@ export function buildThreeWayTrainingDataset(params: {
   };
   let deduplicatedCount = 0;
 
-  for (const [compRoot, indices] of components.entries()) {
-    const groupKey = indices
-      .map((idx) => weightedExamples[idx].page_lineage_id)
-      .sort()[0];
-    const hashU =
-      parseInt(sha256Hex(`${params.seed}:split:${groupKey}`).slice(0, 8), 16) / 0x100000000;
-    const split: SplitName =
-      hashU < ratios.train
-        ? 'train'
-        : hashU < ratios.train + ratios.select_tune
-          ? 'select_tune'
-          : 'final_eval';
-
+  for (const { compRoot, indices, split } of componentList) {
     const compClusterId = `ndc_comp_${sha256Hex(`${params.seed}:${compRoot}:${rawClusterIds[compRoot]}`).slice(0, 16)}`;
 
     // Deduplicate near-duplicates WITHIN this connected component / split
@@ -899,6 +961,13 @@ export function buildThreeWayTrainingDataset(params: {
   const train = buildSplitItems(survivingBySplit.train, 'train');
   const selectTune = buildSplitItems(survivingBySplit.select_tune, 'select_tune');
   const finalEval = buildSplitItems(survivingBySplit.final_eval, 'final_eval');
+
+  if (train.length === 0 || selectTune.length === 0 || finalEval.length === 0) {
+    throw new InsufficientSplitComponentsError(
+      components.size,
+      `3-way split produced empty partition(s): train=${train.length}, select_tune=${selectTune.length}, final_eval=${finalEval.length}`
+    );
+  }
 
   const overlapAudit = verifyZeroSplitOverlap(train, selectTune, finalEval);
   if (!overlapAudit.passed) {

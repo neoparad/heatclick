@@ -6,7 +6,6 @@
 
 import { sha256Bytes, utf8Encode } from './crypto';
 import {
-  InMemoryBundleStateStore,
   SignerCasConflictError,
   SignerPolicyError,
   SignerService,
@@ -88,13 +87,16 @@ async function verifyControlPlaneAuth(
 
 export function createSignerWorkerHandler(deps: SignerWorkerDeps) {
   const now = deps.nowMs ?? (() => Date.now());
-  const bundleStateStore = deps.bundleStateStore ?? new InMemoryBundleStateStore();
-  const signerService = new SignerService({
-    onlinePrivateKey: deps.onlinePrivateKey,
-    onlineKid: deps.onlineKid,
-    getReleaseManifest: deps.getReleaseManifest,
-    bundleStateStore,
-  });
+  // [#5] Fail closed if no shared/persistent BundleStateStore is explicitly injected.
+  const bundleStateStore = deps.bundleStateStore ?? null;
+  const signerService = bundleStateStore
+    ? new SignerService({
+        onlinePrivateKey: deps.onlinePrivateKey,
+        onlineKid: deps.onlineKid,
+        getReleaseManifest: deps.getReleaseManifest,
+        bundleStateStore,
+      })
+    : null;
 
   return {
     bundleStateStore,
@@ -129,6 +131,9 @@ export function createSignerWorkerHandler(deps: SignerWorkerDeps) {
         if (!auth.ok) {
           return jsonResponse({ error: auth.error }, auth.status);
         }
+        if (!bundleStateStore || !signerService) {
+          return jsonResponse({ error: 'BUNDLE_STATE_STORE_UNCONFIGURED' }, 503);
+        }
 
         try {
           // C-18: NEVER read or trust caller-supplied `body.previousBundle`!
@@ -153,6 +158,9 @@ export function createSignerWorkerHandler(deps: SignerWorkerDeps) {
       }
 
       if (request.method === 'POST' && path === '/v1/signer/bundle/verify') {
+        if (!bundleStateStore) {
+          return jsonResponse({ error: 'BUNDLE_STATE_STORE_UNCONFIGURED' }, 503);
+        }
         try {
           const body = (await request.json()) as {
             bundle: SignedConfigBundle;

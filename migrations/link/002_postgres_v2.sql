@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS tenant_sites (
   tenant_id UUID NOT NULL,
   site_id UUID NOT NULL,
   site_ref TEXT NOT NULL,
-  retention_months SMALLINT NOT NULL DEFAULT 13,
+  retention_months SMALLINT NOT NULL DEFAULT 13 CHECK (retention_months IN (1, 2, 3, 6, 9, 12, 13, 18, 24, 30, 36)),
   default_consent_mode TEXT NOT NULL DEFAULT 'cookieless',
   minors_flag BOOLEAN NOT NULL DEFAULT FALSE,
   industry_class TEXT NOT NULL,

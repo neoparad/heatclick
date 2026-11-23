@@ -274,6 +274,11 @@ describe('lib/link/autonomy/agent-publisher (§10.10, §11.7 — 1,000+ Hijack S
       createdAt: '2026-11-20T11:58:00Z',
       expiresAt: '2026-11-21T11:58:00Z',
     };
+    const gatewayVerifier = new SingleUsePasskeyApprovalVerifier({
+      requireRegisteredApproval: true,
+    });
+    gatewayVerifier.registerApproval(humanApproval);
+
     const approvedOpen = evaluateAndSignAgentPublish(
       {
         requestId: 'req_open_2',
@@ -296,6 +301,7 @@ describe('lib/link/autonomy/agent-publisher (§10.10, §11.7 — 1,000+ Hijack S
         approvedServerLookupIds: new Set(['sec_hero']),
         approvedAssetRefs: new Set(['asset_banner_01']),
         sourceTickets: new Map([[source.ticketId, source]]),
+        passkeyApprovalVerifier: gatewayVerifier,
         nowIso: '2026-11-20T12:00:00Z',
       }
     );
@@ -556,6 +562,144 @@ describe('lib/link/autonomy/agent-publisher (§10.10, §11.7 — 1,000+ Hijack S
     expect(replayUse.signed).toBe(false);
     expect(replayUse.code).toBe('INVALID_OR_MISMATCHED_HUMAN_APPROVAL');
     expect(replayUse.reason).toContain('approval_already_consumed');
+  });
+
+  test('[#3] fails closed with APPROVAL_VERIFIER_REQUIRED when human approval verifier is uninjected', () => {
+    const owner = makeHumanOwner();
+    const created = createSealedAutonomyEnvelope({
+      author: owner,
+      spec: {
+        tenantId: 'ten_1',
+        siteId: 'site_1',
+        allowedActions: ['delivery.publish_banner'],
+        allowedScopes: ['decisions:publish'],
+        allowedPagePatterns: ['/articles/*'],
+        allowedFieldProvenance: ['closed_enum', 'copy_library'],
+        maxCostUnits: 100,
+        maxExposedUnits: 2730,
+        maxConversionsAtRisk: 55,
+        smokeEpsilon: 0.01,
+        maxGuardrailStalenessSec: 3600,
+        terminatingEvents: ['kill_switch'],
+        reviewByIso: '2026-12-20T00:00:00Z',
+      },
+      nowIso: '2026-11-20T12:00:00Z',
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const candidatePayload = {
+      pagePath: '/articles/guide',
+      bundleTier: 'A1' as const,
+      fields: [{ name: 'headline', provenance: 'open_free_text' as const, value: 'Forged open text' }],
+    };
+    const hashes = computeActionAndDiffHash('delivery.publish_banner', candidatePayload);
+    const callerSuppliedApproval: PasskeyApprovalRecord = {
+      approvalId: 'apr_unregistered_forged',
+      tenantId: 'ten_1',
+      siteId: 'site_1',
+      approverPrincipalId: owner.principalId,
+      approverRole: 'owner',
+      action: 'delivery.publish_banner',
+      actionHash: hashes.actionHash,
+      renderedDiffHash: hashes.renderedDiffHash,
+      webauthnCredentialId: 'cred_fake_1',
+      createdAt: '2026-11-20T11:59:00Z',
+      expiresAt: '2026-11-20T12:30:00Z',
+    };
+
+    const res = evaluateAndSignAgentPublish(
+      {
+        requestId: 'req_missing_verifier',
+        clientId: 'mcp_a',
+        agentPrincipalId: 'agent_1',
+        action: 'delivery.publish_banner',
+        ...candidatePayload,
+        requestedExposedUnits: 50,
+        requestedConversionsAtRisk: 1,
+        requestedCostUnits: 1,
+        isSmokePhase: true,
+        humanApproval: callerSuppliedApproval,
+      },
+      {
+        envelope: created.envelope,
+        guardrails: { lastCheckedAtIso: '2026-11-20T11:55:00Z', allGuardrailsHealthy: true },
+        sensitiveIndustry: false,
+        preflightPassed: true,
+        section106Passed: true,
+        approvedServerLookupIds: new Set(['sec_hero']),
+        approvedAssetRefs: new Set(['asset_banner_01']),
+        sourceTickets: new Map(),
+        nowIso: '2026-11-20T12:00:00Z',
+      }
+    );
+    expect(res.signed).toBe(false);
+    expect(res.status).toBe('rejected');
+    expect(res.code).toBe('APPROVAL_VERIFIER_REQUIRED');
+  });
+
+  test('[#4] rejects catalog enum field whose provenance is excluded from owner AutonomyEnvelope allowedFieldProvenance', () => {
+    const owner = makeHumanOwner();
+    // Owner sealed envelope permits ONLY `copy_library`, EXCLUDING `closed_enum`!
+    const created = createSealedAutonomyEnvelope({
+      author: owner,
+      spec: {
+        tenantId: 'ten_1',
+        siteId: 'site_1',
+        allowedActions: ['delivery.publish_banner'],
+        allowedScopes: ['decisions:publish'],
+        allowedPagePatterns: ['/articles/*'],
+        allowedFieldProvenance: ['copy_library'],
+        maxCostUnits: 100,
+        maxExposedUnits: 2730,
+        maxConversionsAtRisk: 55,
+        smokeEpsilon: 0.01,
+        maxGuardrailStalenessSec: 3600,
+        terminatingEvents: ['kill_switch'],
+        reviewByIso: '2026-12-20T00:00:00Z',
+      },
+      nowIso: '2026-11-20T12:00:00Z',
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const decision = evaluateAndSignAgentPublish(
+      {
+        requestId: 'req_enum_excluded_by_envelope',
+        clientId: 'mcp_a',
+        agentPrincipalId: 'agent_1',
+        action: 'delivery.publish_banner',
+        pagePath: '/articles/guide',
+        bundleTier: 'A1',
+        fields: [{ name: 'theme', provenance: 'closed_enum', value: 'light' }],
+        requestedExposedUnits: 50,
+        requestedConversionsAtRisk: 1,
+        requestedCostUnits: 1,
+        isSmokePhase: true,
+      },
+      {
+        envelope: created.envelope,
+        guardrails: { lastCheckedAtIso: '2026-11-20T11:55:00Z', allGuardrailsHealthy: true },
+        sensitiveIndustry: false,
+        preflightPassed: true,
+        section106Passed: true,
+        approvedServerLookupIds: new Set(['sec_hero']),
+        approvedAssetRefs: new Set(['asset_banner_01']),
+        sourceTickets: new Map(),
+        slotCatalog: {
+          theme: {
+            slotName: 'theme',
+            provenance: 'closed_enum',
+            allowedValues: ['light', 'dark'],
+          },
+        },
+        nowIso: '2026-11-20T12:00:00Z',
+      }
+    );
+
+    expect(decision.signed).toBe(false);
+    expect(decision.status).toBe('rejected');
+    expect(decision.code).toBe('FIELD_PROVENANCE_NOT_ALLOWED_IN_ENVELOPE');
   });
 
   test('asymmetric stop authority: site resumes after 60 min while named interventions stay stopped until human release; whole-tenant stop requires human or 2 principals', () => {

@@ -67,6 +67,8 @@ import {
   type HeatmapSdkCapability,
   type HeatmapSectionMetricInput,
   type HeatmapUnitDataset,
+  type LabScreenshotInput,
+  type RedactionBox,
 } from './types'
 
 // ---------------------------------------------------------------------------
@@ -95,6 +97,61 @@ export interface AuthCheckResult {
 
 export const EXTERNAL_PARTY_MIN_CELL_K = 10
 export const DEFAULT_MAX_OVERLAPPING_EXTERNAL_QUERIES = 8
+
+/** Fixed, numeric-free external rejection reason codes (never interpolate raw counts or deltas!) */
+export const DISCLOSURE_BLOCKED_DIFFERENCING = 'disclosure_blocked_differencing'
+export const DISCLOSURE_SUPPRESSED_K_ANONYMITY = 'disclosure_suppressed_k_anonymity'
+export const DISCLOSURE_REJECTED_NON_CALENDAR_PERIOD = 'disclosure_rejected_non_calendar_period'
+
+function sanitizeExternalRejectionReason(rawReason: string): string {
+  const low = rawReason.toLowerCase()
+  if (low.includes('differencing') || low === DISCLOSURE_BLOCKED_DIFFERENCING) {
+    return DISCLOSURE_BLOCKED_DIFFERENCING
+  }
+  if (low.includes('calendar') || low === DISCLOSURE_REJECTED_NON_CALENDAR_PERIOD) {
+    return DISCLOSURE_REJECTED_NON_CALENDAR_PERIOD
+  }
+  if (low.includes('k10') || low.includes('k_anonymity') || low.includes('suppress')) {
+    return DISCLOSURE_SUPPRESSED_K_ANONYMITY
+  }
+  // Strip any accidental numeric tokens or parameterized suffixes for external-facing responses
+  const stripped = rawReason.replace(/[:=<>].*$/, '').replace(/\d+/g, '').replace(/_+$/, '')
+  return stripped || DISCLOSURE_SUPPRESSED_K_ANONYMITY
+}
+
+function boxesOverlap(
+  a: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
+  b: Pick<RedactionBox, 'x' | 'y' | 'width' | 'height'>,
+): boolean {
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
+}
+
+/**
+ * Extracts ONLY OCR snippets with explicit post-mask provenance (`from_masked_image: true`
+ * and `overlaps_masked_region !== true`) whose bounding box does not intersect any redaction box.
+ * Bare strings, pre-mask OCR, or masked-region snippets are omitted completely (never emitted).
+ */
+function extractSafePostMaskOcrTexts(screenshot: LabScreenshotInput | null): UntrustedValue[] {
+  if (!screenshot || !screenshot.embedded_text_samples || screenshot.embedded_text_samples.length === 0) {
+    return []
+  }
+  const redactionBoxes = screenshot.redaction_boxes ?? []
+  const safe: UntrustedValue[] = []
+  for (const sample of screenshot.embedded_text_samples) {
+    if (typeof sample === 'string') {
+      // Bare string lacks verified post-mask provenance -> omit completely
+      continue
+    }
+    if (sample.from_masked_image !== true || sample.overlaps_masked_region === true) {
+      continue
+    }
+    if (sample.bbox && redactionBoxes.some((box) => boxesOverlap(sample.bbox!, box))) {
+      continue
+    }
+    safe.push(wrapUntrusted(sample.text, 'heatmap_text'))
+  }
+  return safe
+}
 
 const ISO_EXPLICIT_TZ_RE = /(?:Z|[+-]\d{2}:\d{2})$/
 const UTC_DAY_MS = 86_400_000
@@ -171,6 +228,8 @@ function sanitizeSuppressedSection(s: HeatmapSectionMetricInput): HeatmapSection
 function sanitizeSuppressedClick(c: HeatmapClickPointInput): HeatmapClickPointInput {
   return Object.freeze({
     ...c,
+    rel_x: null,
+    rel_y: null,
     click_count: null,
     ...(c.sample_size !== undefined ? { sample_size: null } : {}),
     status: 'suppressed',
@@ -290,7 +349,7 @@ function detectLinearSubjectCombinationLeak(
   for (let i = 0; i < fullRref.rank; i++) {
     const w = supportWeight(fullRref.rref[i])
     if (w > 0 && w < minK) {
-      return `differencing_attack_blocked:linear_combination_support=${w}<${minK}`
+      return DISCLOSURE_BLOCKED_DIFFERENCING
     }
   }
 
@@ -322,7 +381,7 @@ function detectLinearSubjectCombinationLeak(
   }
 
   if (totalSmallWeight < minK) {
-    return `differencing_attack_blocked:linear_subspace_small_atoms=${totalSmallWeight}<${minK}`
+    return DISCLOSURE_BLOCKED_DIFFERENCING
   }
 
   // Check singletons and pairs of small atoms directly via exact rank drop:
@@ -331,7 +390,7 @@ function detectLinearSubjectCombinationLeak(
     const colA = smallCols[a]
     const comp = Array.from({ length: r }, (_, idx) => idx).filter((idx) => idx !== colA)
     if (extractSubmatrixRank(comp) < fullRref.rank) {
-      return `differencing_attack_blocked:isolated_atom_weight=${atoms[colA].weight}<${minK}`
+      return DISCLOSURE_BLOCKED_DIFFERENCING
     }
     for (let b = a + 1; b < smallCols.length; b++) {
       const colB = smallCols[b]
@@ -341,7 +400,7 @@ function detectLinearSubjectCombinationLeak(
         (idx) => idx !== colA && idx !== colB,
       )
       if (extractSubmatrixRank(compPair) < fullRref.rank) {
-        return `differencing_attack_blocked:isolated_pair_weight=${pairWeight}<${minK}`
+        return DISCLOSURE_BLOCKED_DIFFERENCING
       }
     }
   }
@@ -358,7 +417,7 @@ function detectLinearSubjectCombinationLeak(
       if (Math.abs(subRref.rref[i][j]) > eps) w += orderedWeights[j]
     }
     if (w > 0 && w < minK) {
-      return `differencing_attack_blocked:small_subspace_basis_weight=${w}<${minK}`
+      return DISCLOSURE_BLOCKED_DIFFERENCING
     }
   }
 
@@ -387,11 +446,11 @@ function detectWindowIntervalDifferencingLeak(
     const bContainsA = b.startMs <= a.startMs && b.endMs >= a.endMs
     if (!aContainsB && !bContainsA) {
       // Partially sliding window without subject_ids cannot bound symmetric difference (e.g. equal totals)
-      return 'differencing_attack_blocked:sliding_window_without_subject_ids'
+      return DISCLOSURE_BLOCKED_DIFFERENCING
     }
     const diff = Math.abs(a.total - b.total)
     if (diff < minK) {
-      return `differencing_attack_blocked:nested_window_diff=${diff}<${minK}`
+      return DISCLOSURE_BLOCKED_DIFFERENCING
     }
   }
 
@@ -455,7 +514,7 @@ function detectWindowIntervalDifferencingLeak(
   for (let r = 0; r < rank; r++) {
     const rhs = Math.abs(a[r][sliceCount])
     if (rhs < minK - eps) {
-      return `differencing_attack_blocked:window_linear_residual=${Math.round(rhs)}<${minK}`
+      return DISCLOSURE_BLOCKED_DIFFERENCING
     }
   }
 
@@ -512,7 +571,7 @@ export class HeatmapDisclosureGuard {
         suppressed_cell_count: input.sections.length + input.clicks.length,
         sections: Object.freeze([]),
         clicks: Object.freeze([]),
-        reason: 'external_party_requires_calendar_aligned_period',
+        reason: DISCLOSURE_REJECTED_NON_CALENDAR_PERIOD,
       })
     }
 
@@ -525,7 +584,7 @@ export class HeatmapDisclosureGuard {
         suppressed_cell_count: input.sections.length + input.clicks.length,
         sections: Object.freeze([]),
         clicks: Object.freeze([]),
-        reason: 'segment_below_k10_threshold',
+        reason: DISCLOSURE_SUPPRESSED_K_ANONYMITY,
       })
     }
 
@@ -562,7 +621,7 @@ export class HeatmapDisclosureGuard {
           suppressed_cell_count: input.sections.length + input.clicks.length,
           sections: Object.freeze([]),
           clicks: Object.freeze([]),
-          reason: `differencing_attack_blocked:overlapping_query_budget_exceeded>${this.maxOverlappingQueries}`,
+          reason: DISCLOSURE_BLOCKED_DIFFERENCING,
         })
       }
 
@@ -579,7 +638,7 @@ export class HeatmapDisclosureGuard {
               suppressed_cell_count: input.sections.length + input.clicks.length,
               sections: Object.freeze([]),
               clicks: Object.freeze([]),
-              reason: `differencing_attack_blocked:symmetric_diff=${symDiff}<${EXTERNAL_PARTY_MIN_CELL_K}`,
+              reason: DISCLOSURE_BLOCKED_DIFFERENCING,
             })
           }
         } else if (windowsOverlap) {
@@ -592,7 +651,7 @@ export class HeatmapDisclosureGuard {
               suppressed_cell_count: input.sections.length + input.clicks.length,
               sections: Object.freeze([]),
               clicks: Object.freeze([]),
-              reason: 'differencing_attack_blocked:overlapping_segments_require_subject_ids',
+              reason: DISCLOSURE_BLOCKED_DIFFERENCING,
             })
           }
         }
@@ -1421,10 +1480,11 @@ export class HeatmapRenderService {
         })
         consentEval.limitations.forEach((l) => allLimitations.add(l))
 
-        // Wrap any OCR / embedded text as UntrustedValue so prompt injection cannot touch auth/dest/budget!
-        const untrustedEmbeddedTexts: UntrustedValue[] = (
-          dataset.screenshot?.embedded_text_samples ?? []
-        ).map((txt) => wrapUntrusted(txt, 'heatmap_text'))
+        // Emit ONLY OCR snippets with verified post-mask provenance (from_masked_image: true,
+        // overlaps_masked_region !== true, and outside redaction_boxes), wrapped as UntrustedValue.
+        const untrustedEmbeddedTexts: UntrustedValue[] = extractSafePostMaskOcrTexts(
+          dataset.screenshot,
+        )
 
         const unitKeyStr = serializeHeatmapUnitKey(dataset.unit)
         const reproScope = {
@@ -1718,7 +1778,9 @@ export class HeatmapRenderService {
       model_inferred_disclosure: params.modelDisclosure,
       sections: Object.freeze([]),
       clicks: Object.freeze([]),
-      untrusted_embedded_texts: Object.freeze(params.untrustedEmbeddedTexts),
+      untrusted_embedded_texts: Object.freeze(
+        params.status === 'suppressed' ? [] : params.untrustedEmbeddedTexts,
+      ),
       cache_hit: false,
       deletion_epoch: params.deletionEpoch,
       build_seq: params.buildSeq,
@@ -1757,13 +1819,20 @@ export class HeatmapRenderService {
           EXTERNAL_PARTY_MIN_CELL_K
         : params.dataset.total_units_in_segment
 
-    const gateReason = params.limitations[0] ?? params.status
+    const rawGateReason = params.limitations[0] ?? params.status
+    const gateReason =
+      params.audience === 'external_party' && !isOk
+        ? sanitizeExternalRejectionReason(rawGateReason)
+        : rawGateReason
     const unmetGate: UnmetGate = {
       id: gateReason,
       required: EXTERNAL_PARTY_MIN_CELL_K,
       observed: 0,
       reason: gateReason,
-      unlock: `satisfy_${params.status}_gate`,
+      unlock:
+        params.audience === 'external_party' && !isOk
+          ? 'satisfy_disclosure_policy'
+          : `satisfy_${params.status}_gate`,
     }
 
     const measure: MeasureInput<VerifiedNumericLeaf> = {

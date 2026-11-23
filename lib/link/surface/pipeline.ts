@@ -494,7 +494,12 @@ export interface SurfaceInvocation {
   readonly bearerToken?: string;
   readonly sessionPrincipal?: VerifiedPrincipal;
   readonly clientIp?: string;
-  readonly dpopThumbprint?: string;
+  /** Signed RFC 9449 DPoP proof JWT from `DPoP` HTTP header. */
+  readonly dpopProof?: string;
+  readonly httpMethod?: string;
+  readonly httpUri?: string;
+  /** Server-trusted mTLS client certificate thumbprint (NEVER populated from untrusted HTTP headers). */
+  readonly mtlsThumbprint?: string;
   /** Caller-supplied `tenant_id` (if any) — strictly rejected on foreign mismatch -> 404 + audit. */
   readonly callerSuppliedTenantId?: string;
   readonly siteId?: string;
@@ -605,7 +610,10 @@ export class SurfacePipeline {
     readonly bearerToken?: string;
     readonly sessionPrincipal?: VerifiedPrincipal;
     readonly clientIp?: string;
-    readonly dpopThumbprint?: string;
+    readonly dpopProof?: string;
+    readonly httpMethod?: string;
+    readonly httpUri?: string;
+    readonly mtlsThumbprint?: string;
     readonly siteId?: string;
     readonly forbidPublicBrowserKey?: boolean;
     readonly now?: Date;
@@ -620,7 +628,10 @@ export class SurfacePipeline {
         bearerToken: params.bearerToken,
         sessionPrincipal: params.sessionPrincipal,
         clientIp: params.clientIp,
-        dpopThumbprint: params.dpopThumbprint,
+        dpopProof: params.dpopProof,
+        httpMethod: params.httpMethod,
+        httpUri: params.httpUri,
+        mtlsThumbprint: params.mtlsThumbprint,
         siteId: params.siteId,
         now,
       },
@@ -661,19 +672,27 @@ export class SurfacePipeline {
       return this.keyRegistry.verifySecretKey(raw, {
         clientIp: inv.clientIp,
         siteId: inv.siteId,
-        senderThumbprint: inv.dpopThumbprint,
+        dpopProof: inv.dpopProof,
+        httpMethod: inv.httpMethod,
+        httpUri: inv.httpUri,
+        mtlsThumbprint: inv.mtlsThumbprint,
         now,
       });
     }
     if (raw.startsWith('ugk_oauth_')) {
       return this.keyRegistry.verifyMcpOAuthToken(raw, {
-        dpopThumbprint: inv.dpopThumbprint,
+        dpopProof: inv.dpopProof,
+        httpMethod: inv.httpMethod,
+        httpUri: inv.httpUri,
         now,
       });
     }
     if (raw.startsWith('ugk_oemx_')) {
       return this.keyRegistry.verifyOemExchangedToken(raw, {
-        senderThumbprint: inv.dpopThumbprint,
+        dpopProof: inv.dpopProof,
+        httpMethod: inv.httpMethod,
+        httpUri: inv.httpUri,
+        mtlsThumbprint: inv.mtlsThumbprint,
         now,
       });
     }
@@ -742,7 +761,30 @@ export class SurfacePipeline {
     const siteCfg = this.repository.getSiteConfig(targetSiteId);
     const resourceTenantId = siteCfg ? siteCfg.tenantId : '__nonexistent_tenant__';
 
-    // Step 3: Unified Authorization Gateway (foreign tenant -> 404 + audit, own missing scope -> 403, R0–R5)
+    // Precompute Idempotency-Key lookup (read-only) so exact replays of already-executed writes
+    // do not fail on single-use Passkey approval consumption before cache hit return (#25).
+    const idemRaw = inv.idempotencyKey?.trim();
+    const idemStoreKey =
+      op.riskClass !== 'R0' && idemRaw
+        ? `${principal.tenantId}:${principal.principalId}:${op.operationId}:${idemRaw}`
+        : null;
+    const idemPayloadHash = idemStoreKey
+      ? sha256Hex(
+          canonicalJson({
+            siteId: targetSiteId,
+            params: inv.params ?? {},
+            body: inv.body ?? {},
+          })
+        )
+      : null;
+    const cachedIdem =
+      idemStoreKey && idemPayloadHash
+        ? this.idempotencyStore.get(idemStoreKey, now.getTime())
+        : undefined;
+    const isExactIdempotentReplay = Boolean(cachedIdem && cachedIdem.payloadHash === idemPayloadHash);
+
+    // Step 3: Unified Authorization Gateway (read-only Passkey approval verification; consumption
+    // is deferred until AFTER idempotency cache lookup, rate limit, and isolation checks!)
     const authz = this.gateway.authorize({
       principal,
       action: op.operationId,
@@ -759,6 +801,8 @@ export class SurfacePipeline {
       renderedDiff: inv.body,
       passkeyApprovalId: inv.passkeyApprovalId,
       passkeyAssertion: inv.passkeyAssertion,
+      deferApprovalConsumption: true,
+      allowConsumedApprovalForReplay: isExactIdempotentReplay,
       autonomyEnvelopeId: inv.autonomyEnvelopeId,
       fieldProvenance: inv.fieldProvenance,
       destruction:
@@ -795,47 +839,29 @@ export class SurfacePipeline {
       };
     }
 
-    // Step 3b: Bounded Idempotency-Key store check on mutating operations ([L-03])
-    const idemRaw = inv.idempotencyKey?.trim();
-    const idemStoreKey =
-      op.riskClass !== 'R0' && idemRaw
-        ? `${principal.tenantId}:${principal.principalId}:${op.operationId}:${idemRaw}`
-        : null;
-    const idemPayloadHash = idemStoreKey
-      ? sha256Hex(
-          canonicalJson({
-            siteId: targetSiteId,
-            params: inv.params ?? {},
-            body: inv.body ?? {},
-          })
-        )
-      : null;
-
-    if (idemStoreKey && idemPayloadHash) {
-      const cachedIdem = this.idempotencyStore.get(idemStoreKey, now.getTime());
-      if (cachedIdem) {
-        if (cachedIdem.payloadHash !== idemPayloadHash) {
-          return {
-            httpStatus: 409,
-            headers: versionHeaders,
-            error: {
-              code: 'IDEMPOTENCY_KEY_PAYLOAD_MISMATCH',
-              message: 'Idempotency-Key was already used with a different request payload',
-              auditEntryId: authz.auditEntryId,
-            },
-          };
-        }
+    // Step 3b: Bounded Idempotency-Key store check on mutating operations ([L-03], #25)
+    if (cachedIdem && idemPayloadHash) {
+      if (cachedIdem.payloadHash !== idemPayloadHash) {
         return {
-          ...cachedIdem.result,
-          headers: {
-            ...cachedIdem.result.headers,
-            'X-UGOKI-Idempotent-Replay': 'true',
+          httpStatus: 409,
+          headers: versionHeaders,
+          error: {
+            code: 'IDEMPOTENCY_KEY_PAYLOAD_MISMATCH',
+            message: 'Idempotency-Key was already used with a different request payload',
+            auditEntryId: authz.auditEntryId,
           },
         };
       }
+      return {
+        ...cachedIdem.result,
+        headers: {
+          ...cachedIdem.result.headers,
+          'X-UGOKI-Idempotent-Replay': 'true',
+        },
+      };
     }
 
-    // Step 4: Cost-unit rate limiter (§11.9)
+    // Step 4: Cost-unit rate limiter (§11.9) — does NOT burn Passkey approval on 429 (#25)
     const rateCheck = this.rateLimiter.consume(
       `${principal.tenantId}:${principal.credentialId}`,
       op.costUnits,
@@ -871,6 +897,30 @@ export class SurfacePipeline {
           auditEntryId: authz.auditEntryId,
         },
       };
+    }
+
+    // Step 5b: Atomically consume single-use Passkey approval ONLY now that all pre-checks
+    // (authz, idempotency cache, rate limit, isolation hold) have passed (#25)
+    if (authz.pendingApprovalConsumption) {
+      const consumed = this.gateway.consumePasskeyApproval({
+        approvalId: authz.pendingApprovalConsumption.approvalId,
+        tenantId: principal.tenantId,
+        siteId: targetSiteId,
+        action: op.operationId,
+        actionPayload: authz.pendingApprovalConsumption.actionPayload,
+        now,
+      });
+      if (!consumed.ok) {
+        return {
+          httpStatus: 202,
+          headers: versionHeaders,
+          error: {
+            code: consumed.code,
+            message: consumed.reason,
+            auditEntryId: authz.auditEntryId,
+          },
+        };
+      }
     }
 
     const enrichedHeaders: Record<string, string> = {

@@ -1,8 +1,14 @@
 import { hmacSha256Hex } from '../../lib/link/allocator';
+import {
+  DeletionExecutionEngine,
+  TenantKeyVersionRegistry,
+  type DeletionStoreAdapter,
+} from '../../lib/link/store';
 import { isUntrustedValue } from '../../packages/contract/response';
 import {
   CANONICAL_SCHEMA,
   CODEC_VERSION,
+  computeCanonicalSubjectHmac,
   computeFrameChecksum,
   createSdkFrameCodec,
   type TelemetryFrame,
@@ -543,6 +549,9 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
       r2SpillBucket: spill.bucket,
       r2HoldBucket: hold.bucket,
       r2QuarantineBucket: quarantine.bucket,
+      deletionSink: {
+        enqueueSubjectDeletion: async (req) => ({ receiptId: req.receiptId }),
+      },
       nowMs: () => now,
     });
 
@@ -924,8 +933,20 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
         body: JSON.stringify({ member_hash: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789' }),
       })
     );
-    expect(optResFallback.status).toBe(200);
-    expect(workerB.deletionFallbackQueue).toHaveLength(1);
+    // Codex #8: Without a configured durable deletionSink, opt-out cookie is set but deletion_queued MUST be false (503)
+    expect(optResFallback.status).toBe(503);
+    const optFallbackJson = (await optResFallback.json()) as {
+      ok: boolean;
+      optout_cookie_set: boolean;
+      deletion_queued: boolean;
+      error: string;
+    };
+    expect(optFallbackJson.ok).toBe(false);
+    expect(optFallbackJson.optout_cookie_set).toBe(true);
+    expect(optFallbackJson.deletion_queued).toBe(false);
+    expect(optFallbackJson.error).toBe('deletion_sink_unavailable');
+    expect(optResFallback.headers.get('set-cookie')).toContain('ugk_optout=1');
+    expect(workerB.deletionFallbackQueue).toHaveLength(0);
 
     // 2. [H-11]: Collector strips all linkable keys on `private_scope` frames
     const privFrame = makeValidFrame({
@@ -1043,5 +1064,256 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
     expect(tinyMap.get('k2', 2000)).toBeUndefined();
     expect(tinyMap.get('k1', 2000)).toBe(1);
     expect(tinyMap.get('k1', 7000)).toBeUndefined(); // expired after 5s TTL!
+  });
+
+  test('Wave 9 Codex #8: /v1/optout NEVER returns deletion_queued: true when deletionSink is missing or throws, while durable sink returns 200 with receipt_id', async () => {
+    const q = makeMemoryQueue<PersistedCollectorRecord>();
+    const customQ = makeMemoryQueue<CustomEventPersistedRecord>();
+    const spill = makeMemoryR2();
+    const hold = makeMemoryR2();
+    const quarantine = makeMemoryR2();
+    const site = makeTestSite();
+    const now = Date.parse('2026-11-23T06:00:00.000Z');
+    const rawMember = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+
+    // 1. Missing deletionSink -> HTTP 503, optout_cookie_set: true, deletion_queued: false
+    const workerMissingSink = createCollectorWorker({
+      sitesByPublishableKey: new Map([[site.publishableKey, site]]),
+      continuityTokenSecret: 'cont_sec',
+      labMarkerSecret: 'lab_sec',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      nowMs: () => now,
+    });
+    const resMissing = await workerMissingSink.fetch(
+      new Request('https://collect.ugokilink.example/v1/optout', {
+        method: 'POST',
+        headers: { 'x-ugk-key': site.publishableKey, 'content-type': 'application/json' },
+        body: JSON.stringify({ member_hash: rawMember }),
+      })
+    );
+    expect(resMissing.status).toBe(503);
+    const jsonMissing = (await resMissing.json()) as Record<string, unknown>;
+    expect(jsonMissing.deletion_queued).toBe(false);
+    expect(jsonMissing.optout_cookie_set).toBe(true);
+    expect(jsonMissing.error).toBe('deletion_sink_unavailable');
+    expect(resMissing.headers.get('set-cookie')).toContain('ugk_optout=1');
+
+    // 2. Throwing deletionSink -> HTTP 503, optout_cookie_set: true, deletion_queued: false
+    const workerThrowingSink = createCollectorWorker({
+      sitesByPublishableKey: new Map([[site.publishableKey, site]]),
+      continuityTokenSecret: 'cont_sec',
+      labMarkerSecret: 'lab_sec',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      deletionSink: {
+        enqueueSubjectDeletion: async () => {
+          throw new Error('D1/Queue transient outage');
+        },
+      },
+      nowMs: () => now,
+    });
+    const resThrowing = await workerThrowingSink.fetch(
+      new Request('https://collect.ugokilink.example/v1/optout', {
+        method: 'POST',
+        headers: { 'x-ugk-key': site.publishableKey, 'content-type': 'application/json' },
+        body: JSON.stringify({ member_hash: rawMember }),
+      })
+    );
+    expect(resThrowing.status).toBe(503);
+    const jsonThrowing = (await resThrowing.json()) as Record<string, unknown>;
+    expect(jsonThrowing.deletion_queued).toBe(false);
+    expect(jsonThrowing.optout_cookie_set).toBe(true);
+    expect(jsonThrowing.error).toBe('deletion_sink_unavailable');
+    expect(resThrowing.headers.get('set-cookie')).toContain('ugk_optout=1');
+
+    // 3. Succeeding durable deletionSink -> HTTP 200, deletion_queued: true with receipt_id
+    const persistedRequests: SubjectDeletionRequest[] = [];
+    const workerDurableSink = createCollectorWorker({
+      sitesByPublishableKey: new Map([[site.publishableKey, site]]),
+      continuityTokenSecret: 'cont_sec',
+      labMarkerSecret: 'lab_sec',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      deletionSink: {
+        enqueueSubjectDeletion: async (req) => {
+          persistedRequests.push(req);
+          return { receiptId: `durable_${req.receiptId}` };
+        },
+      },
+      nowMs: () => now,
+    });
+    const resDurable = await workerDurableSink.fetch(
+      new Request('https://collect.ugokilink.example/v1/optout', {
+        method: 'POST',
+        headers: { 'x-ugk-key': site.publishableKey, 'content-type': 'application/json' },
+        body: JSON.stringify({ member_hash: rawMember }),
+      })
+    );
+    expect(resDurable.status).toBe(200);
+    const jsonDurable = (await resDurable.json()) as Record<string, unknown>;
+    expect(jsonDurable.ok).toBe(true);
+    expect(jsonDurable.deletion_queued).toBe(true);
+    expect(jsonDurable.optout_cookie_set).toBe(true);
+    expect(String(jsonDurable.receipt_id)).toMatch(/^durable_del_/);
+    expect(persistedRequests).toHaveLength(1);
+  });
+
+  test('Wave 9 Codex #9: unified versioned subject HMAC roundtrip — collected member frame -> /v1/optout -> DeletionExecutionEngine finds and erases the exact collected row', async () => {
+    const q = makeMemoryQueue<PersistedCollectorRecord>();
+    const customQ = makeMemoryQueue<CustomEventPersistedRecord>();
+    const spill = makeMemoryR2();
+    const hold = makeMemoryR2();
+    const quarantine = makeMemoryR2();
+    const site = makeTestSite({
+      tenantId: 'ten_roundtrip_01',
+      siteId: 'site_roundtrip_01',
+      tenantMemberHashKey: 'tenant_member_secret_v1_2026',
+    });
+    const now = Date.parse('2026-11-23T06:00:00.000Z');
+    const rawMemberHash = '11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff';
+    const queuedDeletions: SubjectDeletionRequest[] = [];
+
+    const worker = createCollectorWorker({
+      sitesByPublishableKey: new Map([[site.publishableKey, site]]),
+      continuityTokenSecret: 'cont_sec',
+      labMarkerSecret: 'lab_sec',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      deletionSink: {
+        enqueueSubjectDeletion: async (req) => {
+          queuedDeletions.push(req);
+          return { receiptId: req.receiptId };
+        },
+      },
+      nowMs: () => now,
+    });
+
+    // 1. Collect member frame via LinkCollectorEngine
+    const collectRes = await worker.collector.handleTelemetryFrame({
+      publishableKey: site.publishableKey,
+      body: makeValidFrame({
+        pv_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        seq: 1,
+        consent_mode: 'full',
+        purposes: ['member_link', 'experiment'],
+        member_hash: rawMemberHash,
+      }),
+      networkPrefix: '203.0.113.0/24',
+    });
+    expect(collectRes.status).toBe(200);
+    const storedMemberHmac = collectRes.persistedRecord!.frame.member_hash;
+    expect(storedMemberHmac).toBe(
+      computeCanonicalSubjectHmac({
+        tenantId: site.tenantId,
+        subjectKind: 'member_hash',
+        subjectValue: rawMemberHash,
+        secretKey: site.tenantMemberHashKey,
+      })
+    );
+
+    // 2. Opt-out via /v1/optout -> queues exact same canonical HMAC
+    const optRes = await worker.fetch(
+      new Request('https://collect.ugokilink.example/v1/optout', {
+        method: 'POST',
+        headers: { 'x-ugk-key': site.publishableKey, 'content-type': 'application/json' },
+        body: JSON.stringify({ member_hash: rawMemberHash }),
+      })
+    );
+    expect(optRes.status).toBe(200);
+    expect(queuedDeletions).toHaveLength(1);
+    expect(queuedDeletions[0].subjectHmac).toBe(storedMemberHmac);
+
+    // 3. DeletionExecutionEngine searches stored rows (both canonical v1 collected row + legacy row)
+    const legacyRowHmac = hmacSha256Hex(site.tenantMemberHashKey, rawMemberHash);
+    const storedRows = new Map<string, { pvId: string; memberHmac: string }>([
+      ['pv_collected', { pvId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', memberHmac: storedMemberHmac! }],
+      ['pv_legacy', { pvId: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', memberHmac: legacyRowHmac }],
+    ]);
+
+    const keyRegistry = new TenantKeyVersionRegistry();
+    keyRegistry.registerKeyVersion({
+      tenantId: site.tenantId,
+      keyVersion: 1,
+      secretSalt: site.tenantMemberHashKey,
+      status: 'active',
+      activeRowCount: 2,
+      createdAtMs: now - 86_400_000,
+    });
+
+    const adapter: DeletionStoreAdapter = {
+      async resolveSubjectKeys({ keyedDigests }) {
+        const candidateSet = new Set<string>();
+        for (const kd of keyedDigests) {
+          candidateSet.add(kd.hmacHex);
+          for (const c of kd.lookupCandidates ?? []) candidateSet.add(c);
+        }
+        const matchedPvIds: string[] = [];
+        for (const row of storedRows.values()) {
+          if (candidateSet.has(row.memberHmac)) {
+            matchedPvIds.push(row.pvId);
+          }
+        }
+        return {
+          visitorKeys: [],
+          sessionKeys: [],
+          pvIds: matchedPvIds,
+          reqUids: [],
+          unitIds: [],
+          touchedPvHoursMs: [],
+          matchedKeyVersions: keyedDigests.map((d) => d.keyVersion),
+        };
+      },
+      async maskSubjectImmediate() {
+        return { ecMemberSummaryDeleted: 1, edgeCacheKeysPurged: 0 };
+      },
+      async purgeTable({ table, resolvedKeys }) {
+        if (table.tableName === 'page_view_state') {
+          let deleted = 0;
+          for (const [k, row] of storedRows.entries()) {
+            if (resolvedKeys.pvIds.includes(row.pvId)) {
+              storedRows.delete(k);
+              deleted += 1;
+            }
+          }
+          return { matchedRows: deleted, deletedRows: deleted };
+        }
+        return { matchedRows: 0, deletedRows: 0 };
+      },
+      async purgeExternalStore() {
+        return { deletedObjects: 0, status: 'expired_or_empty' };
+      },
+      async markRollupHoursDirty() {},
+      async notifyCustomerExportSinks() {
+        return [];
+      },
+    };
+
+    const deletionEngine = new DeletionExecutionEngine(adapter, keyRegistry);
+    deletionEngine.scheduleRequest({
+      requestId: queuedDeletions[0].receiptId,
+      tenantId: site.tenantId,
+      siteId: site.siteId,
+      subjectKind: 'member_hash',
+      rawSubjectValue: rawMemberHash,
+      requestedAtMs: now,
+    });
+    await deletionEngine.executeMaskPhase(queuedDeletions[0].receiptId, now + 1000);
+    await deletionEngine.executePhysicalPurgePhase(queuedDeletions[0].receiptId, now + 2000);
+
+    // Both the newly collected canonical row AND the legacy row were found and erased!
+    expect(storedRows.size).toBe(0);
   });
 });

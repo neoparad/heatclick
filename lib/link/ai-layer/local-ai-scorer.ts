@@ -396,9 +396,16 @@ export function boundWildAiPrevalenceAndLift(params: {
   readonly familywise_alpha?: number
 }): {
   readonly identifiable: boolean
-  readonly status: 'ok' | 'unidentifiable'
-  readonly prevalence_lower: number
+  readonly status: 'ok' | 'unidentifiable' | 'assumption_inconsistent'
+  readonly consistent: boolean
+  readonly assumption_mismatch: boolean
+  readonly intersection_empty: boolean
+  readonly lower: number | null
+  readonly upper: number | null
+  readonly prevalence_lower: number | null
   readonly prevalence_upper: number | null
+  readonly data_lower: number | null
+  readonly data_upper: number | null
   readonly disclosed_pi_max: number
   readonly reason: string
 } {
@@ -440,17 +447,56 @@ export function boundWildAiPrevalenceAndLift(params: {
     return Object.freeze({
       identifiable: false,
       status: 'unidentifiable',
+      consistent: true,
+      assumption_mismatch: false,
+      intersection_empty: false,
+      lower: null,
+      upper: null,
       prevalence_lower: 0,
       prevalence_upper: null,
+      data_lower: null,
+      data_upper: null,
       disclosed_pi_max: piMax,
       reason: 'denominator_ci_contains_zero',
     })
   }
+
+  const dataLower = Math.max(0, ratio.lower)
+  const dataUpper = Math.min(1, ratio.upper)
+  const intLower = Math.max(dataLower, 0)
+  const intUpper = Math.min(dataUpper, piMax)
+
+  // Empty intersection between empirical data lower bound and disclosed prior upper bound!
+  if (dataLower > piMax || intLower > intUpper) {
+    return Object.freeze({
+      identifiable: false,
+      status: 'assumption_inconsistent',
+      consistent: false,
+      assumption_mismatch: true,
+      intersection_empty: true,
+      lower: null,
+      upper: null,
+      prevalence_lower: null,
+      prevalence_upper: null,
+      data_lower: dataLower,
+      data_upper: dataUpper,
+      disclosed_pi_max: piMax,
+      reason: 'data_lower_exceeds_prior_upper',
+    })
+  }
+
   return Object.freeze({
     identifiable: true,
     status: 'ok',
-    prevalence_lower: Math.min(piMax, Math.max(0, ratio.lower)),
-    prevalence_upper: Math.min(piMax, Math.min(1, ratio.upper)),
+    consistent: true,
+    assumption_mismatch: false,
+    intersection_empty: false,
+    lower: intLower,
+    upper: intUpper,
+    prevalence_lower: intLower,
+    prevalence_upper: intUpper,
+    data_lower: dataLower,
+    data_upper: dataUpper,
     disclosed_pi_max: piMax,
     reason: 'ok',
   })
@@ -589,9 +635,41 @@ export interface FamilyCentroidProfile {
   readonly diagonal_vars_60?: readonly number[]
 }
 
+function validateGaussianProfile60(
+  label: string,
+  centroid: readonly number[],
+  scale: number,
+  diagonalVars60?: readonly number[],
+): string | null {
+  if (centroid.length !== BEHAVIORAL_STAT_COUNT) {
+    return `dimension_mismatch:${label}_centroid_len=${centroid.length}!=60`
+  }
+  for (let i = 0; i < BEHAVIORAL_STAT_COUNT; i++) {
+    if (!Number.isFinite(centroid[i])) {
+      return `non_finite_centroid:${label}[${i}]`
+    }
+  }
+  if (diagonalVars60 !== undefined) {
+    if (diagonalVars60.length !== BEHAVIORAL_STAT_COUNT) {
+      return `dimension_mismatch:${label}_diagonal_vars_len=${diagonalVars60.length}!=60`
+    }
+    for (let i = 0; i < BEHAVIORAL_STAT_COUNT; i++) {
+      if (!Number.isFinite(diagonalVars60[i]) || diagonalVars60[i] <= 0) {
+        return `invalid_variance:${label}[${i}]`
+      }
+    }
+  } else {
+    if (!Number.isFinite(scale) || scale <= 0) {
+      return `invalid_scale:${label}=${scale}`
+    }
+  }
+  return null
+}
+
 /**
  * Exact 60D multivariate Gaussian log-density including full normalization constant:
  * log N(x | mu, Sigma) = -(d/2) log(2*pi) - (1/2) log|Sigma| - (1/2) (x - mu)^T Sigma^{-1} (x - mu).
+ * Strictly enforces exact 60D dimensional parity and finite positive variance before computing.
  */
 export function computeGaussianLogDensity60(
   x: readonly number[],
@@ -599,13 +677,27 @@ export function computeGaussianLogDensity60(
   scale: number,
   diagonalVars60?: readonly number[],
 ): { readonly logDensity: number; readonly mahalanobisSq: number } {
-  const dim = Math.min(BEHAVIORAL_STAT_COUNT, x.length, centroid.length)
-  const fallbackVar = Math.max(1e-6, scale * scale)
+  if (x.length !== BEHAVIORAL_STAT_COUNT) {
+    throw new Error(
+      `Exact 60D dimensional parity required: observation vector length ${x.length} !== ${BEHAVIORAL_STAT_COUNT}`,
+    )
+  }
+  for (let i = 0; i < BEHAVIORAL_STAT_COUNT; i++) {
+    if (!Number.isFinite(x[i])) {
+      throw new Error(`Observation vector contains non-finite value at index ${i}`)
+    }
+  }
+  const profileErr = validateGaussianProfile60('profile', centroid, scale, diagonalVars60)
+  if (profileErr) {
+    throw new Error(`Exact 60D Gaussian profile validation failed: ${profileErr}`)
+  }
+
+  const dim = BEHAVIORAL_STAT_COUNT
+  const fallbackVar = scale * scale
   let logDet = 0
   let mahalSq = 0
   for (let i = 0; i < dim; i++) {
-    const rawVar = diagonalVars60 && i < diagonalVars60.length ? diagonalVars60[i] : fallbackVar
-    const vi = Number.isFinite(rawVar) && rawVar > 1e-8 ? rawVar : fallbackVar
+    const vi = diagonalVars60 ? diagonalVars60[i] : fallbackVar
     const diff = x[i] - centroid[i]
     logDet += Math.log(vi)
     mahalSq += (diff * diff) / vi
@@ -673,6 +765,32 @@ export class LocalAiLikelihoodScorer {
     }
 
     const x = decompressBehavioralStats60(input.compressed_stats_60)
+    if (x.length !== BEHAVIORAL_STAT_COUNT || x.some((v) => !Number.isFinite(v))) {
+      return this.buildUnscorable(input.pv_id, 'dimension_mismatch:observation_vector_not_60d')
+    }
+
+    const humanErr = validateGaussianProfile60(
+      'human',
+      this.config.human_centroid_60,
+      this.config.human_scale,
+      this.config.human_diagonal_vars_60,
+    )
+    if (humanErr) {
+      return this.buildUnscorable(input.pv_id, humanErr)
+    }
+
+    for (const prof of this.config.family_profiles) {
+      const famErr = validateGaussianProfile60(
+        `family:${prof.family_id}`,
+        prof.centroid_60,
+        prof.scale,
+        prof.diagonal_vars_60,
+      )
+      if (famErr) {
+        return this.buildUnscorable(input.pv_id, famErr)
+      }
+    }
+
     const humanGauss = computeGaussianLogDensity60(
       x,
       this.config.human_centroid_60,

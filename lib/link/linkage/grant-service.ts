@@ -111,8 +111,8 @@ function isPrivateOrReservedIpv4Octets(a: number, b: number, c: number, d: numbe
   if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 CGNAT
   if (a === 192 && b === 0 && (c === 0 || c === 2)) return true; // 192.0.0.0/24, 192.0.2.0/24
   if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
-  if (a === 198 && b === 51 && c === 100) return false; // 198.51.100.0/24 TEST-NET-2 used in public fixture IPs
-  if (a === 203 && b === 0 && c === 113) return false; // 203.0.113.0/24 TEST-NET-3 used in public fixture IPs
+  if (a === 198 && b === 51 && c === 100) return true; // 198.51.100.0/24 TEST-NET-2 (RFC 5737)
+  if (a === 203 && b === 0 && c === 113) return true; // 203.0.113.0/24 TEST-NET-3 (RFC 5737)
   if (a >= 224) return true; // 224.0.0.0/4 multicast & 240.0.0.0/4 reserved
   return false;
 }

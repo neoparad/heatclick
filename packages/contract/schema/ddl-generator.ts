@@ -19,7 +19,7 @@ import {
 } from './deletion-plan-generator';
 import { sha256Hex } from './hash';
 import { assertValidContractSchema } from './invariants';
-import type { ContractSchema, TableSpec } from './types';
+import { RETENTION_GRID_MONTHS, type ContractSchema, type TableSpec } from './types';
 
 function escapeSqlComment(text: string): string {
   return text.replace(/'/g, "''");
@@ -147,7 +147,14 @@ function renderClickHousePublicViews(): string {
   ).join('\n\n');
 }
 
-function renderPostgresTable(table: TableSpec): string {
+function isRetentionMonthsColumn(colName: string): boolean {
+  return colName === 'retention_months' || colName.endsWith('_retention_months');
+}
+
+function renderPostgresTable(
+  table: TableSpec,
+  retentionGridMonths: readonly number[] = RETENTION_GRID_MONTHS
+): string {
   const lines: string[] = [];
   lines.push(`-- Table: ${table.name} (${table.description})`);
   lines.push(
@@ -155,8 +162,12 @@ function renderPostgresTable(table: TableSpec): string {
   );
   lines.push(`CREATE TABLE IF NOT EXISTS ${table.name} (`);
 
+  const gridCheckList = retentionGridMonths.join(', ');
   const bodyLines: string[] = table.columns.map((col) => {
     const pgType = col.postgresType ?? 'TEXT';
+    if (isRetentionMonthsColumn(col.name) && !/\bCHECK\s*\(/i.test(pgType)) {
+      return `  ${col.name} ${pgType} CHECK (${col.name} IN (${gridCheckList}))`;
+    }
     return `  ${col.name} ${pgType}`;
   });
   if (table.primaryKey && table.primaryKey.length > 0) {
@@ -253,7 +264,9 @@ export function generatePostgresDdl(schema: ContractSchema): GeneratedDdlArtifac
     '',
   ].join('\n');
 
-  const body = pgTables.map(renderPostgresTable).join('\n\n');
+  const body = pgTables
+    .map((table) => renderPostgresTable(table, schema.retentionGridMonths))
+    .join('\n\n');
   const sql = `${header}${body}\n`;
 
   return {

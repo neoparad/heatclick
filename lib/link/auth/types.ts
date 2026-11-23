@@ -466,6 +466,17 @@ export interface AuthorizationRequest {
   readonly renderedDiff?: unknown;
   readonly passkeyApprovalId?: string;
   readonly passkeyAssertion?: PasskeyAssertionInput;
+  /**
+   * When true, verifies the Passkey approval read-only without marking it consumed;
+   * caller MUST atomically call `consumePasskeyApproval()` after idempotency/rate-limit checks.
+   */
+  readonly deferApprovalConsumption?: boolean;
+  /**
+   * Set true ONLY when the pipeline has verified an exact idempotent replay hit in its
+   * idempotency store, so a previously consumed approval matching tenant/site/action/diff
+   * does not block returning the cached response.
+   */
+  readonly allowConsumedApprovalForReplay?: boolean;
   readonly autonomyEnvelopeId?: string;
   readonly fieldProvenance?: ReadonlyArray<FieldProvenance>;
   readonly touchesPriceOrOffer?: boolean;
@@ -498,6 +509,11 @@ export interface AuthorizationDecision {
   readonly approvalUrl?: string;
   readonly auditEntryId: string;
   readonly sealed?: boolean;
+  /** Present when `deferApprovalConsumption: true` verified a Passkey approval read-only. */
+  readonly pendingApprovalConsumption?: {
+    readonly approvalId: string;
+    readonly actionPayload: unknown;
+  };
   readonly destructionRequest?: {
     readonly requestId: string;
     readonly undoToken: string;

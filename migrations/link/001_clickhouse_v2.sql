@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS conversion_fact (
 ENGINE = ReplacingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, pv_hour, url_id, pv_id, label_key, contract_version)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for conversion_fact (§5.6 / STORE M7)
@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS decision_features_v1 (
 ENGINE = ReplacingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, decided_hour, decision_id)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for decision_features_v1 (§5.6 / STORE M7)
@@ -150,7 +150,7 @@ CREATE TABLE IF NOT EXISTS decision_log (
 ENGINE = ReplacingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, layer_id, decided_hour, decision_id)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for decision_log (§5.6 / STORE M7)
@@ -219,7 +219,7 @@ CREATE TABLE IF NOT EXISTS events_v2 (
 ENGINE = ReplacingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, pv_hour, url_id, pv_id, log_i)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for events_v2 (§5.6 / STORE M7)
@@ -245,7 +245,7 @@ CREATE TABLE IF NOT EXISTS exposure_log (
 ENGINE = ReplacingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, layer_id, exposed_hour, decision_id, exposure_kind)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for exposure_log (§5.6 / STORE M7)
@@ -281,7 +281,7 @@ CREATE TABLE IF NOT EXISTS frame_log (
 ENGINE = ReplacingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, pv_hour, url_id, pv_id, seq, frame_hash)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for frame_log (§5.6 / STORE M7)
@@ -304,7 +304,7 @@ CREATE TABLE IF NOT EXISTS frame_payload (
 ENGINE = ReplacingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, pv_hour, url_id, pv_id, seq, frame_hash)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for frame_payload (§5.6 / STORE M7)
@@ -346,7 +346,7 @@ CREATE TABLE IF NOT EXISTS handoff (
 ENGINE = ReplacingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, req_uid)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for handoff (§5.6 / STORE M7)
@@ -367,7 +367,7 @@ CREATE TABLE IF NOT EXISTS identity_link (
 ENGINE = ReplacingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, key_version, member_hmac, visitor_key)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for identity_link (§5.6 / STORE M7)
@@ -425,7 +425,7 @@ CREATE TABLE IF NOT EXISTS page_view_state (
 ENGINE = AggregatingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, pv_hour, url_id, pv_id)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for page_view_state (§5.6 / STORE M7)
@@ -446,7 +446,7 @@ CREATE TABLE IF NOT EXISTS pv_by_session (
 ENGINE = AggregatingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, session_day, session_key, pv_start_srv, pv_id)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for pv_by_session (§5.6 / STORE M7)
@@ -469,7 +469,7 @@ CREATE TABLE IF NOT EXISTS pv_by_visitor (
 ENGINE = AggregatingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, visitor_key, pv_start_srv, pv_id)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for pv_by_visitor (§5.6 / STORE M7)
@@ -503,7 +503,7 @@ CREATE TABLE IF NOT EXISTS pv_fact (
 ENGINE = MergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, pv_hour, url_id, pv_id, build_seq)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for pv_fact (§5.6 / STORE M7)
@@ -535,7 +535,7 @@ CREATE TABLE IF NOT EXISTS pv_index (
 ENGINE = AggregatingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, pv_id)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 1024, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for pv_index (§5.6 / STORE M7)
@@ -662,7 +662,7 @@ CREATE TABLE IF NOT EXISTS session_index (
 ENGINE = AggregatingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, session_key)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for session_index (§5.6 / STORE M7)
@@ -682,7 +682,7 @@ CREATE TABLE IF NOT EXISTS session_period (
 ENGINE = AggregatingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, grain, period, session_key)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for session_period (§5.6 / STORE M7)
@@ -749,7 +749,7 @@ CREATE TABLE IF NOT EXISTS unit_ledger (
 ENGINE = AggregatingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, layer_id, unit_id, kind, ref_id)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for unit_ledger (§5.6 / STORE M7)
@@ -789,7 +789,7 @@ CREATE TABLE IF NOT EXISTS visitor_period (
 ENGINE = AggregatingMergeTree()
 PARTITION BY exp_week
 ORDER BY (tenant_id, site_id, grain, period, visitor_key)
-TTL exp_week + INTERVAL 7 DAY DELETE
+TTL exp_week DELETE
 SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 10000, ttl_only_drop_parts = 1;
 
 -- Dual-layer ClickHouse tenant isolation row policies for visitor_period (§5.6 / STORE M7)

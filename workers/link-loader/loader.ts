@@ -143,6 +143,7 @@ export class ShardLoader {
 
   private nextManifestSeq = 1;
   private readonly processedWalKeys = new Set<string>();
+  private readonly appliedManifestSeqs = new Set<number>();
   private readonly committedManifests: LoadManifest[] = [];
 
   // Authoritative base tables (in-memory representation matching ClickHouse schema)
@@ -203,13 +204,16 @@ export class ShardLoader {
   }
 
   /**
-   * Synchronizes committed manifests from R2 on startup/failover so the loader
-   * resumes from the exact next `manifest_seq` without re-processing WAL keys.
+   * Synchronizes committed manifests from R2 on startup/failover AND replays
+   * every newly discovered manifest's WAL keys in manifest order so the loader
+   * restores exact committed `pvIndex`, `pvStates`, `frameLog`, `events`,
+   * `dirtyCells`, and `controlTotals` before accepting any new frames (Codex #10).
    */
   public async syncManifestsFromBucket(): Promise<number> {
     const prefix = `manifest/${this.region}/${this.shardId.toString().padStart(4, '0')}/`;
     const keys = await listAllKeysWithPrefix(this.manifestBucket, prefix);
     let maxSeq = 0;
+    const newlyDiscovered: LoadManifest[] = [];
 
     for (const key of keys) {
       const obj = await this.manifestBucket.get(key);
@@ -218,15 +222,42 @@ export class ShardLoader {
       if (manifest.manifest_seq > maxSeq) {
         maxSeq = manifest.manifest_seq;
       }
-      for (const wk of manifest.wal_keys) {
-        this.processedWalKeys.add(wk);
-      }
       if (!this.committedManifests.some((m) => m.manifest_seq === manifest.manifest_seq)) {
         this.committedManifests.push(manifest);
+      }
+      if (!this.appliedManifestSeqs.has(manifest.manifest_seq)) {
+        newlyDiscovered.push(manifest);
       }
     }
 
     this.committedManifests.sort((a, b) => a.manifest_seq - b.manifest_seq);
+    newlyDiscovered.sort((a, b) => a.manifest_seq - b.manifest_seq);
+
+    // Replay WAL objects in committed manifest order to restore PV state & control totals
+    for (const manifest of newlyDiscovered) {
+      const replayItems: Array<{ readonly walKey: string; readonly record: WalRecord }> = [];
+      for (const walKey of manifest.wal_keys) {
+        if (this.processedWalKeys.has(walKey)) continue;
+        const walObjRaw = await this.bucket.get(walKey);
+        if (walObjRaw) {
+          const walObj = JSON.parse(await walObjRaw.text()) as WalObject;
+          for (const record of walObj.records) {
+            replayItems.push({ walKey, record });
+          }
+        }
+      }
+
+      if (replayItems.length > 0) {
+        const staged = this.stageBatchItems(replayItems, manifest.committed_at_ms);
+        this.applyStagedMutations(staged);
+      }
+
+      for (const wk of manifest.wal_keys) {
+        this.processedWalKeys.add(wk);
+      }
+      this.appliedManifestSeqs.add(manifest.manifest_seq);
+    }
+
     this.nextManifestSeq = Math.max(this.nextManifestSeq, maxSeq + 1);
     return maxSeq;
   }
@@ -308,12 +339,19 @@ export class ShardLoader {
     return this.commitBatchItems([walKey], items, nowMs, sealedHours);
   }
 
-  private async commitBatchItems(
-    walKeys: readonly string[],
+  private stageBatchItems(
     items: ReadonlyArray<{ readonly walKey: string; readonly record: WalRecord }>,
     nowMs: number,
     sealedHours?: ReadonlySet<string>
-  ): Promise<LoadBatchOutcome> {
+  ): {
+    readonly stagedPvIndex: Map<string, PvIndexRow>;
+    readonly stagedPvStates: Map<string, MergedPvState>;
+    readonly stagedFrameLog: Map<string, FrameLogRow>;
+    readonly stagedEvents: Map<string, MergedEventRow>;
+    readonly stagedDirty: Map<string, DirtyCell>;
+    readonly manifestFrameKeys: Set<string>;
+    readonly newlyPlacedPvs: number;
+  } {
     // Stage placements & state mutations first so a failed conditional manifest
     // put leaves the live tables completely untouched (zero partial commits!).
     const stagedPvIndex = new Map<string, PvIndexRow>();
@@ -472,6 +510,40 @@ export class ShardLoader {
       });
     }
 
+    return {
+      stagedPvIndex,
+      stagedPvStates,
+      stagedFrameLog,
+      stagedEvents,
+      stagedDirty,
+      manifestFrameKeys,
+      newlyPlacedPvs,
+    };
+  }
+
+  private applyStagedMutations(staged: {
+    readonly stagedPvIndex: Map<string, PvIndexRow>;
+    readonly stagedPvStates: Map<string, MergedPvState>;
+    readonly stagedFrameLog: Map<string, FrameLogRow>;
+    readonly stagedEvents: Map<string, MergedEventRow>;
+    readonly stagedDirty: Map<string, DirtyCell>;
+  }): void {
+    for (const [k, v] of staged.stagedPvIndex.entries()) this.pvIndex.set(k, v);
+    for (const [k, v] of staged.stagedPvStates.entries()) this.pvStates.set(k, v);
+    for (const [k, v] of staged.stagedFrameLog.entries()) this.frameLog.set(k, v);
+    for (const [k, v] of staged.stagedEvents.entries()) this.events.set(k, v);
+    for (const [k, v] of staged.stagedDirty.entries()) this.dirtyCells.set(k, v);
+  }
+
+  private async commitBatchItems(
+    walKeys: readonly string[],
+    items: ReadonlyArray<{ readonly walKey: string; readonly record: WalRecord }>,
+    nowMs: number,
+    sealedHours?: ReadonlySet<string>
+  ): Promise<LoadBatchOutcome> {
+    const staged = this.stageBatchItems(items, nowMs, sealedHours);
+    const { stagedPvStates, manifestFrameKeys, newlyPlacedPvs } = staged;
+
     // Build manifest control totals for this batch
     let batchEvents = 0;
     let batchScrollSum = 0;
@@ -531,12 +603,9 @@ export class ShardLoader {
     }
 
     // Manifest committed! Apply staged state mutations atomically.
-    for (const [k, v] of stagedPvIndex.entries()) this.pvIndex.set(k, v);
-    for (const [k, v] of stagedPvStates.entries()) this.pvStates.set(k, v);
-    for (const [k, v] of stagedFrameLog.entries()) this.frameLog.set(k, v);
-    for (const [k, v] of stagedEvents.entries()) this.events.set(k, v);
-    for (const [k, v] of stagedDirty.entries()) this.dirtyCells.set(k, v);
+    this.applyStagedMutations(staged);
     for (const wk of walKeys) this.processedWalKeys.add(wk);
+    this.appliedManifestSeqs.add(manifestSeq);
     this.committedManifests.push(manifest);
     this.nextManifestSeq = manifestSeq + 1;
 

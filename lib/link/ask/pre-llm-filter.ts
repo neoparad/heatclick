@@ -220,38 +220,58 @@ function normalizedSignPattern(vec: ReadonlyArray<number>): string {
 }
 
 /**
- * Evaluates whether adding `candidateRow` to `priorRows` over disjoint elementary atoms
- * (`atomWeights`) creates ANY pairwise difference or multi-query RREF linear combination
- * with non-zero weighted support strictly below `minSupport`.
+ * Evaluates whether adding `candidateRows` (atomically as a batch) to `priorRows` over
+ * disjoint elementary atoms (`atomWeights`) creates ANY pairwise difference or multi-query
+ * RREF linear combination with non-zero weighted support strictly below `minSupport`.
  */
-function checkLinearCombinationSupport(
+function checkBatchLinearCombinationSupport(
   priorRows: ReadonlyArray<ReadonlyArray<number>>,
-  candidateRow: ReadonlyArray<number>,
+  candidateRows: ReadonlyArray<ReadonlyArray<number>>,
   atomWeights: ReadonlyArray<number>,
   minSupport: number
 ): { readonly allowed: boolean; readonly minObservedSupport?: number } {
-  // 1. Pairwise symmetric and one-sided difference check
-  for (const prev of priorRows) {
-    let onlyInPrev = 0;
-    let onlyInCurr = 0;
+  if (candidateRows.length === 0) {
+    return { allowed: true };
+  }
+
+  const checkPair = (
+    a: ReadonlyArray<number>,
+    b: ReadonlyArray<number>
+  ): { readonly allowed: boolean; readonly minObservedSupport?: number } => {
+    let onlyInA = 0;
+    let onlyInB = 0;
     for (let j = 0; j < atomWeights.length; j++) {
-      const pHas = Math.abs(prev[j]) > EPS;
-      const cHas = Math.abs(candidateRow[j]) > EPS;
-      if (pHas && !cHas) onlyInPrev += atomWeights[j];
-      if (cHas && !pHas) onlyInCurr += atomWeights[j];
+      const aHas = Math.abs(a[j]) > EPS;
+      const bHas = Math.abs(b[j]) > EPS;
+      if (aHas && !bHas) onlyInA += atomWeights[j];
+      if (bHas && !aHas) onlyInB += atomWeights[j];
     }
-    const symDiff = onlyInPrev + onlyInCurr;
+    const symDiff = onlyInA + onlyInB;
     if (
       (symDiff > EPS && symDiff < minSupport - EPS) ||
-      (onlyInPrev > EPS && onlyInPrev < minSupport - EPS && onlyInCurr <= EPS) ||
-      (onlyInCurr > EPS && onlyInCurr < minSupport - EPS && onlyInPrev <= EPS)
+      (onlyInA > EPS && onlyInA < minSupport - EPS && onlyInB <= EPS) ||
+      (onlyInB > EPS && onlyInB < minSupport - EPS && onlyInA <= EPS)
     ) {
       const smallest = Math.min(
         symDiff,
-        onlyInPrev > EPS ? onlyInPrev : symDiff,
-        onlyInCurr > EPS ? onlyInCurr : symDiff
+        onlyInA > EPS ? onlyInA : symDiff,
+        onlyInB > EPS ? onlyInB : symDiff
       );
       return { allowed: false, minObservedSupport: smallest };
+    }
+    return { allowed: true };
+  };
+
+  // 1. Pairwise symmetric and one-sided difference check (candidate vs prior, and candidate vs candidate)
+  for (let i = 0; i < candidateRows.length; i++) {
+    const cand = candidateRows[i];
+    for (const prev of priorRows) {
+      const res = checkPair(prev, cand);
+      if (!res.allowed) return res;
+    }
+    for (let j = i + 1; j < candidateRows.length; j++) {
+      const res = checkPair(cand, candidateRows[j]);
+      if (!res.allowed) return res;
     }
   }
 
@@ -265,8 +285,9 @@ function checkLinearCombinationSupport(
     }
   }
 
-  // 2. Multi-query Gaussian elimination (RREF) across all queries in the scope/component
-  const rref = computeRref([...priorRows, candidateRow]);
+  // 2. Multi-query Gaussian elimination (RREF) across all prior + candidate rows together
+  const combinedMatrix = [...priorRows, ...candidateRows];
+  const rref = computeRref(combinedMatrix);
   const nonZeroBasis = rref.filter((r) => vectorWeightedSupport(r, atomWeights) > EPS);
 
   for (const row of nonZeroBasis) {
@@ -294,7 +315,52 @@ function checkLinearCombinationSupport(
     }
   }
 
+  // 3. Exact small-atom subspace check: eliminate largeCols first on [M_large | M_small]
+  //    so rows >= largeRank form an exact basis of combinations supported solely on small atoms.
+  const smallCols: number[] = [];
+  const largeCols: number[] = [];
+  for (let j = 0; j < atomWeights.length; j++) {
+    if (atomWeights[j] < minSupport - EPS) {
+      smallCols.push(j);
+    } else {
+      largeCols.push(j);
+    }
+  }
+  if (smallCols.length > 0 && largeCols.length > 0) {
+    const orderedCols = [...largeCols, ...smallCols];
+    const orderedWeights = orderedCols.map((c) => atomWeights[c]);
+    const orderedMatrix = combinedMatrix.map((row) => orderedCols.map((c) => row[c]));
+    const largeOnlyMatrix = combinedMatrix.map((row) => largeCols.map((c) => row[c]));
+    const largeRank = computeRref(largeOnlyMatrix).filter(
+      (r) => r.some((v) => Math.abs(v) > EPS)
+    ).length;
+    const subRref = computeRref(orderedMatrix).filter(
+      (r) => r.some((v) => Math.abs(v) > EPS)
+    );
+    for (let i = largeRank; i < subRref.length; i++) {
+      const supp = vectorWeightedSupport(subRref[i], orderedWeights);
+      if (supp > EPS && supp < minSupport - EPS) {
+        const origVec = new Array<number>(atomWeights.length).fill(0);
+        for (let k = 0; k < orderedCols.length; k++) {
+          origVec[orderedCols[k]] = subRref[i][k];
+        }
+        if (!standalonePriorSmallPatterns.has(normalizedSignPattern(origVec))) {
+          return { allowed: false, minObservedSupport: supp };
+        }
+      }
+    }
+  }
+
   return { allowed: true };
+}
+
+function checkLinearCombinationSupport(
+  priorRows: ReadonlyArray<ReadonlyArray<number>>,
+  candidateRow: ReadonlyArray<number>,
+  atomWeights: ReadonlyArray<number>,
+  minSupport: number
+): { readonly allowed: boolean; readonly minObservedSupport?: number } {
+  return checkBatchLinearCombinationSupport(priorRows, [candidateRow], atomWeights, minSupport);
 }
 
 interface CohortHistoryEntry {
@@ -330,39 +396,58 @@ export class DifferencingGuard {
   }
 
   /**
-   * Checks whether the new query's cohort differs from ANY prior query or multi-query
-   * linear combination in the same `(tenantId, siteId, permissionEpoch)` session by
-   * `1..(k-1)` individuals (blocks pairwise differencing AND 4-query RREF linear combinations).
+   * Atomically evaluates a batch of disclosed cohort constraint vectors (e.g. every individually
+   * disclosed GROUP BY row PLUS the disclosed total row) against the session's RREF history.
+   * Commits ALL new equations to history ONLY if the entire batch passes; if ANY equation or
+   * multi-query linear combination isolates `1..(k-1)` individuals, rejects and commits NOTHING.
    */
-  public checkAndRecord(
+  public checkAndRecordBatch(
     sessionKey: string,
-    filterSignature: string,
-    cohortMemberIds: ReadonlyArray<string>
+    entries: ReadonlyArray<{
+      readonly filterSignature: string;
+      readonly cohortMemberIds: ReadonlyArray<string>;
+    }>
   ): { readonly allowed: boolean; readonly isolatedCount?: number } {
-    const currSet = new Set(cohortMemberIds);
     const priorList = this.history.get(sessionKey) ?? [];
 
-    // Exact repeat of same filter + identical member set is idempotent
-    for (const prev of priorList) {
-      if (prev.filterSignature === filterSignature && prev.memberSet.size === currSet.size) {
-        let identical = true;
-        for (const id of currSet) {
-          if (!prev.memberSet.has(id)) {
-            identical = false;
-            break;
-          }
-        }
-        if (identical) {
-          return { allowed: true };
-        }
+    const setsEqual = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean => {
+      if (a.size !== b.size) return false;
+      for (const id of a) {
+        if (!b.has(id)) return false;
       }
+      return true;
+    };
+
+    // Deduplicate against prior committed sets AND within the batch itself
+    const newEntries: CohortHistoryEntry[] = [];
+    for (const entry of entries) {
+      const currSet = new Set(entry.cohortMemberIds);
+      if (currSet.size === 0) continue;
+
+      if (currSet.size < this.minCellK) {
+        return {
+          allowed: false,
+          isolatedCount: currSet.size,
+        };
+      }
+
+      const alreadyInPrior = priorList.some((p) => setsEqual(p.memberSet, currSet));
+      if (alreadyInPrior) continue;
+
+      const alreadyInBatch = newEntries.some((n) => setsEqual(n.memberSet, currSet));
+      if (alreadyInBatch) continue;
+
+      newEntries.push({ filterSignature: entry.filterSignature, memberSet: currSet });
     }
 
-    if (priorList.length > 0 && currSet.size > 0) {
-      // Partition union of members across priorList + currSet into elementary bitmask atoms
+    if (newEntries.length === 0) {
+      return { allowed: true };
+    }
+
+    if (priorList.length > 0 || newEntries.length > 1) {
       const allSets: ReadonlyArray<ReadonlySet<string>> = [
         ...priorList.map((p) => p.memberSet),
-        currSet,
+        ...newEntries.map((n) => n.memberSet),
       ];
       const universe = new Set<string>();
       for (const s of allSets) {
@@ -384,15 +469,18 @@ export class DifferencingGuard {
       const atoms = Array.from(atomCounts.values());
       const atomWeights = atoms.map((a) => a.weight);
       const priorRows = priorList.map((_, rowIdx) => atoms.map((a) => a.membership[rowIdx]));
-      const candidateRow = atoms.map((a) => a.membership[priorList.length]);
+      const candidateRows = newEntries.map((_, idx) =>
+        atoms.map((a) => a.membership[priorList.length + idx])
+      );
 
-      const check = checkLinearCombinationSupport(
+      const check = checkBatchLinearCombinationSupport(
         priorRows,
-        candidateRow,
+        candidateRows,
         atomWeights,
         this.minCellK
       );
       if (!check.allowed) {
+        // Atomic rollback: do NOT commit any entry from this batch!
         return {
           allowed: false,
           isolatedCount: Math.max(1, Math.round(check.minObservedSupport ?? 1)),
@@ -400,9 +488,22 @@ export class DifferencingGuard {
       }
     }
 
-    priorList.push({ filterSignature, memberSet: currSet });
-    this.history.set(sessionKey, priorList);
+    // Entire batch passed: commit all new equations atomically
+    this.history.set(sessionKey, [...priorList, ...newEntries]);
     return { allowed: true };
+  }
+
+  /**
+   * Checks whether the new query's cohort differs from ANY prior query or multi-query
+   * linear combination in the same `(tenantId, siteId, permissionEpoch)` session by
+   * `1..(k-1)` individuals (blocks pairwise differencing AND 4-query RREF linear combinations).
+   */
+  public checkAndRecord(
+    sessionKey: string,
+    filterSignature: string,
+    cohortMemberIds: ReadonlyArray<string>
+  ): { readonly allowed: boolean; readonly isolatedCount?: number } {
+    return this.checkAndRecordBatch(sessionKey, [{ filterSignature, cohortMemberIds }]);
   }
 
   /**
@@ -978,37 +1079,13 @@ export function filterQueryAndRowsBeforeLlm(params: {
     }
   }
 
-  // 6. Differencing attack check across cohort members when present (binds windowStart..windowEnd)
-  const boundSignature =
-    params.windowStart && params.windowEnd
-      ? `${params.filterSignature}|win:${params.windowStart}..${params.windowEnd}`
-      : params.filterSignature;
-
-  const unionCohort: string[] = [];
-  for (const r of params.rows) {
-    if (r.cohortMemberIds) {
-      for (const id of r.cohortMemberIds) unionCohort.push(id);
-    }
-  }
-  if (unionCohort.length > 0) {
-    const diffCheck = params.differencingGuard.checkAndRecord(
-      params.sessionKey,
-      boundSignature,
-      unionCohort
-    );
-    if (!diffCheck.allowed) {
-      return {
-        allowed: false,
-        blockedCode: 'DIFFERENCING_ATTACK_BLOCKED',
-        reason: `Differencing attack detected: query combination isolates ${diffCheck.isolatedCount} individual(s) (< k=${minK})`,
-        safeRows: [],
-        suppressedCount: params.rows.length,
-      };
-    }
-  }
-
-  // 7. Primary < k cell suppression + Complementary secondary suppression on GROUP BY results
-  const safeRows: AggregateQueryRow[] = [];
+  // 6. Primary < k cell suppression + Complementary secondary suppression on GROUP BY results
+  //    (Compute the exact set of disclosed rows FIRST so we feed every disclosed row + total
+  //     into atomic batch RREF differencing without ever committing suppressed rows.)
+  const disclosedWithCohorts: Array<{
+    readonly safeRow: AggregateQueryRow;
+    readonly cohortMemberIds?: ReadonlyArray<string>;
+  }> = [];
   let primarySuppressedCount = 0;
   let secondarySuppressedCount = 0;
   let sawPerPerson = false;
@@ -1024,12 +1101,15 @@ export function filterQueryAndRowsBeforeLlm(params: {
       continue;
     }
     // Strip cohortMemberIds and extraColumns before handing rows to model!
-    safeRows.push({
-      bucketLabel: row.bucketLabel,
-      unitCount: row.unitCount,
-      metricKey: row.metricKey,
-      metricValue: row.metricValue,
-      unit: row.unit,
+    disclosedWithCohorts.push({
+      safeRow: {
+        bucketLabel: row.bucketLabel,
+        unitCount: row.unitCount,
+        metricKey: row.metricKey,
+        metricValue: row.metricValue,
+        unit: row.unit,
+      },
+      cohortMemberIds: row.cohortMemberIds,
     });
   }
 
@@ -1037,11 +1117,15 @@ export function filterQueryAndRowsBeforeLlm(params: {
   // primary (< k) suppression, an attacker knowing the ungrouped site total could recover that
   // single suppressed cell by subtracting all remaining sibling cells. Suppress the next-smallest
   // sibling cell (`unitCount`, tie-broken by `|metricValue|` then `bucketLabel`) as well!
-  if (params.groupByColumns.length > 0 && primarySuppressedCount === 1 && safeRows.length >= 1) {
+  if (
+    params.groupByColumns.length > 0 &&
+    primarySuppressedCount === 1 &&
+    disclosedWithCohorts.length >= 1
+  ) {
     let smallestIdx = 0;
-    for (let i = 1; i < safeRows.length; i++) {
-      const curr = safeRows[i];
-      const best = safeRows[smallestIdx];
+    for (let i = 1; i < disclosedWithCohorts.length; i++) {
+      const curr = disclosedWithCohorts[i].safeRow;
+      const best = disclosedWithCohorts[smallestIdx].safeRow;
       if (
         curr.unitCount < best.unitCount ||
         (curr.unitCount === best.unitCount &&
@@ -1053,14 +1137,16 @@ export function filterQueryAndRowsBeforeLlm(params: {
         smallestIdx = i;
       }
     }
-    safeRows.splice(smallestIdx, 1);
+    disclosedWithCohorts.splice(smallestIdx, 1);
     secondarySuppressedCount = 1;
   }
 
+  const safeRows = disclosedWithCohorts.map((d) => d.safeRow);
   const suppressedCount = primarySuppressedCount + secondarySuppressedCount;
 
   if (safeRows.length === 0 && params.rows.length > 0) {
-    const allOriginalPerPerson = sawPerPerson && secondarySuppressedCount === 0 && params.rows.every((r) => r.unitCount <= 1);
+    const allOriginalPerPerson =
+      sawPerPerson && secondarySuppressedCount === 0 && params.rows.every((r) => r.unitCount <= 1);
     return {
       allowed: false,
       blockedCode: allOriginalPerPerson ? 'PER_PERSON_AGGREGATION_BLOCKED' : 'SMALL_CELL_SUPPRESSED',
@@ -1073,6 +1159,53 @@ export function filterQueryAndRowsBeforeLlm(params: {
       suppressedCount,
       secondarySuppressedCount,
     };
+  }
+
+  // 7. Atomic batch RREF differencing check across EVERY individually disclosed group row PLUS
+  //    the disclosed total row (binds windowStart..windowEnd). Commits ALL or NOTHING!
+  const boundSignature =
+    params.windowStart && params.windowEnd
+      ? `${params.filterSignature}|win:${params.windowStart}..${params.windowEnd}`
+      : params.filterSignature;
+
+  const batchEntries: Array<{
+    readonly filterSignature: string;
+    readonly cohortMemberIds: ReadonlyArray<string>;
+  }> = [];
+  const disclosedUnionSet = new Set<string>();
+
+  for (const item of disclosedWithCohorts) {
+    if (item.cohortMemberIds && item.cohortMemberIds.length > 0) {
+      batchEntries.push({
+        filterSignature: `${boundSignature}|row:${item.safeRow.bucketLabel}`,
+        cohortMemberIds: item.cohortMemberIds,
+      });
+      for (const id of item.cohortMemberIds) {
+        disclosedUnionSet.add(id);
+      }
+    }
+  }
+  if (disclosedUnionSet.size > 0) {
+    batchEntries.push({
+      filterSignature: `${boundSignature}|total`,
+      cohortMemberIds: Array.from(disclosedUnionSet),
+    });
+  }
+
+  if (batchEntries.length > 0) {
+    const diffCheck = params.differencingGuard.checkAndRecordBatch(
+      params.sessionKey,
+      batchEntries
+    );
+    if (!diffCheck.allowed) {
+      return {
+        allowed: false,
+        blockedCode: 'DIFFERENCING_ATTACK_BLOCKED',
+        reason: `Differencing attack detected: disclosed group rows/total isolate ${diffCheck.isolatedCount} individual(s) (< k=${minK})`,
+        safeRows: [],
+        suppressedCount: params.rows.length,
+      };
+    }
   }
 
   return {

@@ -196,9 +196,9 @@ export interface HeatmapClickPointInput {
   readonly box_y: number
   readonly box_w: number
   readonly box_h: number
-  /** Relative click position inside the element [0, 1] × [0, 1] (§4.3, §11.12) */
-  readonly rel_x: number
-  readonly rel_y: number
+  /** Relative click position inside the element [0, 1] × [0, 1] (§4.3, §11.12); null when suppressed */
+  readonly rel_x: number | null
+  readonly rel_y: number | null
   readonly click_count: number | null
   readonly sample_size?: number | null
   readonly evidence: 'observed' | 'inferred'
@@ -224,6 +224,23 @@ export interface RedactionBox {
   readonly reason: 'pii_region' | 'unauthorized_third_party_content' | 'protected_region'
 }
 
+export interface EmbeddedTextSample {
+  readonly text: string
+  /** MUST be true to prove OCR was extracted strictly from the post-mask image */
+  readonly from_masked_image: boolean
+  /** If true, this snippet overlaps a masked/sensitive region and MUST be omitted */
+  readonly overlaps_masked_region?: boolean
+  /** Optional pixel bounding box on the screenshot; snippets overlapping any redaction_box are omitted */
+  readonly bbox?: {
+    readonly x: number
+    readonly y: number
+    readonly width: number
+    readonly height: number
+  }
+}
+
+export type LabScreenshotEmbeddedText = string | EmbeddedTextSample
+
 export interface LabScreenshotInput {
   /** §11.12: ONLY lab_render is permitted; visitor_screen / replay_recording are strictly rejected */
   readonly provenance: 'lab_render' | 'visitor_screen' | 'replay_recording'
@@ -237,8 +254,13 @@ export interface LabScreenshotInput {
   readonly redaction_boxes: readonly RedactionBox[]
   readonly capture_basis: string
   readonly capture_purpose: string
-  /** Optional OCR / embedded text harvested from page (ALWAYS treated as UntrustedValue!) */
-  readonly embedded_text_samples?: readonly string[]
+  /**
+   * Optional OCR / embedded text harvested from page.
+   * Only structured samples with `from_masked_image: true` and `overlaps_masked_region !== true`
+   * (and non-overlapping any redaction_box) are emitted, always wrapped as UntrustedValue.
+   * Bare strings or unverified/masked-region snippets are omitted completely.
+   */
+  readonly embedded_text_samples?: readonly LabScreenshotEmbeddedText[]
 }
 
 export interface HeatmapUnitDataset {

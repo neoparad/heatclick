@@ -487,7 +487,7 @@ describe('workers/link-decision — Strong Control Store (KV Ban), Single-PV Dec
 
       setSurfaceRuntimeContext({ pipeline, mcpServer, askService, repository });
 
-      // 1. Wrong clientIp -> rejected by verifySecretKey!
+      // 1. Wrong clientIp -> rejected by verifySecretKey! Raw x-dpop-jkt is NOT forwarded; signed DPoP header is.
       const badIpRes = await postDecisionApi(
         new NextRequest('https://api.ugokilink.invalid/api/v1/decisions', {
           method: 'POST',
@@ -495,7 +495,8 @@ describe('workers/link-decision — Strong Control Store (KV Ban), Single-PV Dec
             'content-type': 'application/json',
             authorization: `Bearer ${ipAndSenderBoundKey.rawKey}`,
             'x-forwarded-for': '198.51.100.99',
-            'x-dpop-jkt': 'jkt_expected_thumbprint_123',
+            'x-dpop-jkt': 'jkt_untrusted_raw_header',
+            dpop: 'signed.dpop.jwt_token_1',
           },
           body: JSON.stringify({ siteId: 'site_m15', pvId: 'pv_1' }),
         })
@@ -507,37 +508,39 @@ describe('workers/link-decision — Strong Control Store (KV Ban), Single-PV Dec
         expect.objectContaining({
           siteId: 'site_m15',
           clientIp: '198.51.100.99',
-          senderThumbprint: 'jkt_expected_thumbprint_123',
+          dpopProof: 'signed.dpop.jwt_token_1',
+          httpMethod: 'POST',
+          httpUri: 'https://api.ugokilink.invalid/api/v1/decisions',
         })
       );
 
-      // 2. Wrong x-dpop-jkt senderThumbprint -> forwarded to verifySecretKey and rejected!
+      // 2. Forged/invalid DPoP proof -> forwarded to verifySecretKey and rejected!
       verifySpy.mockImplementationOnce((rawKey, opts) => {
-        if (opts?.senderThumbprint !== 'jkt_expected_thumbprint_123') {
+        if (opts?.dpopProof !== 'signed.dpop.jwt_expected') {
           return {
             ok: false as const,
             httpStatus: 401 as const,
-            code: 'SENDER_THUMBPRINT_MISMATCH',
-            reason: 'x-dpop-jkt thumbprint mismatch',
+            code: 'DPOP_PROOF_INVALID',
+            reason: 'DPoP proof verification failed',
           };
         }
         return keyRegistry.verifySecretKey(rawKey, opts);
       });
-      const badThumbRes = await postDecisionApi(
+      const badDpopRes = await postDecisionApi(
         new NextRequest('https://api.ugokilink.invalid/api/v1/decisions', {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
             authorization: `Bearer ${ipAndSenderBoundKey.rawKey}`,
             'x-forwarded-for': '203.0.113.10',
-            'x-dpop-jkt': 'jkt_forged_thumbprint',
+            dpop: 'forged.dpop.jwt',
           },
           body: JSON.stringify({ siteId: 'site_m15', pvId: 'pv_1' }),
         })
       );
-      expect(badThumbRes.status).toBe(401);
+      expect(badDpopRes.status).toBe(401);
 
-      // 3. Matching IP + thumbprint succeeds up to rate limit (2 requests), 3rd returns 429
+      // 3. Matching IP succeeds up to rate limit (2 requests), 3rd returns 429
       const makeValidReq = (pvId: string) =>
         new NextRequest('https://api.ugokilink.invalid/api/v1/decisions', {
           method: 'POST',
@@ -545,7 +548,6 @@ describe('workers/link-decision — Strong Control Store (KV Ban), Single-PV Dec
             'content-type': 'application/json',
             authorization: `Bearer ${ipAndSenderBoundKey.rawKey}`,
             'x-forwarded-for': '203.0.113.10',
-            'x-dpop-jkt': 'jkt_expected_thumbprint_123',
           },
           body: JSON.stringify({ siteId: 'site_m15', pvId }),
         });

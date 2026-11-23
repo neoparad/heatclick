@@ -9,8 +9,7 @@
  * - `POST /v1/optout`                — Durable opt-out + 14-day deletion queue endpoint (§4.5 / [H-11])
  */
 
-import { hmacSha256Hex } from '../../lib/link/allocator';
-import { sha256Hex } from '../../packages/contract/schema';
+import { computeCanonicalSubjectHmac, sha256Hex } from '../../packages/contract/schema';
 import { LinkCollectorEngine, deriveServerNetworkPrefix } from './collector';
 import {
   SEGMENT_CALL_TYPES,
@@ -29,8 +28,6 @@ import type {
 export interface CollectorWorkerDeps extends CollectorDeps {
   readonly customEventQueue: QueueLike<CustomEventPersistedRecord>;
 }
-
-const MAX_FALLBACK_DELETION_QUEUE = 10_000;
 
 function parseLabMarkerHeader(headerVal: string | null): LabMarkerToken | null {
   if (!headerVal) return null;
@@ -143,7 +140,12 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
         }
 
         const subjectHmac = rawSubject
-          ? hmacSha256Hex(site.tenantMemberHashKey, `${subjectKind}:${rawSubject}`)
+          ? computeCanonicalSubjectHmac({
+              tenantId: site.tenantId,
+              subjectKind,
+              subjectValue: rawSubject,
+              secretKey: site.tenantMemberHashKey,
+            })
           : null;
         const generatedReceiptId = `del_${sha256Hex(
           `${site.tenantId}:${site.siteId}:${subjectKind}:${subjectHmac ?? 'anon'}:${now}`
@@ -159,6 +161,19 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
           slaDays: 14,
         };
 
+        const headers = new Headers({
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        });
+        headers.append(
+          'set-cookie',
+          'ugk_optout=1; Path=/; Max-Age=34128000; HttpOnly; Secure; SameSite=Lax'
+        );
+        headers.append('set-cookie', 'ugk_vid=; Path=/; Max-Age=0; Secure; SameSite=Lax');
+        headers.append('set-cookie', 'ugk_sid=; Path=/; Max-Age=0; Secure; SameSite=Lax');
+
+        // Codex #8: Separate setting the opt-out cookie from durable subject-deletion queuing.
+        // NEVER return `deletion_queued: true` unless a configured `deletionSink` durably succeeds!
         let receiptId = generatedReceiptId;
         let queuedViaSink = false;
         if (deps.deletionSink) {
@@ -172,28 +187,26 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
             queuedViaSink = false;
           }
         }
-        if (!queuedViaSink) {
-          if (deletionFallbackQueue.length >= MAX_FALLBACK_DELETION_QUEUE) {
-            deletionFallbackQueue.shift();
-          }
-          deletionFallbackQueue.push(deletionReq);
-        }
 
-        const headers = new Headers({
-          'content-type': 'application/json; charset=utf-8',
-          'cache-control': 'no-store',
-        });
-        headers.append(
-          'set-cookie',
-          'ugk_optout=1; Path=/; Max-Age=34128000; HttpOnly; Secure; SameSite=Lax'
-        );
-        headers.append('set-cookie', 'ugk_vid=; Path=/; Max-Age=0; Secure; SameSite=Lax');
-        headers.append('set-cookie', 'ugk_sid=; Path=/; Max-Age=0; Secure; SameSite=Lax');
+        if (!queuedViaSink) {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              opted_out: true,
+              optout_cookie_set: true,
+              receipt_id: null,
+              deletion_queued: false,
+              error: 'deletion_sink_unavailable',
+            }),
+            { status: 503, headers }
+          );
+        }
 
         return new Response(
           JSON.stringify({
             ok: true,
             opted_out: true,
+            optout_cookie_set: true,
             receipt_id: receiptId,
             deletion_queued: true,
             deletion_sla_days: 14,

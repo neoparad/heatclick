@@ -188,8 +188,12 @@ export function evaluateInterimLook(params: {
   readonly totalAlpha: number;
   readonly stage: InterimLookStage;
   readonly zStatistic: number;
-  /** Optional explicit sampling variance $V_t = \mathrm{SE}_t^2$ for `always_valid` mSPRT (`[H-06]`). */
+  /** Required explicit sampling variance $V_t = \mathrm{SE}_t^2$ for `always_valid` mSPRT (`[H-06]` / `[#21]`). */
   readonly sampleVariance?: number;
+  /** Alias for `sampleVariance` ($V_t = \mathrm{SE}_t^2$). */
+  readonly estimatorVariance?: number;
+  /** Alias for `sampleVariance` ($V_t = \mathrm{SE}_t^2$). */
+  readonly variance?: number;
   /** Optional explicit point estimate $\hat{\theta}_t$ (defaults to $z_t \sqrt{V_t}$). */
   readonly effectEstimate?: number;
   /** Optional mSPRT mixing variance $\tau^2$ (defaults to `0.04`). */
@@ -200,15 +204,38 @@ export function evaluateInterimLook(params: {
   readonly stage: InterimLookStage;
   readonly stageAlpha: number;
   readonly twoSidedPValue: number;
+  readonly pValue: number;
   readonly crossesBoundary: boolean;
+  readonly canStop: boolean;
+  readonly status?: 'ok' | 'insufficient_data';
+  readonly reason?: string;
   readonly msprtLambda?: number;
   readonly confidenceSequenceHalfWidth?: number;
 } {
   const stageAlpha = getStageAlphaBudget(params.totalAlpha, params.stage);
 
-  // [H-06]: `always_valid` look MUST use Johari et al. (2017) mSPRT, never fixed-horizon normal z-test!
+  // [H-06] & [#21]: `always_valid` look MUST use Johari et al. (2017) mSPRT with EXPLICIT finite positive variance.
+  // Never default variance to 0.01 (which collapses mSPRT into an invalid fixed-z threshold).
   if (params.stage === 'always_valid') {
-    const vT = Math.max(1e-12, params.sampleVariance ?? 0.01);
+    const rawVariance =
+      params.estimatorVariance ?? params.sampleVariance ?? params.variance;
+    if (
+      typeof rawVariance !== 'number' ||
+      !Number.isFinite(rawVariance) ||
+      rawVariance <= 0
+    ) {
+      return {
+        stage: params.stage,
+        stageAlpha,
+        twoSidedPValue: 1,
+        pValue: 1,
+        crossesBoundary: false,
+        canStop: false,
+        status: 'insufficient_data',
+        reason: 'msprt_variance_required',
+      };
+    }
+    const vT = rawVariance;
     const tauSq = Math.max(1e-12, params.mixingVarianceTauSq ?? 0.04);
     const thetaHat =
       params.effectEstimate !== undefined
@@ -225,18 +252,25 @@ export function evaluateInterimLook(params: {
       stage: params.stage,
       stageAlpha,
       twoSidedPValue: msprt.anytimePValue,
+      pValue: msprt.anytimePValue,
       crossesBoundary: msprt.crossesBoundary,
+      canStop: msprt.crossesBoundary,
+      status: 'ok',
       msprtLambda: msprt.lambdaT,
       confidenceSequenceHalfWidth: msprt.confidenceSequenceHalfWidth,
     };
   }
 
   const p = twoSidedNormalPValue(params.zStatistic);
+  const crosses = p <= stageAlpha;
   return {
     stage: params.stage,
     stageAlpha,
     twoSidedPValue: p,
-    crossesBoundary: p <= stageAlpha,
+    pValue: p,
+    crossesBoundary: crosses,
+    canStop: crosses,
+    status: 'ok',
   };
 }
 
@@ -431,6 +465,16 @@ export interface RegisterEntry {
   readonly recordedAt: string;
 }
 
+export class IdempotencyConflictError extends Error {
+  public readonly experimentId: string;
+
+  constructor(experimentId: string, detail: string) {
+    super(`IDEMPOTENCY_CONFLICT (${experimentId}): ${detail}`);
+    this.name = 'IdempotencyConflictError';
+    this.experimentId = experimentId;
+  }
+}
+
 /**
  * Separates human-approved experiments (Register H) from autonomy-envelope experiments
  * (Register S, controlled with online LORD++ FDR <= 0.10 per §9.11 / `ev.G-16`).
@@ -442,6 +486,14 @@ export class DualExperimentLedger {
   private readonly initialWealth: number;
   /** Full history of discovery indices $\tau_1 < \tau_2 < \dots$ (`[H-05]`). */
   private readonly autonomyDiscoveryTimes: number[] = [];
+  private readonly recordedHumanExperiments = new Map<
+    string,
+    { readonly pValue: number; readonly alpha: number; readonly entry: RegisterEntry }
+  >();
+  private readonly recordedAutonomyExperiments = new Map<
+    string,
+    { readonly pValue: number; readonly rejected: boolean; readonly entry: RegisterEntry }
+  >();
 
   constructor(targetFdr = 0.1, initialWealth?: number) {
     this.targetFdr = Math.min(Math.max(0.01, targetFdr), 0.1);
@@ -465,6 +517,20 @@ export class DualExperimentLedger {
     readonly now?: Date;
   }): RegisterEntry {
     const threshold = params.alpha ?? 0.05;
+    const existing = this.recordedHumanExperiments.get(params.experimentId);
+    if (existing) {
+      if (
+        Math.abs(existing.pValue - params.pValue) > 1e-12 ||
+        Math.abs(existing.alpha - threshold) > 1e-12
+      ) {
+        throw new IdempotencyConflictError(
+          params.experimentId,
+          `Conflicting human experiment outcome (existing p=${existing.pValue}, alpha=${existing.alpha}; received p=${params.pValue}, alpha=${threshold})`
+        );
+      }
+      return existing.entry;
+    }
+
     const entry: RegisterEntry = {
       experimentId: params.experimentId,
       registerKind: 'human_approved',
@@ -474,23 +540,43 @@ export class DualExperimentLedger {
       recordedAt: (params.now ?? new Date()).toISOString(),
     };
     this.humanRegister.push(entry);
+    this.recordedHumanExperiments.set(params.experimentId, {
+      pValue: params.pValue,
+      alpha: threshold,
+      entry,
+    });
     return entry;
   }
 
   /**
-   * Exact Javanmard & Montanari (2018) LORD++ step for autonomy-envelope stream (`[H-05]`):
+   * Exact Javanmard & Montanari (2018) LORD++ step for autonomy-envelope stream (`[H-05]` / `[#22]`):
    *
    * $$\alpha_t = \gamma_t W_0 + (\alpha - W_0)\gamma_{t - \tau_1} + \alpha \sum_{j \ge 2:\, \tau_j < t} \gamma_{t - \tau_j}$$
    *
    * where $\tau_1$ is the FIRST rejection time (earning $\alpha - W_0$, never $\alpha$) and ALL
    * subsequent rejection times $\tau_2, \tau_3, \dots$ are retained and summed at every step $t$,
    * guaranteeing $\sum_{s \le t} \alpha_s \le \max(1, R_t)\alpha$ and online $\mathrm{FDR} \le \alpha$.
+   *
+   * Idempotent by `experimentId` (`[#22]`): re-submitting with identical `pValue` returns the
+   * cached prior `RegisterEntry` without advancing `t` or double-counting discoveries; conflicting
+   * `pValue` throws `IdempotencyConflictError`.
    */
   public recordAutonomyExperiment(params: {
     readonly experimentId: string;
     readonly pValue: number;
     readonly now?: Date;
   }): RegisterEntry {
+    const existing = this.recordedAutonomyExperiments.get(params.experimentId);
+    if (existing) {
+      if (Math.abs(existing.pValue - params.pValue) > 1e-12) {
+        throw new IdempotencyConflictError(
+          params.experimentId,
+          `Conflicting LORD++ outcome for already-recorded experiment (existing p=${existing.pValue}, rejected=${existing.rejected}; received p=${params.pValue})`
+        );
+      }
+      return existing.entry;
+    }
+
     const t = this.autonomyRegister.length + 1;
 
     let alphaT = this.gammaWeight(t) * this.initialWealth;
@@ -517,6 +603,11 @@ export class DualExperimentLedger {
       recordedAt: (params.now ?? new Date()).toISOString(),
     };
     this.autonomyRegister.push(entry);
+    this.recordedAutonomyExperiments.set(params.experimentId, {
+      pValue: params.pValue,
+      rejected,
+      entry,
+    });
     return entry;
   }
 

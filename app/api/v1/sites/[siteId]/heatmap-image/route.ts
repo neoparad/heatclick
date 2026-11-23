@@ -128,10 +128,16 @@ function authenticateAndAuthorizeHeatmapRoute(params: {
     params.req.headers.get('x-real-ip')?.trim() ??
     undefined;
 
+  const httpUri = params.req.nextUrl
+    ? `${params.req.nextUrl.origin}${params.req.nextUrl.pathname}`
+    : undefined;
+
   const auth = ctx.pipeline.authenticateCaller({
     bearerToken,
     clientIp,
-    dpopThumbprint: params.req.headers.get('x-dpop-jkt') ?? undefined,
+    dpopProof: params.req.headers.get('dpop')?.trim() ?? undefined,
+    httpMethod: params.req.method,
+    httpUri,
     siteId: params.siteId,
     forbidPublicBrowserKey: true,
     now: params.now,

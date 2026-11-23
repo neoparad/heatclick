@@ -486,7 +486,13 @@ describe('§11.12 Gates 3–6: Per-Fetch Auth, Differencing Defense, Deletion In
 
     const ds = makeUnitDataset({
       screenshot: makeLabScreenshot({
-        embedded_text_samples: [injectionText],
+        embedded_text_samples: [
+          {
+            text: injectionText,
+            from_masked_image: true,
+            overlaps_masked_region: false,
+          },
+        ],
       }),
     })
 
@@ -899,5 +905,203 @@ describe('Wave 8 Adversarial Regressions: [H-30] Model-Inferred Feature Ban & [L
     const svg = res.artifacts[0].svg_markup!
     expect(svg).not.toContain('<script>')
     expect(svg).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+  })
+})
+
+// ===========================================================================
+// Wave 9 Codex Remediation Regression Tests: [#15], [#16], [#19]
+// ===========================================================================
+
+describe('Wave 9 Codex Remediation Regressions: [#15], [#16], [#19]', () => {
+  test('[#15] external_party nested-period <10 differencing 403 response emits fixed numeric-free reason code and leaks ZERO occurrences of secret delta', () => {
+    const svc = new HeatmapRenderService()
+    const ext: HeatmapFetchPrincipal = {
+      ...OWNER_PRINCIPAL,
+      principal_id: 'ext_codex_15',
+      audience: 'external_party',
+    }
+
+    // Use dates/URLs/IDs that do not contain "7" so we can assert zero occurrences of secret delta 7 across the entire 403 payload!
+    const q1 = svc.renderHeatmap(
+      ext,
+      makeBaseRequest({
+        page_url: 'https://www.example.jp/guide',
+        segment_id: 'seg_all',
+        period_start: '2026-11-01T00:00:00Z',
+        period_end: '2026-11-20T00:00:00Z',
+        requested_at: '2026-11-20T12:00:00Z',
+        unit_datasets: [makeUnitDataset({ total_units_in_segment: 100 })],
+      }),
+    )
+    expect(q1.http_status).toBe(200)
+
+    // Nested period [Nov 1..19] with 93 units -> secret delta is 7 (< 10)
+    const q2 = svc.renderHeatmap(
+      ext,
+      makeBaseRequest({
+        page_url: 'https://www.example.jp/guide',
+        segment_id: 'seg_all',
+        period_start: '2026-11-01T00:00:00Z',
+        period_end: '2026-11-19T00:00:00Z',
+        requested_at: '2026-11-20T12:00:00Z',
+        unit_datasets: [makeUnitDataset({ total_units_in_segment: 93 })],
+      }),
+    )
+    expect(q2.http_status).toBe(403)
+    expect(q2.error).toBe('differencing_attack_blocked')
+
+    const measure = q2.artifacts[0].envelope.measures.heatmap_click
+    expect(measure.status).toBe('suppressed')
+    expect(measure.reason).toBe('disclosure_blocked_differencing')
+    expect(measure.unmet_gates).toBeDefined()
+    expect(measure.unmet_gates?.[0].id).toBe('disclosure_blocked_differencing')
+    expect(measure.unmet_gates?.[0].reason).toBe('disclosure_blocked_differencing')
+
+    // Check that no rejection/reason/error/gate field contains any raw delta or digit!
+    const rejectionFieldsJson = JSON.stringify({
+      error: q2.error,
+      limitations: q2.limitations,
+      measure_reason: measure.reason,
+      unmet_gates: measure.unmet_gates?.map((g) => ({ id: g.id, reason: g.reason, unlock: g.unlock })),
+    })
+    expect(rejectionFieldsJson).not.toMatch(/\d/)
+    expect(rejectionFieldsJson).not.toContain('nested_window_diff')
+    expect(rejectionFieldsJson).not.toContain('7')
+
+    // Also verify the entire serialized 403 response (excluding deterministic sha256 hashes which are random hex)
+    // contains ZERO occurrences of the secret delta '7' or 'diff=7'
+    const fullSerializedWithoutHashes = JSON.stringify(q2).replace(/[0-9a-f]{12,64}/gi, '<HASH>')
+    expect(fullSerializedWithoutHashes).not.toContain('7')
+    expect(JSON.stringify(q2)).not.toContain('nested_window_diff=7')
+  })
+
+  test('[#16] suppressed 1-click cell for external_party strips empirical rel_x/rel_y to null and omits dot from PNG & SVG', () => {
+    const svc = new HeatmapRenderService()
+    const ext: HeatmapFetchPrincipal = {
+      ...OWNER_PRINCIPAL,
+      principal_id: 'ext_codex_16',
+      audience: 'external_party',
+    }
+    const baseClick = makeUnitDataset().clicks[0]
+    const ds = makeUnitDataset({
+      total_units_in_segment: 100,
+      subject_ids: Array.from({ length: 100 }, (_, i) => `u_${i}`),
+      clicks: [
+        {
+          ...baseClick,
+          el_fp: 'el_secret_1click',
+          rel_x: 0.7312,
+          rel_y: 0.2891,
+          click_count: 1,
+          sample_size: 1,
+        },
+        {
+          ...baseClick,
+          el_fp: 'el_popular_click',
+          rel_x: 0.5,
+          rel_y: 0.5,
+          click_count: 40,
+          sample_size: 40,
+        },
+      ],
+    })
+
+    const res = svc.renderHeatmap(
+      ext,
+      makeBaseRequest({
+        kind: 'click',
+        segment_id: 'seg_click_16',
+        unit_datasets: [ds],
+      }),
+    )
+    expect(res.http_status).toBe(200)
+    const art = res.artifacts[0]
+    const suppressedOne = art.clicks.find((c) => c.el_fp === 'el_secret_1click')!
+    expect(suppressedOne.status).toBe('suppressed')
+    expect(suppressedOne.rel_x).toBeNull()
+    expect(suppressedOne.rel_y).toBeNull()
+    expect(suppressedOne.click_count).toBeNull()
+    expect(suppressedOne.sample_size).toBeNull()
+
+    // Complementary suppression also suppresses the 2nd click cell -> ALL suppressed clicks have null rel_x/rel_y
+    for (const c of art.clicks) {
+      if (c.status === 'suppressed') {
+        expect(c.rel_x).toBeNull()
+        expect(c.rel_y).toBeNull()
+        expect(c.click_count).toBeNull()
+        expect(c.sample_size).toBeNull()
+      }
+    }
+
+    // Suppressed click coordinates must NOT appear anywhere in serialized output or SVG circles!
+    const serialized = JSON.stringify(res)
+    expect(serialized).not.toContain('0.7312')
+    expect(serialized).not.toContain('0.2891')
+    expect(art.svg_markup).not.toContain('el_secret_1click')
+
+    // PNG rendered with suppressed clicks must be byte-identical to PNG rendered with empty clicks (no click dots drawn!)
+    const svcEmpty = new HeatmapRenderService()
+    const dsNoClicks = makeUnitDataset({
+      total_units_in_segment: 100,
+      subject_ids: Array.from({ length: 100 }, (_, i) => `u_${i}`),
+      clicks: [],
+    })
+    const resNoClicks = svcEmpty.renderHeatmap(
+      ext,
+      makeBaseRequest({
+        kind: 'click',
+        segment_id: 'seg_click_16_empty',
+        unit_datasets: [dsNoClicks],
+      }),
+    )
+    expect(art.png_sha256).toBe(resNoClicks.artifacts[0].png_sha256)
+  })
+
+  test('[#19] omits raw OCR strings from masked regions, overlapping redaction boxes, or unverified provenance', () => {
+    const svc = new HeatmapRenderService()
+    const ds = makeUnitDataset({
+      screenshot: makeLabScreenshot({
+        redaction_boxes: [{ x: 10, y: 10, width: 40, height: 20, reason: 'pii_region' }],
+        embedded_text_samples: [
+          'BARE_UNVERIFIED_PII_TOKEN',
+          {
+            text: 'PRE_MASK_EMAIL_alice@example.jp',
+            from_masked_image: false,
+            overlaps_masked_region: false,
+          },
+          {
+            text: 'MASKED_REGION_SECRET_CARD_4242',
+            from_masked_image: true,
+            overlaps_masked_region: true,
+          },
+          {
+            text: 'BBOX_OVERLAP_PHONE_09012345678',
+            from_masked_image: true,
+            overlaps_masked_region: false,
+            bbox: { x: 15, y: 15, width: 10, height: 10 },
+          },
+          {
+            text: 'SAFE_PUBLIC_POST_MASK_HEADING',
+            from_masked_image: true,
+            overlaps_masked_region: false,
+            bbox: { x: 60, y: 100, width: 40, height: 12 },
+          },
+        ],
+      }),
+    })
+
+    const res = svc.renderHeatmap(OWNER_PRINCIPAL, makeBaseRequest({ unit_datasets: [ds] }))
+    expect(res.http_status).toBe(200)
+    const serialized = JSON.stringify(res)
+
+    expect(serialized).not.toContain('BARE_UNVERIFIED_PII_TOKEN')
+    expect(serialized).not.toContain('PRE_MASK_EMAIL_alice@example.jp')
+    expect(serialized).not.toContain('MASKED_REGION_SECRET_CARD_4242')
+    expect(serialized).not.toContain('BBOX_OVERLAP_PHONE_09012345678')
+
+    // Only the verified post-mask non-overlapping snippet survives, wrapped in UntrustedValue
+    expect(res.artifacts[0].untrusted_embedded_texts).toHaveLength(1)
+    expect(res.artifacts[0].untrusted_embedded_texts[0].__untrusted).toBe(true)
+    expect(res.artifacts[0].untrusted_embedded_texts[0].value).toBe('SAFE_PUBLIC_POST_MASK_HEADING')
   })
 })

@@ -11,11 +11,12 @@
  *    explicitly naming every unreachable class and §5.12 external-export status
  */
 
-import * as crypto from 'node:crypto';
 import { getConstant } from '../../../packages/contract/ledgers';
 import {
   assertDeletionPlanCoverage,
   CANONICAL_SCHEMA,
+  computeCanonicalSubjectHmac,
+  computeSubjectHmacLookupCandidates,
   generateDeletionPlan,
   type DeletionPlan,
   type DeletionTableEntry,
@@ -29,8 +30,8 @@ export type DeletionSubjectKind =
   | 'ga_client_id';
 
 /**
- * Canonical RFC 2104 HMAC-SHA256 subject identifier digest shared between
- * identity ingestion and 14-day subject erasure (`H-19`).
+ * Canonical versioned RFC 2104 HMAC-SHA256 subject identifier digest shared
+ * identically across collector ingest, `/v1/optout`, and 14-day subject erasure (`H-19` / Codex #9).
  */
 export function computeTenantSubjectHmac(
   secretSalt: string,
@@ -38,10 +39,12 @@ export function computeTenantSubjectHmac(
   subjectKind: DeletionSubjectKind,
   rawSubjectValue: string
 ): string {
-  return crypto
-    .createHmac('sha256', secretSalt)
-    .update(`${tenantId}:${subjectKind}:${rawSubjectValue}`, 'utf8')
-    .digest('hex');
+  return computeCanonicalSubjectHmac({
+    tenantId,
+    subjectKind,
+    subjectValue: rawSubjectValue,
+    secretKey: secretSalt,
+  });
 }
 
 export type DeletionRequestState =
@@ -82,6 +85,12 @@ export interface KeyVersionDestructionResult {
 export interface KeyedSubjectDigest {
   readonly keyVersion: number;
   readonly hmacHex: string;
+  /**
+   * Canonical `v1` digest plus legacy compatibility digests (`value`, `kind:value`,
+   * `tenant:kind:value`) for this key version so deletion matches both newly ingested
+   * and historical rows (Codex #9).
+   */
+  readonly lookupCandidates?: readonly string[];
 }
 
 /**
@@ -138,6 +147,8 @@ export class TenantKeyVersionRegistry {
   /**
    * Computes deterministic tenant-keyed digests across ALL searchable key
    * versions so rotated keys never miss historical rows during subject erasure.
+   * Each entry includes `hmacHex` (canonical `v1`) and `lookupCandidates`
+   * (canonical `v1` + legacy formats) via `computeSubjectHmacLookupCandidates`.
    */
   public computeSubjectDigestsAcrossAllVersions(
     tenantId: string,
@@ -153,7 +164,31 @@ export class TenantKeyVersionRegistry {
         subjectKind,
         rawSubjectValue
       ),
+      lookupCandidates: computeSubjectHmacLookupCandidates({
+        tenantId,
+        subjectKind,
+        subjectValue: rawSubjectValue,
+        secretKeys: [kv.secretSalt],
+      }),
     }));
+  }
+
+  /**
+   * Flat deduplicated set of all canonical `v1` and legacy compatibility digests
+   * across every searchable key version for this tenant.
+   */
+  public computeSubjectLookupCandidatesAcrossAllVersions(
+    tenantId: string,
+    subjectKind: DeletionSubjectKind,
+    rawSubjectValue: string
+  ): readonly string[] {
+    const versions = this.getSearchableKeyVersions(tenantId);
+    return computeSubjectHmacLookupCandidates({
+      tenantId,
+      subjectKind,
+      subjectValue: rawSubjectValue,
+      secretKeys: versions.map((kv) => kv.secretSalt),
+    });
   }
 
   /**

@@ -261,9 +261,12 @@ export class TenantSqlInterface {
       }
     }
 
-    // 3. Run `lib/link/isolation` AST inspector
+    // 3. Run `lib/link/isolation` AST inspector (enforcing site_id predicate when credential is site-scoped)
+    const siteRestricted =
+      req.principal.allowedSiteIds !== null && !req.principal.allowedSiteIds.includes('*');
     const ast = inspectSqlAst(req.sql, {
       requireTenantFilter: true,
+      requireSiteFilter: siteRestricted,
       requireTimeBound: true,
     });
     for (const v of ast.violations) {
@@ -314,9 +317,12 @@ export class TenantSqlInterface {
     }
 
     if (violations.length > 0) {
+      const hasSiteScopeViolation = violations.some((v) =>
+        v.includes('[MISSING_SITE_BIND_PREDICATE]')
+      );
       return {
         allowed: false,
-        httpStatus: 400,
+        httpStatus: hasSiteScopeViolation ? 403 : 400,
         sanitizedQuery: null,
         violations,
       };
@@ -366,6 +372,27 @@ export class TenantSqlInterface {
         violations: validation.violations,
         envelope: null,
       };
+    }
+
+    // Defense-in-depth execution guard for site-scoped credentials
+    const siteRestricted =
+      req.principal.allowedSiteIds !== null && !req.principal.allowedSiteIds.includes('*');
+    if (siteRestricted) {
+      const execAst = inspectSqlAst(validation.sanitizedQuery.sql, {
+        requireTenantFilter: true,
+        requireSiteFilter: true,
+        requireTimeBound: true,
+      });
+      if (!execAst.valid) {
+        return {
+          allowed: false,
+          httpStatus: 403,
+          clickhouseUser: roUser,
+          authoritativeTruthProhibited: true,
+          violations: execAst.violations.map((v) => `[${v.code}] ${v.message}`),
+          envelope: null,
+        };
+      }
     }
 
     const nowMs = req.nowMs ?? Date.now();

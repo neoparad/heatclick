@@ -173,7 +173,7 @@ describe('Bundle 4-G: Generative Model Thin Layer (Muse Glimmer 30B / Gemma 4), 
       gates: {
         contractRetentionDeletionSigned: false,
         crossBorderRegionApproved: false,
-        japaneseHumanEvalPassed300: false,
+        passedJapaneseEvaluations: [],
       },
       costGuard,
     });
@@ -243,7 +243,14 @@ describe('Bundle 4-G: Generative Model Thin Layer (Muse Glimmer 30B / Gemma 4), 
       gates: {
         contractRetentionDeletionSigned: true,
         crossBorderRegionApproved: true,
-        japaneseHumanEvalPassed300: true,
+        passedJapaneseEvaluations: [
+          {
+            category: 'section_role',
+            modelVersion: 'jev-judge-2026-10-01',
+            humanLabeledSamples: 320,
+            passedAt: '2026-11-19T00:00:00Z',
+          },
+        ],
       },
       costGuard,
       transport: async ({ shuffled_options }) => {
@@ -516,7 +523,14 @@ describe('Bundle 4-G: Generative Model Thin Layer (Muse Glimmer 30B / Gemma 4), 
       gates: {
         contractRetentionDeletionSigned: true,
         crossBorderRegionApproved: true,
-        japaneseHumanEvalPassed300: true,
+        passedJapaneseEvaluations: [
+          {
+            category: 'section_role',
+            modelVersion: 'jev-judge-2026-10-01',
+            humanLabeledSamples: 300,
+            passedAt: '2026-11-19T00:00:00Z',
+          },
+        ],
       },
       costGuard,
     });
@@ -560,5 +574,81 @@ describe('Bundle 4-G: Generative Model Thin Layer (Muse Glimmer 30B / Gemma 4), 
         aggregate_context: makeDeepNested({ visitor_id: 'vis_deep_25' }, 25),
       })
     ).rejects.toThrow(VisitorRowProhibitedError);
+  });
+
+  test('[#24] Jev Japanese evaluation gate is scoped strictly by (questionCategory, modelVersion) with >=300 samples and blocks unevaluated categories or model versions as not_entitled', async () => {
+    const costGuard = new LlmCostBudgetGuard({ inference_max_usd: 1, jev_max_usd: 1, retry_max_usd: 1 });
+    const publicText = wrapPublicPageTextForLlm('料金プラン比較と解約条件の説明');
+    const options = [
+      { option_id: 'pricing', label_ja: '料金' },
+      { option_id: 'terms', label_ja: '条件' },
+    ] as const;
+
+    const jev = new JevPublicPageClient({
+      gates: {
+        contractRetentionDeletionSigned: true,
+        crossBorderRegionApproved: true,
+        passedJapaneseEvaluations: [
+          {
+            category: 'section_meaning',
+            modelVersion: 'jev-judge-2026-10-01',
+            humanLabeledSamples: 350,
+            passedAt: '2026-11-20T00:00:00Z',
+          },
+          // Sub-300 evaluation MUST NOT unlock entitlement
+          {
+            category: 'under_sampled_category',
+            modelVersion: 'jev-judge-2026-10-01',
+            humanLabeledSamples: 299,
+            passedAt: '2026-11-20T00:00:00Z',
+          },
+        ],
+      },
+      costGuard,
+      transport: async () => ({ chosen_shuffled_index: 0, probability: 0.88 }),
+    });
+
+    // 1. Evaluated (section_meaning, jev-judge-2026-10-01) -> ok (preserving D-31b prohibited_for_training)
+    const okRes = await jev.judgePublicPageText({
+      request_id: 'req_eval_ok',
+      pinned_model_version: 'jev-judge-2026-10-01',
+      question_category: 'section_meaning',
+      public_section_text: publicText,
+      options,
+    });
+    expect(okRes.status).toBe('ok');
+    if (okRes.status === 'ok') {
+      expect(okRes.recorded.prohibited_for_training).toBe(true);
+    }
+
+    // 2. Unrelated category (hypothesis_reason, jev-judge-2026-10-01) -> not_entitled!
+    const wrongCategory = await jev.judgePublicPageText({
+      request_id: 'req_eval_wrong_cat',
+      pinned_model_version: 'jev-judge-2026-10-01',
+      question_category: 'hypothesis_reason',
+      public_section_text: publicText,
+      options,
+    });
+    expect(wrongCategory.status).toBe('not_entitled');
+
+    // 3. Unevaluated model version (section_meaning, jev-judge-2026-11-01) -> not_entitled!
+    const wrongModelVersion = await jev.judgePublicPageText({
+      request_id: 'req_eval_wrong_ver',
+      pinned_model_version: 'jev-judge-2026-11-01',
+      question_category: 'section_meaning',
+      public_section_text: publicText,
+      options,
+    });
+    expect(wrongModelVersion.status).toBe('not_entitled');
+
+    // 4. Sub-300 sample evaluation -> not_entitled!
+    const underSampled = await jev.judgePublicPageText({
+      request_id: 'req_eval_299',
+      pinned_model_version: 'jev-judge-2026-10-01',
+      question_category: 'under_sampled_category',
+      public_section_text: publicText,
+      options,
+    });
+    expect(underSampled.status).toBe('not_entitled');
   });
 });

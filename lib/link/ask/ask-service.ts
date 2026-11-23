@@ -429,11 +429,10 @@ export class AskService {
       req.siteId,
       req.permissionEpoch
     );
-    const cacheKey = sha256Hex(`${req.question}|${windowStart}|${windowEnd}`);
-    const existingCache = this.sessionCache.get(sessionKey)?.get(cacheKey);
-    if (existingCache) {
-      return existingCache;
-    }
+    const scopePolicyKey = Array.from(req.principal.effectiveScopes).sort().join(',');
+    const cacheKey = sha256Hex(
+      `${req.question}|${windowStart}|${windowEnd}|consent:${req.siteConsentMode}|role:${req.principal.role}|scopes:${scopePolicyKey}`
+    );
 
     const refBase = (seed: string): EvidenceRef => ({
       ref_id: `ask_${sha256Hex(`${sessionKey}:${seed}`).slice(0, 16)}`,
@@ -449,7 +448,7 @@ export class AskService {
     // 2. Wrap question & schema metadata in `UntrustedValue` before handing to planner
     const untrustedQuestion = wrapUntrusted(req.question, 'external_query');
 
-    // Enforce site consent gate BEFORE even planning or executing if site consent is 'off'
+    // Enforce current site consent & disclosure eligibility STRICTLY BEFORE cache lookup!
     if (req.siteConsentMode === 'off') {
       const status = 'not_collected' as const;
       const reason = 'Site consent mode is "off"; human behaviour aggregates are not collected';
@@ -493,8 +492,12 @@ export class AskService {
         returnedUnauthorizedData: false,
         auditCode: `REFUSED:${status}`,
       };
-      this.storeCache(sessionKey, cacheKey, outcome);
       return outcome;
+    }
+
+    const existingCache = this.sessionCache.get(sessionKey)?.get(cacheKey);
+    if (existingCache) {
+      return existingCache;
     }
 
     const untrustedSchemaCatalog = PUBLIC_VIEW_SCHEMAS.map((v) => ({

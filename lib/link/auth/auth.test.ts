@@ -1,15 +1,20 @@
+import crypto from 'node:crypto';
 import {
   ALL_SCOPES,
   AuthorizationGateway,
+  DpopReplayCache,
   EdgeKeyForbiddenPurposeError,
   IdentityKeyRegistry,
   MAX_OEM_EXCHANGED_TTL_SEC,
   SCOPE_PRESETS,
   computeActionAndDiffHash,
+  computeJwkThumbprint,
   computePkceS256Challenge,
   computeSmokeUnitsRequired,
+  createDpopProofJwt,
   generateEd25519KeyPair,
   normalizeRole,
+  verifyDpopProofJwt,
   verifyPublicKeyStateless,
   type VerifiedPrincipal,
 } from './index';
@@ -424,7 +429,10 @@ describe('lib/link/auth — Account Plane, 4 Key Kinds, OAuth 2.1, Risk Classes 
     });
     expect(badPkce.ok).toBe(false);
 
-    // Correct verifier succeeds (TTL clamped to <= 3600s)
+    // Correct verifier succeeds (TTL clamped to <= 3600s) with real RFC 7638 DPoP JKT binding
+    const dpopPair = crypto.generateKeyPairSync('ed25519');
+    const dpopPublicJwk = dpopPair.publicKey.export({ format: 'jwk' }) as Record<string, unknown>;
+    const dpopJkt = computeJwkThumbprint(dpopPublicJwk);
     const issued = registry.issueMcpOAuthToken({
       tenantId: 'tenant_a',
       principalId: 'agent_a',
@@ -433,31 +441,67 @@ describe('lib/link/auth — Account Plane, 4 Key Kinds, OAuth 2.1, Risk Classes 
       codeVerifier: verifier,
       expectedCodeChallengeS256: challenge,
       ttlSec: 7200,
-      dpopThumbprint: 'dpop_jkt_001',
+      dpopThumbprint: dpopJkt,
       now,
     });
     expect(issued.ok).toBe(true);
     if (!issued.ok) return;
 
+    const t30m = new Date(now.getTime() + 30 * 60 * 1000);
+    const validProof = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: dpopPublicJwk,
+      privateKey: dpopPair.privateKey,
+      htm: 'POST',
+      htu: 'https://api.ugokilink.example/api/v1/mcp',
+      accessToken: issued.accessToken,
+      now: t30m,
+    });
     const validNow = registry.verifyMcpOAuthToken(issued.accessToken, {
-      dpopThumbprint: 'dpop_jkt_001',
-      now: new Date(now.getTime() + 30 * 60 * 1000),
+      dpopProof: validProof,
+      httpMethod: 'POST',
+      httpUri: 'https://api.ugokilink.example/api/v1/mcp',
+      now: t30m,
     });
     expect(validNow.ok).toBe(true);
     if (validNow.ok) expect(validNow.principal.senderConstrained).toBe(true);
 
     // Expired after 61 min
+    const t61m = new Date(now.getTime() + 61 * 60 * 1000);
+    const expiredProof = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: dpopPublicJwk,
+      privateKey: dpopPair.privateKey,
+      htm: 'POST',
+      htu: 'https://api.ugokilink.example/api/v1/mcp',
+      accessToken: issued.accessToken,
+      now: t61m,
+    });
     const expired = registry.verifyMcpOAuthToken(issued.accessToken, {
-      dpopThumbprint: 'dpop_jkt_001',
-      now: new Date(now.getTime() + 61 * 60 * 1000),
+      dpopProof: expiredProof,
+      httpMethod: 'POST',
+      httpUri: 'https://api.ugokilink.example/api/v1/mcp',
+      now: t61m,
     });
     expect(expired.ok).toBe(false);
 
     // Epoch revocation invalidates token immediately even while unexpired
     registry.bumpTenantRevocationEpoch('tenant_a');
+    const t1s = new Date(now.getTime() + 1000);
+    const revokeCheckProof = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: dpopPublicJwk,
+      privateKey: dpopPair.privateKey,
+      htm: 'POST',
+      htu: 'https://api.ugokilink.example/api/v1/mcp',
+      accessToken: issued.accessToken,
+      now: t1s,
+    });
     const revoked = registry.verifyMcpOAuthToken(issued.accessToken, {
-      dpopThumbprint: 'dpop_jkt_001',
-      now: new Date(now.getTime() + 1000),
+      dpopProof: revokeCheckProof,
+      httpMethod: 'POST',
+      httpUri: 'https://api.ugokilink.example/api/v1/mcp',
+      now: t1s,
     });
     expect(revoked.ok).toBe(false);
     if (!revoked.ok) expect(revoked.code).toBe('OAUTH_REVOCATION_EPOCH_MISMATCH');
@@ -484,7 +528,7 @@ describe('lib/link/auth — Account Plane, 4 Key Kinds, OAuth 2.1, Risk Classes 
     });
 
     const verifiedAgent = registry.verifySecretKey(agentSecKey, {
-      senderThumbprint: 'mtls_thumb_agent_a',
+      mtlsThumbprint: 'mtls_thumb_agent_a',
       now,
     });
     expect(verifiedAgent.ok).toBe(true);
@@ -836,7 +880,7 @@ describe('lib/link/auth — Account Plane, 4 Key Kinds, OAuth 2.1, Risk Classes 
       },
       now,
     });
-    const ver = registry.verifySecretKey(rawKey, { senderThumbprint: 'mtls_del', now });
+    const ver = registry.verifySecretKey(rawKey, { mtlsThumbprint: 'mtls_del', now });
     expect(ver.ok).toBe(true);
     if (!ver.ok) return;
 
@@ -946,5 +990,263 @@ describe('lib/link/auth — Account Plane, 4 Key Kinds, OAuth 2.1, Risk Classes 
       });
       expect(r.allowed).toBe(true);
     }
+  });
+
+  test('Wave 9 Regressions (#2, #25): RFC 9449 DPoP proof verification (EdDSA & ES256) blocks missing proof, wrong htm/htu/iat/jti/ath & private JWK; Passkey approval verify vs consume stays non-destructive until commit', () => {
+    const { registry, gateway, now, ownerSessionPrincipal } = buildFixture();
+
+    // ---- #2: RFC 9449 DPoP Proof-of-Possession ----
+    const edPair = crypto.generateKeyPairSync('ed25519');
+    const edPubJwk = edPair.publicKey.export({ format: 'jwk' }) as Record<string, unknown>;
+    const edJkt = computeJwkThumbprint(edPubJwk);
+
+    const ecPair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const ecPubJwk = ecPair.publicKey.export({ format: 'jwk' }) as Record<string, unknown>;
+    const ecJkt = computeJwkThumbprint(ecPubJwk);
+
+    const verifier = 'v'.repeat(48);
+    const challenge = computePkceS256Challenge(verifier);
+    const issued = registry.issueMcpOAuthToken({
+      tenantId: 'tenant_a',
+      principalId: 'agent_a',
+      clientId: 'claude_desktop',
+      scopes: ['analytics:read', 'decisions:publish'],
+      codeVerifier: verifier,
+      expectedCodeChallengeS256: challenge,
+      dpopThumbprint: edJkt,
+      now,
+    });
+    expect(issued.ok).toBe(true);
+    if (!issued.ok) return;
+
+    const uri = 'https://api.ugokilink.example/api/v1/sites/site_a1/metrics';
+
+    // (a) Missing DPoP proof (e.g., bare x-dpop-jkt without signed proof) fails closed with 401
+    const noProof = registry.verifyMcpOAuthToken(issued.accessToken, { now });
+    expect(noProof.ok).toBe(false);
+    if (!noProof.ok) {
+      expect(noProof.httpStatus).toBe(401);
+      expect(noProof.code).toBe('DPOP_PROOF_REQUIRED');
+    }
+
+    // (b1) Wrong htm -> fails closed
+    const badHtmProof = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: edPubJwk,
+      privateKey: edPair.privateKey,
+      htm: 'DELETE',
+      htu: uri,
+      accessToken: issued.accessToken,
+      now,
+    });
+    const badHtmRes = registry.verifyMcpOAuthToken(issued.accessToken, {
+      dpopProof: badHtmProof,
+      httpMethod: 'GET',
+      httpUri: uri,
+      now,
+    });
+    expect(badHtmRes.ok).toBe(false);
+    if (!badHtmRes.ok) expect(badHtmRes.code).toBe('DPOP_HTM_MISMATCH');
+
+    // (b2) Wrong htu -> fails closed
+    const badHtuProof = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: edPubJwk,
+      privateKey: edPair.privateKey,
+      htm: 'GET',
+      htu: 'https://api.ugokilink.example/api/v1/sites/site_other/metrics',
+      accessToken: issued.accessToken,
+      now,
+    });
+    const badHtuRes = registry.verifyMcpOAuthToken(issued.accessToken, {
+      dpopProof: badHtuProof,
+      httpMethod: 'GET',
+      httpUri: uri,
+      now,
+    });
+    expect(badHtuRes.ok).toBe(false);
+    if (!badHtuRes.ok) expect(badHtuRes.code).toBe('DPOP_HTU_MISMATCH');
+
+    // (b3) Expired iat (> 60s skew) -> fails closed
+    const staleProof = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: edPubJwk,
+      privateKey: edPair.privateKey,
+      htm: 'GET',
+      htu: uri,
+      accessToken: issued.accessToken,
+      iat: Math.floor(now.getTime() / 1000) - 120,
+    });
+    const staleRes = registry.verifyMcpOAuthToken(issued.accessToken, {
+      dpopProof: staleProof,
+      httpMethod: 'GET',
+      httpUri: uri,
+      now,
+    });
+    expect(staleRes.ok).toBe(false);
+    if (!staleRes.ok) expect(staleRes.code).toBe('DPOP_IAT_OUT_OF_RANGE');
+
+    // (b4) Wrong ath -> fails closed
+    const badAthProof = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: edPubJwk,
+      privateKey: edPair.privateKey,
+      htm: 'GET',
+      htu: uri,
+      accessToken: 'wrong_token_value',
+      now,
+    });
+    const badAthRes = registry.verifyMcpOAuthToken(issued.accessToken, {
+      dpopProof: badAthProof,
+      httpMethod: 'GET',
+      httpUri: uri,
+      now,
+    });
+    expect(badAthRes.ok).toBe(false);
+    if (!badAthRes.ok) expect(badAthRes.code).toBe('DPOP_ATH_MISMATCH');
+
+    // (b5) Private key parameter embedded in header.jwk -> fails closed
+    const privJwk = edPair.privateKey.export({ format: 'jwk' }) as Record<string, unknown>;
+    const privLeakProof = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: privJwk,
+      privateKey: edPair.privateKey,
+      htm: 'GET',
+      htu: uri,
+      accessToken: issued.accessToken,
+      now,
+    });
+    const privLeakRes = verifyDpopProofJwt({
+      dpopProof: privLeakProof,
+      httpMethod: 'GET',
+      httpUri: uri,
+      accessToken: issued.accessToken,
+      replayCache: new DpopReplayCache(),
+      now,
+    });
+    expect(privLeakRes.ok).toBe(false);
+    if (!privLeakRes.ok) expect(privLeakRes.code).toBe('DPOP_PRIVATE_JWK_FORBIDDEN');
+
+    // (c1) Genuine signed EdDSA DPoP proof succeeds (ignoring query string in request URI)
+    const goodEdProof = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: edPubJwk,
+      privateKey: edPair.privateKey,
+      htm: 'GET',
+      htu: uri,
+      accessToken: issued.accessToken,
+      jti: 'jti_unique_ed_001',
+      now,
+    });
+    const okEdRes = registry.verifyMcpOAuthToken(issued.accessToken, {
+      dpopProof: goodEdProof,
+      httpMethod: 'GET',
+      httpUri: `${uri}?window=7d`,
+      now,
+    });
+    expect(okEdRes.ok).toBe(true);
+    if (okEdRes.ok) expect(okEdRes.principal.senderConstrained).toBe(true);
+
+    // (b6) Replaying the exact same jti -> fails closed!
+    const replayRes = registry.verifyMcpOAuthToken(issued.accessToken, {
+      dpopProof: goodEdProof,
+      httpMethod: 'GET',
+      httpUri: uri,
+      now,
+    });
+    expect(replayRes.ok).toBe(false);
+    if (!replayRes.ok) expect(replayRes.code).toBe('DPOP_JTI_REPLAYED');
+
+    // (c2) Genuine signed ES256 DPoP proof also succeeds
+    const goodEcProof = createDpopProofJwt({
+      alg: 'ES256',
+      publicJwk: ecPubJwk,
+      privateKey: ecPair.privateKey,
+      htm: 'POST',
+      htu: uri,
+      accessToken: issued.accessToken,
+      now,
+    });
+    const okEcRes = verifyDpopProofJwt({
+      dpopProof: goodEcProof,
+      httpMethod: 'POST',
+      httpUri: uri,
+      accessToken: issued.accessToken,
+      expectedJkt: ecJkt,
+      replayCache: new DpopReplayCache(),
+      now,
+    });
+    expect(okEcRes.ok).toBe(true);
+
+    // ---- #25: verifyPasskeyApproval (read-only) vs consumePasskeyApproval (atomic) ----
+    const diff = { ruleId: 'rule_99', action: 'publish' };
+    const { combinedHash } = computeActionAndDiffHash('publishDecision', diff);
+    const createdApr = gateway.createPasskeyApproval({
+      principal: ownerSessionPrincipal,
+      siteId: 'site_a1',
+      action: 'publishDecision',
+      renderedDiff: diff,
+      passkeyAssertion: {
+        credentialId: 'webauthn_owner_25',
+        userVerification: true,
+        signedChallengeHash: combinedHash,
+        assertedAt: now.toISOString(),
+        signatureVerified: true,
+      },
+      now,
+    });
+    expect(createdApr.ok).toBe(true);
+    if (!createdApr.ok) return;
+
+    // Read-only verifyPasskeyApproval does NOT consume the approval
+    const roCheck1 = gateway.verifyPasskeyApproval({
+      approvalId: createdApr.approval.approvalId,
+      tenantId: 'tenant_a',
+      siteId: 'site_a1',
+      action: 'publishDecision',
+      actionPayload: diff,
+      now,
+    });
+    expect(roCheck1.ok).toBe(true);
+    expect(createdApr.approval.consumedAt).toBeUndefined();
+
+    // Deferred authorize() also does NOT consume the approval
+    const deferredAuthz = gateway.authorize({
+      principal: ownerSessionPrincipal,
+      action: 'publishDecision',
+      riskClass: 'R2',
+      requiredScope: 'decisions:publish',
+      resource: { type: 'site', id: 'site_a1', tenantId: 'tenant_a', siteId: 'site_a1' },
+      renderedDiff: diff,
+      passkeyApprovalId: createdApr.approval.approvalId,
+      deferApprovalConsumption: true,
+      now,
+    });
+    expect(deferredAuthz.allowed).toBe(true);
+    expect(deferredAuthz.pendingApprovalConsumption?.approvalId).toBe(createdApr.approval.approvalId);
+    expect(createdApr.approval.consumedAt).toBeUndefined();
+
+    // Atomic consumePasskeyApproval consumes once and blocks second consume
+    const consume1 = gateway.consumePasskeyApproval({
+      approvalId: createdApr.approval.approvalId,
+      tenantId: 'tenant_a',
+      siteId: 'site_a1',
+      action: 'publishDecision',
+      actionPayload: diff,
+      now,
+    });
+    expect(consume1.ok).toBe(true);
+    expect(createdApr.approval.consumedAt).toBeDefined();
+
+    const consume2 = gateway.consumePasskeyApproval({
+      approvalId: createdApr.approval.approvalId,
+      tenantId: 'tenant_a',
+      siteId: 'site_a1',
+      action: 'publishDecision',
+      actionPayload: diff,
+      now,
+    });
+    expect(consume2.ok).toBe(false);
+    if (!consume2.ok) expect(consume2.code).toBe('APPROVAL_ALREADY_CONSUMED');
   });
 });

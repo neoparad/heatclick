@@ -842,4 +842,201 @@ describe('packages/wp-plugin — WordPress Companion Plugin Protocol & del.D20 C
       (await siteB.handleSignedCommand(day2Apply, Date.parse('2026-11-21T01:00:00Z'))).status
     ).toBe(200);
   });
+
+  test('[#6] full before/after HTML document comparison catches text-only <h1> edit as touch_indexable_seo and requires local WP 2-key approval', async () => {
+    const keyPair = await generateEd25519KeyPair();
+    const engine = new WpPluginEngine({
+      pinnedPubKeys: new Map([['k1', keyPair.publicKey]]),
+      tenantId: 'ten_seo',
+      siteId: 'site_seo',
+      homeUrl: 'https://seo.example.jp',
+      ownerPolicy: {
+        local_stop: false,
+        allowed_auto_classes: ['cta_copy'],
+        daily_apply_cap: 10,
+        require_admin_confirmation_classes: ['touch_indexable_seo'],
+      },
+    });
+
+    const beforeHtml = '<article><h1>Old Title</h1><p>Body paragraph</p></article>';
+    const byteStart = beforeHtml.indexOf('Old Title');
+    const byteEnd = byteStart + 'Old Title'.length;
+    const afterHtml = '<article><h1>New Title</h1><p>Body paragraph</p></article>';
+    const beforeSha = await sha256Hex(beforeHtml);
+    const afterSha = await sha256Hex(afterHtml);
+    const mod = '2026-11-20T00:00:00.000Z';
+
+    engine.seedPost({
+      post_id: 601,
+      permalink: '/seo-post/',
+      content: beforeHtml,
+      modified_gmt: mod,
+      edit_lock_user_id: null,
+    });
+
+    // Text-only fragment "New Title" replacing "Old Title" inside <h1>...</h1> has NO HTML tags in slice,
+    // yet full-document comparison MUST detect <h1> change and reject without local WP 2-key approval!
+    const unapprovedEnv = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 1,
+        not_after: futureIso,
+        tenant_id: 'ten_seo',
+        site_id: 'site_seo',
+        home_url: 'https://seo.example.jp',
+        post_id: 601,
+        promotion_id: 'promo_h1_text_only',
+        change_class: 'cta_copy',
+        expected_content_sha256: beforeSha,
+        expected_modified_gmt: mod,
+        byte_start: byteStart,
+        byte_end: byteEnd,
+        replacement_html: 'New Title',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    const rejected = await engine.handleSignedCommand(unapprovedEnv);
+    expect(rejected.status).toBe(403);
+    expect(rejected.error).toBe('owner_local_policy_requires_admin_confirmation');
+    expect(engine.getPost(601)?.content).toBe(beforeHtml);
+
+    // With genuine local WP-Admin 2-key approval for seq=2, the exact same edit succeeds
+    const nowMs = Date.now();
+    const localApprove = await engine.recordLocalWpAdminApproval({
+      hasManageOptionsCapability: true,
+      wpAdminNonceVerified: true,
+      postId: 601,
+      beforeSha256: beforeSha,
+      afterSha256: afterSha,
+      commandSeq: 2,
+      nowMs,
+    });
+    expect(localApprove.ok).toBe(true);
+
+    const approvedEnv = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 2,
+        not_after: futureIso,
+        tenant_id: 'ten_seo',
+        site_id: 'site_seo',
+        home_url: 'https://seo.example.jp',
+        post_id: 601,
+        promotion_id: 'promo_h1_text_only_ok',
+        change_class: 'cta_copy',
+        expected_content_sha256: beforeSha,
+        expected_modified_gmt: mod,
+        byte_start: byteStart,
+        byte_end: byteEnd,
+        replacement_html: 'New Title',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    const okRes = await engine.handleSignedCommand(approvedEnv, nowMs + 1000);
+    expect(okRes.status).toBe(200);
+    expect(engine.getPost(601)?.content).toBe(afterHtml);
+  });
+
+  test('[#7] atomic approval claim prevents concurrent double-consumption and rolls back to unused on wp_update_post failure for clean retry', async () => {
+    const keyPair = await generateEd25519KeyPair();
+    const engine = new WpPluginEngine({
+      pinnedPubKeys: new Map([['k1', keyPair.publicKey]]),
+      tenantId: 'ten_atom',
+      siteId: 'site_atom',
+      homeUrl: 'https://atom.example.jp',
+      ownerPolicy: {
+        local_stop: false,
+        allowed_auto_classes: ['cta_copy'],
+        daily_apply_cap: 10,
+        require_admin_confirmation_classes: ['touch_indexable_seo'],
+      },
+    });
+
+    const beforeHtml = '<h1>Original Heading</h1>';
+    const byteStart = beforeHtml.indexOf('Original Heading');
+    const byteEnd = byteStart + 'Original Heading'.length;
+    const afterHtml = '<h1>Updated Heading</h1>';
+    const beforeSha = await sha256Hex(beforeHtml);
+    const afterSha = await sha256Hex(afterHtml);
+    const mod = '2026-11-20T00:00:00.000Z';
+
+    engine.seedPost({
+      post_id: 701,
+      permalink: '/atomic-post/',
+      content: beforeHtml,
+      modified_gmt: mod,
+      edit_lock_user_id: null,
+    });
+
+    const nowMs = Date.now();
+    const approved = await engine.recordLocalWpAdminApproval({
+      hasManageOptionsCapability: true,
+      wpAdminNonceVerified: true,
+      postId: 701,
+      beforeSha256: beforeSha,
+      afterSha256: afterSha,
+      commandSeq: 1,
+      nowMs,
+    });
+    expect(approved.ok).toBe(true);
+    const digest = approved.digest!;
+    expect(engine.getLocalApprovalState(digest)).toBe('unused');
+
+    const cmdEnv = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 1,
+        not_after: futureIso,
+        tenant_id: 'ten_atom',
+        site_id: 'site_atom',
+        home_url: 'https://atom.example.jp',
+        post_id: 701,
+        promotion_id: 'promo_atomic_1',
+        change_class: 'touch_indexable_seo',
+        expected_content_sha256: beforeSha,
+        expected_modified_gmt: mod,
+        byte_start: byteStart,
+        byte_end: byteEnd,
+        replacement_html: 'Updated Heading',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+
+    // (b) Simulate wp_update_post failure: approval transitions unused -> claimed -> unused (rolled back!)
+    let observedInFlightState: string | null = null;
+    let concurrentClaimWhileInFlight: string | null = 'not_tested';
+    engine.setPostUpdateHook(async () => {
+      observedInFlightState = engine.getLocalApprovalState(digest);
+      // While claimed in-flight, a concurrent claim on the same digest MUST be rejected (null)
+      concurrentClaimWhileInFlight = engine.claimLocalWpAdminApproval(digest, nowMs + 500);
+      throw new Error('simulated_db_write_error');
+    });
+
+    const failedRes = await engine.handleSignedCommand(cmdEnv, nowMs + 500);
+    expect(failedRes.status).toBe(500);
+    expect(failedRes.error).toBe('wp_update_post_failed');
+    expect(observedInFlightState).toBe('claimed');
+    expect(concurrentClaimWhileInFlight).toBeNull();
+    // Rolled back to unused & post unchanged!
+    expect(engine.getLocalApprovalState(digest)).toBe('unused');
+    expect(engine.getPost(701)?.content).toBe(beforeHtml);
+
+    // (a) Clean retry with concurrent duplicate delivery: ONLY 1 succeeds (200), second is rejected!
+    engine.setPostUpdateHook(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    });
+    const [resA, resB] = await Promise.all([
+      engine.handleSignedCommand(cmdEnv, nowMs + 1000),
+      engine.handleSignedCommand(cmdEnv, nowMs + 1000),
+    ]);
+    const okCount = [resA, resB].filter((r) => r.status === 200).length;
+    const rejectedCount = [resA, resB].filter((r) => r.status !== 200).length;
+    expect(okCount).toBe(1);
+    expect(rejectedCount).toBe(1);
+    expect(engine.getPost(701)?.content).toBe(afterHtml);
+    expect(engine.getLocalApprovalState(digest)).toBe('consumed');
+  });
 });

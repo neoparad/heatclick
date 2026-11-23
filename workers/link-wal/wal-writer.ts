@@ -52,6 +52,14 @@ export const DEFAULT_RETENTION_DAYS = 395; // ~13 months default grid
 
 const DAY_MS = 86_400_000;
 
+export interface RegionRerouteSink {
+  reroute(
+    item: WalQueuePayload,
+    expectedRegion: DataRegion,
+    actualRegion: string
+  ): Promise<void> | void;
+}
+
 export interface WalWriterOptions {
   readonly region: DataRegion;
   readonly adapter?: StorageTierAdapter;
@@ -62,16 +70,24 @@ export interface WalWriterOptions {
   readonly deletionEpoch?: number;
   readonly postAckDetector?: PostAckLossDetector;
   readonly validator?: GeneratedIngestValidator;
+  /**
+   * Optional reroute sink for wrong-region deliveries (Codex #11 / §11.11.13).
+   * Wrong-region payloads are NEVER persisted to local WAL or local quarantine.
+   */
+  readonly regionRerouteSink?: RegionRerouteSink;
 }
 
 export interface WalConsumeResult {
   readonly acceptedCount: number;
   readonly partialAcceptedCount: number;
   readonly quarantinedCount: number;
+  readonly regionMismatchCount: number;
   readonly dedupedObjectsCount: number;
   readonly bisectSplits: number;
   readonly walKeys: readonly string[];
   readonly quarantineKeys: readonly string[];
+  readonly reroutedPayloads: readonly WalQueuePayload[];
+  readonly rejectedRegionMismatch: readonly WalQueuePayload[];
   readonly exportReceipts: readonly ExportNotificationReceipt[];
   readonly writtenRecords: readonly WalRecord[];
 }
@@ -312,6 +328,8 @@ interface FailedItem {
   readonly payload: WalQueuePayload;
   readonly reason: string;
   readonly validationResult: IngestValidationResult | null;
+  readonly isRegionMismatch?: boolean;
+  readonly actualRegion?: string;
 }
 
 export class WalWriter {
@@ -322,6 +340,7 @@ export class WalWriter {
   private readonly defaultRetentionDays: number;
   private readonly quarantineRetentionDays: number;
   private readonly quarantineMasterKey: Buffer;
+  private readonly regionRerouteSink?: RegionRerouteSink;
   private deletionEpoch: number;
 
   public constructor(options: WalWriterOptions) {
@@ -343,6 +362,7 @@ export class WalWriter {
       options.quarantineMasterKeyHex && /^[0-9a-fA-F]{64}$/.test(options.quarantineMasterKeyHex)
         ? Buffer.from(options.quarantineMasterKeyHex, 'hex')
         : crypto.randomBytes(32);
+    this.regionRerouteSink = options.regionRerouteSink;
     this.deletionEpoch = options.deletionEpoch ?? 1;
     this.postAckDetector = options.postAckDetector ?? new PostAckLossDetector();
   }
@@ -470,10 +490,13 @@ export class WalWriter {
         acceptedCount: 0,
         partialAcceptedCount: 0,
         quarantinedCount: 0,
+        regionMismatchCount: 0,
         dedupedObjectsCount: 0,
         bisectSplits: 0,
         walKeys: [],
         quarantineKeys: [],
+        reroutedPayloads: [],
+        rejectedRegionMismatch: [],
         exportReceipts: [],
         writtenRecords: [],
       };
@@ -483,10 +506,13 @@ export class WalWriter {
       acceptedCount: 0,
       partialAcceptedCount: 0,
       quarantinedCount: 0,
+      regionMismatchCount: 0,
       dedupedObjectsCount: 0,
       bisectSplits: 0,
       walKeys: [] as string[],
       quarantineKeys: [] as string[],
+      reroutedPayloads: [] as WalQueuePayload[],
+      rejectedRegionMismatch: [] as WalQueuePayload[],
       exportReceipts: [] as ExportNotificationReceipt[],
       writtenRecords: [] as WalRecord[],
     };
@@ -534,7 +560,7 @@ export class WalWriter {
         };
       }
 
-      // Enforce Decision 29 region residency boundary
+      // Enforce Decision 29 / §11.11.13 region residency boundary (Codex #11: NEVER quarantine locally!)
       try {
         assertRegionPinned(this.region, item.storage_region);
       } catch (err) {
@@ -544,6 +570,8 @@ export class WalWriter {
             payload: item,
             reason: err instanceof Error ? `region_mismatch:${err.message}` : 'region_mismatch',
             validationResult: null,
+            isRegionMismatch: true,
+            actualRegion: String(item.storage_region),
           },
         };
       }
@@ -659,10 +687,13 @@ export class WalWriter {
       acceptedCount: number;
       partialAcceptedCount: number;
       quarantinedCount: number;
+      regionMismatchCount: number;
       dedupedObjectsCount: number;
       bisectSplits: number;
       walKeys: string[];
       quarantineKeys: string[];
+      reroutedPayloads: WalQueuePayload[];
+      rejectedRegionMismatch: WalQueuePayload[];
       exportReceipts: ExportNotificationReceipt[];
       writtenRecords: WalRecord[];
     }
@@ -698,7 +729,25 @@ export class WalWriter {
       return;
     }
 
-    // Leaf length === 1: quarantine the isolated poison item
+    // Leaf length === 1:
+    // Codex #11 (§11.11.13): Wrong-region delivery MUST NEVER be written to local region
+    // WAL or local region quarantine! Reroute if sink configured, otherwise reject without local storage.
+    if (firstFailure.isRegionMismatch) {
+      state.regionMismatchCount += 1;
+      if (this.regionRerouteSink) {
+        await this.regionRerouteSink.reroute(
+          firstFailure.payload,
+          this.region,
+          firstFailure.actualRegion ?? String(firstFailure.payload?.storage_region)
+        );
+        state.reroutedPayloads.push(firstFailure.payload);
+      } else {
+        state.rejectedRegionMismatch.push(firstFailure.payload);
+      }
+      return;
+    }
+
+    // Corrupt/invalid payload within pinned region: quarantine locally
     const quarantineKey = await this.writeQuarantineItem(firstFailure, nowMs);
     state.quarantinedCount += 1;
     state.quarantineKeys.push(quarantineKey);
@@ -937,7 +986,6 @@ export class WalWriter {
       }
     }
 
-    const listed = await this.adapter.listObjects(prefix, 1000);
     let scannedCount = 0;
     let skippedExpiredCount = 0;
     let skippedUnrepairedCount = 0;
@@ -946,37 +994,43 @@ export class WalWriter {
     const deletedQuarantineKeys: string[] = [];
     const newWalKeys: string[] = [];
 
-    for (const meta of listed.objects) {
-      scannedCount += 1;
-      const obj = await this.adapter.getObject(meta.key);
-      if (!obj) continue;
-      const parsed = this.decryptQuarantineEnvelope(
-        await obj.text(),
-        options.tenantId,
-        options.siteId
-      );
-      if (!parsed) continue;
-      if (parsed.expires_at_ms <= nowMs) {
-        skippedExpiredCount += 1;
-        continue;
-      }
+    // Codex #13: Paginate across ALL R2 list pages (beyond 1,000 objects)
+    let cursor: string | undefined = undefined;
+    do {
+      const page = await this.adapter.listObjects(prefix, 1000, cursor);
+      for (const meta of page.objects) {
+        scannedCount += 1;
+        const obj = await this.adapter.getObject(meta.key);
+        if (!obj) continue;
+        const parsed = this.decryptQuarantineEnvelope(
+          await obj.text(),
+          options.tenantId,
+          options.siteId
+        );
+        if (!parsed) continue;
+        if (parsed.expires_at_ms <= nowMs) {
+          skippedExpiredCount += 1;
+          continue;
+        }
 
-      const repaired = options.repair(parsed);
-      if (!repaired) {
-        skippedUnrepairedCount += 1;
-        continue;
-      }
+        const repaired = options.repair(parsed);
+        if (!repaired) {
+          skippedUnrepairedCount += 1;
+          continue;
+        }
 
-      const res = await this.consumeBatch([repaired], nowMs);
-      if (res.acceptedCount > 0) {
-        reingestedCount += 1;
-        newWalKeys.push(...res.walKeys);
-        await this.adapter.deleteObjects(meta.key);
-        deletedQuarantineKeys.push(meta.key);
-      } else {
-        stillQuarantinedCount += 1;
+        const res = await this.consumeBatch([repaired], nowMs);
+        if (res.acceptedCount > 0) {
+          reingestedCount += 1;
+          newWalKeys.push(...res.walKeys);
+          await this.adapter.deleteObjects(meta.key);
+          deletedQuarantineKeys.push(meta.key);
+        } else {
+          stillQuarantinedCount += 1;
+        }
       }
-    }
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
 
     return {
       scannedCount,
@@ -991,7 +1045,8 @@ export class WalWriter {
 
   /**
    * Deletion-coverage hook for 14-day subject erasure (`store.M5` / `store.G-8`):
-   * deletes every quarantine object matching any of the subject's `pv_id`s.
+   * deletes every quarantine object matching any of the subject's `pv_id`s across
+   * ALL R2 list pages (Codex #13).
    */
   public async deleteQuarantineByPvIds(
     tenantId: string,
@@ -1006,73 +1061,86 @@ export class WalWriter {
     }
 
     const prefix = `quarantine/${this.region}/${tenantId}/${siteId}/`;
-    const listed = await this.adapter.listObjects(prefix, 1000);
     const toDelete: string[] = [];
+    let scannedCount = 0;
+    let cursor: string | undefined = undefined;
 
-    for (const meta of listed.objects) {
-      const metaPvHmac = meta.customMetadata?.pv_id_hmac;
-      if (metaPvHmac && pvHmacSet.has(metaPvHmac)) {
-        toDelete.push(meta.key);
-        continue;
+    do {
+      const page = await this.adapter.listObjects(prefix, 1000, cursor);
+      for (const meta of page.objects) {
+        scannedCount += 1;
+        const metaPvHmac = meta.customMetadata?.pv_id_hmac;
+        if (metaPvHmac && pvHmacSet.has(metaPvHmac)) {
+          toDelete.push(meta.key);
+          continue;
+        }
+        const obj = await this.adapter.getObject(meta.key);
+        if (!obj) continue;
+        const parsed = this.decryptQuarantineEnvelope(await obj.text(), tenantId, siteId);
+        if (parsed?.pv_id && pvSet.has(parsed.pv_id)) {
+          toDelete.push(meta.key);
+        }
       }
-      const obj = await this.adapter.getObject(meta.key);
-      if (!obj) continue;
-      const parsed = this.decryptQuarantineEnvelope(await obj.text(), tenantId, siteId);
-      if (parsed?.pv_id && pvSet.has(parsed.pv_id)) {
-        toDelete.push(meta.key);
-      }
-    }
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
 
     if (toDelete.length > 0) {
       await this.adapter.deleteObjects(toDelete);
     }
 
     return {
-      scannedCount: listed.objects.length,
+      scannedCount,
       deletedKeys: toDelete,
     };
   }
 
   /**
-   * Enforces the 7-day retention ceiling on `decode_quarantine` objects.
+   * Enforces the 7-day retention ceiling on `decode_quarantine` objects across
+   * ALL R2 list pages (Codex #13).
    */
   public async purgeExpiredQuarantine(
     nowMs = Date.now()
   ): Promise<{ readonly scannedCount: number; readonly purgedKeys: readonly string[] }> {
     const prefix = `quarantine/${this.region}/`;
-    const listed = await this.adapter.listObjects(prefix, 1000);
     const expired: string[] = [];
+    let scannedCount = 0;
+    let cursor: string | undefined = undefined;
 
-    for (const meta of listed.objects) {
-      const metaExp = meta.customMetadata?.expires_at_ms
-        ? Number(meta.customMetadata.expires_at_ms)
-        : Number.NaN;
-      if (Number.isFinite(metaExp) && metaExp <= nowMs) {
-        expired.push(meta.key);
-        continue;
-      }
-      const obj = await this.adapter.getObject(meta.key);
-      if (!obj) continue;
-      let expiresAt = Number.NaN;
-      try {
-        const rawJson = JSON.parse(await obj.text()) as { expires_at_ms?: number };
-        if (typeof rawJson.expires_at_ms === 'number') {
-          expiresAt = rawJson.expires_at_ms;
+    do {
+      const page = await this.adapter.listObjects(prefix, 1000, cursor);
+      for (const meta of page.objects) {
+        scannedCount += 1;
+        const metaExp = meta.customMetadata?.expires_at_ms
+          ? Number(meta.customMetadata.expires_at_ms)
+          : Number.NaN;
+        if (Number.isFinite(metaExp) && metaExp <= nowMs) {
+          expired.push(meta.key);
+          continue;
         }
-      } catch {
-        expiresAt = Number.NaN;
+        const obj = await this.adapter.getObject(meta.key);
+        if (!obj) continue;
+        let expiresAt = Number.NaN;
+        try {
+          const rawJson = JSON.parse(await obj.text()) as { expires_at_ms?: number };
+          if (typeof rawJson.expires_at_ms === 'number') {
+            expiresAt = rawJson.expires_at_ms;
+          }
+        } catch {
+          expiresAt = Number.NaN;
+        }
+        if (Number.isFinite(expiresAt) && expiresAt <= nowMs) {
+          expired.push(meta.key);
+        }
       }
-      if (Number.isFinite(expiresAt) && expiresAt <= nowMs) {
-        expired.push(meta.key);
-      }
-    }
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
 
     if (expired.length > 0) {
       await this.adapter.deleteObjects(expired);
     }
 
     return {
-      scannedCount: listed.objects.length,
+      scannedCount,
       purgedKeys: expired,
     };
   }
@@ -1080,7 +1148,8 @@ export class WalWriter {
 
 /**
  * Cloudflare Queue consumer entry point wrapping `WalWriter`.
- * Acks every message once durably written to either immutable WAL or 7-day quarantine.
+ * Acks every message once durably written to either immutable WAL or 7-day quarantine,
+ * or rerouted out of region; retries un-rerouted region-mismatch deliveries without local persistence.
  */
 export async function handleWalQueueBatch(
   batch: QueueBatchLike<WalQueuePayload>,
@@ -1089,8 +1158,13 @@ export async function handleWalQueueBatch(
 ): Promise<WalConsumeResult> {
   const payloads = batch.messages.map((m) => m.body);
   const result = await writer.consumeBatch(payloads, nowMs);
+  const rejectedSet = new Set<WalQueuePayload>(result.rejectedRegionMismatch);
   for (const msg of batch.messages) {
-    msg.ack();
+    if (rejectedSet.has(msg.body)) {
+      msg.retry();
+    } else {
+      msg.ack();
+    }
   }
   return result;
 }

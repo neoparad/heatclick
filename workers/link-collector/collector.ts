@@ -20,6 +20,7 @@ import {
   DATA_REGIONS,
   STORAGE_TIERS,
   canonicalJsonStringify,
+  computeCanonicalSubjectHmac,
   computeFrameChecksum,
   createIngestValidator,
   createSdkFrameCodec,
@@ -694,11 +695,17 @@ export class LinkCollectorEngine {
             page_url_key: urlCheck.first.url_key_v2,
           };
 
-    // [H-11]: On `private_scope` pages, strip all person/cross-PV linkable keys before persistence!
+    // [H-11] & Codex #9: On `private_scope` pages, strip all person/cross-PV linkable keys;
+    // otherwise hash `member_hash` with the unified canonical versioned subject HMAC!
     const isPrivateScope = canonicalState.dom_state === 'private_scope';
     const rehashedMember =
       !isPrivateScope && frame.member_hash && frame.purposes.includes('member_link')
-        ? hmacSha256Hex(site.tenantMemberHashKey, frame.member_hash)
+        ? computeCanonicalSubjectHmac({
+            tenantId: site.tenantId,
+            subjectKind: 'member_hash',
+            subjectValue: frame.member_hash,
+            secretKey: site.tenantMemberHashKey,
+          })
         : null;
 
     const canonicalChk =

@@ -901,4 +901,119 @@ describe('workers/link-loader', () => {
     expect(replayedPvIds).not.toContain(pvDeleted);
     expect(replayedPvIds).toContain(pvHuman);
   });
+
+  test('Wave 9 Codex #10: ShardLoader handover restores committed PV state from manifest WAL keys so subsequent frames merge with newlyPlacedPvs === 0', async () => {
+    const bucket = new InMemoryR2Bucket();
+    const writer = new WalWriter({ region: 'jp', bucket });
+    const t0 = Date.UTC(2026, 10, 23, 8, 55, 0); // 08:55 UTC
+    const pvId = '1234567890abcdef1234567890abcdef';
+
+    // 1. Loader A commits frame seq=0 for pv_1 (placed in 08:00 UTC hour)
+    const frame0 = buildFrameFromStep(
+      GROUND_TRUTH_STEPS[0]!,
+      -1,
+      [GROUND_TRUTH_STEPS[0]!.newLogItem!],
+      pvId,
+      '90001',
+      t0
+    );
+    await writer.consumeBatch(
+      [
+        {
+          tenant_id: 't-handover',
+          site_id: 's-handover',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: t0 + 200,
+          raw_frame: frame0,
+        },
+      ],
+      t0 + 200
+    );
+
+    const loaderA = new ShardLoader({ region: 'jp', shardId: 0, bucket });
+    const commitA = await loaderA.loadPendingWalObjects(t0 + 1000);
+    expect(commitA.committed).toBe(true);
+    expect(commitA.newlyPlacedPvs).toBe(1);
+    const pv0Placement = loaderA.getPvIndexRow('t-handover', 's-handover', pvId);
+    expect(pv0Placement).toBeDefined();
+
+    // 2. Loader B takes over the same shard via syncManifestsFromBucket()
+    const loaderB = new ShardLoader({ region: 'jp', shardId: 0, bucket });
+    const syncedSeq = await loaderB.syncManifestsFromBucket();
+    expect(syncedSeq).toBe(1);
+    expect(loaderB.getControlTotals()).toEqual(loaderA.getControlTotals());
+    expect(loaderB.getPvIndexRow('t-handover', 's-handover', pvId)).toEqual(pv0Placement);
+
+    // 3. New frame seq=1 arrives in the NEXT hour (09:05 UTC) in a new WAL object
+    const t1 = Date.UTC(2026, 10, 23, 9, 5, 0);
+    const frame1 = buildFrameFromStep(
+      GROUND_TRUTH_STEPS[3]!,
+      0,
+      [GROUND_TRUTH_STEPS[0]!.newLogItem!, GROUND_TRUTH_STEPS[3]!.newLogItem!],
+      pvId,
+      '90001',
+      t0
+    );
+    await writer.consumeBatch(
+      [
+        {
+          tenant_id: 't-handover',
+          site_id: 's-handover',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: t1,
+          raw_frame: frame1,
+        },
+      ],
+      t1
+    );
+
+    const commitB = await loaderB.loadPendingWalObjects(t1 + 1000);
+    expect(commitB.committed).toBe(true);
+    expect(commitB.manifestSeq).toBe(2);
+    // CRITICAL: pv_1 MUST NOT be treated as a brand-new PV after handover!
+    expect(commitB.newlyPlacedPvs).toBe(0);
+    expect(commitB.doublePlacementCount).toBe(0);
+
+    // Verify Loader B preserved seq=0 placement and merged seq=1 state identically to a fresh replay
+    const pvIndexB = loaderB.getPvIndexRow('t-handover', 's-handover', pvId)!;
+    const pvStateB = loaderB.getPvState('t-handover', 's-handover', pvId)!;
+    expect(pvIndexB.pvStartSrvMs).toBe(pv0Placement!.pvStartSrvMs);
+    expect(pvIndexB.pvHourMinMs).toBe(pv0Placement!.pvHourMinMs);
+    expect(pvIndexB.pvHourMaxMs).toBe(pv0Placement!.pvHourMaxMs);
+    expect(pvStateB.scrollMaxPx).toBe(GROUND_TRUTH_STEPS[3]!.scrollMaxPx);
+    expect(pvStateB.visMs).toBe(GROUND_TRUTH_STEPS[3]!.visMs);
+    expect(pvStateB.events.size).toBe(2);
+
+    const fullReplay = await replayAllFromWal({
+      region: 'jp',
+      shardId: 0,
+      walBucket: bucket,
+      nowMs: t1 + 2000,
+    });
+    expect(loaderB.getControlTotals()).toEqual(fullReplay.controlTotals);
+  });
+
+  test('Wave 9 Codex #14: Monday-rounded exp_week boundary expires on exp_week without +7d lag', () => {
+    // 2026-11-04 is Wednesday; + 30 days = 2026-12-04 (Friday) -> floored to Monday 2026-11-30
+    const pvStartMs = Date.UTC(2026, 10, 4, 12, 0, 0);
+    const placement = computeInitialPlacement({
+      tenantId: 't-ttl',
+      siteId: 's-ttl',
+      pvId: 'aaaa1111222233334444555566667777',
+      urlId: '100',
+      keyVer: 1,
+      profileRev: 1,
+      receivedAtMs: pvStartMs,
+      tMonoMs: 0,
+      retentionDays: 30,
+    });
+    expect(placement.expWeek).toBe('2026-11-30');
+    const expWeekUtcMs = Date.parse(`${placement.expWeek}T00:00:00.000Z`);
+    const exactExpiryMs = pvStartMs + 30 * 86_400_000;
+    // Monday floor is <= exact expiry and within 6 days prior, so TTL exp_week DELETE expires on Monday 2026-11-30 (0 extra +7d lag!)
+    expect(expWeekUtcMs).toBeLessThanOrEqual(exactExpiryMs);
+    expect(exactExpiryMs - expWeekUtcMs).toBeLessThan(7 * 86_400_000);
+  });
 });

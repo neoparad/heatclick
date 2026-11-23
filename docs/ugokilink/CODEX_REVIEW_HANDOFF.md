@@ -135,3 +135,43 @@ npm run build
 - 特に (1) テナント分離・認可バイパス・ヘッダ偽装、(2) SQL 字句/AST 検査・`worker_threads` サンドボックス・128-bit SSRF、(3) Collector↔WAL↔Loader↔Deletion のデータ契約と ClickHouse/Postgres DDL の実運用整合、(4) `<10` 秘匿・相補的二次抑制・RREF 差分推論防御、(5) 暗号署名・WP 2鍵・Signer CAS・自律公開ゲート、(6) `D-31b` Jev 永久禁止ロックと統計/ML 数理（LORD++, mSPRT, Union-Find 分割, Plackett-Luce, Wilson/ガウス境界）、(7) Wave 8 修正による退行や二次バグの有無 を重点的に監査し、Critical / High / Medium / Low に分類してファイル名・行番号・再現条件とともに報告してください。
 - なお、実装計画 §2 の禁止事項（本番 DB/デプロイ接触禁止、`git push` 禁止、`.env*` 読み書き禁止、`docs/handoff/antigravity-fusion/LINKSCRAWL_CAPABILITIES_2026-11-04.md` 変更禁止）は厳守してください。
 ```
+
+
+---
+
+## 7. Wave 9: Codex 第 1 回レビュー（`13a3b09`）指摘 30 件の全件是正マトリクス
+
+Codex 第 1 回レビュー（High 24 / Medium 5 / Low 1 = 計 30 件）に対し、全 30 件を修正・回帰テスト追加・DDL 決定論再生成・全 56 スイート（1,122 テスト）・`tsc`・`next build` まで完了した：
+
+| # | 重要度 | 指摘内容 | 修正ファイル | 検証テスト |
+|---|---|---|---|---|
+| 1 | High | サイト限定資格情報の SQL サイト述語強制 | `lib/link/isolation/{ast-inspector,query-builder}.ts`, `lib/link/export/sql-interface.ts` | `isolation.test.ts`, `export.test.ts`（2 サイト実行検証） |
+| 2 | High | RFC 9449 署名付き DPoP 実検証（`x-dpop-jkt` 単独信用廃止） | `lib/link/auth/keys.ts`, `lib/link/surface/{http-adapter,pipeline,mcp}.ts`, `app/api/v1/{decisions,sites/[siteId]/heatmap-image}/route.ts` | `auth.test.ts`, `surface.test.ts`, `decision.test.ts` |
+| 3 | High | 自律公開で承認検証器未注入時に fail-closed | `lib/link/autonomy/agent-publisher.ts` | `autonomy.test.ts`（`APPROVAL_VERIFIER_REQUIRED`） |
+| 4 | High | カタログ列挙値も封印済み envelope 許可種別と突合 | `lib/link/autonomy/{agent-publisher,autonomous-envelope}.ts` | `autonomy.test.ts` |
+| 5 | High | Signer 既定インメモリ CAS 廃止・共有ストア必須化 (`503`) | `workers/link-signer/{worker,signer}.ts` | `signer.test.ts`（別 handler 競合 `[200, 409]`） |
+| 6 | High | WP 2 鍵判定を全文 before/after HTML 比較化（H1 本文のみ変更を捕捉） | `packages/wp-plugin/{ugokilink-companion.php,contract.ts}` | `wp-plugin.test.ts`, `rollout.test.ts` |
+| 7 | High | WP 承認消費（`unused→claimed→consumed`）と投稿更新の不可分・失敗時回復 | `packages/wp-plugin/{ugokilink-companion.php,contract.ts}` | `wp-plugin.test.ts`（同時配送＋更新失敗ロールバック） |
+| 8 | High | `/v1/optout` の Cookie 設定と永続削除受付の分離（非永続で `deletion_queued:true` 禁止） | `workers/link-collector/worker.ts` | `collector.test.ts`（Wave 9 `#8`） |
+| 9 | High | 会員識別子 HMAC の共通版付き関数統一（過去形式・旧鍵候補含む） | `packages/contract/schema/hash.ts`, `workers/link-collector/{collector,worker}.ts`, `lib/link/store/deletion-engine.ts` | `schema.test.ts`, `collector.test.ts`（収集→消去往復） |
+| 10 | High | Loader 引き継ぎ時に manifest 順 WAL 再生で旧 PV 状態を復元 | `workers/link-loader/loader.ts` | `loader.test.ts`（Wave 9 `#10`） |
+| 11 | High | 誤リージョン配送の現地隔離保存禁止（§11.11.13 準拠・再配送/retry） | `workers/link-wal/wal-writer.ts` | `wal.test.ts`（Wave 9 `#11`） |
+| 12 | High | Tier 2 顧客 export 受領の永続管理と主系重複時の冪等再送 | `workers/link-wal/storage-adapter.ts` | `wal.test.ts`（Wave 9 `#12`） |
+| 13 | High | 隔離削除・期限掃除の 1,000 件超 `cursor` 全ページ走査 | `workers/link-wal/{wal-writer,storage-adapter}.ts` | `wal.test.ts`（Wave 9 `#13` 1,050 件超） |
+| 14 | High | ClickHouse `TTL exp_week` 修正（余分な `+ INTERVAL 7 DAY` 削除＋DDL 再生成） | `packages/contract/schema/canonical.ts`, `migrations/link/001_clickhouse_v2.sql` | `schema.test.ts`, `loader.test.ts` |
+| 15 | High | 外部 403 拒否理由から秘匿件数・差分値を完全除去 | `lib/link/heatmap-render/service.ts` | `heatmap-render.test.ts`（`[#15]`） |
+| 16 | High | 秘匿クリックの `rel_x`/`rel_y` を `null` 化＆PNG/SVG 点描画除外 | `lib/link/heatmap-render/{types,service,renderer}.ts` | `heatmap-render.test.ts`（`[#16]`） |
+| 17 | High | Ask の開示予定全グループ行＋合計を RREF へ原子バッチ投入 | `lib/link/ask/pre-llm-filter.ts` | `ask.test.ts`（`[#17]` 同和集合 1 人入替検知） |
+| 18 | High | Ask キャッシュ参照前に現在同意判定＋キャッシュキーへ同意モード追加 | `lib/link/ask/ask-service.ts` | `ask.test.ts`（`[#18]`） |
+| 19 | High | マスク領域・未保証由来 OCR 文字列の完全除外 | `lib/link/heatmap-render/{types,service}.ts` | `heatmap-render.test.ts`（`[#19]`） |
+| 20 | High | 記事推薦両分岐で Plackett-Luce 真の周辺表示確率（`2/3`）を返却 | `lib/link/models/recommend-service.ts` | `recommend-assistant.test.ts`（`[#20]`） |
+| 21 | High | `always_valid` mSPRT で推定量分散必須化（`0.01` 暗黙規定廃止） | `lib/link/evidence/experiment-engine.ts` | `evidence.test.ts`（`[#21]`） |
+| 22 | High | LORD++ の `experimentId` 単位冪等記帳（矛盾再送は拒否） | `lib/link/evidence/experiment-engine.ts` | `evidence.test.ts`（`[#22]`） |
+| 23 | High | 単一サイト学習コーパスの 3 分割修復（系譜・近重複・実験境界＋空分割拒否） | `lib/link/ml/finetune/dataset-builder.ts` | `finetune.test.ts`（`[#23]`） |
+| 24 | High | Jev 日本語評価ゲートを `(質問カテゴリ, モデル版)` 別管理へ厳格化 | `lib/link/ml/llm/jev-client.ts` | `llm.test.ts`（`[#24]`） |
+| 25 | Medium | 承認消費を冪等キャッシュ照会・レート制限通過後へ遅延 | `lib/link/auth/{types,gateway}.ts`, `lib/link/surface/pipeline.ts` | `auth.test.ts`, `surface.test.ts` |
+| 26 | Medium | Worker 内 32 KiB 出力＆512 B エラー制限を IPC 転送前に強制 | `lib/link/export/destination-functions.ts` | `export.test.ts` |
+| 27 | Medium | Postgres 保持月数グリッド `CHECK` 制約生成＋ランタイム検証器 | `packages/contract/schema/{ddl-generator,invariants}.ts`, `migrations/link/002_postgres_v2.sql` | `schema.test.ts` |
+| 28 | Medium | Wilson 下限 > 事前上限の空共通部分を `assumption_inconsistent` として検知 | `lib/link/ai-layer/local-ai-scorer.ts` | `ai-layer.test.ts`（`[#28]`） |
+| 29 | Medium | ガウス尤度比計算前の 60 次元一致・有限・正分散強制 | `lib/link/ai-layer/local-ai-scorer.ts` | `ai-layer.test.ts`（`[#29]`） |
+| 30 | Low | SSRF 予約帯判定から `TEST-NET-2/3` 例外を撤去 | `lib/link/linkage/grant-service.ts` | `linkage.test.ts`, `export.test.ts` |

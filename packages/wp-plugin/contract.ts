@@ -55,6 +55,8 @@ export interface WpLocalAdminApprovalRecord {
   readonly command_seq: number;
   readonly approved_at_ms: number;
   readonly expires_at_ms: number;
+  state: 'unused' | 'claimed' | 'consumed';
+  claim_token: string | null;
   consumed: boolean;
 }
 
@@ -131,8 +133,66 @@ export interface WpCommandResult {
 const SCRIPT_OR_HANDLER_RE =
   /<\s*(?:script|iframe|object|embed|style|svg)\b[\s\S]*?(?:<\/\s*(?:script|iframe|object|embed|style|svg)\s*>|>)|\bon[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)|javascript\s*:/gi;
 
-const SEO_INDEXABLE_TAG_RE =
-  /<\s*\/?\s*(?:title|h1)\b|<\s*link\b[^>]*rel\s*=\s*["']?canonical|<\s*meta\b[^>]*name\s*=\s*["']?robots/i;
+/**
+ * Extracts canonical indexable SEO nodes from a FULL HTML document (`[#6]`):
+ * `<h1>`, `<title>`, `<meta>`, `<link rel="canonical">`, `<a href>` (href/rel attrs),
+ * and `<script type="application/ld+json">`.
+ * Mirrors `UgokiLink_Companion_Plugin::extractIndexableSeoSignature` 1:1.
+ */
+export function extractIndexableSeoSignature(html: string): string {
+  const parts: string[] = [];
+
+  // 1. <h1>...</h1> and <title>...</title> (full attributes + inner text/content)
+  const blockRe = /<\s*(h1|title)\b([^>]*)>([\s\S]*?)<\/\s*\1\s*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(html)) !== null) {
+    const tag = m[1].toLowerCase();
+    const attrs = m[2].trim().replace(/\s+/g, ' ');
+    const body = m[3].trim().replace(/\s+/g, ' ');
+    parts.push(`${tag}[${attrs}]=${body}`);
+  }
+
+  // 2. <meta ...> tags
+  const metaRe = /<\s*meta\b([^>]*)>/gi;
+  while ((m = metaRe.exec(html)) !== null) {
+    const attrs = m[1].trim().replace(/\s+/g, ' ');
+    parts.push(`meta[${attrs}]`);
+  }
+
+  // 3. <link ... rel="canonical" ...> tags
+  const linkRe = /<\s*link\b([^>]*)>/gi;
+  while ((m = linkRe.exec(html)) !== null) {
+    const attrs = m[1].trim().replace(/\s+/g, ' ');
+    if (/\brel\s*=\s*(?:"[^"]*\bcanonical\b[^"]*"|'[^']*\bcanonical\b[^']*'|canonical\b)/i.test(attrs)) {
+      parts.push(`link_canonical[${attrs}]`);
+    }
+  }
+
+  // 4. <a ... href=...> tags (href & rel attributes)
+  const anchorRe = /<\s*a\b([^>]*)>/gi;
+  while ((m = anchorRe.exec(html)) !== null) {
+    const attrs = m[1];
+    const hm = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
+    const rm = /\brel\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
+    const href = hm ? (hm[1] ?? hm[2] ?? hm[3] ?? '').trim() : '';
+    const rel = rm ? (rm[1] ?? rm[2] ?? rm[3] ?? '').trim() : '';
+    if (href !== '') {
+      parts.push(`a[href=${href};rel=${rel}]`);
+    }
+  }
+
+  // 5. <script type="application/ld+json">...</script>
+  const scriptRe = /<\s*script\b([^>]*)>([\s\S]*?)<\/\s*script\s*>/gi;
+  while ((m = scriptRe.exec(html)) !== null) {
+    const attrs = m[1];
+    if (/\btype\s*=\s*(?:"application\/ld\+json"|'application\/ld\+json'|application\/ld\+json\b)/i.test(attrs)) {
+      const body = m[2].trim().replace(/\s+/g, ' ');
+      parts.push(`ld_json=${body}`);
+    }
+  }
+
+  return parts.join('\n');
+}
 
 /** Mirrors `wp_kses_post` safety floor: strips any script/iframe/event-handler/javascript URL. */
 export function sanitizeWpKsesPost(rawHtml: string): string {
@@ -227,8 +287,12 @@ export class WpPluginEngine {
   private readonly posts = new Map<number, WpPostRecord>();
   private readonly preImages = new Map<string, WpPreImageRecord>();
   private readonly filterPatches = new Map<string, { url_path: string; fragment_html: string }>();
-  /** Mirrors `wp_options['ugokilink_local_approvals']` (`[C-17]`). */
+  /** Mirrors `wp_options['ugokilink_local_approvals']` (`[C-17]` / `[#7]`). */
   private readonly localApprovals = new Map<string, WpLocalAdminApprovalRecord>();
+  /** Mirrors atomic per-digest `add_option('ugk_approval_claim_' . $digest)` lock (`[#7]`). */
+  private readonly approvalClaimLocks = new Set<string>();
+  private claimTokenSeq = 0;
+  private postUpdateHook?: (post: WpPostRecord, nextContent: string) => Promise<void> | void;
   /** Mirrors `wp_options['ugk_daily_apply_counter']` keyed by UTC `YYYY-MM-DD` (`[H-08]`). */
   private readonly dailyApplyCountByUtcDay = new Map<string, number>();
   private ownerPolicy: WpOwnerLocalPolicy;
@@ -348,19 +412,68 @@ export class WpPluginEngine {
       command_seq: params.commandSeq,
       approved_at_ms: nowMs,
       expires_at_ms: nowMs + boundedTtlMs,
+      state: 'unused',
+      claim_token: null,
       consumed: false,
     });
 
     return { ok: true, digest };
   }
 
-  private consumeLocalWpAdminApproval(expectedDigest: string, nowMs: number): boolean {
-    const rec = this.localApprovals.get(expectedDigest);
-    if (!rec || rec.consumed || rec.expires_at_ms <= nowMs || rec.digest !== expectedDigest) {
-      return false;
+  public getLocalApprovalState(digest: string): 'unused' | 'claimed' | 'consumed' | null {
+    return this.localApprovals.get(digest)?.state ?? null;
+  }
+
+  public setPostUpdateHook(
+    hook?: (post: WpPostRecord, nextContent: string) => Promise<void> | void
+  ): void {
+    this.postUpdateHook = hook;
+  }
+
+  /**
+   * Atomically claims an unused local WP-Admin approval (`unused` -> `claimed`, `[#7]`).
+   * Returns a unique claim token on success, or `null` if already claimed/consumed/expired/missing.
+   */
+  public claimLocalWpAdminApproval(expectedDigest: string, nowMs = Date.now()): string | null {
+    if (this.approvalClaimLocks.has(expectedDigest)) {
+      return null;
     }
-    rec.consumed = true;
-    return true;
+    const rec = this.localApprovals.get(expectedDigest);
+    if (
+      !rec ||
+      rec.state !== 'unused' ||
+      rec.consumed ||
+      rec.expires_at_ms <= nowMs ||
+      rec.digest !== expectedDigest
+    ) {
+      return null;
+    }
+    this.approvalClaimLocks.add(expectedDigest);
+    this.claimTokenSeq += 1;
+    const claimToken = `claim_${this.claimTokenSeq}_${expectedDigest.slice(0, 12)}`;
+    rec.state = 'claimed';
+    rec.claim_token = claimToken;
+    return claimToken;
+  }
+
+  private commitLocalWpAdminApproval(expectedDigest: string, claimToken: string): void {
+    const rec = this.localApprovals.get(expectedDigest);
+    if (rec && rec.state === 'claimed' && rec.claim_token === claimToken) {
+      rec.state = 'consumed';
+      rec.consumed = true;
+      rec.claim_token = null;
+    }
+    this.approvalClaimLocks.delete(expectedDigest);
+  }
+
+  private releaseLocalWpAdminApproval(expectedDigest: string, claimToken: string): void {
+    const rec = this.localApprovals.get(expectedDigest);
+    if (rec && rec.state === 'claimed' && rec.claim_token === claimToken) {
+      rec.state = 'unused';
+      rec.consumed = false;
+      rec.claim_token = null;
+    }
+    this.approvalClaimLocks.delete(expectedDigest);
   }
 
   public seedPost(post: WpPostRecord): void {
@@ -473,6 +586,7 @@ export class WpPluginEngine {
     if (!Number.isInteger(parsedPayload.seq) || parsedPayload.seq <= this.lastSeq) {
       return { status: 409, ok: false, error: 'seq_replay_rejected' };
     }
+    const prevSeq = this.lastSeq;
     this.lastSeq = parsedPayload.seq;
 
     switch (parsedPayload.command) {
@@ -480,7 +594,7 @@ export class WpPluginEngine {
         return { status: 200, ok: true };
 
       case 'apply':
-        return this.executeApply(parsedPayload, nowMs);
+        return this.executeApply(parsedPayload, nowMs, prevSeq);
 
       case 'restore':
         return this.executeRestore(parsedPayload);
@@ -520,7 +634,11 @@ export class WpPluginEngine {
     }
   }
 
-  private async executeApply(p: WpCommandPayload, nowMs: number): Promise<WpCommandResult> {
+  private async executeApply(
+    p: WpCommandPayload,
+    nowMs: number,
+    prevSeq: number
+  ): Promise<WpCommandResult> {
     if (this.ownerPolicy.local_stop) {
       return { status: 403, ok: false, error: 'owner_local_stop_active' };
     }
@@ -562,22 +680,23 @@ export class WpPluginEngine {
         return { status: 400, ok: false, error: 'invalid_byte_span' };
       }
 
-      const oldSlice = post.content.slice(byteStart, byteEnd);
       const sanitized = sanitizeWpKsesPost(p.replacement_html ?? '');
       const newContent = post.content.slice(0, byteStart) + sanitized + post.content.slice(byteEnd);
       const postImageSha = await sha256Hex(newContent);
 
-      // [C-17]: True 2-key local WP-Admin approval verification!
-      // NEVER trust `p.owner_wp_admin_confirmed` from the cloud payload!
+      // [C-17] & [#6]: True 2-key local WP-Admin approval verification!
+      // Compare FULL before/after HTML documents so text-only edits inside <h1>, <title>,
+      // <meta>, <link rel="canonical">, <a href>, and JSON-LD NEVER bypass touch_indexable_seo.
       const changeClass = p.change_class ?? '';
+      const seoChangedInFullDoc =
+        extractIndexableSeoSignature(post.content) !== extractIndexableSeoSignature(newContent);
       const touchesIndexableSeo =
         changeClass === 'touch_indexable_seo' ||
         changeClass === 'indexable_major' ||
-        SEO_INDEXABLE_TAG_RE.test(oldSlice) ||
-        SEO_INDEXABLE_TAG_RE.test(sanitized);
+        seoChangedInFullDoc;
 
-      const oldHosts = extractExternalHosts(oldSlice, this.homeUrl).join(',');
-      const newHosts = extractExternalHosts(sanitized, this.homeUrl).join(',');
+      const oldHosts = extractExternalHosts(post.content, this.homeUrl).join(',');
+      const newHosts = extractExternalHosts(newContent, this.homeUrl).join(',');
       const changesOutboundHosts = changeClass === 'change_outbound_hosts' || oldHosts !== newHosts;
 
       const requiresAdminConfirm =
@@ -587,6 +706,8 @@ export class WpPluginEngine {
 
       const inAllowedAuto = this.ownerPolicy.allowed_auto_classes.includes(changeClass);
 
+      let claimedApprovalDigest: string | null = null;
+      let claimedApprovalToken: string | null = null;
       if (requiresAdminConfirm || !inAllowedAuto) {
         const expectedDigest = await computeWpLocalApprovalDigest({
           siteId: this.siteId,
@@ -595,7 +716,8 @@ export class WpPluginEngine {
           afterSha256: postImageSha,
           commandSeq: p.seq,
         });
-        if (!this.consumeLocalWpAdminApproval(expectedDigest, nowMs)) {
+        const claimToken = this.claimLocalWpAdminApproval(expectedDigest, nowMs);
+        if (!claimToken) {
           return {
             status: 403,
             ok: false,
@@ -604,6 +726,8 @@ export class WpPluginEngine {
               : 'change_class_not_in_owner_local_policy',
           };
         }
+        claimedApprovalDigest = expectedDigest;
+        claimedApprovalToken = claimToken;
       }
 
       const promotionId = p.promotion_id ?? `promo_${p.seq}`;
@@ -618,8 +742,28 @@ export class WpPluginEngine {
         applied_at_gmt: new Date(nowMs).toISOString(),
       });
 
-      post.content = newContent;
-      post.modified_gmt = new Date(nowMs).toISOString();
+      try {
+        if (this.postUpdateHook) {
+          await this.postUpdateHook({ ...post }, newContent);
+        }
+        post.content = newContent;
+        post.modified_gmt = new Date(nowMs).toISOString();
+      } catch {
+        // [#7] Roll back claimed approval to `unused` and restore seq on wp_update_post failure
+        if (claimedApprovalDigest && claimedApprovalToken) {
+          this.releaseLocalWpAdminApproval(claimedApprovalDigest, claimedApprovalToken);
+        }
+        if (this.lastSeq === p.seq) {
+          this.lastSeq = prevSeq;
+        }
+        return { status: 500, ok: false, error: 'wp_update_post_failed' };
+      }
+
+      // [#7] Commit claimed approval (`claimed` -> `consumed`) ONLY after post update succeeds
+      if (claimedApprovalDigest && claimedApprovalToken) {
+        this.commitLocalWpAdminApproval(claimedApprovalDigest, claimedApprovalToken);
+      }
+
       this.dailyApplyCountByUtcDay.set(utcDay, usedToday + 1);
       this.cachePurgeLog.push(postId);
 
@@ -717,6 +861,10 @@ export function auditPhpPluginSource(phpSource: string): PhpStaticAuditResult {
     ['site_binding_mismatch', 'Site & home_url binding before seq advancement ([H-08])'],
     ['ugokilink_local_approvals', 'True 2-key local WP-Admin approval storage ([C-17])'],
     ['ugokilink_local_approve', 'WP-Admin nonce action for local 2-key approval ([C-17])'],
+    ['extractIndexableSeoSignature', 'Full before/after HTML document SEO comparison ([#6])'],
+    ['claimLocalWpAdminApproval', 'Atomic conditional approval claim ([#7])'],
+    ['releaseLocalWpAdminApproval', 'Approval rollback on post update failure ([#7])'],
+    ['add_option($lockOption', 'Per-digest atomic add_option claim lock ([#7])'],
     ['owner_daily_apply_cap_exceeded', 'Per-UTC-day daily_apply_cap enforcement ([H-08])'],
     ['$acquiredLock', 'Edit lock ownership guard in finally ([H-08])'],
     ['wp_check_post_lock', 'Concurrent editor post lock check'],

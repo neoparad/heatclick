@@ -202,13 +202,16 @@ export async function POST(req: NextRequest) {
     req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
     req.headers.get('x-real-ip')?.trim() ??
     undefined;
-  const senderThumbprint = req.headers.get('x-dpop-jkt')?.trim() ?? undefined;
+  const dpopProof = req.headers.get('dpop')?.trim() ?? undefined;
+  const httpUri = req.nextUrl ? `${req.nextUrl.origin}${req.nextUrl.pathname}` : undefined;
 
-  // [M-15]: Pass clientIp and senderThumbprint into verifySecretKey
+  // [M-15 / Codex #2]: Pass clientIp and signed RFC 9449 DPoP proof (never raw x-dpop-jkt!)
   const verified = ctx.pipeline.keyRegistry.verifySecretKey(bearer, {
     siteId,
     clientIp,
-    senderThumbprint,
+    dpopProof,
+    httpMethod: req.method,
+    httpUri,
     now,
   });
   if (!verified.ok) {

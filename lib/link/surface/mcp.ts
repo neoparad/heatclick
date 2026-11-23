@@ -334,7 +334,10 @@ export class LinkMcpServer {
     readonly body?: Readonly<Record<string, unknown>>;
     readonly bearerToken?: string;
     readonly sessionPrincipal?: VerifiedPrincipal;
-    readonly dpopThumbprint?: string;
+    readonly dpopProof?: string;
+    readonly httpMethod?: string;
+    readonly httpUri?: string;
+    readonly mtlsThumbprint?: string;
     readonly clientIp?: string;
     readonly callerSuppliedTenantId?: string;
     readonly now?: Date;
@@ -347,7 +350,10 @@ export class LinkMcpServer {
       bearerToken: params.bearerToken,
       sessionPrincipal: params.sessionPrincipal,
       clientIp: params.clientIp,
-      dpopThumbprint: params.dpopThumbprint,
+      dpopProof: params.dpopProof,
+      httpMethod: params.httpMethod,
+      httpUri: params.httpUri,
+      mtlsThumbprint: params.mtlsThumbprint,
       forbidPublicBrowserKey: true,
       now,
     });
@@ -370,7 +376,6 @@ export class LinkMcpServer {
         toolName,
         arguments: args,
         sessionPrincipal: principal,
-        dpopThumbprint: params.dpopThumbprint,
         clientIp: params.clientIp,
         now,
       });
@@ -477,7 +482,10 @@ export class LinkMcpServer {
     readonly arguments: Readonly<Record<string, unknown>>;
     readonly bearerToken?: string;
     readonly sessionPrincipal?: SurfaceInvocation['sessionPrincipal'];
-    readonly dpopThumbprint?: string;
+    readonly dpopProof?: string;
+    readonly httpMethod?: string;
+    readonly httpUri?: string;
+    readonly mtlsThumbprint?: string;
     readonly clientIp?: string;
     readonly now?: Date;
   }): SurfaceExecutionResult {
@@ -487,7 +495,10 @@ export class LinkMcpServer {
       bearerToken: params.bearerToken,
       sessionPrincipal: params.sessionPrincipal,
       clientIp: params.clientIp,
-      dpopThumbprint: params.dpopThumbprint,
+      dpopProof: params.dpopProof,
+      httpMethod: params.httpMethod,
+      httpUri: params.httpUri,
+      mtlsThumbprint: params.mtlsThumbprint,
       forbidPublicBrowserKey: true,
       now,
     });
@@ -548,7 +559,6 @@ export class LinkMcpServer {
       operationId: tool.operationId,
       channel: 'mcp',
       sessionPrincipal: auth.principal,
-      dpopThumbprint: params.dpopThumbprint,
       clientIp: params.clientIp,
       callerSuppliedTenantId,
       siteId,

@@ -770,41 +770,123 @@ export class AuthorizationGateway {
     return this.allow(req, now, 'R1_DRAFT_ALLOWED');
   }
 
-  private consumeVerifiedPasskeyApproval(
+  /**
+   * Read-only Passkey approval verification: checks existence, tenant/site binding,
+   * freshness, unconsumed state (unless `allowConsumed` is explicitly set for an exact
+   * idempotent replay), and action + rendered-diff hash match WITHOUT mutating `consumedAt`.
+   */
+  public verifyPasskeyApproval(params: {
+    readonly approvalId: string;
+    readonly tenantId: string;
+    readonly siteId?: string;
+    readonly action: string;
+    readonly actionPayload: unknown;
+    readonly allowConsumed?: boolean;
+    readonly now?: Date;
+  }):
+    | { readonly ok: true; readonly approval: PasskeyApprovalRecord }
+    | { readonly ok: false; readonly code: string; readonly reason: string } {
+    const now = params.now ?? new Date();
+    const { actionHash, renderedDiffHash } = computeActionAndDiffHash(
+      params.action,
+      params.actionPayload
+    );
+    const apr = this.approvals.get(params.approvalId);
+    if (
+      !apr ||
+      apr.tenantId !== params.tenantId ||
+      (params.siteId && apr.siteId !== '*' && apr.siteId !== params.siteId)
+    ) {
+      return { ok: false, code: 'APPROVAL_NOT_FOUND', reason: 'Passkey approval not found' };
+    }
+    if (apr.consumedAt && !params.allowConsumed) {
+      return {
+        ok: false,
+        code: 'APPROVAL_ALREADY_CONSUMED',
+        reason: 'Passkey approval has already been consumed',
+      };
+    }
+    if (!(apr.consumedAt && params.allowConsumed) && new Date(apr.expiresAt).getTime() <= now.getTime()) {
+      return { ok: false, code: 'APPROVAL_EXPIRED', reason: 'Passkey approval has expired' };
+    }
+    if (apr.actionHash !== actionHash || apr.renderedDiffHash !== renderedDiffHash) {
+      return {
+        ok: false,
+        code: 'APPROVAL_DIFF_MISMATCH',
+        reason: 'Passkey approval does not match action or rendered diff',
+      };
+    }
+    return { ok: true, approval: apr };
+  }
+
+  /**
+   * Atomically verifies and marks a single-use Passkey approval as consumed.
+   * Must be invoked ONLY after idempotency cache lookup and rate-limit checks pass.
+   */
+  public consumePasskeyApproval(params: {
+    readonly approvalId: string;
+    readonly tenantId: string;
+    readonly siteId?: string;
+    readonly action: string;
+    readonly actionPayload: unknown;
+    readonly now?: Date;
+  }):
+    | { readonly ok: true; readonly approval: PasskeyApprovalRecord }
+    | { readonly ok: false; readonly code: string; readonly reason: string } {
+    const now = params.now ?? new Date();
+    const check = this.verifyPasskeyApproval({
+      approvalId: params.approvalId,
+      tenantId: params.tenantId,
+      siteId: params.siteId,
+      action: params.action,
+      actionPayload: params.actionPayload,
+      allowConsumed: false,
+      now,
+    });
+    if (!check.ok) {
+      return check;
+    }
+    check.approval.consumedAt = now.toISOString();
+    return { ok: true, approval: check.approval };
+  }
+
+  private checkOrConsumePasskeyApproval(
     req: AuthorizationRequest,
     approvalId: string,
     actionPayload: unknown,
     now: Date,
     approvalUrl: string
   ):
-    | { readonly ok: true; readonly approval: PasskeyApprovalRecord }
+    | { readonly ok: true; readonly approval: PasskeyApprovalRecord; readonly deferred: boolean }
     | { readonly ok: false; readonly decision: AuthorizationDecision } {
-    const { actionHash, renderedDiffHash } = computeActionAndDiffHash(req.action, actionPayload);
-    const apr = this.approvals.get(approvalId);
-    if (
-      !apr ||
-      apr.tenantId !== req.principal.tenantId ||
-      (req.resource.siteId && apr.siteId !== '*' && apr.siteId !== req.resource.siteId)
-    ) {
-      return { ok: false, decision: this.denyPending(req, now, 'APPROVAL_NOT_FOUND', approvalUrl) };
+    if (req.deferApprovalConsumption) {
+      const verified = this.verifyPasskeyApproval({
+        approvalId,
+        tenantId: req.principal.tenantId,
+        siteId: req.resource.siteId,
+        action: req.action,
+        actionPayload,
+        allowConsumed: req.allowConsumedApprovalForReplay === true,
+        now,
+      });
+      if (!verified.ok) {
+        return { ok: false, decision: this.denyPending(req, now, verified.code, approvalUrl) };
+      }
+      return { ok: true, approval: verified.approval, deferred: !verified.approval.consumedAt };
     }
-    if (apr.consumedAt) {
-      return {
-        ok: false,
-        decision: this.denyPending(req, now, 'APPROVAL_ALREADY_CONSUMED', approvalUrl),
-      };
+
+    const consumed = this.consumePasskeyApproval({
+      approvalId,
+      tenantId: req.principal.tenantId,
+      siteId: req.resource.siteId,
+      action: req.action,
+      actionPayload,
+      now,
+    });
+    if (!consumed.ok) {
+      return { ok: false, decision: this.denyPending(req, now, consumed.code, approvalUrl) };
     }
-    if (new Date(apr.expiresAt).getTime() <= now.getTime()) {
-      return { ok: false, decision: this.denyPending(req, now, 'APPROVAL_EXPIRED', approvalUrl) };
-    }
-    if (apr.actionHash !== actionHash || apr.renderedDiffHash !== renderedDiffHash) {
-      return {
-        ok: false,
-        decision: this.denyPending(req, now, 'APPROVAL_DIFF_MISMATCH', approvalUrl),
-      };
-    }
-    apr.consumedAt = now.toISOString();
-    return { ok: true, approval: apr };
+    return { ok: true, approval: consumed.approval, deferred: false };
   }
 
   private enforceR2(req: AuthorizationRequest, now: Date): AuthorizationDecision {
@@ -813,19 +895,29 @@ export class AuthorizationGateway {
 
     // Path A: Valid single-use human passkey approval record
     if (req.passkeyApprovalId) {
-      const consumed = this.consumeVerifiedPasskeyApproval(
+      const checked = this.checkOrConsumePasskeyApproval(
         req,
         req.passkeyApprovalId,
         req.renderedDiff,
         now,
         approvalUrl
       );
-      if (!consumed.ok) {
-        return consumed.decision;
+      if (!checked.ok) {
+        return checked.decision;
       }
-      return this.allow(req, now, 'R2_APPROVED_BY_PASSKEY', {
-        approvalId: consumed.approval.approvalId,
+      const decision = this.allow(req, now, 'R2_APPROVED_BY_PASSKEY', {
+        approvalId: checked.approval.approvalId,
       });
+      if (checked.deferred) {
+        return {
+          ...decision,
+          pendingApprovalConsumption: {
+            approvalId: checked.approval.approvalId,
+            actionPayload: req.renderedDiff,
+          },
+        };
+      }
+      return decision;
     }
 
     // Path B: Active Autonomy Envelope + sender-constrained credential
@@ -1001,20 +1093,28 @@ export class AuthorizationGateway {
     const requiresVerifiedPasskey =
       isSiteOrTenantDestruction || overDailySubjectCap || req.passkeyApprovalId !== undefined;
 
+    let pendingApprovalConsumption: AuthorizationDecision['pendingApprovalConsumption'];
+
     if (requiresVerifiedPasskey) {
       if (req.passkeyApprovalId !== undefined) {
         if (!req.passkeyApprovalId.trim()) {
           return this.denyPending(req, now, 'APPROVAL_NOT_FOUND', approvalUrl);
         }
-        const consumed = this.consumeVerifiedPasskeyApproval(
+        const checked = this.checkOrConsumePasskeyApproval(
           req,
           req.passkeyApprovalId,
           diffPayload,
           now,
           approvalUrl
         );
-        if (!consumed.ok) {
-          return consumed.decision;
+        if (!checked.ok) {
+          return checked.decision;
+        }
+        if (checked.deferred) {
+          pendingApprovalConsumption = {
+            approvalId: checked.approval.approvalId,
+            actionPayload: diffPayload,
+          };
         }
       } else if (
         req.principal.credentialKind === 'session_cookie' &&
@@ -1090,6 +1190,7 @@ export class AuthorizationGateway {
       measureStatus: 'pending',
       reason: 'Two-phase destruction scheduled; undo token issued for rollback window',
       auditEntryId: entry.auditId,
+      ...(pendingApprovalConsumption ? { pendingApprovalConsumption } : {}),
       destructionRequest: {
         requestId,
         undoToken,

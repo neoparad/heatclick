@@ -25,6 +25,7 @@ import { getConstant } from '../../../packages/contract/ledgers';
 import { canonicalJson, sha256Hex } from '../../../packages/contract/response';
 import {
   computeActionAndDiffHash,
+  type FieldProvenance,
   type PasskeyApprovalRecord,
   type VerifiedPrincipal,
 } from '../auth';
@@ -88,12 +89,14 @@ export type RegisteredSlotDefinition =
       readonly slotName: string;
       readonly provenance: 'closed_enum';
       readonly allowedValues: readonly (string | number | boolean)[];
+      readonly envelopeProvenance?: Exclude<FieldProvenance, 'open'>;
     }
   | {
       readonly slotName: string;
       readonly provenance: 'closed_bounded_number';
       readonly min: number;
       readonly max: number;
+      readonly envelopeProvenance?: Exclude<FieldProvenance, 'open'>;
     }
   | {
       readonly slotName: string;
@@ -102,6 +105,7 @@ export type RegisteredSlotDefinition =
         | 'approved_asset_ref'
         | 'generated_checked'
         | OpenFieldProvenance;
+      readonly envelopeProvenance?: Exclude<FieldProvenance, 'open'>;
     };
 
 export type RegisteredSlotCatalog =
@@ -319,7 +323,8 @@ export class SingleUsePasskeyApprovalVerifier implements PasskeyApprovalVerifier
   private readonly consumedApprovalIds = new Set<string>();
 
   constructor(options?: { readonly requireRegisteredApproval?: boolean }) {
-    this.registeredApprovals = options?.requireRegisteredApproval ? new Map() : null;
+    const requireRegistered = options?.requireRegisteredApproval ?? true;
+    this.registeredApprovals = requireRegistered ? new Map() : null;
   }
 
   public registerApproval(record: PasskeyApprovalRecord): void {
@@ -393,10 +398,6 @@ export class SingleUsePasskeyApprovalVerifier implements PasskeyApprovalVerifier
   }
 }
 
-const DEFAULT_PROCESS_PASSKEY_VERIFIER = new SingleUsePasskeyApprovalVerifier({
-  requireRegisteredApproval: false,
-});
-
 export interface AgentPublishGateContext {
   readonly envelope: SealedAutonomyEnvelope;
   readonly guardrails: BusinessGuardrailSnapshot;
@@ -409,9 +410,35 @@ export interface AgentPublishGateContext {
   readonly slotCatalog?: RegisteredSlotCatalog;
   readonly allowedOwnHosts?: ReadonlySet<string>;
   readonly passkeyApprovalVerifier?: PasskeyApprovalVerifier;
+  readonly approvalVerifier?: PasskeyApprovalVerifier;
   readonly isolatedGenerator?: IsolatedCopyGenerator;
   readonly entailmentChecker?: IndependentEntailmentChecker;
   readonly nowIso: string;
+}
+
+function resolveEnvelopeFieldProvenance(
+  registeredSlot: RegisteredSlotDefinition | undefined,
+  fieldProvenance: AnyPublishFieldInput['provenance']
+): FieldProvenance {
+  if (registeredSlot?.envelopeProvenance) {
+    return registeredSlot.envelopeProvenance;
+  }
+  const authoritativeProvenance = registeredSlot?.provenance ?? fieldProvenance;
+  switch (authoritativeProvenance) {
+    case 'closed_enum':
+    case 'closed_bounded_number':
+      return 'closed_enum';
+    case 'server_lookup_id':
+      return 'link_table';
+    case 'approved_asset_ref':
+      return 'copy_library';
+    case 'generated_checked':
+      return 'generated_checked';
+    case 'open_free_text':
+    case 'open_selector':
+    case 'open_url':
+      return 'open';
+  }
 }
 
 export interface AgentPublishDecision {
@@ -663,6 +690,7 @@ export function evaluateAndSignAgentPublish(
 
   // 3. [C-16]: Exhaustive `switch (field.provenance)` — `default:` IMMEDIATELY FAILS CLOSED!
   const generatedCopies: Record<string, string> = {};
+  const fieldProvenances: FieldProvenance[] = [];
 
   for (const field of req.fields) {
     if (
@@ -911,6 +939,8 @@ export function evaluateAndSignAgentPublish(
         };
       }
     }
+
+    fieldProvenances.push(resolveEnvelopeFieldProvenance(registeredSlot, field.provenance));
   }
 
   // 4. If ANY open field OR mechanically/explicitly forbidden target is present -> REQUIRE fresh single-use Passkey approval!
@@ -935,6 +965,18 @@ export function evaluateAndSignAgentPublish(
       };
     }
 
+    const verifier = ctx.passkeyApprovalVerifier ?? ctx.approvalVerifier;
+    if (!verifier) {
+      return {
+        signed: false,
+        status: 'rejected',
+        code: 'APPROVAL_VERIFIER_REQUIRED',
+        reason:
+          'Human approval verifier is uninjected; fail-closed rejection because Gateway approval registration cannot be verified',
+        openFieldsDetected,
+      };
+    }
+
     const hashTargetPayload: Record<string, unknown> = {
       pagePath: req.pagePath,
       bundleTier: req.bundleTier,
@@ -944,7 +986,6 @@ export function evaluateAndSignAgentPublish(
     };
     const expectedHashes = computeActionAndDiffHash(req.action, hashTargetPayload);
 
-    const verifier = ctx.passkeyApprovalVerifier ?? DEFAULT_PROCESS_PASSKEY_VERIFIER;
     const verification = verifier.verifyAndConsume({
       approval,
       tenantId: ctx.envelope.spec.tenantId,
@@ -982,11 +1023,12 @@ export function evaluateAndSignAgentPublish(
     };
   }
 
-  // 5. Pure autonomous path: enforce sealed human envelope bounds, guardrails & budgets
+  // 5. Pure autonomous path: enforce sealed human envelope bounds, provenance allowlist, guardrails & budgets
   const envCheck = evaluateEnvelopePublishAllowance({
     envelope: ctx.envelope,
     action: req.action,
     pagePath: req.pagePath,
+    fieldProvenances,
     requestedExposedUnits: req.requestedExposedUnits,
     requestedConversionsAtRisk: req.requestedConversionsAtRisk,
     requestedCostUnits: req.requestedCostUnits,

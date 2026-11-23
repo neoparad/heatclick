@@ -527,3 +527,92 @@ describe('Wave 8 Adversarial Regressions: [H-30] Local AI Scorer Rigor & Feature
     ).toThrow(/Classifier feature/)
   })
 })
+
+// ===========================================================================
+// Wave 9 Codex Remediation Regression Tests: [#28], [#29]
+// ===========================================================================
+
+describe('Wave 9 Codex Remediation Regressions: [#28] Empty Intersection & [#29] 60D Parity', () => {
+  test('[#28] flags assumption_inconsistent / empty intersection when Wilson dataLower > disclosed priorUpper (0.20) instead of clamping to [0.20, 0.20]', () => {
+    // High wild flagged rate (~45%) with tight FPR (~0%) and high TPR (~95%) yields dataLower > 0.35 > priorUpper (0.20)
+    const res = boundWildAiPrevalenceAndLift({
+      wild_flagged_count: 450,
+      wild_scorable_n: 1000,
+      panel_false_positives: 0,
+      panel_n: 1000,
+      positive_recall_hits: 950,
+      positive_recall_trials: 1000,
+      disclosed_pi_max: 0.2,
+    })
+
+    expect(res.data_lower).not.toBeNull()
+    expect(res.data_lower!).toBeGreaterThan(0.35)
+    expect(res.disclosed_pi_max).toBe(0.2)
+
+    expect(res.status).toBe('assumption_inconsistent')
+    expect(res.identifiable).toBe(false)
+    expect(res.consistent).toBe(false)
+    expect(res.assumption_mismatch).toBe(true)
+    expect(res.intersection_empty).toBe(true)
+    expect(res.lower).toBeNull()
+    expect(res.upper).toBeNull()
+    expect(res.prevalence_lower).toBeNull()
+    expect(res.prevalence_upper).toBeNull()
+  })
+
+  test('[#29] enforces exact 60D dimensional parity before Gaussian log-likelihood ratio (rejects 57D human vs 60D AI profile)', () => {
+    const x60 = new Array<number>(60).fill(0.5)
+    const mean57 = new Array<number>(57).fill(0.5)
+    const mean60 = new Array<number>(60).fill(0.5)
+
+    // Direct Gaussian log-density rejects 57D centroid, 57D observation, 57D diagonalVars, or non-positive scale
+    expect(() => computeGaussianLogDensity60(x60, mean57, 1)).toThrow(/dimension_mismatch/)
+    expect(() => computeGaussianLogDensity60(mean57, mean60, 1)).toThrow(/60D dimensional parity/)
+    expect(() => computeGaussianLogDensity60(x60, mean60, 1, new Array<number>(57).fill(1))).toThrow(
+      /dimension_mismatch/,
+    )
+    expect(() => computeGaussianLogDensity60(x60, mean60, 0)).toThrow(/invalid_scale/)
+    expect(() => computeGaussianLogDensity60(x60, mean60, -1)).toThrow(/invalid_scale/)
+
+    // Scorer with 57D human profile vs 60D AI profile (identical means=0.5, unit std=1) MUST mark unscorable,
+    // NOT return the ~15.75x normalization-constant bias!
+    const validCert = buildLocalAiModelCertificate({
+      certificate_id: 'cert_29',
+      model_version: 'local-ai/1',
+      issued_at: '2026-11-20T00:00:00Z',
+      positive_family_recalls: {
+        f1: 0.9, f2: 0.9, f3: 0.9, f4: 0.9, f5: 0.9, f6: 0.9, f7: 0.9, f8: 0.9,
+      },
+      unseen_framework_recalls: { f_unseen: 0.7 },
+      threshold_panel_n: 300,
+      test_panel_n: 1000,
+      test_panel_false_positives: 0,
+      panel_cohort_coverage: {
+        assistive_tech_included: true,
+        input_methods_included: true,
+        ad_blockers_included: true,
+      },
+      wild_flagged_rate: 0.01,
+      panel_vs_wild_auc: 0.5,
+    })
+
+    const mismatchedScorer = new LocalAiLikelihoodScorer({
+      certificate: validCert,
+      human_centroid_60: mean57, // 57D!
+      human_scale: 1,
+      family_profiles: [{ family_id: 'f1', centroid_60: mean60, scale: 1 }], // 60D!
+    })
+    const obsBytes = compressBehavioralStats60({ stats_60: x60 })
+    const scored = mismatchedScorer.scorePv({
+      pv_id: 'pv_dim_mismatch_29',
+      pointer_type: 'fine',
+      interaction_event_count: 25,
+      compressed_stats_60: obsBytes,
+    })
+
+    expect(scored.scorable).toBe(false)
+    expect(scored.status).toBe('unscorable')
+    expect(scored.max_likelihood_ratio).toBeNull()
+    expect(scored.unscorable_reason).toMatch(/dimension_mismatch/)
+  })
+})

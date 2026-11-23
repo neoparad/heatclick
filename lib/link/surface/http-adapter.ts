@@ -147,8 +147,13 @@ export function setSurfaceRuntimeContext(ctx: SurfaceRuntimeContext | null): voi
 export function extractBearerToken(req: NextRequest): string | undefined {
   const auth = req.headers.get('authorization');
   if (!auth) return undefined;
-  const match = /^Bearer\s+(.+)$/i.exec(auth.trim());
+  const match = /^(?:Bearer|DPoP)\s+(.+)$/i.exec(auth.trim());
   return match ? match[1].trim() : undefined;
+}
+
+export function normalizeRequestHttpUri(req: NextRequest): string {
+  const u = req.nextUrl;
+  return `${u.protocol}//${u.host}${u.pathname}`;
 }
 
 export function extractQueryParams(req: NextRequest): Record<string, string> {
@@ -234,7 +239,9 @@ export async function handleV1RestRoute(params: {
       params.req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
       params.req.headers.get('x-real-ip')?.trim() ??
       undefined,
-    dpopThumbprint: params.req.headers.get('x-dpop-jkt') ?? undefined,
+    dpopProof: params.req.headers.get('dpop') ?? undefined,
+    httpMethod: params.req.method,
+    httpUri: normalizeRequestHttpUri(params.req),
     callerSuppliedTenantId,
     siteId: params.siteId,
     idempotencyKey: params.req.headers.get('idempotency-key') ?? undefined,
@@ -275,7 +282,9 @@ export async function handleMcpGetRoute(req: NextRequest): Promise<NextResponse>
       sessionId: queryParams.sessionId,
     },
     bearerToken: extractBearerToken(req),
-    dpopThumbprint: req.headers.get('x-dpop-jkt') ?? undefined,
+    dpopProof: req.headers.get('dpop') ?? undefined,
+    httpMethod: req.method,
+    httpUri: normalizeRequestHttpUri(req),
     clientIp:
       req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
       req.headers.get('x-real-ip')?.trim() ??
@@ -313,7 +322,9 @@ export async function handleMcpPostRoute(req: NextRequest): Promise<NextResponse
     method,
     body,
     bearerToken: extractBearerToken(req),
-    dpopThumbprint: req.headers.get('x-dpop-jkt') ?? undefined,
+    dpopProof: req.headers.get('dpop') ?? undefined,
+    httpMethod: req.method,
+    httpUri: normalizeRequestHttpUri(req),
     clientIp:
       req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
       req.headers.get('x-real-ip')?.trim() ??

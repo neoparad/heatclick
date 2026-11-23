@@ -2,6 +2,7 @@ import type { Int8ModelArtifactPayload } from '../foundation/int8-tree-runtime';
 import {
   AdapterDeletionManager,
   BlindLabelingViolationError,
+  InsufficientSplitComponentsError,
   JevTeacherProhibitedError,
   JevTrainingProhibitedError,
   UnmanagedDestinationDeletionGuardError,
@@ -709,5 +710,65 @@ describe('Bundle 4-H: §8.14 Fine-Tuning Pipeline (Zero-Jev Provenance, 3-Way Sp
     for (const ownerW of byOwner.values()) {
       expect(ownerW / totalW).toBeLessThanOrEqual(0.05 + 1e-9);
     }
+  });
+
+  test('[#23] single-site corpus with 10 distinct page lineages populates all 3 splits with zero overlap, while 1-lineage corpus fails closed with INSUFFICIENT_SPLIT_COMPONENTS', () => {
+    // 1. Single-site corpus with 10 distinct page lineages sharing the exact same site_id
+    const singleSiteExamples: CandidateTrainingExample[] = Array.from({ length: 10 }, (_, i) =>
+      makeCleanExample(700 + i, {
+        site_id: 'site_single_main',
+        page_lineage_id: `single_site_lineage_${i}`,
+        public_text: `単一サイトの独立ページ番号${i}。料金体系やサポート手順の個別ガイド本文です。`,
+      })
+    );
+
+    const singleSiteDs = buildThreeWayTrainingDataset({
+      examples: singleSiteExamples,
+      scope: 'shared_adapter',
+      taskKind: 'section_reading',
+      seed: 'single_site_10_lineages',
+    });
+
+    expect(singleSiteDs.train.length).toBeGreaterThan(0);
+    expect(singleSiteDs.select_tune.length).toBeGreaterThan(0);
+    expect(singleSiteDs.final_eval.length).toBeGreaterThan(0);
+    expect(singleSiteDs.overlap_audit).toEqual({
+      passed: true,
+      overlapping_page_lineages: 0,
+      overlapping_near_dup_clusters: 0,
+      overlapping_experiment_ids: 0,
+    });
+
+    // 2. 1-lineage corpus (cannot populate 3 disjoint splits) MUST fail closed with INSUFFICIENT_SPLIT_COMPONENTS!
+    const oneLineageExamples: CandidateTrainingExample[] = [
+      makeCleanExample(801, {
+        site_id: 'site_single_main',
+        page_lineage_id: 'only_one_lineage',
+        public_text: '単一系譜の最初のセクション本文です。',
+      }),
+      makeCleanExample(802, {
+        site_id: 'site_single_main',
+        page_lineage_id: 'only_one_lineage',
+        public_text: '単一系譜の二番目のセクション本文です。',
+      }),
+    ];
+
+    expect(() =>
+      buildThreeWayTrainingDataset({
+        examples: oneLineageExamples,
+        scope: 'shared_adapter',
+        taskKind: 'section_reading',
+        seed: 'one_lineage_fail_closed',
+      })
+    ).toThrow(InsufficientSplitComponentsError);
+
+    expect(() =>
+      buildThreeWayTrainingDataset({
+        examples: oneLineageExamples,
+        scope: 'shared_adapter',
+        taskKind: 'section_reading',
+        seed: 'one_lineage_fail_closed',
+      })
+    ).toThrow(/INSUFFICIENT_SPLIT_COMPONENTS/);
   });
 });

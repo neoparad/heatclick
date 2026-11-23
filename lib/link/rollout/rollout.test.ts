@@ -340,7 +340,18 @@ describe('lib/link/rollout/origin-adapter (§10.8, §10.9, del.D20)', () => {
     expect(rejectedNoFpChange.status).toBe(422);
     expect(rejectedNoFpChange.error).toContain('links_fp');
 
-    // Valid apply changing links_fp
+    // Valid apply changing links_fp (modifying <a href> requires local WP 2-key admin approval per Codex #6!)
+    const updatedHtml = `${initialHtml.slice(0, 20)}<a href="/new">New</a>`;
+    const localApproval = await engine.recordLocalWpAdminApproval({
+      hasManageOptionsCapability: true,
+      wpAdminNonceVerified: true,
+      postId: 42,
+      beforeSha256: sha256Hex(initialHtml),
+      afterSha256: sha256Hex(updatedHtml),
+      commandSeq: 1,
+    });
+    expect(localApproval.ok).toBe(true);
+
     const applied = await adapter.applyWithVersionCheck({
       promotionId: 'promo_good_link',
       postId: 42,

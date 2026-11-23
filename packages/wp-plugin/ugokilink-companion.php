@@ -211,6 +211,8 @@ final class UgokiLink_Companion_Plugin
             'approved_by_user_id' => get_current_user_id(),
             'approved_at_unix' => $nowUnix,
             'expires_at_unix' => $nowUnix + $boundedTtl,
+            'state' => 'unused',
+            'claim_token' => null,
             'consumed' => false,
         ];
         update_option(self::OPTION_LOCAL_APPROVALS, $stored, false);
@@ -219,28 +221,83 @@ final class UgokiLink_Companion_Plugin
     }
 
     /**
-     * Verifies and single-use consumes a local WP-Admin approval record (`[C-17]`).
+     * Atomically claims an unused local WP-Admin approval (`unused` -> `claimed`) using a
+     * per-digest `add_option` lock so concurrent deliveries cannot double-consume (`[#7]`).
      */
-    private static function consumeLocalWpAdminApproval(string $expectedDigest): bool
+    private static function claimLocalWpAdminApproval(string $expectedDigest): ?string
     {
+        $lockOption = 'ugk_approval_claim_' . $expectedDigest;
+        $claimToken = bin2hex(random_bytes(16));
+
+        // Atomic compare-and-set via MySQL UNIQUE option_name on wp_options
+        if (!add_option($lockOption, $claimToken, '', false)) {
+            return null;
+        }
+
         $stored = get_option(self::OPTION_LOCAL_APPROVALS, []);
         if (!is_array($stored) || !isset($stored[$expectedDigest]) || !is_array($stored[$expectedDigest])) {
-            return false;
+            delete_option($lockOption);
+            return null;
         }
         $rec = $stored[$expectedDigest];
         $nowUnix = time();
         $recDigest = isset($rec['digest']) && is_string($rec['digest']) ? $rec['digest'] : '';
         $expiresAt = isset($rec['expires_at_unix']) ? (int) $rec['expires_at_unix'] : 0;
-        $alreadyConsumed = !empty($rec['consumed']);
+        $state = isset($rec['state']) && is_string($rec['state'])
+            ? $rec['state']
+            : (!empty($rec['consumed']) ? 'consumed' : 'unused');
 
-        if ($alreadyConsumed || $expiresAt <= $nowUnix || !hash_equals($expectedDigest, $recDigest)) {
-            return false;
+        if ($state !== 'unused' || !empty($rec['consumed']) || $expiresAt <= $nowUnix || !hash_equals($expectedDigest, $recDigest)) {
+            delete_option($lockOption);
+            return null;
         }
 
-        $stored[$expectedDigest]['consumed'] = true;
-        $stored[$expectedDigest]['consumed_at_unix'] = $nowUnix;
+        $stored[$expectedDigest]['state'] = 'claimed';
+        $stored[$expectedDigest]['claim_token'] = $claimToken;
+        $stored[$expectedDigest]['claimed_at_unix'] = $nowUnix;
         update_option(self::OPTION_LOCAL_APPROVALS, $stored, false);
-        return true;
+        return $claimToken;
+    }
+
+    /**
+     * Commits a previously claimed local approval (`claimed` -> `consumed`) after post update succeeds (`[#7]`).
+     */
+    private static function commitLocalWpAdminApproval(string $expectedDigest, string $claimToken): void
+    {
+        $stored = get_option(self::OPTION_LOCAL_APPROVALS, []);
+        if (is_array($stored) && isset($stored[$expectedDigest]) && is_array($stored[$expectedDigest])) {
+            $recToken = isset($stored[$expectedDigest]['claim_token']) && is_string($stored[$expectedDigest]['claim_token'])
+                ? $stored[$expectedDigest]['claim_token']
+                : '';
+            if (($stored[$expectedDigest]['state'] ?? '') === 'claimed' && hash_equals($claimToken, $recToken)) {
+                $stored[$expectedDigest]['state'] = 'consumed';
+                $stored[$expectedDigest]['consumed'] = true;
+                $stored[$expectedDigest]['claim_token'] = null;
+                $stored[$expectedDigest]['consumed_at_unix'] = time();
+                update_option(self::OPTION_LOCAL_APPROVALS, $stored, false);
+            }
+        }
+        delete_option('ugk_approval_claim_' . $expectedDigest);
+    }
+
+    /**
+     * Releases a previously claimed local approval (`claimed` -> `unused`) when post update fails (`[#7]`).
+     */
+    private static function releaseLocalWpAdminApproval(string $expectedDigest, string $claimToken): void
+    {
+        $stored = get_option(self::OPTION_LOCAL_APPROVALS, []);
+        if (is_array($stored) && isset($stored[$expectedDigest]) && is_array($stored[$expectedDigest])) {
+            $recToken = isset($stored[$expectedDigest]['claim_token']) && is_string($stored[$expectedDigest]['claim_token'])
+                ? $stored[$expectedDigest]['claim_token']
+                : '';
+            if (($stored[$expectedDigest]['state'] ?? '') === 'claimed' && hash_equals($claimToken, $recToken)) {
+                $stored[$expectedDigest]['state'] = 'unused';
+                $stored[$expectedDigest]['consumed'] = false;
+                $stored[$expectedDigest]['claim_token'] = null;
+                update_option(self::OPTION_LOCAL_APPROVALS, $stored, false);
+            }
+        }
+        delete_option('ugk_approval_claim_' . $expectedDigest);
     }
 
     /**
@@ -357,6 +414,7 @@ final class UgokiLink_Companion_Plugin
         }
 
         update_option(self::OPTION_LAST_SEQ, $seq, false);
+        $payload['__prev_seq'] = $lastSeq;
         return ['ok' => true, 'payload' => $payload];
     }
 
@@ -400,6 +458,76 @@ final class UgokiLink_Companion_Plugin
             'durability' => 'origin_db',
             'owner_local_policy' => self::getOwnerLocalPolicy(),
         ], 200);
+    }
+
+    /**
+     * Extracts canonical indexable SEO nodes from a FULL HTML document (`[#6]`):
+     * `<h1>`, `<title>`, `<meta>`, `<link rel="canonical">`, `<a href>` (href/rel attrs),
+     * and `<script type="application/ld+json">`.
+     * Comparing full `before_html` vs `after_html` catches text-only edits inside existing tags!
+     */
+    private static function extractIndexableSeoSignature(string $html): string
+    {
+        $parts = [];
+
+        // 1. <h1>...</h1> and <title>...</title> (full attributes + inner text/content)
+        if (preg_match_all('/<\s*(h1|title)\b([^>]*)>([\s\S]*?)<\/\s*\1\s*>/i', $html, $m, PREG_SET_ORDER)) {
+            foreach ($m as $match) {
+                $tag = strtolower($match[1]);
+                $attrs = preg_replace('/\s+/', ' ', trim($match[2]));
+                $body = preg_replace('/\s+/', ' ', trim($match[3]));
+                $parts[] = $tag . '[' . $attrs . ']=' . $body;
+            }
+        }
+
+        // 2. <meta ...> tags
+        if (preg_match_all('/<\s*meta\b([^>]*)>/i', $html, $m, PREG_SET_ORDER)) {
+            foreach ($m as $match) {
+                $attrs = preg_replace('/\s+/', ' ', trim($match[1]));
+                $parts[] = 'meta[' . $attrs . ']';
+            }
+        }
+
+        // 3. <link ... rel="canonical" ...> tags
+        if (preg_match_all('/<\s*link\b([^>]*)>/i', $html, $m, PREG_SET_ORDER)) {
+            foreach ($m as $match) {
+                $attrs = preg_replace('/\s+/', ' ', trim($match[1]));
+                if (preg_match('/\brel\s*=\s*(?:"[^"]*\bcanonical\b[^"]*"|\'[^\']*\bcanonical\b[^\']*\'|canonical\b)/i', (string) $attrs) === 1) {
+                    $parts[] = 'link_canonical[' . $attrs . ']';
+                }
+            }
+        }
+
+        // 4. <a ... href=...> tags (href & rel attributes)
+        if (preg_match_all('/<\s*a\b([^>]*)>/i', $html, $m, PREG_SET_ORDER)) {
+            foreach ($m as $match) {
+                $attrs = (string) $match[1];
+                $href = '';
+                $rel = '';
+                if (preg_match('/\bhref\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))/i', $attrs, $hm) === 1) {
+                    $href = $hm[1] !== '' ? $hm[1] : ($hm[2] !== '' ? $hm[2] : ($hm[3] ?? ''));
+                }
+                if (preg_match('/\brel\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))/i', $attrs, $rm) === 1) {
+                    $rel = $rm[1] !== '' ? $rm[1] : ($rm[2] !== '' ? $rm[2] : ($rm[3] ?? ''));
+                }
+                if ($href !== '') {
+                    $parts[] = 'a[href=' . trim($href) . ';rel=' . trim($rel) . ']';
+                }
+            }
+        }
+
+        // 5. <script type="application/ld+json">...</script>
+        if (preg_match_all('/<\s*script\b([^>]*)>([\s\S]*?)<\/\s*script\s*>/i', $html, $m, PREG_SET_ORDER)) {
+            foreach ($m as $match) {
+                $attrs = (string) $match[1];
+                if (preg_match('/\btype\s*=\s*(?:"application\/ld\+json"|\'application\/ld\+json\'|application\/ld\+json\b)/i', $attrs) === 1) {
+                    $body = preg_replace('/\s+/', ' ', trim($match[2]));
+                    $parts[] = 'ld_json=' . $body;
+                }
+            }
+        }
+
+        return implode("\n", $parts);
     }
 
     /**
@@ -509,19 +637,21 @@ final class UgokiLink_Companion_Plugin
                 . substr($currentContent, $byteEnd);
             $postImageHash = hash('sha256', $newContent);
 
-            // 4. [C-17]: True 2-key local WP-Admin approval verification!
-            // Cloud payload fields are NEVER trusted to waive local policy; approval MUST come
-            // from `ugokilink_local_approvals` in local `wp_options` matching exact before/after SHA-256 + seq.
-            $seoTagRe = '/<\s*\/?\s*(?:title|h1)\b|<\s*link\b[^>]*rel\s*=\s*["\']?canonical|<\s*meta\b[^>]*name\s*=\s*["\']?robots/i';
+            // 4. [C-17] & [#6]: True 2-key local WP-Admin approval verification!
+            // Compare FULL before/after HTML documents so text-only edits inside <h1>, <title>,
+            // <meta>, <link rel="canonical">, <a href>, and JSON-LD NEVER bypass touch_indexable_seo.
+            $seoChangedInFullDoc = !hash_equals(
+                self::extractIndexableSeoSignature($currentContent),
+                self::extractIndexableSeoSignature($newContent)
+            );
             $touchesIndexableSeo =
                 $changeClass === 'touch_indexable_seo'
                 || $changeClass === 'indexable_major'
-                || preg_match($seoTagRe, $oldSlice) === 1
-                || preg_match($seoTagRe, $sanitizedFragment) === 1;
+                || $seoChangedInFullDoc;
 
             $changesOutboundHosts =
                 $changeClass === 'change_outbound_hosts'
-                || self::extractExternalHosts($oldSlice) !== self::extractExternalHosts($sanitizedFragment);
+                || self::extractExternalHosts($currentContent) !== self::extractExternalHosts($newContent);
 
             $requiresAdminConfirm =
                 in_array($changeClass, $policy['require_admin_confirmation_classes'], true)
@@ -530,6 +660,8 @@ final class UgokiLink_Companion_Plugin
 
             $inAllowedAuto = in_array($changeClass, $policy['allowed_auto_classes'], true);
 
+            $claimedApprovalDigest = null;
+            $claimedApprovalToken = null;
             if ($requiresAdminConfirm || !$inAllowedAuto) {
                 $expectedApprovalDigest = self::computeLocalApprovalDigest(
                     $siteId,
@@ -538,12 +670,15 @@ final class UgokiLink_Companion_Plugin
                     $postImageHash,
                     $seq
                 );
-                if (!self::consumeLocalWpAdminApproval($expectedApprovalDigest)) {
+                $claimToken = self::claimLocalWpAdminApproval($expectedApprovalDigest);
+                if ($claimToken === null) {
                     $errCode = $requiresAdminConfirm
                         ? 'owner_local_policy_requires_admin_confirmation'
                         : 'change_class_not_in_owner_local_policy';
                     return new \WP_REST_Response(['error' => $errCode], 403);
                 }
+                $claimedApprovalDigest = $expectedApprovalDigest;
+                $claimedApprovalToken = $claimToken;
             }
 
             // 5. Persist immutable pre-image keyed by promotion_id BEFORE mutating post
@@ -561,7 +696,19 @@ final class UgokiLink_Companion_Plugin
             ], true);
 
             if (is_wp_error($result)) {
+                // [#7] Roll back claimed approval to `unused` so a clean retry succeeds
+                if ($claimedApprovalDigest !== null && $claimedApprovalToken !== null) {
+                    self::releaseLocalWpAdminApproval($claimedApprovalDigest, $claimedApprovalToken);
+                }
+                if (isset($payload['__prev_seq']) && (int) get_option(self::OPTION_LAST_SEQ, 0) === $seq) {
+                    update_option(self::OPTION_LAST_SEQ, (int) $payload['__prev_seq'], false);
+                }
                 return new \WP_REST_Response(['error' => 'wp_update_post_failed'], 500);
+            }
+
+            // [#7] Commit claimed approval (`claimed` -> `consumed`) ONLY after post update succeeds
+            if ($claimedApprovalDigest !== null && $claimedApprovalToken !== null) {
+                self::commitLocalWpAdminApproval($claimedApprovalDigest, $claimedApprovalToken);
             }
 
             // Increment per-UTC-day apply counter (pruning stale days)

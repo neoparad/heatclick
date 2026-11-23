@@ -176,6 +176,10 @@ export interface RecommendInvocation {
   readonly bearerToken?: string;
   readonly sessionPrincipal?: VerifiedPrincipal;
   readonly clientIp?: string;
+  readonly dpopProof?: string;
+  readonly httpMethod?: string;
+  readonly httpUri?: string;
+  readonly mtlsThumbprint?: string;
   readonly dpopThumbprint?: string;
   readonly callerSuppliedTenantId?: string;
   readonly requestedRevision?: string | null;
@@ -216,6 +220,7 @@ interface SafeSerializedArticleItem {
   readonly title: UntrustedValue;
   readonly url: UntrustedValue;
   readonly display_prob: VerifiedMetricValue<number>;
+  readonly slot_cond_prob: VerifiedMetricValue<number>;
   readonly click_only_evidence: boolean;
 }
 
@@ -265,19 +270,27 @@ function resolvePrincipal(
     return pipeline.keyRegistry.verifySecretKey(raw, {
       clientIp: inv.clientIp,
       siteId,
-      senderThumbprint: inv.dpopThumbprint,
+      dpopProof: inv.dpopProof,
+      httpMethod: inv.httpMethod,
+      httpUri: inv.httpUri,
+      mtlsThumbprint: inv.mtlsThumbprint,
       now,
     });
   }
   if (raw.startsWith('ugk_oauth_')) {
     return pipeline.keyRegistry.verifyMcpOAuthToken(raw, {
-      dpopThumbprint: inv.dpopThumbprint,
+      dpopProof: inv.dpopProof,
+      httpMethod: inv.httpMethod,
+      httpUri: inv.httpUri,
       now,
     });
   }
   if (raw.startsWith('ugk_oemx_')) {
     return pipeline.keyRegistry.verifyOemExchangedToken(raw, {
-      senderThumbprint: inv.dpopThumbprint,
+      dpopProof: inv.dpopProof,
+      httpMethod: inv.httpMethod,
+      httpUri: inv.httpUri,
+      mtlsThumbprint: inv.mtlsThumbprint,
       now,
     });
   }
@@ -661,9 +674,14 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
         rank: createDataLayerMetric(entry.rank, `${ref.ref_id}:rank:${idx}`, { createdAt: nowIso }),
         title: wrapUntrusted(entry.item.item.title, 'page_content'),
         url: wrapUntrusted(entry.item.item.url_key_v2, 'url'),
-        display_prob: createModelRegistryMetric(entry.step_propensity, `${ref.ref_id}:prob:${idx}`, {
+        display_prob: createModelRegistryMetric(entry.display_prob, `${ref.ref_id}:prob:${idx}`, {
           createdAt: nowIso,
         }),
+        slot_cond_prob: createModelRegistryMetric(
+          entry.slot_cond_prob,
+          `${ref.ref_id}:slot_cond_prob:${idx}`,
+          { createdAt: nowIso }
+        ),
         click_only_evidence: !entry.item.item.value_terms,
       }));
     } else {
@@ -681,16 +699,21 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
         };
       });
 
-      const plOrdering = sampleFullPlackettLuceOrdering(scored, seedKey, temperature);
+      const plOrdering = sampleFullPlackettLuceOrdering(scored, seedKey, temperature, topK);
       safeArticleItems = plOrdering.slice(0, topK).map((entry, idx) => ({
         item_id: entry.item.item.item_id,
         kind: entry.item.item.kind,
         rank: createDataLayerMetric(entry.rank, `${ref.ref_id}:rank:${idx}`, { createdAt: nowIso }),
         title: wrapUntrusted(entry.item.item.title, 'page_content'),
         url: wrapUntrusted(entry.item.item.url_key_v2, 'url'),
-        display_prob: createModelRegistryMetric(entry.step_propensity, `${ref.ref_id}:prob:${idx}`, {
+        display_prob: createModelRegistryMetric(entry.display_prob, `${ref.ref_id}:prob:${idx}`, {
           createdAt: nowIso,
         }),
+        slot_cond_prob: createModelRegistryMetric(
+          entry.slot_cond_prob,
+          `${ref.ref_id}:slot_cond_prob:${idx}`,
+          { createdAt: nowIso }
+        ),
         click_only_evidence: entry.item.click_only_evidence,
       }));
     }

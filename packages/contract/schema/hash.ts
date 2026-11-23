@@ -130,6 +130,123 @@ export function sha256Hex(input: string | Uint8Array): string {
 }
 
 /**
+ * Pure zero-dependency RFC 2104 HMAC-SHA256 implementation over `sha256Bytes`.
+ * Works identically and synchronously across browsers, Cloudflare Workers, and Node.js.
+ */
+export function hmacSha256Bytes(
+  secretKey: string | Uint8Array,
+  message: string | Uint8Array
+): Uint8Array {
+  const BLOCK_SIZE = 64;
+  const rawKey = typeof secretKey === 'string' ? utf8ToBytes(secretKey) : secretKey;
+  const msgBytes = typeof message === 'string' ? utf8ToBytes(message) : message;
+
+  const keyBlock = new Uint8Array(BLOCK_SIZE);
+  if (rawKey.length > BLOCK_SIZE) {
+    keyBlock.set(sha256Bytes(rawKey), 0);
+  } else {
+    keyBlock.set(rawKey, 0);
+  }
+
+  const innerPad = new Uint8Array(BLOCK_SIZE + msgBytes.length);
+  const outerPad = new Uint8Array(BLOCK_SIZE + 32);
+  for (let i = 0; i < BLOCK_SIZE; i++) {
+    innerPad[i] = keyBlock[i] ^ 0x36;
+    outerPad[i] = keyBlock[i] ^ 0x5c;
+  }
+  innerPad.set(msgBytes, BLOCK_SIZE);
+
+  const innerHash = sha256Bytes(innerPad);
+  outerPad.set(innerHash, BLOCK_SIZE);
+  return sha256Bytes(outerPad);
+}
+
+export function hmacSha256Hex(
+  secretKey: string | Uint8Array,
+  message: string | Uint8Array
+): string {
+  const digest = hmacSha256Bytes(secretKey, message);
+  let hex = '';
+  for (let i = 0; i < digest.length; i++) {
+    hex += digest[i].toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+export const SUBJECT_HMAC_VERSION = 'v1' as const;
+export type CanonicalSubjectHmacVersion = typeof SUBJECT_HMAC_VERSION;
+
+export interface CanonicalSubjectHmacInput {
+  readonly tenantId: string;
+  readonly subjectKind: string;
+  readonly subjectValue: string;
+  readonly secretKey: string;
+  readonly version?: CanonicalSubjectHmacVersion;
+}
+
+/**
+ * Unified canonical versioned RFC 2104 HMAC-SHA256 for subject identifiers
+ * shared identically across collector ingest, `/v1/optout`, and the 14-day
+ * deletion execution engine (Codex #9):
+ *   `HMAC-SHA256(secretKey, "v1\0" + tenantId + "\0" + subjectKind + "\0" + subjectValue)`
+ */
+export function computeCanonicalSubjectHmac(input: CanonicalSubjectHmacInput): string {
+  const version = input.version ?? SUBJECT_HMAC_VERSION;
+  const payload = `${version}\u0000${input.tenantId}\u0000${input.subjectKind}\u0000${input.subjectValue}`;
+  return hmacSha256Hex(input.secretKey, payload);
+}
+
+export interface SubjectHmacLookupCandidatesInput {
+  readonly tenantId: string;
+  readonly subjectKind: string;
+  readonly subjectValue: string;
+  readonly secretKeys: readonly string[];
+  readonly version?: CanonicalSubjectHmacVersion;
+}
+
+/**
+ * Returns the canonical `v1` digest PLUS legacy compatibility digests
+ * (`value`, `kind:value`, `tenant:kind:value`) across current AND rotated
+ * historical `secretKeys` so subject deletion matches both newly ingested
+ * and legacy rows.
+ */
+export function computeSubjectHmacLookupCandidates(
+  input: SubjectHmacLookupCandidatesInput
+): readonly string[] {
+  const version = input.version ?? SUBJECT_HMAC_VERSION;
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  const add = (digest: string) => {
+    if (!seen.has(digest)) {
+      seen.add(digest);
+      out.push(digest);
+    }
+  };
+
+  for (const secretKey of input.secretKeys) {
+    // 1. Canonical v1 digest
+    add(
+      computeCanonicalSubjectHmac({
+        tenantId: input.tenantId,
+        subjectKind: input.subjectKind,
+        subjectValue: input.subjectValue,
+        secretKey,
+        version,
+      })
+    );
+    // 2. Legacy collector digest (value only)
+    add(hmacSha256Hex(secretKey, input.subjectValue));
+    // 3. Legacy opt-out worker digest (`kind:value`)
+    add(hmacSha256Hex(secretKey, `${input.subjectKind}:${input.subjectValue}`));
+    // 4. Legacy deletion engine digest (`tenant:kind:value`)
+    add(hmacSha256Hex(secretKey, `${input.tenantId}:${input.subjectKind}:${input.subjectValue}`));
+  }
+
+  return out;
+}
+
+/**
  * Deterministic canonical JSON stringify (recursively sorts object keys).
  */
 export function canonicalJsonStringify(value: unknown): string {

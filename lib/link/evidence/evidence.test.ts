@@ -1,6 +1,7 @@
 import { validateSerializedEnvelope } from '@/packages/contract/response';
 import {
   DualExperimentLedger,
+  IdempotencyConflictError,
   buildProvenVerdictEnvelope,
   evaluateAlwaysValidMsprt,
   evaluateCupedVarianceReduction,
@@ -332,5 +333,72 @@ describe('lib/link/evidence — Wave 5-C: Prereg Lock, Alpha Split, CUPED, ev.G-
     });
     expect(lookAlwaysValid.msprtLambda).toBeDefined();
     expect(lookAlwaysValid.crossesBoundary).toBe(false);
+  });
+
+  test('[#21] always_valid mSPRT fails closed (msprt_variance_required) when explicit variance is omitted or invalid, even with large z', () => {
+    const omitted = evaluateInterimLook({
+      totalAlpha: 0.05,
+      stage: 'always_valid',
+      zStatistic: 12.0,
+    });
+    expect(omitted.crossesBoundary).toBe(false);
+    expect(omitted.canStop).toBe(false);
+    expect(omitted.twoSidedPValue).toBe(1);
+    expect(omitted.pValue).toBe(1);
+    expect(omitted.status).toBe('insufficient_data');
+    expect(omitted.reason).toBe('msprt_variance_required');
+
+    const zeroVar = evaluateInterimLook({
+      totalAlpha: 0.05,
+      stage: 'always_valid',
+      zStatistic: 12.0,
+      estimatorVariance: 0,
+    });
+    expect(zeroVar.canStop).toBe(false);
+    expect(zeroVar.reason).toBe('msprt_variance_required');
+
+    const nanVar = evaluateInterimLook({
+      totalAlpha: 0.05,
+      stage: 'always_valid',
+      zStatistic: 12.0,
+      sampleVariance: Number.NaN,
+    });
+    expect(nanVar.canStop).toBe(false);
+    expect(nanVar.reason).toBe('msprt_variance_required');
+  });
+
+  test('[#22] LORD++ discovery recording is idempotent by experimentId and throws IdempotencyConflictError on conflicting outcome', () => {
+    const alpha = 0.1;
+    const w0 = 0.05;
+    const ledger = new DualExperimentLedger(alpha, w0);
+    const gamma = (m: number) => 6 / (Math.PI * Math.PI * m * m);
+    const now = new Date('2026-11-22T00:00:00Z');
+
+    // Submit discovery exp_dup_1 twice with identical pValue
+    const first = ledger.recordAutonomyExperiment({ experimentId: 'exp_dup_1', pValue: 0.0001, now });
+    expect(first.rejectedNull).toBe(true);
+
+    const duplicate = ledger.recordAutonomyExperiment({
+      experimentId: 'exp_dup_1',
+      pValue: 0.0001,
+      now: new Date('2026-11-22T01:00:00Z'),
+    });
+    expect(duplicate).toEqual(first);
+
+    // Step count and discovery list MUST NOT advance or double-count!
+    const regAfterDup = ledger.getRegisters();
+    expect(regAfterDup.autonomy).toHaveLength(1);
+    expect(regAfterDup.autonomyDiscoveryTimes).toEqual([1]);
+
+    // Next hypothesis (t=2) gets exact LORD++ threshold for t=2 with single discovery tau_1=1
+    const nextExp = ledger.recordAutonomyExperiment({ experimentId: 'exp_next_2', pValue: 0.5, now });
+    const expectedAlpha2 = gamma(2) * w0 + (alpha - w0) * gamma(1);
+    expect(nextExp.thresholdAlpha).toBeCloseTo(expectedAlpha2, 12);
+    expect(ledger.getRegisters().autonomy).toHaveLength(2);
+
+    // Re-submitting same experimentId with conflicting pValue MUST throw IdempotencyConflictError
+    expect(() =>
+      ledger.recordAutonomyExperiment({ experimentId: 'exp_dup_1', pValue: 0.9, now })
+    ).toThrow(IdempotencyConflictError);
   });
 });

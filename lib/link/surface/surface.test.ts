@@ -1,9 +1,14 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { NextRequest } from 'next/server';
 import {
   ALL_SCOPES,
   IdentityKeyRegistry,
+  computeActionAndDiffHash,
+  computeJwkThumbprint,
+  computePkceS256Challenge,
+  createDpopProofJwt,
   type VerifiedPrincipal,
 } from '@/lib/link/auth';
 import { AskService } from '@/lib/link/ask';
@@ -33,6 +38,7 @@ import {
   evaluateSegmentRule,
   evaluateSiteUsage,
   getSurfaceRuntimeContext,
+  handleV1RestRoute,
   loadInternalScreenViaV1,
   resolveRuntimePepperSecret,
   setSurfaceRuntimeContext,
@@ -1123,5 +1129,255 @@ describe('lib/link/surface — OpenAPI 3.1, Single Pipeline, MCP, Segments, Jour
         expect(mcp.getTool(`ugokilink_${op.operationId}`)).toBeUndefined();
       }
     }
+  });
+
+  test('Wave 9 Regression (#2): HTTP adapter rejects bare x-dpop-jkt and invalid DPoP proofs (401), and accepts genuine RFC 9449 signed DPoP proof (200)', async () => {
+    const { keyRegistry, emptyRepo } = buildSurfaceTestFixture();
+    const now = new Date();
+    const dpopPair = crypto.generateKeyPairSync('ed25519');
+    const dpopPubJwk = dpopPair.publicKey.export({ format: 'jwk' }) as Record<string, unknown>;
+    const dpopJkt = computeJwkThumbprint(dpopPubJwk);
+
+    const verifier = 'd'.repeat(48);
+    const challenge = computePkceS256Challenge(verifier);
+    const issued = keyRegistry.issueMcpOAuthToken({
+      tenantId: 'tenant_a',
+      principalId: 'user_a',
+      clientId: 'claude_desktop',
+      scopes: ['analytics:read'],
+      codeVerifier: verifier,
+      expectedCodeChallengeS256: challenge,
+      dpopThumbprint: dpopJkt,
+      now,
+    });
+    expect(issued.ok).toBe(true);
+    if (!issued.ok) return;
+
+    const pipeline = new SurfacePipeline({ keyRegistry, repository: emptyRepo });
+    const mcpServer = new LinkMcpServer(pipeline);
+    const askService = new AskService({
+      executor: {
+        executePublicViewQuery: (p) => ({
+          connected: false,
+          rows: [],
+          queryRefId: p.viewName,
+          paramsHash: 'h',
+          resultDigest: 'd',
+        }),
+      },
+    });
+
+    try {
+      setSurfaceRuntimeContext({ pipeline, mcpServer, askService, repository: emptyRepo });
+      const url = 'https://api.ugokilink.example/api/v1/sites/site_a1/capabilities';
+
+      // (a) Bare `x-dpop-jkt` header WITHOUT signed `DPoP` proof MUST fail closed with 401
+      const spoofedJktRes = await handleV1RestRoute({
+        req: new NextRequest(url, {
+          method: 'GET',
+          headers: {
+            authorization: `Bearer ${issued.accessToken}`,
+            'x-dpop-jkt': dpopJkt,
+          },
+        }),
+        operationId: 'getSiteCapabilities',
+        siteId: 'site_a1',
+      });
+      expect(spoofedJktRes.status).toBe(401);
+
+      // (b1) Wrong htm in signed DPoP proof -> 401
+      const wrongHtmProof = createDpopProofJwt({
+        alg: 'EdDSA',
+        publicJwk: dpopPubJwk,
+        privateKey: dpopPair.privateKey,
+        htm: 'POST',
+        htu: url,
+        accessToken: issued.accessToken,
+        now,
+      });
+      const wrongHtmRes = await handleV1RestRoute({
+        req: new NextRequest(url, {
+          method: 'GET',
+          headers: {
+            authorization: `DPoP ${issued.accessToken}`,
+            dpop: wrongHtmProof,
+          },
+        }),
+        operationId: 'getSiteCapabilities',
+        siteId: 'site_a1',
+      });
+      expect(wrongHtmRes.status).toBe(401);
+
+      // (b2) Wrong htu -> 401
+      const wrongHtuProof = createDpopProofJwt({
+        alg: 'EdDSA',
+        publicJwk: dpopPubJwk,
+        privateKey: dpopPair.privateKey,
+        htm: 'GET',
+        htu: 'https://api.ugokilink.example/api/v1/sites/site_other/capabilities',
+        accessToken: issued.accessToken,
+        now,
+      });
+      const wrongHtuRes = await handleV1RestRoute({
+        req: new NextRequest(url, {
+          method: 'GET',
+          headers: {
+            authorization: `DPoP ${issued.accessToken}`,
+            dpop: wrongHtuProof,
+          },
+        }),
+        operationId: 'getSiteCapabilities',
+        siteId: 'site_a1',
+      });
+      expect(wrongHtuRes.status).toBe(401);
+
+      // (c) Genuine signed DPoP proof succeeds (200), even with query string on request URL
+      const validProof = createDpopProofJwt({
+        alg: 'EdDSA',
+        publicJwk: dpopPubJwk,
+        privateKey: dpopPair.privateKey,
+        htm: 'GET',
+        htu: url,
+        accessToken: issued.accessToken,
+        jti: 'jti_http_adapter_001',
+        now,
+      });
+      const okRes = await handleV1RestRoute({
+        req: new NextRequest(`${url}?foo=bar`, {
+          method: 'GET',
+          headers: {
+            authorization: `DPoP ${issued.accessToken}`,
+            dpop: validProof,
+          },
+        }),
+        operationId: 'getSiteCapabilities',
+        siteId: 'site_a1',
+      });
+      expect(okRes.status).toBe(200);
+
+      // (b3) Replaying the exact same DPoP proof (same jti) fails closed -> 401
+      const replayRes = await handleV1RestRoute({
+        req: new NextRequest(url, {
+          method: 'GET',
+          headers: {
+            authorization: `DPoP ${issued.accessToken}`,
+            dpop: validProof,
+          },
+        }),
+        operationId: 'getSiteCapabilities',
+        siteId: 'site_a1',
+      });
+      expect(replayRes.status).toBe(401);
+    } finally {
+      setSurfaceRuntimeContext(null);
+    }
+  });
+
+  test('Wave 9 Regression (#25): 429 rate-limit does NOT burn single-use Passkey approval, and idempotent retry returns cached response instead of APPROVAL_ALREADY_CONSUMED', () => {
+    const { now, keyRegistry, emptyRepo, fullKey } = buildSurfaceTestFixture();
+    const rateLimiter = new CostUnitRateLimiter({ windowMs: 60_000, maxUnitsPerWindow: 6 });
+    const pipeline = new SurfacePipeline({
+      keyRegistry,
+      repository: emptyRepo,
+      rateLimiter,
+    });
+
+    const ownerSession: VerifiedPrincipal = {
+      credentialKind: 'session_cookie',
+      credentialId: 'sess_owner_25',
+      tenantId: 'tenant_a',
+      orgId: 'org_1',
+      allowedSiteIds: null,
+      principalKind: 'human',
+      principalId: 'owner_a',
+      role: 'owner',
+      effectiveScopes: new Set(ALL_SCOPES),
+      senderConstrained: true,
+      passkeyVerified: true,
+      passkeyVerifiedAt: now.toISOString(),
+    };
+
+    const publishBody = { ruleId: 'rule_25', variant: 'hero_b' };
+    const { combinedHash } = computeActionAndDiffHash('publishDecision', publishBody);
+    const aprRes = pipeline.gateway.createPasskeyApproval({
+      principal: ownerSession,
+      siteId: 'site_a1',
+      action: 'publishDecision',
+      renderedDiff: publishBody,
+      passkeyAssertion: {
+        credentialId: 'webauthn_owner_25',
+        userVerification: true,
+        signedChallengeHash: combinedHash,
+        assertedAt: now.toISOString(),
+        signatureVerified: true,
+      },
+      now,
+    });
+    expect(aprRes.ok).toBe(true);
+    if (!aprRes.ok) return;
+
+    // Exhaust rate limit bucket for `fullKey` right before the R2 publishDecision call
+    const authRes = pipeline.authenticateCaller({ bearerToken: fullKey, now });
+    expect(authRes.ok).toBe(true);
+    if (!authRes.ok) return;
+    rateLimiter.consume(`${authRes.principal.tenantId}:${authRes.principal.credentialId}`, 6, now);
+
+    // 1. Rate-limited (429) request MUST NOT burn the single-use Passkey approval!
+    const rateLimited = pipeline.execute({
+      operationId: 'publishDecision',
+      channel: 'rest',
+      bearerToken: fullKey,
+      siteId: 'site_a1',
+      idempotencyKey: 'idem_r2_publish_001',
+      body: publishBody,
+      passkeyApprovalId: aprRes.approval.approvalId,
+      now,
+    });
+    expect(rateLimited.httpStatus).toBe(429);
+    expect(rateLimited.error?.code).toBe('RATE_LIMIT_EXCEEDED');
+    expect(aprRes.approval.consumedAt).toBeUndefined();
+
+    // 2. Retry after rate-limit window resets (65s later) succeeds using the UNBURNED approval!
+    const tRetry = new Date(now.getTime() + 65_000);
+    const firstSuccess = pipeline.execute({
+      operationId: 'publishDecision',
+      channel: 'rest',
+      bearerToken: fullKey,
+      siteId: 'site_a1',
+      idempotencyKey: 'idem_r2_publish_001',
+      body: publishBody,
+      passkeyApprovalId: aprRes.approval.approvalId,
+      now: tRetry,
+    });
+    expect(firstSuccess.httpStatus).toBe(200);
+    expect(aprRes.approval.consumedAt).toBeDefined();
+
+    // 3. Idempotent retry with SAME Idempotency-Key + SAME payload returns cached 200 (NOT APPROVAL_ALREADY_CONSUMED)!
+    const idempotentRetry = pipeline.execute({
+      operationId: 'publishDecision',
+      channel: 'rest',
+      bearerToken: fullKey,
+      siteId: 'site_a1',
+      idempotencyKey: 'idem_r2_publish_001',
+      body: publishBody,
+      passkeyApprovalId: aprRes.approval.approvalId,
+      now: new Date(tRetry.getTime() + 1_000),
+    });
+    expect(idempotentRetry.httpStatus).toBe(200);
+    expect(idempotentRetry.headers['X-UGOKI-Idempotent-Replay']).toBe('true');
+
+    // 4. Attempting to reuse the consumed approval under a DIFFERENT Idempotency-Key MUST still fail closed!
+    const replayNewIdem = pipeline.execute({
+      operationId: 'publishDecision',
+      channel: 'rest',
+      bearerToken: fullKey,
+      siteId: 'site_a1',
+      idempotencyKey: 'idem_r2_publish_002',
+      body: publishBody,
+      passkeyApprovalId: aprRes.approval.approvalId,
+      now: new Date(tRetry.getTime() + 2_000),
+    });
+    expect(replayNewIdem.httpStatus).toBe(202);
+    expect(replayNewIdem.error?.code).toBe('APPROVAL_ALREADY_CONSUMED');
   });
 });

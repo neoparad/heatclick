@@ -14,9 +14,33 @@ import {
   BEHAVIOUR_REGISTER_DOMAINS,
   CONSENT_MODES,
   MONOTONE_REQUIRED_MERGE_CLASSES,
+  RETENTION_GRID_MONTHS,
   isPersonLinkablePii,
   type ContractSchema,
+  type RetentionGridMonths,
 } from './types';
+
+const VALID_RETENTION_GRID_SET: ReadonlySet<number> = new Set<number>(RETENTION_GRID_MONTHS);
+
+/**
+ * Runtime check enforcing that a retention duration belongs strictly to
+ * `RETENTION_GRID_MONTHS` (`[1, 2, 3, 6, 9, 12, 13, 18, 24, 30, 36]`).
+ */
+export function isValidRetentionGridMonths(n: unknown): n is RetentionGridMonths {
+  return typeof n === 'number' && Number.isInteger(n) && VALID_RETENTION_GRID_SET.has(n);
+}
+
+/**
+ * Runtime config validator that throws if `n` is not an allowed value in
+ * `RETENTION_GRID_MONTHS` (e.g., rejects off-grid values like `4`).
+ */
+export function assertValidRetentionGridMonths(n: number): asserts n is RetentionGridMonths {
+  if (!isValidRetentionGridMonths(n)) {
+    throw new RangeError(
+      `Invalid retention_months=${String(n)}: must be one of RETENTION_GRID_MONTHS (${RETENTION_GRID_MONTHS.join(', ')})`
+    );
+  }
+}
 
 export type SchemaViolationCode =
   | 'DUPLICATE_FIELD_TAG'
