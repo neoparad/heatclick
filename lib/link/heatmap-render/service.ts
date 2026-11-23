@@ -52,8 +52,10 @@ import {
 } from './renderer'
 import {
   assertValidHeatmapDisplayLabel,
+  canonicalizeRedactionBoxes,
   computeReproducibilityHash,
   HEATMAP_KIND_DISPLAY_NAMES,
+  HEATMAP_OCR_POLICY_VERSION,
   serializeHeatmapUnitKey,
   type HeatmapActorBucket,
   type HeatmapClickPointInput,
@@ -1485,6 +1487,12 @@ export class HeatmapRenderService {
         const untrustedEmbeddedTexts: UntrustedValue[] = extractSafePostMaskOcrTexts(
           dataset.screenshot,
         )
+        const canonicalRedactionBoxes = canonicalizeRedactionBoxes(
+          dataset.screenshot?.redaction_boxes,
+        )
+        const embeddedTextsDigest = createHash('sha256')
+          .update(JSON.stringify(untrustedEmbeddedTexts), 'utf8')
+          .digest('hex')
 
         const unitKeyStr = serializeHeatmapUnitKey(dataset.unit)
         const reproScope = {
@@ -1494,6 +1502,9 @@ export class HeatmapRenderService {
           period_start: req.period_start,
           period_end: req.period_end,
           segment_id: req.segment_id,
+          redaction_boxes: canonicalRedactionBoxes,
+          ocr_policy_version: HEATMAP_OCR_POLICY_VERSION,
+          embedded_texts_digest: embeddedTextsDigest,
         }
 
         // Unified disclosure & differencing attack check MUST run BEFORE any cache lookup!
@@ -1523,6 +1534,9 @@ export class HeatmapRenderService {
               is_auth_page: Boolean(dataset.is_authenticated_or_personalized_page),
               pending_job_id: dataset.lab_render_pending_job_id ?? null,
               screenshot_provenance: dataset.screenshot?.provenance ?? null,
+              redaction_boxes: canonicalRedactionBoxes,
+              ocr_policy_version: HEATMAP_OCR_POLICY_VERSION,
+              embedded_texts_digest: embeddedTextsDigest,
               sections: disclosure.sections,
               clicks: disclosure.clicks,
               http: dataset.http_fetch_metrics ?? null,

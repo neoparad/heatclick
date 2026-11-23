@@ -538,4 +538,103 @@ describe('lib/link/isolation — Layer A AST Inspector & Query Builder, Layer B 
     });
     expect(builtTenantWide.query_params.tenant_id).toBe('tenant_a');
   });
+
+  test('Wave 10 Regression (#1): multi-table JOIN requires per-table alias.site_id predicate for EVERY referenced tenant table/view', () => {
+    const qb = new TenantScopedQueryBuilder();
+    const siteAOnlyPrincipal = {
+      tenantId: 'tenant_a',
+      allowedSiteIds: ['site_a'] as const,
+      role: 'analyst',
+    };
+
+    // 1. JOIN where only `a.site_id` is constrained and `b.site_id` is missing MUST be REJECTED
+    const missingRightSiteSql = `
+      SELECT a.page_id, sum(a.pv_count) AS pvs, sum(b.dwell_ms) AS dwell
+      FROM v_page_hourly a
+      JOIN v_section_hourly b ON a.page_id = b.page_id
+      WHERE a.tenant_id = {tenant_id:String}
+        AND b.tenant_id = {tenant_id:String}
+        AND a.site_id = {site_id:String}
+        AND a.pv_hour >= {start:DateTime}
+      GROUP BY a.page_id
+    `;
+    const astMissingRight = inspectSqlAst(missingRightSiteSql, { requireSiteFilter: true });
+    expect(astMissingRight.valid).toBe(false);
+    expect(astMissingRight.violations.some((v) => v.code === 'MISSING_SITE_BIND_PREDICATE')).toBe(true);
+    expect(() =>
+      qb.build(siteAOnlyPrincipal, {
+        sql: missingRightSiteSql,
+        siteId: 'site_a',
+        params: { start: '2026-11-01 00:00:00' },
+      })
+    ).toThrow(SqlAstViolationError);
+
+    // 2. JOIN with unaliased `site_id = {site_id:String}` MUST also be REJECTED
+    const unaliasedJoinSiteSql = `
+      SELECT a.page_id, sum(a.pv_count) AS pvs
+      FROM v_page_hourly a
+      JOIN v_section_hourly b ON a.page_id = b.page_id
+      WHERE a.tenant_id = {tenant_id:String}
+        AND site_id = {site_id:String}
+        AND a.pv_hour >= {start:DateTime}
+      GROUP BY a.page_id
+    `;
+    const astUnaliased = inspectSqlAst(unaliasedJoinSiteSql, { requireSiteFilter: true });
+    expect(astUnaliased.valid).toBe(false);
+    expect(astUnaliased.violations.some((v) => v.code === 'MISSING_SITE_BIND_PREDICATE')).toBe(true);
+
+    // 3. Constraining BOTH `a.site_id` and `b.site_id` PASSES and filters both sides of the join to site_a only
+    const bothConstrainedSql = `
+      SELECT a.page_id, sum(a.pv_count) AS pvs, sum(b.dwell_ms) AS dwell
+      FROM v_page_hourly a
+      JOIN v_section_hourly b ON a.page_id = b.page_id
+      WHERE a.tenant_id = {tenant_id:String}
+        AND b.tenant_id = {tenant_id:String}
+        AND a.site_id = {site_id:String}
+        AND b.site_id = {site_id:String}
+        AND a.pv_hour >= {start:DateTime}
+      GROUP BY a.page_id
+    `;
+    const builtJoin = qb.build(siteAOnlyPrincipal, {
+      sql: bothConstrainedSql,
+      siteId: 'site_a',
+      params: { start: '2026-11-01 00:00:00' },
+    });
+    expect(builtJoin.query_params.tenant_id).toBe('tenant_a');
+    expect(builtJoin.query_params.site_id).toBe('site_a');
+
+    // Verify actual join row filtering across two-site page & section datasets (site_b never leaks!)
+    const pageRows = [
+      { tenant_id: 'tenant_a', site_id: 'site_a', page_id: '/home', pv_count: 100 },
+      { tenant_id: 'tenant_a', site_id: 'site_b', page_id: '/home', pv_count: 900 },
+    ];
+    const sectionRows = [
+      { tenant_id: 'tenant_a', site_id: 'site_a', page_id: '/home', dwell_ms: 4200 },
+      { tenant_id: 'tenant_a', site_id: 'site_b', page_id: '/home', dwell_ms: 99000 },
+    ];
+    const joined = pageRows
+      .filter(
+        (a) =>
+          a.tenant_id === builtJoin.query_params.tenant_id &&
+          a.site_id === builtJoin.query_params.site_id
+      )
+      .flatMap((a) =>
+        sectionRows
+          .filter(
+            (b) =>
+              b.tenant_id === builtJoin.query_params.tenant_id &&
+              b.site_id === builtJoin.query_params.site_id &&
+              b.page_id === a.page_id
+          )
+          .map((b) => ({ page_id: a.page_id, a_site: a.site_id, b_site: b.site_id, pv_count: a.pv_count, dwell_ms: b.dwell_ms }))
+      );
+    expect(joined).toHaveLength(1);
+    expect(joined[0]).toEqual({
+      page_id: '/home',
+      a_site: 'site_a',
+      b_site: 'site_a',
+      pv_count: 100,
+      dwell_ms: 4200,
+    });
+  });
 });

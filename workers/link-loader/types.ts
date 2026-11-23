@@ -156,6 +156,16 @@ export interface DeletionTombstoneSpec {
   readonly memberHashes?: readonly string[];
 }
 
+export interface PersistedShardTombstones {
+  readonly version: 1;
+  readonly region: DataRegion;
+  readonly shard_id: number;
+  readonly deleted_pv_keys: readonly string[];
+  readonly deleted_visitor_keys: readonly string[];
+  readonly deleted_member_hashes: readonly string[];
+  readonly purged_wal_keys: readonly string[];
+}
+
 export interface FrameLogRow {
   readonly tenantId: string;
   readonly siteId: string;
@@ -214,6 +224,8 @@ export interface LoadManifest {
   readonly shard_id: number;
   readonly manifest_seq: number;
   readonly wal_keys: readonly string[];
+  /** Optional list of WAL keys intentionally purged/expired after commit (Codex R2 #10). */
+  readonly purged_wal_keys?: readonly string[];
   readonly committed_at_ms: number;
   readonly frame_keys: readonly string[];
   readonly control_totals: LoadControlTotals;

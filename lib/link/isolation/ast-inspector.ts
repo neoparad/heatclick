@@ -904,23 +904,27 @@ function unwrapOuterParens(conjunct: ReadonlyArray<SqlToken>): ReadonlyArray<Sql
   return slice;
 }
 
-function isExactSiteBindConjunct(conjunct: ReadonlyArray<SqlToken>): boolean {
+function extractExactSiteBindQualifier(
+  conjunct: ReadonlyArray<SqlToken>
+): { readonly valid: true; readonly qualifier: string | null } | { readonly valid: false } {
   const slice = unwrapOuterParens(conjunct);
 
-  // Strip optional `alias.` prefix
+  // Extract optional `alias.` prefix
   let offset = 0;
+  let qualifier: string | null = null;
   if (
     slice.length >= 3 &&
     slice[0]!.kind === 'IDENT' &&
     slice[1]!.kind === 'PUNCT' &&
     slice[1]!.value === '.'
   ) {
+    qualifier = slice[0]!.lower;
     offset = 2;
   }
 
   const rem = slice.slice(offset);
   if (rem.length < 3 || rem[0]!.kind !== 'IDENT' || rem[0]!.lower !== 'site_id') {
-    return false;
+    return { valid: false };
   }
 
   // Case 1: `[alias.]site_id = {site_id:String}`
@@ -932,7 +936,7 @@ function isExactSiteBindConjunct(conjunct: ReadonlyArray<SqlToken>): boolean {
     rem[2]!.bindName === 'site_id' &&
     rem[2]!.bindType === 'String'
   ) {
-    return true;
+    return { valid: true, qualifier };
   }
 
   // Case 2a: `[alias.]site_id IN ({allowed_site_ids:Array(String)})`
@@ -949,7 +953,7 @@ function isExactSiteBindConjunct(conjunct: ReadonlyArray<SqlToken>): boolean {
     rem[4]!.kind === 'PUNCT' &&
     rem[4]!.value === ')'
   ) {
-    return true;
+    return { valid: true, qualifier };
   }
 
   // Case 2b: `[alias.]site_id IN {allowed_site_ids:Array(String)}`
@@ -962,10 +966,10 @@ function isExactSiteBindConjunct(conjunct: ReadonlyArray<SqlToken>): boolean {
     rem[2]!.bindName === 'allowed_site_ids' &&
     rem[2]!.bindType?.replace(/\s+/g, '') === 'Array(String)'
   ) {
-    return true;
+    return { valid: true, qualifier };
   }
 
-  return false;
+  return { valid: false };
 }
 
 function hasTimeComparisonInConjunct(conjunct: ReadonlyArray<SqlToken>): boolean {
@@ -1301,6 +1305,13 @@ export function inspectSqlAst(sql: string, options: InspectSqlOptions = {}): Sql
 
     // 3. Extract FROM tables (including comma-joins `FROM a, b`) and JOIN right-hand tables
     const scopeRealTables: string[] = [];
+    const scopeRealTableRefs: Array<{
+      readonly tableName: string;
+      readonly alias: string;
+      readonly hasExplicitAlias: boolean;
+    }> = [];
+    let scopeTotalTableRefs = 0;
+
     const recordTableRef = (
       startPos: number,
       isRightJoinOrCommaJoin: boolean
@@ -1310,6 +1321,7 @@ export function inspectSqlAst(sql: string, options: InspectSqlOptions = {}): Sql
 
       // Subquery `FROM (SELECT ...)` — inner SelectScope handles its own tables
       if (t0.token.kind === 'PUNCT' && t0.token.value === '(') {
+        scopeTotalTableRefs += 1;
         let p = startPos + 1;
         while (p < own.length && own[p]!.depth > d) p += 1;
         if (p < own.length && own[p]!.token.kind === 'PUNCT' && own[p]!.token.value === ')') {
@@ -1361,29 +1373,19 @@ export function inspectSqlAst(sql: string, options: InspectSqlOptions = {}): Sql
         });
       }
 
-      if (!cteNames.has(tableName)) {
-        if (!allTables.includes(tableName)) {
-          allTables.push(tableName);
-        }
-        if (!scopeRealTables.includes(tableName)) {
-          scopeRealTables.push(tableName);
-        }
-        if (isRightJoinOrCommaJoin && RAW_BASE_TABLES.has(tableName)) {
-          violations.push({
-            code: 'BASE_TABLE_ON_JOIN_RIGHT',
-            message: `Raw base table "${tableName}" is forbidden on the RIGHT side of a JOIN or comma-join (causes ClickHouse hash-table OOM)`,
-            snippet: tableName,
-          });
-        }
-      }
-
-      // Skip optional `[AS] alias`
+      // Parse optional `[AS] alias`
+      let alias = tableName;
+      let hasExplicitAlias = false;
       if (
         own[nextPos]?.depth === d &&
         own[nextPos]?.token.kind === 'IDENT' &&
         !own[nextPos]?.token.quoted &&
         own[nextPos]?.token.lower === 'as'
       ) {
+        if (own[nextPos + 1]?.depth === d && own[nextPos + 1]?.token.kind === 'IDENT') {
+          alias = own[nextPos + 1]!.token.lower;
+          hasExplicitAlias = true;
+        }
         nextPos += 2;
       } else if (
         own[nextPos]?.depth === d &&
@@ -1394,7 +1396,27 @@ export function inspectSqlAst(sql: string, options: InspectSqlOptions = {}): Sql
         own[nextPos]!.token.lower !== 'on' &&
         own[nextPos]!.token.lower !== 'using'
       ) {
+        alias = own[nextPos]!.token.lower;
+        hasExplicitAlias = true;
         nextPos += 1;
+      }
+
+      scopeTotalTableRefs += 1;
+      if (!cteNames.has(tableName)) {
+        if (!allTables.includes(tableName)) {
+          allTables.push(tableName);
+        }
+        if (!scopeRealTables.includes(tableName)) {
+          scopeRealTables.push(tableName);
+        }
+        scopeRealTableRefs.push({ tableName, alias, hasExplicitAlias });
+        if (isRightJoinOrCommaJoin && RAW_BASE_TABLES.has(tableName)) {
+          violations.push({
+            code: 'BASE_TABLE_ON_JOIN_RIGHT',
+            message: `Raw base table "${tableName}" is forbidden on the RIGHT side of a JOIN or comma-join (causes ClickHouse hash-table OOM)`,
+            snippet: tableName,
+          });
+        }
       }
 
       return nextPos;
@@ -1521,14 +1543,54 @@ export function inspectSqlAst(sql: string, options: InspectSqlOptions = {}): Sql
               });
             }
           }
-          if (requireSiteFilter && scopeRealTables.length > 0) {
-            const hasValidSiteConjunct = conjuncts.some((c) => isExactSiteBindConjunct(c));
-            if (!hasValidSiteConjunct) {
-              violations.push({
-                code: 'MISSING_SITE_BIND_PREDICATE',
-                message:
-                  'Site-scoped credentials MUST include a top-level `site_id = {site_id:String}` or `site_id IN ({allowed_site_ids:Array(String)})` conjunct in every tenant SELECT scope',
-              });
+          if (requireSiteFilter && scopeRealTableRefs.length > 0) {
+            const siteBindMatches = conjuncts
+              .map((c) => extractExactSiteBindQualifier(c))
+              .filter(
+                (m): m is { readonly valid: true; readonly qualifier: string | null } => m.valid
+              );
+
+            if (scopeRealTableRefs.length === 1 && scopeTotalTableRefs <= 1) {
+              const onlyRef = scopeRealTableRefs[0]!;
+              const hasValidSiteConjunct = siteBindMatches.some(
+                (m) => m.qualifier === null || m.qualifier === onlyRef.alias
+              );
+              if (!hasValidSiteConjunct) {
+                violations.push({
+                  code: 'MISSING_SITE_BIND_PREDICATE',
+                  message:
+                    'Site-scoped credentials MUST include a top-level `site_id = {site_id:String}` or `site_id IN ({allowed_site_ids:Array(String)})` conjunct in every tenant SELECT scope',
+                });
+              }
+            } else {
+              // Multi-table SELECT / JOIN: every referenced tenant table/view alias MUST have its OWN
+              // qualified top-level `AND alias.site_id = {site_id:String}` or `alias.site_id IN ({allowed_site_ids:Array(String)})` conjunct.
+              const seenAliases = new Set<string>();
+              const duplicateAliases: string[] = [];
+              for (const ref of scopeRealTableRefs) {
+                if (seenAliases.has(ref.alias)) {
+                  duplicateAliases.push(ref.alias);
+                }
+                seenAliases.add(ref.alias);
+              }
+              const qualifiedSiteAliases = new Set<string>(
+                siteBindMatches
+                  .map((m) => m.qualifier)
+                  .filter((q): q is string => q !== null)
+              );
+              const missingAliases = scopeRealTableRefs
+                .filter((ref) => !qualifiedSiteAliases.has(ref.alias))
+                .map((ref) => ref.alias);
+
+              if (duplicateAliases.length > 0 || missingAliases.length > 0) {
+                violations.push({
+                  code: 'MISSING_SITE_BIND_PREDICATE',
+                  message:
+                    duplicateAliases.length > 0
+                      ? `Multi-table SELECT/JOIN contains ambiguous duplicate table/alias (${duplicateAliases.join(', ')}); each tenant table must be uniquely aliased with its own top-level \`alias.site_id = {site_id:String}\` or \`alias.site_id IN ({allowed_site_ids:Array(String)})\` conjunct`
+                      : `Multi-table SELECT/JOIN is missing top-level qualified site_id predicate(s) for table/alias: ${missingAliases.join(', ')}; every referenced tenant table MUST have its own \`alias.site_id = {site_id:String}\` or \`alias.site_id IN ({allowed_site_ids:Array(String)})\` conjunct`,
+                });
+              }
             }
           }
         }

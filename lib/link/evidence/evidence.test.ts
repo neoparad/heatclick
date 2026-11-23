@@ -400,5 +400,24 @@ describe('lib/link/evidence — Wave 5-C: Prereg Lock, Alpha Split, CUPED, ev.G-
     expect(() =>
       ledger.recordAutonomyExperiment({ experimentId: 'exp_dup_1', pValue: 0.9, now })
     ).toThrow(IdempotencyConflictError);
+
+    // Strict idempotency without decision-flipping tolerance: perturbing pValue by 5e-13 across alpha_t MUST throw!
+    const boundaryLedger = new DualExperimentLedger(alpha, w0);
+    const alpha1 = gamma(1) * w0;
+    const pJustBelow = alpha1 - 2.5e-13;
+    const pJustAbove = alpha1 + 2.5e-13; // difference = 5e-13 < 1e-12, flips rejectedNull from true -> false!
+    const recordedBoundary = boundaryLedger.recordAutonomyExperiment({
+      experimentId: 'exp_boundary_flip',
+      pValue: pJustBelow,
+      now,
+    });
+    expect(recordedBoundary.rejectedNull).toBe(true);
+    expect(() =>
+      boundaryLedger.recordAutonomyExperiment({
+        experimentId: 'exp_boundary_flip',
+        pValue: pJustAbove,
+        now,
+      })
+    ).toThrow(IdempotencyConflictError);
   });
 });

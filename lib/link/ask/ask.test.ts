@@ -582,4 +582,259 @@ describe('lib/link/ask — POST /v1/ask Read-Only Planner, Pre-LLM Privacy Filte
     expect(offRes.envelope?.measures.ask_metric.status).toBe('not_collected');
     expect(offRes.envelope?.measures.ask_metric.value).toBeNull();
   });
+
+  test('[#15] strips raw <10 isolated counts from all Ask rejection reasons and external envelopes (small-cohort & grouped-row RREF)', () => {
+    const sql = lookupPrecompiledPublicViewSql('v_pub_segment_agg', 'page_views')!;
+    const now = new Date('2026-11-20T12:00:00Z');
+    const winStart = '2026-10-20T00:00:00Z';
+    const winEnd = '2026-11-20T00:00:00Z';
+
+    // Use IDs/dates/questions free of the digit "7" so we can assert ZERO occurrences of secret count 7!
+    const principalNo7: VerifiedPrincipal = {
+      ...CALLER_A,
+      credentialId: 'key_a_ask_no_s',
+      tenantId: 'tenant_eval_a',
+    };
+
+    // A) Pre-execution small-cohort rejection (secret cohort size = 7 < 10)
+    const secret7 = Array.from({ length: 7 }, (_, i) => `m_${i}`);
+    const smallCohortPlanner: AskPlannerProvider = {
+      providerId: 'local_llm',
+      modelName: 'gemma-4-local',
+      hosting: 'self_hosted_local',
+      plan: () => ({
+        kind: 'execute_query',
+        toolName: 'query_public_segment_agg',
+        viewName: 'v_pub_segment_agg',
+        metricName: 'page_views',
+        sql,
+        requestedColumns: ['segment_id', 'page_views'],
+        groupByColumns: ['segment_id'],
+        filterSignature: 'cohort:small_probe',
+        cohortMemberIds: secret7,
+      }),
+    };
+    const svcSmall = new AskService({
+      planner: smallCohortPlanner,
+      executor: new EvalGroundTruthExecutor(),
+    });
+    const smallRes = svcSmall.ask({
+      principal: principalNo7,
+      siteId: 'site_eval_a',
+      siteTenantId: 'tenant_eval_a',
+      siteConsentMode: 'full',
+      permissionEpoch: 11,
+      question: 'セグメント別PV集計',
+      windowStart: winStart,
+      windowEnd: winEnd,
+      now,
+    });
+    expect(smallRes.auditCode).toBe('PRE_LLM_BLOCKED:DIFFERENCING_ATTACK_BLOCKED');
+    // Strip opaque hex digest tokens (ref_id / params_hash / result_digest / untrusted sha/handle)
+    // and verify the entire serialized external response JSON contains ZERO occurrences of secret count "7"
+    const stripOpaqueDigests = (obj: unknown): string =>
+      JSON.stringify(obj, (k, v) =>
+        k === 'ref_id' || k === 'params_hash' || k === 'result_digest' || k === 'sha' || k === 'handle'
+          ? '<hash>'
+          : v
+      );
+    const smallJson = stripOpaqueDigests(smallRes.envelope);
+    expect(smallJson).not.toContain('7');
+    expect(smallRes.envelope?.measures.page_views.reason).toBe('disclosure_blocked_differencing');
+    expect(smallRes.envelope?.measures.page_views.reason).not.toMatch(/\d/);
+    expect(smallRes.envelope?.measures.page_views.unmet_gates?.[0]?.unlock).toBe(
+      'disclosure_blocked_differencing'
+    );
+    expect((smallRes.envelope?.data as { refusalReason?: string })?.refusalReason).toBe(
+      'disclosure_blocked_differencing'
+    );
+
+    // B) Post-row grouped RREF rejection isolating exact delta = 7 individuals
+    const users27 = Array.from({ length: 27 }, (_, i) => `u_${i}`);
+    let callNum = 0;
+    const groupedPlanner: AskPlannerProvider = {
+      providerId: 'local_llm',
+      modelName: 'gemma-4-local',
+      hosting: 'self_hosted_local',
+      plan: () => {
+        callNum += 1;
+        return {
+          kind: 'execute_query',
+          toolName: 'query_public_segment_agg',
+          viewName: 'v_pub_segment_agg',
+          metricName: 'page_views',
+          sql,
+          requestedColumns: ['segment_id', 'page_views'],
+          groupByColumns: ['segment_id'],
+          filterSignature: `cohort:grp_probe_${callNum}`,
+        };
+      },
+    };
+    const groupedExecutor: AskDataExecutor = {
+      executePublicViewQuery: () => {
+        if (callNum === 1) {
+          return {
+            connected: true,
+            rows: [
+              { bucketLabel: 'g_a', unitCount: 17, metricKey: 'page_views', metricValue: 170, unit: 'page_views', cohortMemberIds: users27.slice(0, 17) },
+              { bucketLabel: 'g_b', unitCount: 10, metricKey: 'page_views', metricValue: 100, unit: 'page_views', cohortMemberIds: users27.slice(17, 27) },
+            ],
+            queryRefId: 'qref_grp_1',
+            paramsHash: 'ph_aaa',
+            resultDigest: 'rd_aaa',
+          };
+        }
+        // Shift 7 members (u_10..u_16) from g_a into g_b -> g_a - g_a_shift isolates exact delta = 7 (< 10) via RREF!
+        return {
+          connected: true,
+          rows: [
+            { bucketLabel: 'g_a_shift', unitCount: 10, metricKey: 'page_views', metricValue: 100, unit: 'page_views', cohortMemberIds: users27.slice(0, 10) },
+            { bucketLabel: 'g_b_shift', unitCount: 17, metricKey: 'page_views', metricValue: 170, unit: 'page_views', cohortMemberIds: users27.slice(10, 27) },
+          ],
+          queryRefId: 'qref_grp_2',
+          paramsHash: 'ph_bbb',
+          resultDigest: 'rd_bbb',
+        };
+      },
+    };
+    const svcGrouped = new AskService({ planner: groupedPlanner, executor: groupedExecutor });
+    const g1 = svcGrouped.ask({
+      principal: principalNo7,
+      siteId: 'site_eval_a',
+      siteTenantId: 'tenant_eval_a',
+      siteConsentMode: 'full',
+      permissionEpoch: 12,
+      question: 'セグメント別PV集計 初回',
+      windowStart: winStart,
+      windowEnd: winEnd,
+      now,
+    });
+    expect(g1.auditCode).toBe('OK');
+
+    const g2 = svcGrouped.ask({
+      principal: principalNo7,
+      siteId: 'site_eval_a',
+      siteTenantId: 'tenant_eval_a',
+      siteConsentMode: 'full',
+      permissionEpoch: 12,
+      question: 'セグメント別PV集計 再集計',
+      windowStart: winStart,
+      windowEnd: winEnd,
+      now,
+    });
+    expect(g2.auditCode).toBe('PRE_LLM_BLOCKED:DIFFERENCING_ATTACK_BLOCKED');
+    const groupedJson = stripOpaqueDigests(g2.envelope);
+    expect(groupedJson).not.toContain('7');
+    expect(g2.envelope?.measures.page_views.reason).toBe('disclosure_blocked_differencing');
+    expect(g2.envelope?.measures.page_views.reason).not.toMatch(/\d/);
+    expect(g2.envelope?.measures.page_views.unmet_gates?.[0]?.unlock).toBe(
+      'disclosure_blocked_differencing'
+    );
+    expect((g2.envelope?.data as { refusalReason?: string })?.refusalReason).toBe(
+      'disclosure_blocked_differencing'
+    );
+  });
+
+  test('[#17] requires cohortMemberIds on grouped rows under RREF protection and commits DifferencingGuard history atomically ONLY after post-row approval', () => {
+    const sql = lookupPrecompiledPublicViewSql('v_pub_segment_agg', 'page_views')!;
+    const diffGuard = new DifferencingGuard(10);
+    const sessionKey = 'tenant_eval_a:site_eval_a:ep88';
+
+    // (a) Grouped rows under RREF protection: a row missing cohortMemberIds MUST NOT be released unchecked!
+    const grpA = Array.from({ length: 15 }, (_, i) => `a_${i}`);
+    const grpB = Array.from({ length: 15 }, (_, i) => `b_${i}`);
+    const mixedVerdict = filterQueryAndRowsBeforeLlm({
+      viewName: 'v_pub_segment_agg',
+      metricName: 'page_views',
+      sql,
+      requestedColumns: ['segment_id', 'page_views'],
+      groupByColumns: ['segment_id'],
+      rows: [
+        { bucketLabel: 'has_ids_a', unitCount: 50, metricKey: 'page_views', metricValue: 500, unit: 'page_views', cohortMemberIds: grpA },
+        { bucketLabel: 'has_ids_b', unitCount: 30, metricKey: 'page_views', metricValue: 300, unit: 'page_views', cohortMemberIds: grpB },
+        { bucketLabel: 'missing_ids_row', unitCount: 20, metricKey: 'page_views', metricValue: 200, unit: 'page_views' },
+      ],
+      sessionKey,
+      filterSignature: 'cohort:mixed_missing',
+      differencingGuard: diffGuard,
+    });
+    // `missing_ids_row` MUST NOT appear in safeRows (suppressed + complementary secondary suppression applied!)
+    expect(mixedVerdict.safeRows.some((r) => r.bucketLabel === 'missing_ids_row')).toBe(false);
+
+    // Follow-up grouped query in the same RREF-active session where ALL rows omit cohortMemberIds -> rejected!
+    const allMissingVerdict = filterQueryAndRowsBeforeLlm({
+      viewName: 'v_pub_segment_agg',
+      metricName: 'page_views',
+      sql,
+      requestedColumns: ['segment_id', 'page_views'],
+      groupByColumns: ['segment_id'],
+      rows: [
+        { bucketLabel: 'unchecked_row', unitCount: 25, metricKey: 'page_views', metricValue: 250, unit: 'page_views' },
+      ],
+      sessionKey,
+      filterSignature: 'cohort:all_missing',
+      differencingGuard: diffGuard,
+    });
+    expect(allMissingVerdict.allowed).toBe(false);
+    expect(allMissingVerdict.safeRows).toHaveLength(0);
+
+    // (b) Atomic post-approval commit in AskService:
+    //     Query passes pre-execution check (with predeclaredCohortMemberIds + window),
+    //     then FAILS at post-row stage -> DifferencingGuard cohort & window history MUST remain completely unchanged!
+    const atomicGuard = new DifferencingGuard(10);
+    const atomicSessionKey = AskService.buildSessionKey('tenant_eval_a', 'site_eval_a', 99);
+    const predeclared20 = Array.from({ length: 20 }, (_, i) => `pre_${i}`);
+
+    const predeclaredPlanner: AskPlannerProvider = {
+      providerId: 'local_llm',
+      modelName: 'gemma-4-local',
+      hosting: 'self_hosted_local',
+      plan: () => ({
+        kind: 'execute_query',
+        toolName: 'query_public_segment_agg',
+        viewName: 'v_pub_segment_agg',
+        metricName: 'page_views',
+        sql,
+        requestedColumns: ['segment_id', 'page_views'],
+        groupByColumns: ['segment_id'],
+        filterSignature: 'cohort:atomic_test',
+        cohortMemberIds: predeclared20,
+      }),
+    };
+    const failingPostRowExecutor: AskDataExecutor = {
+      executePublicViewQuery: () => ({
+        connected: true,
+        // Fails at post-row stage (< k cell suppression)
+        rows: [
+          { bucketLabel: 'tiny_bucket', unitCount: 4, metricKey: 'page_views', metricValue: 40, unit: 'page_views', cohortMemberIds: predeclared20.slice(0, 4) },
+        ],
+        queryRefId: 'qref_atomic_fail',
+        paramsHash: 'ph_atomic',
+        resultDigest: 'rd_atomic',
+      }),
+    };
+
+    const svcAtomic = new AskService({
+      planner: predeclaredPlanner,
+      executor: failingPostRowExecutor,
+      differencingGuard: atomicGuard,
+    });
+    expect(atomicGuard.getCohortHistoryLength(atomicSessionKey)).toBe(0);
+    expect(atomicGuard.getWindowHistoryLength(atomicSessionKey)).toBe(0);
+
+    const rejectedRes = svcAtomic.ask({
+      principal: CALLER_A,
+      siteId: 'site_eval_a',
+      siteTenantId: 'tenant_eval_a',
+      siteConsentMode: 'full',
+      permissionEpoch: 99,
+      question: 'セグメント別PV集計',
+      windowStart: '2026-11-01T00:00:00Z',
+      windowEnd: '2026-11-28T00:00:00Z',
+    });
+    expect(rejectedRes.auditCode).toBe('PRE_LLM_BLOCKED:SMALL_CELL_SUPPRESSED');
+    // DifferencingGuard history MUST be completely untouched after post-row rejection!
+    expect(atomicGuard.getCohortHistoryLength(atomicSessionKey)).toBe(0);
+    expect(atomicGuard.getWindowHistoryLength(atomicSessionKey)).toBe(0);
+  });
 });

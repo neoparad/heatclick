@@ -125,6 +125,30 @@ export interface HeatmapReproducibilityInputs {
   readonly palette_id: 'ugk-thermal-v1'
 }
 
+export const HEATMAP_OCR_POLICY_VERSION = 'post-mask-ocr-v1' as const
+
+export function canonicalizeRedactionBoxes(
+  boxes?: readonly RedactionBox[],
+): readonly RedactionBox[] {
+  if (!boxes || boxes.length === 0) return []
+  return [...boxes]
+    .map((b) => ({
+      x: b.x,
+      y: b.y,
+      width: b.width,
+      height: b.height,
+      reason: b.reason,
+    }))
+    .sort(
+      (a, b) =>
+        a.x - b.x ||
+        a.y - b.y ||
+        a.width - b.width ||
+        a.height - b.height ||
+        (a.reason < b.reason ? -1 : a.reason > b.reason ? 1 : 0),
+    )
+}
+
 export interface HeatmapReproducibilityScope {
   readonly tenant_id: string
   readonly site_id: string
@@ -132,6 +156,9 @@ export interface HeatmapReproducibilityScope {
   readonly period_start: string
   readonly period_end: string
   readonly segment_id: string
+  readonly redaction_boxes?: readonly RedactionBox[]
+  readonly ocr_policy_version?: string
+  readonly embedded_texts_digest?: string
 }
 
 export function computeReproducibilityHash(
@@ -156,6 +183,9 @@ export function computeReproducibilityHash(
           period_start: scope.period_start,
           period_end: scope.period_end,
           segment_id: scope.segment_id,
+          redaction_boxes: canonicalizeRedactionBoxes(scope.redaction_boxes),
+          ocr_policy_version: scope.ocr_policy_version ?? HEATMAP_OCR_POLICY_VERSION,
+          embedded_texts_digest: scope.embedded_texts_digest ?? null,
         }
       : {}),
   })

@@ -505,6 +505,11 @@ export class AuthorizationGateway {
     return this.destructions.get(requestId);
   }
 
+  public listDestructionRequests(tenantId?: string): ReadonlyArray<DestructionRequestRecord> {
+    const all = Array.from(this.destructions.values());
+    return tenantId ? all.filter((r) => r.tenantId === tenantId) : all;
+  }
+
   // ---- Main Authorization Entry Point ----
 
   public authorize(req: AuthorizationRequest): AuthorizationDecision {
@@ -850,6 +855,53 @@ export class AuthorizationGateway {
     return { ok: true, approval: check.approval };
   }
 
+  /**
+   * Atomically commits an R4 two-phase destruction request ONLY after the caller has passed
+   * idempotency cache lookup, rate-limiting, and isolation hold checks (#25).
+   * Consumes any Passkey approval / assertion, increments the daily subject deletion counter,
+   * and registers the single `DestructionRequestRecord`.
+   */
+  public commitR4Destruction(req: AuthorizationRequest):
+    | {
+        readonly ok: true;
+        readonly auditEntryId: string;
+        readonly destructionRequest: NonNullable<AuthorizationDecision['destructionRequest']>;
+      }
+    | {
+        readonly ok: false;
+        readonly httpStatus: 202 | 403;
+        readonly code: string;
+        readonly reason: string;
+        readonly approvalUrl?: string;
+        readonly auditEntryId: string;
+      } {
+    const now = req.now ?? new Date();
+    const committed = this.enforceR4(
+      {
+        ...req,
+        deferApprovalConsumption: false,
+        deferSideEffects: false,
+        allowConsumedApprovalForReplay: false,
+      },
+      now
+    );
+    if (!committed.allowed || !committed.destructionRequest) {
+      return {
+        ok: false,
+        httpStatus: committed.httpStatus === 403 ? 403 : 202,
+        code: committed.code,
+        reason: committed.reason,
+        approvalUrl: committed.approvalUrl,
+        auditEntryId: committed.auditEntryId,
+      };
+    }
+    return {
+      ok: true,
+      auditEntryId: committed.auditEntryId,
+      destructionRequest: committed.destructionRequest,
+    };
+  }
+
   private checkOrConsumePasskeyApproval(
     req: AuthorizationRequest,
     approvalId: string,
@@ -859,7 +911,7 @@ export class AuthorizationGateway {
   ):
     | { readonly ok: true; readonly approval: PasskeyApprovalRecord; readonly deferred: boolean }
     | { readonly ok: false; readonly decision: AuthorizationDecision } {
-    if (req.deferApprovalConsumption) {
+    if (req.deferApprovalConsumption || req.deferSideEffects) {
       const verified = this.verifyPasskeyApproval({
         approvalId,
         tenantId: req.principal.tenantId,
@@ -1084,9 +1136,11 @@ export class AuthorizationGateway {
     const usedToday = this.dailySubjectDeleteCounts.get(dailyKey) ?? 0;
     const dailyCap = req.principal.constraints?.dailyDeleteSubjectsCap;
 
+    const deferR4 = req.deferApprovalConsumption === true || req.deferSideEffects === true;
     const overDailySubjectCap =
       dest.scope === 'subject' &&
       dailyCap !== undefined &&
+      req.allowConsumedApprovalForReplay !== true &&
       usedToday + subjectCount > dailyCap;
 
     const isSiteOrTenantDestruction = dest.scope === 'site' || dest.scope === 'tenant';
@@ -1121,7 +1175,12 @@ export class AuthorizationGateway {
         (req.principal.role === 'owner' || req.principal.role === 'admin') &&
         req.passkeyAssertion
       ) {
-        const assertionCheck = this.verifyPasskeyAssertion(req.passkeyAssertion, combinedHash, now);
+        const assertionCheck = this.verifyPasskeyAssertion(
+          req.passkeyAssertion,
+          combinedHash,
+          now,
+          deferR4
+        );
         if (!assertionCheck.ok) {
           return this.denyPending(req, now, assertionCheck.code, approvalUrl);
         }
@@ -1131,6 +1190,36 @@ export class AuthorizationGateway {
           : 'R4_SITE_TENANT_DESTRUCTION_REQUIRES_APPROVAL';
         return this.denyPending(req, now, pendingCode, approvalUrl);
       }
+    }
+
+    if (deferR4) {
+      // Strictly read-only pre-authorization (#25): do NOT increment daily counters or register
+      // a destruction reservation until commitR4Destruction() runs after idempotency & rate-limit checks.
+      const entry = this.auditLog.append({
+        timestamp: now.toISOString(),
+        tenantId: req.principal.tenantId,
+        targetTenantId: req.resource.tenantId,
+        principalId: req.principal.principalId,
+        credentialKind: req.principal.credentialKind,
+        credentialId: req.principal.credentialId,
+        action: req.action,
+        riskClass: 'R4',
+        resourceType: req.resource.type,
+        resourceId: req.resource.id,
+        outcome: 'allow',
+        reason: 'R4_AUTHORIZED_DEFERRED',
+        metadata: { scope: dest.scope, subjectCount, deferred: true },
+      });
+      return {
+        allowed: true,
+        httpStatus: 202,
+        code: 'R4_AUTHORIZED_DEFERRED',
+        measureStatus: 'pending',
+        reason: 'R4 destruction authorized read-only; awaiting commit after idempotency and rate-limit checks',
+        auditEntryId: entry.auditId,
+        ...(pendingApprovalConsumption ? { pendingApprovalConsumption } : {}),
+        pendingDestructionCommit: true,
+      };
     }
 
     if (dest.scope === 'subject' && subjectCount > 0) {
@@ -1277,7 +1366,8 @@ export class AuthorizationGateway {
   private verifyPasskeyAssertion(
     assertion: PasskeyAssertionInput,
     expectedCombinedHash: string,
-    now: Date
+    now: Date,
+    readOnly: boolean = false
   ): { readonly ok: true } | { readonly ok: false; readonly code: string; readonly reason: string } {
     if (!assertion.signatureVerified) {
       return { ok: false, code: 'PASSKEY_SIGNATURE_INVALID', reason: 'WebAuthn signature not verified' };
@@ -1304,7 +1394,9 @@ export class AuthorizationGateway {
         reason: 'Passkey assertion has already been consumed',
       };
     }
-    setBoundedMap(this.consumedAssertionIds, replayKey, now.getTime(), this.maxStateMapEntries);
+    if (!readOnly) {
+      setBoundedMap(this.consumedAssertionIds, replayKey, now.getTime(), this.maxStateMapEntries);
+    }
     return { ok: true };
   }
 

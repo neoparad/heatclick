@@ -398,16 +398,19 @@ export class DifferencingGuard {
   /**
    * Atomically evaluates a batch of disclosed cohort constraint vectors (e.g. every individually
    * disclosed GROUP BY row PLUS the disclosed total row) against the session's RREF history.
-   * Commits ALL new equations to history ONLY if the entire batch passes; if ANY equation or
-   * multi-query linear combination isolates `1..(k-1)` individuals, rejects and commits NOTHING.
+   * When `options.commit !== false`, commits ALL new equations to history ONLY if the entire
+   * batch passes; if ANY equation or multi-query linear combination isolates `1..(k-1)` individuals,
+   * rejects and commits NOTHING.
    */
   public checkAndRecordBatch(
     sessionKey: string,
     entries: ReadonlyArray<{
       readonly filterSignature: string;
       readonly cohortMemberIds: ReadonlyArray<string>;
-    }>
+    }>,
+    options?: { readonly commit?: boolean }
   ): { readonly allowed: boolean; readonly isolatedCount?: number } {
+    const shouldCommit = options?.commit ?? true;
     const priorList = this.history.get(sessionKey) ?? [];
 
     const setsEqual = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean => {
@@ -488,9 +491,30 @@ export class DifferencingGuard {
       }
     }
 
-    // Entire batch passed: commit all new equations atomically
-    this.history.set(sessionKey, [...priorList, ...newEntries]);
+    // Entire batch passed: commit all new equations atomically only if requested
+    if (shouldCommit) {
+      this.history.set(sessionKey, [...priorList, ...newEntries]);
+    }
     return { allowed: true };
+  }
+
+  public hasCohortHistory(sessionKey: string): boolean {
+    return (this.history.get(sessionKey)?.length ?? 0) > 0;
+  }
+
+  public getCohortHistoryLength(sessionKey: string): number {
+    return this.history.get(sessionKey)?.length ?? 0;
+  }
+
+  public getWindowHistoryLength(sessionKey: string): number {
+    const prefix = `${sessionKey}|`;
+    let total = 0;
+    for (const [k, list] of this.windowHistory.entries()) {
+      if (k.startsWith(prefix)) {
+        total += list.length;
+      }
+    }
+    return total;
   }
 
   /**
@@ -501,9 +525,10 @@ export class DifferencingGuard {
   public checkAndRecord(
     sessionKey: string,
     filterSignature: string,
-    cohortMemberIds: ReadonlyArray<string>
+    cohortMemberIds: ReadonlyArray<string>,
+    options?: { readonly commit?: boolean }
   ): { readonly allowed: boolean; readonly isolatedCount?: number } {
-    return this.checkAndRecordBatch(sessionKey, [{ filterSignature, cohortMemberIds }]);
+    return this.checkAndRecordBatch(sessionKey, [{ filterSignature, cohortMemberIds }], options);
   }
 
   /**
@@ -512,20 +537,24 @@ export class DifferencingGuard {
    * 4-query RREF linear combinations isolating `< minWindowDiffDays` days, and excessive overlapping
    * window probing BEFORE any database query executes.
    */
-  public checkAndRecordWindow(params: {
-    readonly sessionKey: string;
-    readonly viewName: string;
-    readonly metricName: string;
-    readonly predicateKey: string;
-    readonly windowStart: string;
-    readonly windowEnd: string;
-  }): { readonly allowed: boolean; readonly isolatedDays?: number; readonly reason?: string } {
+  public checkAndRecordWindow(
+    params: {
+      readonly sessionKey: string;
+      readonly viewName: string;
+      readonly metricName: string;
+      readonly predicateKey: string;
+      readonly windowStart: string;
+      readonly windowEnd: string;
+    },
+    options?: { readonly commit?: boolean }
+  ): { readonly allowed: boolean; readonly isolatedDays?: number; readonly reason?: string } {
+    const shouldCommit = options?.commit ?? true;
     const startMs = Date.parse(params.windowStart);
     const endMs = Date.parse(params.windowEnd);
     if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
       return {
         allowed: false,
-        reason: `Invalid query time window [${params.windowStart}, ${params.windowEnd}]`,
+        reason: 'disclosure_blocked_invalid_window',
       };
     }
 
@@ -567,7 +596,7 @@ export class DifferencingGuard {
       if (connected.length + 1 > this.maxOverlappingWindowsPerScope) {
         return {
           allowed: false,
-          reason: `Window overlap budget exceeded (${connected.length + 1} > ${this.maxOverlappingWindowsPerScope}) for ${params.viewName}.${params.metricName}`,
+          reason: 'disclosure_blocked_differencing',
         };
       }
 
@@ -607,13 +636,14 @@ export class DifferencingGuard {
         return {
           allowed: false,
           isolatedDays: days,
-          reason: `Time-window differencing / linear-combination attack blocked: query combination isolates ${days} day(s) (< ${this.minWindowDiffDays} days)`,
+          reason: 'disclosure_blocked_differencing',
         };
       }
     }
 
-    priorWindows.push({ startMs, endMs: effectiveEndMs });
-    this.windowHistory.set(scopeKey, priorWindows);
+    if (shouldCommit) {
+      this.windowHistory.set(scopeKey, [...priorWindows, { startMs, endMs: effectiveEndMs }]);
+    }
     return { allowed: true };
   }
 
@@ -900,38 +930,44 @@ export function validateAskQueryBeforeExecution(params: {
     };
   }
 
-  // 5. Pre-execution time-window differencing & multi-query linear combination check
+  // 5. Pre-execution time-window differencing & multi-query linear combination check (DRY-RUN ONLY!)
+  //    History is NOT mutated until post-query row checks pass and the entire Ask response is approved.
   const boundFilterSignature = `${params.filterSignature}|win:${params.windowStart}..${params.windowEnd}`;
-  const windowCheck = params.differencingGuard.checkAndRecordWindow({
-    sessionKey: params.sessionKey,
-    viewName: typedView,
-    metricName: params.metricName,
-    predicateKey: extractPredicateScopeKey(params.filterSignature),
-    windowStart: params.windowStart,
-    windowEnd: params.windowEnd,
-  });
+  const windowCheck = params.differencingGuard.checkAndRecordWindow(
+    {
+      sessionKey: params.sessionKey,
+      viewName: typedView,
+      metricName: params.metricName,
+      predicateKey: extractPredicateScopeKey(params.filterSignature),
+      windowStart: params.windowStart,
+      windowEnd: params.windowEnd,
+    },
+    { commit: false }
+  );
   if (!windowCheck.allowed) {
     return {
       allowed: false,
       blockedCode: 'DIFFERENCING_ATTACK_BLOCKED',
-      reason: windowCheck.reason ?? 'Blocked by time-window differencing guard before DB execution',
+      reason: 'disclosure_blocked_differencing',
       safeRows: [],
       suppressedCount: 0,
     };
   }
 
-  // 6. Optional pre-declared cohort differencing check BEFORE execution
+  // 6. Optional pre-declared cohort differencing check BEFORE execution (DRY-RUN ONLY!)
+  //    Committed atomically with disclosed row + total equations ONLY after post-row approval.
   if (params.predeclaredCohortMemberIds && params.predeclaredCohortMemberIds.length > 0) {
     const cohortCheck = params.differencingGuard.checkAndRecord(
       params.sessionKey,
       boundFilterSignature,
-      params.predeclaredCohortMemberIds
+      params.predeclaredCohortMemberIds,
+      { commit: false }
     );
     if (!cohortCheck.allowed) {
       return {
         allowed: false,
         blockedCode: 'DIFFERENCING_ATTACK_BLOCKED',
-        reason: `Pre-execution cohort differencing attack blocked: isolates ${cohortCheck.isolatedCount} individual(s) (< k=${ASK_MIN_CELL_K})`,
+        reason: 'disclosure_blocked_differencing',
         safeRows: [],
         suppressedCount: 0,
       };
@@ -961,6 +997,8 @@ export function filterQueryAndRowsBeforeLlm(params: {
   readonly windowStart?: string;
   readonly windowEnd?: string;
   readonly skipWindowCheck?: boolean;
+  readonly predeclaredCohortMemberIds?: ReadonlyArray<string>;
+  readonly requireCohortMembership?: boolean;
   readonly differencingGuard: DifferencingGuard;
   readonly minCellK?: number;
 }): PreLlmFilterVerdict {
@@ -971,7 +1009,7 @@ export function filterQueryAndRowsBeforeLlm(params: {
     return {
       allowed: false,
       blockedCode: 'NON_WHITELISTED_VIEW',
-      reason: `View "${params.viewName}" is not in the public read-only aggregate whitelist`,
+      reason: 'disclosure_blocked_policy',
       safeRows: [],
       suppressedCount: 0,
     };
@@ -988,7 +1026,7 @@ export function filterQueryAndRowsBeforeLlm(params: {
       return {
         allowed: false,
         blockedCode: 'IDENTIFIER_COLUMN_BLOCKED',
-        reason: `Identifier column "${col}" is strictly forbidden in /v1/ask queries and model context`,
+        reason: 'disclosure_blocked_restricted_column',
         safeRows: [],
         suppressedCount: 0,
       };
@@ -997,7 +1035,7 @@ export function filterQueryAndRowsBeforeLlm(params: {
       return {
         allowed: false,
         blockedCode: 'FREE_TEXT_COLUMN_BLOCKED',
-        reason: `Free-text column "${col}" is strictly forbidden in /v1/ask queries and model context`,
+        reason: 'disclosure_blocked_restricted_column',
         safeRows: [],
         suppressedCount: 0,
       };
@@ -1010,7 +1048,7 @@ export function filterQueryAndRowsBeforeLlm(params: {
     return {
       allowed: false,
       blockedCode: 'SQL_AST_VIOLATION',
-      reason: `Generated SQL failed AST lint: ${ast.violations.map((v) => v.code).join(', ')}`,
+      reason: 'disclosure_blocked_policy',
       safeRows: [],
       suppressedCount: 0,
     };
@@ -1025,27 +1063,34 @@ export function filterQueryAndRowsBeforeLlm(params: {
     return {
       allowed: false,
       blockedCode: sqlTableMetricCheck.blockedCode ?? 'SQL_AST_VIOLATION',
-      reason: sqlTableMetricCheck.reason,
+      reason: 'disclosure_blocked_policy',
       safeRows: [],
       suppressedCount: 0,
     };
   }
 
-  // 4. Optional time-window differencing check when called standalone with window bounds
-  if (!params.skipWindowCheck && params.windowStart && params.windowEnd) {
-    const winCheck = params.differencingGuard.checkAndRecordWindow({
-      sessionKey: params.sessionKey,
-      viewName: typedView,
-      metricName: params.metricName ?? 'default_metric',
-      predicateKey: extractPredicateScopeKey(params.filterSignature),
-      windowStart: params.windowStart,
-      windowEnd: params.windowEnd,
+  // 4. Optional time-window differencing check (DRY-RUN here; committed atomically ONLY upon full approval)
+  const pendingWindowCheck =
+    !params.skipWindowCheck && params.windowStart && params.windowEnd
+      ? {
+          sessionKey: params.sessionKey,
+          viewName: typedView,
+          metricName: params.metricName ?? 'default_metric',
+          predicateKey: extractPredicateScopeKey(params.filterSignature),
+          windowStart: params.windowStart,
+          windowEnd: params.windowEnd,
+        }
+      : null;
+
+  if (pendingWindowCheck) {
+    const winCheck = params.differencingGuard.checkAndRecordWindow(pendingWindowCheck, {
+      commit: false,
     });
     if (!winCheck.allowed) {
       return {
         allowed: false,
         blockedCode: 'DIFFERENCING_ATTACK_BLOCKED',
-        reason: winCheck.reason ?? 'Blocked by time-window differencing guard',
+        reason: 'disclosure_blocked_differencing',
         safeRows: [],
         suppressedCount: params.rows.length,
       };
@@ -1061,7 +1106,7 @@ export function filterQueryAndRowsBeforeLlm(params: {
           return {
             allowed: false,
             blockedCode: 'IDENTIFIER_COLUMN_BLOCKED',
-            reason: `Result row contained forbidden identifier field "${k}"`,
+            reason: 'disclosure_blocked_restricted_column',
             safeRows: [],
             suppressedCount: 0,
           };
@@ -1070,7 +1115,7 @@ export function filterQueryAndRowsBeforeLlm(params: {
           return {
             allowed: false,
             blockedCode: 'FREE_TEXT_COLUMN_BLOCKED',
-            reason: `Result row contained forbidden free-text field "${k}"`,
+            reason: 'disclosure_blocked_restricted_column',
             safeRows: [],
             suppressedCount: 0,
           };
@@ -1079,14 +1124,29 @@ export function filterQueryAndRowsBeforeLlm(params: {
     }
   }
 
-  // 6. Primary < k cell suppression + Complementary secondary suppression on GROUP BY results
-  //    (Compute the exact set of disclosed rows FIRST so we feed every disclosed row + total
-  //     into atomic batch RREF differencing without ever committing suppressed rows.)
+  // 6. Primary < k cell suppression + mandatory row membership evidence under RREF +
+  //    Complementary secondary suppression on GROUP BY results.
+  //    (Compute the exact set of disclosed rows FIRST so we feed pre-query + every disclosed row +
+  //     total into atomic batch RREF differencing without ever committing suppressed rows.)
+  const hasCohortHistory = params.differencingGuard.hasCohortHistory(params.sessionKey);
+  const hasPredeclaredCohort =
+    params.predeclaredCohortMemberIds !== undefined &&
+    params.predeclaredCohortMemberIds.length > 0;
+  const anyRowHasCohortIds = params.rows.some(
+    (r) => r.cohortMemberIds !== undefined && r.cohortMemberIds.length > 0
+  );
+  const rrefActive =
+    params.requireCohortMembership === true ||
+    hasCohortHistory ||
+    hasPredeclaredCohort ||
+    anyRowHasCohortIds;
+
   const disclosedWithCohorts: Array<{
     readonly safeRow: AggregateQueryRow;
     readonly cohortMemberIds?: ReadonlyArray<string>;
   }> = [];
   let primarySuppressedCount = 0;
+  let missingMembershipSuppressedCount = 0;
   let secondarySuppressedCount = 0;
   let sawPerPerson = false;
 
@@ -1097,6 +1157,17 @@ export function filterQueryAndRowsBeforeLlm(params: {
       continue;
     }
     if (row.unitCount < minK) {
+      primarySuppressedCount += 1;
+      continue;
+    }
+    // When RREF / differencing protection is active on grouped rows, EVERY non-suppressed
+    // disclosed row MUST carry cohortMemberIds — never release an unchecked grouped row!
+    if (
+      rrefActive &&
+      params.groupByColumns.length > 0 &&
+      (!row.cohortMemberIds || row.cohortMemberIds.length === 0)
+    ) {
+      missingMembershipSuppressedCount += 1;
       primarySuppressedCount += 1;
       continue;
     }
@@ -1114,9 +1185,9 @@ export function filterQueryAndRowsBeforeLlm(params: {
   }
 
   // Complementary secondary suppression: on GROUP BY queries, if ONLY 1 cell was suppressed by
-  // primary (< k) suppression, an attacker knowing the ungrouped site total could recover that
-  // single suppressed cell by subtracting all remaining sibling cells. Suppress the next-smallest
-  // sibling cell (`unitCount`, tie-broken by `|metricValue|` then `bucketLabel`) as well!
+  // primary (< k or missing membership) suppression, an attacker knowing the ungrouped site total
+  // could recover that single suppressed cell by subtracting all remaining sibling cells. Suppress
+  // the next-smallest sibling cell (`unitCount`, tie-broken by `|metricValue|` then `bucketLabel`)!
   if (
     params.groupByColumns.length > 0 &&
     primarySuppressedCount === 1 &&
@@ -1147,22 +1218,28 @@ export function filterQueryAndRowsBeforeLlm(params: {
   if (safeRows.length === 0 && params.rows.length > 0) {
     const allOriginalPerPerson =
       sawPerPerson && secondarySuppressedCount === 0 && params.rows.every((r) => r.unitCount <= 1);
+    const blockedCode = allOriginalPerPerson
+      ? 'PER_PERSON_AGGREGATION_BLOCKED'
+      : missingMembershipSuppressedCount > 0 &&
+          primarySuppressedCount === missingMembershipSuppressedCount
+        ? 'DIFFERENCING_ATTACK_BLOCKED'
+        : 'SMALL_CELL_SUPPRESSED';
     return {
       allowed: false,
-      blockedCode: allOriginalPerPerson ? 'PER_PERSON_AGGREGATION_BLOCKED' : 'SMALL_CELL_SUPPRESSED',
-      reason: allOriginalPerPerson
-        ? 'Single-person aggregation blocked by pre-LLM filter'
-        : secondarySuppressedCount > 0
-          ? `Primary and complementary secondary suppression left 0 safe cells (k=${minK})`
-          : `All ${params.rows.length} rows fell below privacy threshold k=${minK}`,
+      blockedCode,
+      reason:
+        blockedCode === 'DIFFERENCING_ATTACK_BLOCKED'
+          ? 'disclosure_blocked_differencing'
+          : 'disclosure_suppressed_k_anonymity',
       safeRows: [],
       suppressedCount,
       secondarySuppressedCount,
     };
   }
 
-  // 7. Atomic batch RREF differencing check across EVERY individually disclosed group row PLUS
-  //    the disclosed total row (binds windowStart..windowEnd). Commits ALL or NOTHING!
+  // 7. Atomic batch RREF differencing check across pre-declared cohort + EVERY individually
+  //    disclosed group row + the disclosed total row (binds windowStart..windowEnd).
+  //    Evaluates dry-run first; commits ALL (window + cohort batch) ONLY when entire response is approved!
   const boundSignature =
     params.windowStart && params.windowEnd
       ? `${params.filterSignature}|win:${params.windowStart}..${params.windowEnd}`
@@ -1173,6 +1250,13 @@ export function filterQueryAndRowsBeforeLlm(params: {
     readonly cohortMemberIds: ReadonlyArray<string>;
   }> = [];
   const disclosedUnionSet = new Set<string>();
+
+  if (hasPredeclaredCohort && params.predeclaredCohortMemberIds) {
+    batchEntries.push({
+      filterSignature: `${boundSignature}|predeclared`,
+      cohortMemberIds: params.predeclaredCohortMemberIds,
+    });
+  }
 
   for (const item of disclosedWithCohorts) {
     if (item.cohortMemberIds && item.cohortMemberIds.length > 0) {
@@ -1195,17 +1279,26 @@ export function filterQueryAndRowsBeforeLlm(params: {
   if (batchEntries.length > 0) {
     const diffCheck = params.differencingGuard.checkAndRecordBatch(
       params.sessionKey,
-      batchEntries
+      batchEntries,
+      { commit: false }
     );
     if (!diffCheck.allowed) {
       return {
         allowed: false,
         blockedCode: 'DIFFERENCING_ATTACK_BLOCKED',
-        reason: `Differencing attack detected: disclosed group rows/total isolate ${diffCheck.isolatedCount} individual(s) (< k=${minK})`,
+        reason: 'disclosure_blocked_differencing',
         safeRows: [],
         suppressedCount: params.rows.length,
       };
     }
+  }
+
+  // 8. Entire Ask disclosure approved: atomically commit window + cohort batch equations!
+  if (pendingWindowCheck) {
+    params.differencingGuard.checkAndRecordWindow(pendingWindowCheck, { commit: true });
+  }
+  if (batchEntries.length > 0) {
+    params.differencingGuard.checkAndRecordBatch(params.sessionKey, batchEntries, { commit: true });
   }
 
   return {

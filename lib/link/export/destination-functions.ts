@@ -151,21 +151,38 @@ const effectiveMaxErrorBytes =
     : 512;
 
 function truncateUtf8(str, maxBytes) {
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) return '';
+  const limit = Math.floor(maxBytes);
   const s = String(str || '');
-  if (Buffer.byteLength(s, 'utf8') <= maxBytes) return s;
-  const buf = Buffer.from(s, 'utf8').subarray(0, maxBytes);
+  if (Buffer.byteLength(s, 'utf8') <= limit) return s;
+  const buf = Buffer.from(s, 'utf8').subarray(0, limit);
   let end = buf.length;
+  // Step back over any trailing UTF-8 continuation bytes (0x80..0xBF)
   while (end > 0 && (buf[end - 1] & 0xc0) === 0x80) {
     end -= 1;
   }
-  if (end > 0 && (buf[end - 1] & 0x80) !== 0) {
+  // If the byte before continuations is a multi-byte lead byte (>= 0xC0) whose full
+  // sequence does not fit within buf.length, drop the lead byte too so toString('utf8')
+  // NEVER emits U+FFFD (3 bytes) and NEVER exceeds maxBytes.
+  if (end > 0 && buf[end - 1] >= 0xc0) {
     const lead = buf[end - 1];
-    const seqLen = (lead & 0xe0) === 0xc0 ? 2 : (lead & 0xf0) === 0xe0 ? 3 : (lead & 0xf8) === 0xf0 ? 4 : 1;
+    const seqLen =
+      (lead & 0xe0) === 0xc0
+        ? 2
+        : (lead & 0xf0) === 0xe0
+          ? 3
+          : (lead & 0xf8) === 0xf0
+            ? 4
+            : 5;
     if (end - 1 + seqLen > buf.length) {
       end -= 1;
     }
   }
-  return buf.subarray(0, end).toString('utf8');
+  let out = buf.subarray(0, end).toString('utf8');
+  while (Buffer.byteLength(out, 'utf8') > limit && out.length > 0) {
+    out = Array.from(out).slice(0, -1).join('');
+  }
+  return out;
 }
 
 if (i32) {
@@ -258,21 +275,33 @@ function sanitizePlainRecord(raw: Record<string, unknown>): Record<string, unkno
 }
 
 function truncateUtf8Error(str: string, maxBytes: number = MAX_SANDBOX_ERROR_BYTES): string {
-  if (Buffer.byteLength(str, 'utf8') <= maxBytes) return str;
-  const buf = Buffer.from(str, 'utf8').subarray(0, maxBytes);
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) return '';
+  const limit = Math.floor(maxBytes);
+  if (Buffer.byteLength(str, 'utf8') <= limit) return str;
+  const buf = Buffer.from(str, 'utf8').subarray(0, limit);
   let end = buf.length;
   while (end > 0 && (buf[end - 1]! & 0xc0) === 0x80) {
     end -= 1;
   }
-  if (end > 0 && (buf[end - 1]! & 0x80) !== 0) {
+  if (end > 0 && buf[end - 1]! >= 0xc0) {
     const lead = buf[end - 1]!;
     const seqLen =
-      (lead & 0xe0) === 0xc0 ? 2 : (lead & 0xf0) === 0xe0 ? 3 : (lead & 0xf8) === 0xf0 ? 4 : 1;
+      (lead & 0xe0) === 0xc0
+        ? 2
+        : (lead & 0xf0) === 0xe0
+          ? 3
+          : (lead & 0xf8) === 0xf0
+            ? 4
+            : 5;
     if (end - 1 + seqLen > buf.length) {
       end -= 1;
     }
   }
-  return buf.subarray(0, end).toString('utf8');
+  let out = buf.subarray(0, end).toString('utf8');
+  while (Buffer.byteLength(out, 'utf8') > limit && out.length > 0) {
+    out = Array.from(out).slice(0, -1).join('');
+  }
+  return out;
 }
 
 function parseWorkerRawOutput(

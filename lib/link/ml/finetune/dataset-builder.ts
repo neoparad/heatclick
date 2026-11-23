@@ -508,6 +508,8 @@ export interface ThreeWayDatasetBuildResult {
   readonly final_eval: readonly SplitTrainingExample[];
   readonly deduplicated_count: number;
   readonly quarantined_poisoning_ids: readonly string[];
+  readonly splitAssignmentsByComponent: ReadonlyMap<string, SplitName>;
+  readonly splitAssignmentsByExample: ReadonlyMap<string, SplitName>;
   readonly overlap_audit: {
     readonly passed: boolean;
     readonly overlapping_page_lineages: number;
@@ -686,6 +688,13 @@ export function buildThreeWayTrainingDataset(params: {
    * so single-site corpora do NOT collapse into 1 component.
    */
   readonly splitBoundaryMode?: 'lineage' | 'site';
+  /**
+   * Persistent split assignments from prior dataset builds (`[#23]`).
+   * Keys may be component `groupKey` (`splitAssignmentsByComponent`), `page_lineage_id`, or `example_id`
+   * (`splitAssignmentsByExample`). Every previously assigned component/example is strictly locked to its
+   * original split so a prior `train` or `select_tune` example can NEVER migrate into `final_eval`.
+   */
+  readonly priorSplitAssignments?: ReadonlyMap<string, SplitName>;
   readonly ratios?: { readonly train: number; readonly select_tune: number; readonly final_eval: number };
 }): ThreeWayDatasetBuildResult {
   // 0. [H-04]: Run D-31b Jev provenance check FIRST on ALL raw examples (even if text looks like poisoning!)
@@ -828,24 +837,54 @@ export function buildThreeWayTrainingDataset(params: {
     );
   }
 
-  // 4. Assign each connected component atomically to ONE split, then deduplicate WITHIN that split!
+  // 4. Assign each connected component atomically to ONE split, locking any prior assignments (`[#23]`)!
   const ratios = params.ratios ?? { train: 0.6, select_tune: 0.2, final_eval: 0.2 };
+  const priorSplits = params.priorSplitAssignments;
   const componentList = Array.from(components.entries()).map(([compRoot, indices]) => {
     const groupKey = indices
       .map((idx) => weightedExamples[idx].page_lineage_id)
       .sort()[0];
     const hashU =
       parseInt(sha256Hex(`${params.seed}:split:${groupKey}`).slice(0, 8), 16) / 0x100000000;
-    const initialSplit: SplitName =
+
+    // Resolve any prior split assignments across component key, lineage IDs, and example IDs
+    let locked = false;
+    let initialSplit: SplitName =
       hashU < ratios.train
         ? 'train'
         : hashU < ratios.train + ratios.select_tune
           ? 'select_tune'
           : 'final_eval';
-    return { compRoot, indices, groupKey, hashU, split: initialSplit };
+
+    if (priorSplits && priorSplits.size > 0) {
+      const matchedPrior = new Set<SplitName>();
+      const byComp = priorSplits.get(groupKey);
+      if (byComp) matchedPrior.add(byComp);
+      for (const idx of indices) {
+        const ex = weightedExamples[idx];
+        const byEx = priorSplits.get(ex.example_id);
+        if (byEx) matchedPrior.add(byEx);
+        const byLin = priorSplits.get(ex.page_lineage_id);
+        if (byLin) matchedPrior.add(byLin);
+      }
+      if (matchedPrior.size > 0) {
+        locked = true;
+        // Never allow a prior `train` or `select_tune` component to contaminate `final_eval`!
+        if (matchedPrior.has('train')) {
+          initialSplit = 'train';
+        } else if (matchedPrior.has('select_tune')) {
+          initialSplit = 'select_tune';
+        } else {
+          initialSplit = 'final_eval';
+        }
+      }
+    }
+
+    return { compRoot, indices, groupKey, hashU, split: initialSplit, locked };
   });
 
-  // Ensure every split receives at least 1 atomic component when components.size >= 3
+  // Ensure every split receives at least 1 atomic component when components.size >= 3,
+  // moving ONLY unlocked (newly arrived) components so prior assignments are NEVER mutated (`[#23]`)!
   const splitOrder: readonly SplitName[] = ['train', 'select_tune', 'final_eval'];
   const bySplitMap = new Map<SplitName, typeof componentList>([
     ['train', []],
@@ -857,20 +896,25 @@ export function buildThreeWayTrainingDataset(params: {
   }
   for (const targetSplit of splitOrder) {
     if (bySplitMap.get(targetSplit)!.length === 0) {
-      // Deterministically move the highest-hashU atomic component from the largest split
-      let donorSplit: SplitName = 'train';
+      // Deterministically move the highest-hashU UNLOCKED atomic component from the largest eligible donor split
+      let donorSplit: SplitName | null = null;
       let maxLen = -1;
       for (const s of splitOrder) {
-        const len = bySplitMap.get(s)!.length;
-        if (len > maxLen) {
-          maxLen = len;
+        const list = bySplitMap.get(s)!;
+        const hasUnlocked = list.some((c) => !c.locked);
+        if (list.length > 1 && hasUnlocked && list.length > maxLen) {
+          maxLen = list.length;
           donorSplit = s;
         }
       }
-      const donorList = bySplitMap.get(donorSplit)!;
-      if (donorList.length > 1) {
-        donorList.sort((a, b) => a.hashU - b.hashU);
-        const moved = donorList.pop()!;
+      if (donorSplit !== null) {
+        const donorList = bySplitMap.get(donorSplit)!;
+        const unlocked = donorList.filter((c) => !c.locked).sort((a, b) => a.hashU - b.hashU);
+        const moved = unlocked.pop()!;
+        const removeIdx = donorList.indexOf(moved);
+        if (removeIdx >= 0) {
+          donorList.splice(removeIdx, 1);
+        }
         moved.split = targetSplit;
         bySplitMap.get(targetSplit)!.push(moved);
       }
@@ -980,6 +1024,15 @@ export function buildThreeWayTrainingDataset(params: {
     .join(',');
   const datasetId = `ds_${sha256Hex(`${params.taskKind}:${params.scope}:${params.seed}:${allKeptIds}`).slice(0, 20)}`;
 
+  const splitAssignmentsByComponent = new Map<string, SplitName>();
+  for (const comp of componentList) {
+    splitAssignmentsByComponent.set(comp.groupKey, comp.split);
+  }
+  const splitAssignmentsByExample = new Map<string, SplitName>();
+  for (const item of [...train, ...selectTune, ...finalEval]) {
+    splitAssignmentsByExample.set(item.example_id, item.split);
+  }
+
   return {
     dataset_id: datasetId,
     provenance: finalProvenance,
@@ -988,6 +1041,8 @@ export function buildThreeWayTrainingDataset(params: {
     final_eval: finalEval,
     deduplicated_count: deduplicatedCount,
     quarantined_poisoning_ids: quarantinedPoisoningIds,
+    splitAssignmentsByComponent,
+    splitAssignmentsByExample,
     overlap_audit: overlapAudit,
   };
 }

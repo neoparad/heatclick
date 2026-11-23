@@ -9,8 +9,17 @@
  * - `POST /v1/optout`                — Durable opt-out + 14-day deletion queue endpoint (§4.5 / [H-11])
  */
 
-import { computeCanonicalSubjectHmac, sha256Hex } from '../../packages/contract/schema';
-import { LinkCollectorEngine, deriveServerNetworkPrefix } from './collector';
+import {
+  computeCanonicalSubjectHmac,
+  computeSubjectHmacLookupCandidates,
+  hmacSha256Hex,
+  sha256Hex,
+} from '../../packages/contract/schema';
+import {
+  LinkCollectorEngine,
+  constantTimeHexEqual,
+  deriveServerNetworkPrefix,
+} from './collector';
 import {
   SEGMENT_CALL_TYPES,
   SegmentCompatIngestEngine,
@@ -51,6 +60,88 @@ function extractCookieValue(cookieHeader: string | null, name: string): string |
     }
   }
   return null;
+}
+
+const DELETION_RETRY_COOKIE_NAME = 'ugk_del_retry';
+const DELETION_RETRY_COOKIE_TTL_SEC = 86_400; // 24 hours short-lived retry handle
+
+function base64UrlEncodeUtf8(input: string): string {
+  return Buffer.from(input, 'utf8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function base64UrlDecodeUtf8(input: string): string | null {
+  try {
+    const padded = input.replace(/-/g, '+').replace(/_/g, '/');
+    const padLen = (4 - (padded.length % 4)) % 4;
+    return Buffer.from(padded + '='.repeat(padLen), 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+function signDeletionRetryHandle(args: {
+  readonly tenantId: string;
+  readonly siteId: string;
+  readonly visitorId: string;
+  readonly expiresAtMs: number;
+  readonly signingSecret: string;
+}): string {
+  const payloadB64 = base64UrlEncodeUtf8(
+    JSON.stringify({
+      t: args.tenantId,
+      s: args.siteId,
+      v: args.visitorId,
+      exp: args.expiresAtMs,
+    })
+  );
+  const sig = hmacSha256Hex(args.signingSecret, `ugk_del_retry:v1:${payloadB64}`);
+  return `${payloadB64}.${sig}`;
+}
+
+function verifyDeletionRetryHandle(args: {
+  readonly token: string;
+  readonly expectedTenantId: string;
+  readonly expectedSiteId: string;
+  readonly signingSecret: string;
+  readonly nowMs: number;
+}): string | null {
+  const dot = args.token.indexOf('.');
+  if (dot <= 0 || dot !== args.token.lastIndexOf('.')) return null;
+  const payloadB64 = args.token.slice(0, dot);
+  const providedSig = args.token.slice(dot + 1);
+  if (payloadB64.length === 0 || providedSig.length === 0) return null;
+
+  const expectedSig = hmacSha256Hex(args.signingSecret, `ugk_del_retry:v1:${payloadB64}`);
+  if (!constantTimeHexEqual(providedSig, expectedSig)) return null;
+
+  const decoded = base64UrlDecodeUtf8(payloadB64);
+  if (!decoded) return null;
+  try {
+    const parsed = JSON.parse(decoded) as {
+      readonly t?: unknown;
+      readonly s?: unknown;
+      readonly v?: unknown;
+      readonly exp?: unknown;
+    };
+    if (
+      parsed.t !== args.expectedTenantId ||
+      parsed.s !== args.expectedSiteId ||
+      typeof parsed.v !== 'string' ||
+      parsed.v.length === 0 ||
+      typeof parsed.exp !== 'number' ||
+      !Number.isFinite(parsed.exp) ||
+      parsed.exp <= args.nowMs
+    ) {
+      return null;
+    }
+    return parsed.v;
+  } catch {
+    return null;
+  }
 }
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -105,11 +196,24 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
           return jsonResponse({ error: 'invalid_json_body' }, 400);
         }
 
-        const cookieVid = extractCookieValue(request.headers.get('cookie'), 'ugk_vid');
-        const rawVisitorId =
+        const cookieHeader = request.headers.get('cookie');
+        const cookieVid = extractCookieValue(cookieHeader, 'ugk_vid');
+        const retrySigningSecret = `${deps.continuityTokenSecret}:${site.tenantMemberHashKey}`;
+        const rawDelRetryCookie = extractCookieValue(cookieHeader, DELETION_RETRY_COOKIE_NAME);
+        const verifiedRetryVid = rawDelRetryCookie
+          ? verifyDeletionRetryHandle({
+              token: rawDelRetryCookie,
+              expectedTenantId: site.tenantId,
+              expectedSiteId: site.siteId,
+              signingSecret: retrySigningSecret,
+              nowMs: now,
+            })
+          : null;
+        const bodyVisitorId =
           typeof bodyObj.visitor_id === 'string' && bodyObj.visitor_id.length > 0
             ? bodyObj.visitor_id
-            : cookieVid;
+            : null;
+        const rawVisitorId = bodyVisitorId ?? cookieVid ?? verifiedRetryVid;
         const rawMemberHash =
           typeof bodyObj.member_hash === 'string' && bodyObj.member_hash.length > 0
             ? bodyObj.member_hash
@@ -139,6 +243,11 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
           rawSubject = rawVisitorId;
         }
 
+        const identifiedViaVisitorCookie =
+          subjectKind === 'visitor_id' &&
+          bodyVisitorId === null &&
+          Boolean(cookieVid ?? verifiedRetryVid);
+
         const subjectHmac = rawSubject
           ? computeCanonicalSubjectHmac({
               tenantId: site.tenantId,
@@ -147,6 +256,21 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
               secretKey: site.tenantMemberHashKey,
             })
           : null;
+        // Codex R2 #9: Precompute canonical + legacy HMAC lookup candidates across
+        // current + rotated tenant keys at intake time so downstream deletion needs ZERO plaintext!
+        const secretKeysForCandidates = [
+          site.tenantMemberHashKey,
+          ...(site.rotatedMemberHashKeys ?? []),
+        ];
+        const subjectHmacCandidates =
+          rawSubject && subjectKind !== 'optout_cookie'
+            ? computeSubjectHmacLookupCandidates({
+                tenantId: site.tenantId,
+                subjectKind,
+                subjectValue: rawSubject,
+                secretKeys: secretKeysForCandidates,
+              })
+            : [];
         const generatedReceiptId = `del_${sha256Hex(
           `${site.tenantId}:${site.siteId}:${subjectKind}:${subjectHmac ?? 'anon'}:${now}`
         ).slice(0, 24)}`;
@@ -157,6 +281,8 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
           siteId: site.siteId,
           subjectKind,
           subjectHmac,
+          subject_hmac_candidates: subjectHmacCandidates,
+          subjectHmacCandidates,
           requestedAtMs: now,
           slaDays: 14,
         };
@@ -169,7 +295,6 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
           'set-cookie',
           'ugk_optout=1; Path=/; Max-Age=34128000; HttpOnly; Secure; SameSite=Lax'
         );
-        headers.append('set-cookie', 'ugk_vid=; Path=/; Max-Age=0; Secure; SameSite=Lax');
         headers.append('set-cookie', 'ugk_sid=; Path=/; Max-Age=0; Secure; SameSite=Lax');
 
         // Codex #8: Separate setting the opt-out cookie from durable subject-deletion queuing.
@@ -189,6 +314,23 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
         }
 
         if (!queuedViaSink) {
+          // Codex R2 #8: Preserve a short-lived HttpOnly signed deletion-retry cookie
+          // BEFORE clearing `ugk_vid` so cookie-only visitors can still retry erasure!
+          if (identifiedViaVisitorCookie && rawVisitorId) {
+            const retryHandle = signDeletionRetryHandle({
+              tenantId: site.tenantId,
+              siteId: site.siteId,
+              visitorId: rawVisitorId,
+              expiresAtMs: now + DELETION_RETRY_COOKIE_TTL_SEC * 1000,
+              signingSecret: retrySigningSecret,
+            });
+            headers.append(
+              'set-cookie',
+              `${DELETION_RETRY_COOKIE_NAME}=${retryHandle}; Path=/; Max-Age=${DELETION_RETRY_COOKIE_TTL_SEC}; HttpOnly; Secure; SameSite=Lax`
+            );
+          }
+          headers.append('set-cookie', 'ugk_vid=; Path=/; Max-Age=0; Secure; SameSite=Lax');
+
           return new Response(
             JSON.stringify({
               ok: false,
@@ -201,6 +343,12 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
             { status: 503, headers }
           );
         }
+
+        headers.append('set-cookie', 'ugk_vid=; Path=/; Max-Age=0; Secure; SameSite=Lax');
+        headers.append(
+          'set-cookie',
+          `${DELETION_RETRY_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`
+        );
 
         return new Response(
           JSON.stringify({

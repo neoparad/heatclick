@@ -5,6 +5,7 @@ import {
   DpopReplayCache,
   EdgeKeyForbiddenPurposeError,
   IdentityKeyRegistry,
+  InMemoryDpopReplayStore,
   MAX_OEM_EXCHANGED_TTL_SEC,
   SCOPE_PRESETS,
   computeActionAndDiffHash,
@@ -1248,5 +1249,159 @@ describe('lib/link/auth — Account Plane, 4 Key Kinds, OAuth 2.1, Risk Classes 
     });
     expect(consume2.ok).toBe(false);
     if (!consume2.ok) expect(consume2.code).toBe('APPROVAL_ALREADY_CONSUMED');
+  });
+
+  test('Wave 10 Regression (#2 Auth): shared DpopReplayStore blocks cross-instance jti replay and fails closed (503) on saturation without evicting unexpired entries', () => {
+    const now = new Date('2026-11-20T12:00:00Z');
+    const sharedStore = new InMemoryDpopReplayStore({ maxEntries: 2 });
+
+    const setupRegistry = () => {
+      const reg = new IdentityKeyRegistry({
+        pepperVersion: 'pep_v1',
+        pepperSecret: 'shared-store-pepper-001',
+        dpopReplayStore: sharedStore,
+      });
+      reg.registerOrg({ orgId: 'org_1', type: 'direct', name: 'Org 1', createdAt: now.toISOString() });
+      reg.registerTenant({
+        tenantId: 'tenant_a',
+        orgId: 'org_1',
+        name: 'Tenant A',
+        planScopes: ALL_SCOPES,
+        delegationPolicy: { allowedScopes: ALL_SCOPES, maxExchangedTokenTtlSec: 3600 },
+        createdAt: now.toISOString(),
+      });
+      reg.registerPrincipal({
+        principalId: 'agent_a',
+        tenantId: 'tenant_a',
+        orgId: 'org_1',
+        kind: 'agent',
+        role: 'operator',
+        passkeyEnrolled: false,
+      });
+      return reg;
+    };
+
+    // Two separate IdentityKeyRegistry instances sharing ONE DpopReplayStore
+    const reg1 = setupRegistry();
+    const reg2 = setupRegistry();
+
+    const edPair = crypto.generateKeyPairSync('ed25519');
+    const edPubJwk = edPair.publicKey.export({ format: 'jwk' }) as Record<string, unknown>;
+    const edJkt = computeJwkThumbprint(edPubJwk);
+    const uri = 'https://api.ugokilink.example/api/v1/sites/site_a1/metrics';
+
+    const k1 = reg1.issueSecretKey({
+      tenantId: 'tenant_a',
+      principalId: 'agent_a',
+      scopes: ['analytics:read'],
+      constraints: { senderConstrainedThumbprint: edJkt },
+      now,
+    });
+    const k2 = reg2.issueSecretKey({
+      tenantId: 'tenant_a',
+      principalId: 'agent_a',
+      scopes: ['analytics:read'],
+      constraints: { senderConstrainedThumbprint: edJkt },
+      now,
+    });
+
+    // (a) Proof with jti_shared_1 succeeds on reg1; replaying same jti on reg2 is REJECTED!
+    const proof1ForReg1 = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: edPubJwk,
+      privateKey: edPair.privateKey,
+      htm: 'GET',
+      htu: uri,
+      accessToken: k1.rawKey,
+      jti: 'jti_shared_1',
+      now,
+    });
+    const res1 = reg1.verifySecretKey(k1.rawKey, {
+      dpopProof: proof1ForReg1,
+      httpMethod: 'GET',
+      httpUri: uri,
+      now,
+    });
+    expect(res1.ok).toBe(true);
+
+    const proof1ReplayedOnReg2 = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: edPubJwk,
+      privateKey: edPair.privateKey,
+      htm: 'GET',
+      htu: uri,
+      accessToken: k2.rawKey,
+      jti: 'jti_shared_1',
+      now,
+    });
+    const replayOnReg2 = reg2.verifySecretKey(k2.rawKey, {
+      dpopProof: proof1ReplayedOnReg2,
+      httpMethod: 'GET',
+      httpUri: uri,
+      now,
+    });
+    expect(replayOnReg2.ok).toBe(false);
+    if (!replayOnReg2.ok) {
+      expect(replayOnReg2.httpStatus).toBe(401);
+      expect(replayOnReg2.code).toBe('DPOP_JTI_REPLAYED');
+    }
+
+    // (b) Fill the 2-entry store with a second unexpired jti (`jti_shared_2`) -> succeeds
+    const proof2 = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: edPubJwk,
+      privateKey: edPair.privateKey,
+      htm: 'GET',
+      htu: uri,
+      accessToken: k2.rawKey,
+      jti: 'jti_shared_2',
+      now,
+    });
+    expect(
+      reg2.verifySecretKey(k2.rawKey, {
+        dpopProof: proof2,
+        httpMethod: 'GET',
+        httpUri: uri,
+        now,
+      }).ok
+    ).toBe(true);
+    expect(sharedStore.size()).toBe(2);
+
+    // 3rd distinct jti while store is full with unexpired entries MUST fail closed (HTTP 503)
+    // and MUST NOT evict unexpired `jti_shared_1` or `jti_shared_2`!
+    const proof3 = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk: edPubJwk,
+      privateKey: edPair.privateKey,
+      htm: 'GET',
+      htu: uri,
+      accessToken: k2.rawKey,
+      jti: 'jti_shared_3',
+      now,
+    });
+    const saturatedRes = reg2.verifySecretKey(k2.rawKey, {
+      dpopProof: proof3,
+      httpMethod: 'GET',
+      httpUri: uri,
+      now,
+    });
+    expect(saturatedRes.ok).toBe(false);
+    if (!saturatedRes.ok) {
+      expect(saturatedRes.httpStatus).toBe(503);
+      expect(saturatedRes.code).toBe('DPOP_REPLAY_STORE_SATURATED');
+    }
+
+    // Confirm unexpired `jti_shared_1` was NEVER evicted and is still rejected as replayed
+    const stillReplayed = reg1.verifySecretKey(k1.rawKey, {
+      dpopProof: proof1ForReg1,
+      httpMethod: 'GET',
+      httpUri: uri,
+      now,
+    });
+    expect(stillReplayed.ok).toBe(false);
+    if (!stillReplayed.ok) {
+      expect(stillReplayed.httpStatus).toBe(401);
+      expect(stillReplayed.code).toBe('DPOP_JTI_REPLAYED');
+    }
   });
 });

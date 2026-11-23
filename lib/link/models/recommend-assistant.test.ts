@@ -30,6 +30,7 @@
  *        cross-tenant probe returns 404; browser `ugk_pub` cannot spoof `ec_server_direct`.
  */
 
+import crypto from 'node:crypto';
 import { NextRequest } from 'next/server';
 import { POST as recommendRoutePost } from '../../../app/api/v1/recommend/route';
 import { POST as siteRecommendRoutePost } from '../../../app/api/v1/sites/[siteId]/recommend/route';
@@ -38,7 +39,12 @@ import {
   detectUntrustedStringLeaks,
   isUntrustedValue,
 } from '../../../packages/contract/response';
-import { IdentityKeyRegistry, SCOPE_PRESETS } from '../auth';
+import {
+  computeJwkThumbprint,
+  createDpopProofJwt,
+  IdentityKeyRegistry,
+  SCOPE_PRESETS,
+} from '../auth';
 import { MlModelRegistry } from '../ml/foundation/registry';
 import { EcMemberSummaryStore } from '../revenue/ec-member-store';
 import {
@@ -1123,5 +1129,201 @@ describe('Wave 6 Bundle 6-D.4: POST /v1/recommend Route & MCP Tool Parity', () =
     }
     expect(browserItems[0].slot_cond_prob).toBeCloseTo(1 / 3, 5);
     expect(browserItems[1].slot_cond_prob).toBeCloseTo(1 / 2, 5);
+  });
+
+  test('[#20] 17 equal-weight articles with top_k=2 computes exact analytical display_prob (2/17 within 1e-12) and tags display_prob_method === "exact"', () => {
+    const fx = setupSurfaceFixture();
+    const equal17: RecommendCandidateItem[] = Array.from({ length: 17 }, (_, i) => ({
+      item_id: `art17_${i}`,
+      kind: 'page',
+      title: `Equal 17 Article ${i}`,
+      url_key_v2: `https://example.jp/art17_${i}`,
+      content_sim: 0.5,
+      link_proximity: 0.5,
+      coread_score: 0.5,
+      session_knn: 0.5,
+      decayed_popularity: 0.5,
+      item_embedding: [1, 0, 0],
+    }));
+
+    setRecommendRuntimeConfig({
+      catalogProvider: {
+        getContentCandidates: ({ siteId }) => (siteId === 'site_a' ? equal17 : null),
+      },
+    });
+
+    const serverRes = executeRecommendRequest({
+      channel: 'rest',
+      bearerToken: fx.secKey,
+      pipeline: fx.pipeline,
+      body: {
+        site_id: 'site_a',
+        placement: 'article',
+        top_k: 2,
+        temperature: 1.0,
+        seed_key: 'art17_exact_k2',
+      },
+    });
+    expect(serverRes.httpStatus).toBe(200);
+    const items = (
+      serverRes.envelope?.data as {
+        items: Array<{
+          item_id: string;
+          display_prob: number;
+          display_prob_method: 'exact' | 'monte_carlo';
+        }>;
+      }
+    ).items;
+    expect(items).toHaveLength(2);
+    for (const it of items) {
+      expect(Math.abs(it.display_prob - 2 / 17)).toBeLessThan(1e-12);
+      expect(it.display_prob_method).toBe('exact');
+    }
+
+    // Verify N=17, K=3 uses Monte Carlo and explicitly tags display_prob_method === 'monte_carlo'
+    const mcRes = executeRecommendRequest({
+      channel: 'rest',
+      bearerToken: fx.secKey,
+      pipeline: fx.pipeline,
+      body: {
+        site_id: 'site_a',
+        placement: 'article',
+        top_k: 3,
+        temperature: 1.0,
+        seed_key: 'art17_mc_k3',
+      },
+    });
+    expect(mcRes.httpStatus).toBe(200);
+    const mcItems = (
+      mcRes.envelope?.data as {
+        items: Array<{ display_prob_method: 'exact' | 'monte_carlo' }>;
+      }
+    ).items;
+    expect(mcItems).toHaveLength(3);
+    for (const it of mcItems) {
+      expect(it.display_prob_method).toBe('monte_carlo');
+    }
+  });
+
+  test('[#2] forwards signed RFC 9449 DPoP proof across POST /v1/recommend, POST /v1/sites/[siteId]/recommend, and MCP helper while rejecting raw x-dpop-jkt with 401', async () => {
+    const fx = setupSurfaceFixture();
+    setSurfaceRuntimeContext({
+      pipeline: fx.pipeline,
+      mcpServer: fx.mcpServer,
+      askService: fx.askService,
+      repository: fx.baseRepo,
+    });
+
+    const catalogProducts: EcCandidateProduct[] = [
+      makeEcProduct({ product_id: 'sku_dpop_1', title: 'DPoP Serum' }),
+      makeEcProduct({ product_id: 'sku_dpop_2', title: 'DPoP Cream' }),
+    ];
+    setRecommendRuntimeConfig({
+      catalogProvider: {
+        getEcCandidates: ({ siteId }) => (siteId === 'site_a' ? catalogProducts : null),
+      },
+    });
+
+    // Generate Ed25519 DPoP keypair & bind a secret key to its RFC 7638 JWK thumbprint
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+    const publicJwk = publicKey.export({ format: 'jwk' }) as Record<string, unknown>;
+    const jkt = computeJwkThumbprint(publicJwk);
+
+    const dpopBoundKey = fx.pipeline.keyRegistry.issueSecretKey({
+      tenantId: 'tenant_a',
+      principalId: 'svc_a',
+      env: 'live',
+      scopes: [...SCOPE_PRESETS.read],
+      constraints: { senderConstrainedThumbprint: jkt },
+    }).rawKey;
+
+    const rootUrl = 'https://api.ugokilink.example/api/v1/recommend';
+    const siteUrl = 'https://api.ugokilink.example/api/v1/sites/site_a/recommend';
+
+    // 1. Raw `x-dpop-jkt` without signed `DPoP` proof MUST fail with 401 on BOTH REST routes
+    const forgedRootReq = new NextRequest(rootUrl, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${dpopBoundKey}`,
+        'x-dpop-jkt': jkt,
+      },
+      body: JSON.stringify({ site_id: 'site_a', placement: 'home', top_k: 2 }),
+    });
+    expect((await recommendRoutePost(forgedRootReq)).status).toBe(401);
+
+    const forgedSiteReq = new NextRequest(siteUrl, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${dpopBoundKey}`,
+        'x-dpop-jkt': jkt,
+      },
+      body: JSON.stringify({ placement: 'home', top_k: 2 }),
+    });
+    expect((await siteRecommendRoutePost(forgedSiteReq, { params: { siteId: 'site_a' } })).status).toBe(401);
+
+    // 2. Genuine RFC 9449 signed `DPoP` proof succeeds (200) on POST /api/v1/recommend
+    const rootProof = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk,
+      privateKey,
+      htm: 'POST',
+      htu: rootUrl,
+      accessToken: dpopBoundKey,
+    });
+    const validRootReq = new NextRequest(rootUrl, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${dpopBoundKey}`,
+        dpop: rootProof,
+      },
+      body: JSON.stringify({ site_id: 'site_a', placement: 'home', top_k: 2, seed_key: 'dpop_root' }),
+    });
+    expect((await recommendRoutePost(validRootReq)).status).toBe(200);
+
+    // 3. Genuine RFC 9449 signed `DPoP` proof succeeds (200) on POST /api/v1/sites/[siteId]/recommend
+    const siteProof = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk,
+      privateKey,
+      htm: 'POST',
+      htu: siteUrl,
+      accessToken: dpopBoundKey,
+    });
+    const validSiteReq = new NextRequest(siteUrl, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${dpopBoundKey}`,
+        dpop: siteProof,
+      },
+      body: JSON.stringify({ placement: 'home', top_k: 2, seed_key: 'dpop_site' }),
+    });
+    expect((await siteRecommendRoutePost(validSiteReq, { params: { siteId: 'site_a' } })).status).toBe(200);
+
+    // 4. MCP helper forwards signed `dpopProof` + `httpMethod` + `httpUri` (200) and rejects missing proof (401)
+    const mcpUnauth = callRecommendMcpTool({
+      bearerToken: dpopBoundKey,
+      pipeline: fx.pipeline,
+      arguments: { site_id: 'site_a', placement: 'home', top_k: 2 },
+    });
+    expect(mcpUnauth.httpStatus).toBe(401);
+
+    const mcpUri = 'https://mcp.ugokilink.example/tools/ugokilink_recommendItems';
+    const mcpProof = createDpopProofJwt({
+      alg: 'EdDSA',
+      publicJwk,
+      privateKey,
+      htm: 'POST',
+      htu: mcpUri,
+      accessToken: dpopBoundKey,
+    });
+    const mcpOk = callRecommendMcpTool({
+      bearerToken: dpopBoundKey,
+      dpopProof: mcpProof,
+      httpMethod: 'POST',
+      httpUri: mcpUri,
+      pipeline: fx.pipeline,
+      arguments: { site_id: 'site_a', placement: 'home', top_k: 2, seed_key: 'dpop_mcp' },
+    });
+    expect(mcpOk.httpStatus).toBe(200);
   });
 });

@@ -492,7 +492,12 @@ export class DualExperimentLedger {
   >();
   private readonly recordedAutonomyExperiments = new Map<
     string,
-    { readonly pValue: number; readonly rejected: boolean; readonly entry: RegisterEntry }
+    {
+      readonly pValue: number;
+      readonly alphaThreshold: number;
+      readonly rejected: boolean;
+      readonly entry: RegisterEntry;
+    }
   >();
 
   constructor(targetFdr = 0.1, initialWealth?: number) {
@@ -519,10 +524,7 @@ export class DualExperimentLedger {
     const threshold = params.alpha ?? 0.05;
     const existing = this.recordedHumanExperiments.get(params.experimentId);
     if (existing) {
-      if (
-        Math.abs(existing.pValue - params.pValue) > 1e-12 ||
-        Math.abs(existing.alpha - threshold) > 1e-12
-      ) {
+      if (existing.pValue !== params.pValue || existing.alpha !== threshold) {
         throw new IdempotencyConflictError(
           params.experimentId,
           `Conflicting human experiment outcome (existing p=${existing.pValue}, alpha=${existing.alpha}; received p=${params.pValue}, alpha=${threshold})`
@@ -568,10 +570,13 @@ export class DualExperimentLedger {
   }): RegisterEntry {
     const existing = this.recordedAutonomyExperiments.get(params.experimentId);
     if (existing) {
-      if (Math.abs(existing.pValue - params.pValue) > 1e-12) {
+      if (
+        params.pValue !== existing.pValue ||
+        (params.pValue <= existing.alphaThreshold) !== existing.rejected
+      ) {
         throw new IdempotencyConflictError(
           params.experimentId,
-          `Conflicting LORD++ outcome for already-recorded experiment (existing p=${existing.pValue}, rejected=${existing.rejected}; received p=${params.pValue})`
+          `Conflicting LORD++ outcome for already-recorded experiment (existing p=${existing.pValue}, alpha=${existing.alphaThreshold}, rejected=${existing.rejected}; received p=${params.pValue})`
         );
       }
       return existing.entry;
@@ -605,6 +610,7 @@ export class DualExperimentLedger {
     this.autonomyRegister.push(entry);
     this.recordedAutonomyExperiments.set(params.experimentId, {
       pValue: params.pValue,
+      alphaThreshold: alphaT,
       rejected,
       entry,
     });

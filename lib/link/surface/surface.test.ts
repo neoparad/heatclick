@@ -1380,4 +1380,109 @@ describe('lib/link/surface — OpenAPI 3.1, Single Pipeline, MCP, Segments, Jour
     expect(replayNewIdem.httpStatus).toBe(202);
     expect(replayNewIdem.error?.code).toBe('APPROVAL_ALREADY_CONSUMED');
   });
+
+  test('Wave 10 Regression (#25 R4): 429 rate-limited R4 deletion creates 0 reservations without burning Passkey approval, and idempotent retry leaves strictly 1 reservation', () => {
+    const { now, keyRegistry, emptyRepo, fullKey } = buildSurfaceTestFixture();
+    const rateLimiter = new CostUnitRateLimiter({ windowMs: 60_000, maxUnitsPerWindow: 20 });
+    const pipeline = new SurfacePipeline({
+      keyRegistry,
+      repository: emptyRepo,
+      rateLimiter,
+    });
+
+    const ownerSession: VerifiedPrincipal = {
+      credentialKind: 'session_cookie',
+      credentialId: 'sess_owner_r4_25',
+      tenantId: 'tenant_a',
+      orgId: 'org_1',
+      allowedSiteIds: null,
+      principalKind: 'human',
+      principalId: 'owner_a',
+      role: 'owner',
+      effectiveScopes: new Set(ALL_SCOPES),
+      senderConstrained: true,
+      passkeyVerified: true,
+      passkeyVerifiedAt: now.toISOString(),
+    };
+
+    const deleteBody = { scope: 'site', reason: 'gdpr_site_wipe' };
+    const { combinedHash } = computeActionAndDiffHash('createDeletionRequest', deleteBody);
+    const aprRes = pipeline.gateway.createPasskeyApproval({
+      principal: ownerSession,
+      siteId: 'site_a1',
+      action: 'createDeletionRequest',
+      renderedDiff: deleteBody,
+      passkeyAssertion: {
+        credentialId: 'webauthn_owner_r4_25',
+        userVerification: true,
+        signedChallengeHash: combinedHash,
+        assertedAt: now.toISOString(),
+        signatureVerified: true,
+      },
+      now,
+    });
+    expect(aprRes.ok).toBe(true);
+    if (!aprRes.ok) return;
+
+    // Exhaust rate limit bucket for `fullKey`
+    const authRes = pipeline.authenticateCaller({ bearerToken: fullKey, now });
+    expect(authRes.ok).toBe(true);
+    if (!authRes.ok) return;
+    rateLimiter.consume(`${authRes.principal.tenantId}:${authRes.principal.credentialId}`, 20, now);
+
+    // (a) 429 rate-limited R4 deletion creates 0 reservations and does NOT burn the Passkey approval!
+    const rateLimited = pipeline.execute({
+      operationId: 'createDeletionRequest',
+      channel: 'rest',
+      bearerToken: fullKey,
+      siteId: 'site_a1',
+      idempotencyKey: 'idem_r4_delete_001',
+      body: deleteBody,
+      passkeyApprovalId: aprRes.approval.approvalId,
+      now,
+    });
+    expect(rateLimited.httpStatus).toBe(429);
+    expect(rateLimited.error?.code).toBe('RATE_LIMIT_EXCEEDED');
+    expect(pipeline.gateway.listDestructionRequests('tenant_a')).toHaveLength(0);
+    expect(aprRes.approval.consumedAt).toBeUndefined();
+
+    // (b) Retry after rate-limit window resets succeeds (202), consumes approval, and creates strictly 1 reservation
+    const tRetry = new Date(now.getTime() + 65_000);
+    const firstOk = pipeline.execute({
+      operationId: 'createDeletionRequest',
+      channel: 'rest',
+      bearerToken: fullKey,
+      siteId: 'site_a1',
+      idempotencyKey: 'idem_r4_delete_001',
+      body: deleteBody,
+      passkeyApprovalId: aprRes.approval.approvalId,
+      now: tRetry,
+    });
+    expect(firstOk.httpStatus).toBe(202);
+    expect(aprRes.approval.consumedAt).toBeDefined();
+    expect(pipeline.gateway.listDestructionRequests('tenant_a')).toHaveLength(1);
+    const firstReqId = (
+      firstOk.envelope?.data as { deletionRequest?: { requestId: string } }
+    )?.deletionRequest?.requestId;
+    expect(firstReqId).toBeDefined();
+
+    // (c) Idempotent retry of the succeeded R4 deletion returns cached 202 and leaves strictly 1 reservation (NEVER 2!)
+    const idempotentRetry = pipeline.execute({
+      operationId: 'createDeletionRequest',
+      channel: 'rest',
+      bearerToken: fullKey,
+      siteId: 'site_a1',
+      idempotencyKey: 'idem_r4_delete_001',
+      body: deleteBody,
+      passkeyApprovalId: aprRes.approval.approvalId,
+      now: new Date(tRetry.getTime() + 1_000),
+    });
+    expect(idempotentRetry.httpStatus).toBe(202);
+    expect(idempotentRetry.headers['X-UGOKI-Idempotent-Replay']).toBe('true');
+    const retryReqId = (
+      idempotentRetry.envelope?.data as { deletionRequest?: { requestId: string } }
+    )?.deletionRequest?.requestId;
+    expect(retryReqId).toBe(firstReqId);
+    expect(pipeline.gateway.listDestructionRequests('tenant_a')).toHaveLength(1);
+  });
 });

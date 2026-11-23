@@ -336,6 +336,30 @@ export class DeterministicReadOnlyPlanner implements AskPlannerProvider {
 // 3. AskService (Conversation Isolation + Pre-Execution & Pre-LLM Filter + Grounded Response)
 // =========================================================================
 
+function toFixedExternalAskRejectionReason(
+  blockedCode?: string
+): string {
+  switch (blockedCode) {
+    case 'DIFFERENCING_ATTACK_BLOCKED':
+      return 'disclosure_blocked_differencing';
+    case 'SMALL_CELL_SUPPRESSED':
+    case 'PER_PERSON_AGGREGATION_BLOCKED':
+      return 'disclosure_suppressed_k_anonymity';
+    case 'CONSENT_OFF_BLOCKED':
+    case 'CONSENT_PURPOSE_MISMATCH':
+      return 'disclosure_blocked_consent';
+    case 'IDENTIFIER_COLUMN_BLOCKED':
+    case 'FREE_TEXT_COLUMN_BLOCKED':
+      return 'disclosure_blocked_restricted_column';
+    case 'NON_WHITELISTED_VIEW':
+    case 'NON_ALLOWED_METRIC':
+    case 'NON_READ_ONLY_TOOL':
+    case 'SQL_AST_VIOLATION':
+    default:
+      return 'disclosure_blocked_policy';
+  }
+}
+
 export class AskService {
   private readonly planner: AskPlannerProvider;
   private readonly executor: AskDataExecutor;
@@ -598,6 +622,7 @@ export class AskService {
               preExecVerdict.blockedCode === 'PER_PERSON_AGGREGATION_BLOCKED'
             ? 'suppressed'
             : 'not_entitled';
+      const externalReason = toFixedExternalAskRejectionReason(preExecVerdict.blockedCode);
       const ref = refBase(`preexec_blocked:${cacheKey}`);
       const safeMeasureKey = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(plan.metricName)
         ? plan.metricName
@@ -613,7 +638,7 @@ export class AskService {
             value: null,
             unit: 'count',
             status,
-            reason: preExecVerdict.reason ?? 'Blocked by pre-execution privacy/SQL filter',
+            reason: externalReason,
             evidence: { level: 'observed', exactness: 'exact', criteria: [], refs: [ref], scope: `site:${req.siteId}` },
             sample: null,
             interval: null,
@@ -622,7 +647,7 @@ export class AskService {
                 id: 'surf.ask_accuracy',
                 required: ASK_MIN_CELL_K,
                 observed: 0,
-                unlock: preExecVerdict.reason ?? 'Pre-execution privacy/SQL filter blocked query',
+                unlock: externalReason,
               },
             ],
           },
@@ -633,7 +658,7 @@ export class AskService {
           citations: [],
           hypotheses: [],
           refusalStatus: status,
-          refusalReason: preExecVerdict.reason,
+          refusalReason: externalReason,
           blockedCode: preExecVerdict.blockedCode,
         },
       });
@@ -713,8 +738,9 @@ export class AskService {
     }
 
     // 6. Independent Post-Execution / Pre-LLM Row Filter:
-    //    Enforces row-level PII/free-text check, returned cohort differencing,
-    //    primary `< k` suppression, AND complementary secondary suppression on GROUP BY results!
+    //    Enforces row-level PII/free-text check, mandatory row membership evidence under RREF,
+    //    primary `< k` suppression, complementary secondary suppression on GROUP BY results,
+    //    and atomic post-approval commit of window + pre-declared cohort + disclosed row + total equations!
     const filterVerdict = filterQueryAndRowsBeforeLlm({
       viewName: plan.viewName,
       metricName: plan.metricName,
@@ -726,7 +752,8 @@ export class AskService {
       filterSignature: effectiveFilterSig,
       windowStart,
       windowEnd,
-      skipWindowCheck: true,
+      skipWindowCheck: false,
+      predeclaredCohortMemberIds: plan.cohortMemberIds,
       differencingGuard: this.differencingGuard,
     });
 
@@ -737,6 +764,7 @@ export class AskService {
         filterVerdict.blockedCode === 'PER_PERSON_AGGREGATION_BLOCKED'
           ? 'suppressed'
           : 'not_entitled';
+      const externalReason = toFixedExternalAskRejectionReason(filterVerdict.blockedCode);
       const ref = refBase(`blocked:${cacheKey}`);
       const envelope = buildResponseEnvelope({
         window: { start: windowStart, end: windowEnd },
@@ -749,7 +777,7 @@ export class AskService {
             value: null,
             unit: 'count',
             status,
-            reason: filterVerdict.reason ?? 'Blocked by pre-LLM privacy filter',
+            reason: externalReason,
             evidence: { level: 'observed', exactness: 'exact', criteria: [], refs: [ref], scope: `site:${req.siteId}` },
             sample: null,
             interval: null,
@@ -758,7 +786,7 @@ export class AskService {
                 id: 'surf.ask_accuracy',
                 required: ASK_MIN_CELL_K,
                 observed: 0,
-                unlock: filterVerdict.reason ?? 'Pre-LLM privacy filter blocked query',
+                unlock: externalReason,
               },
             ],
           },
@@ -769,7 +797,7 @@ export class AskService {
           citations: [],
           hypotheses: [],
           refusalStatus: status,
-          refusalReason: filterVerdict.reason,
+          refusalReason: externalReason,
           blockedCode: filterVerdict.blockedCode,
         },
       });

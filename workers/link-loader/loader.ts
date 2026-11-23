@@ -40,9 +40,24 @@ import type {
   LoadManifest,
   MergedEventRow,
   MergedPvState,
+  PersistedShardTombstones,
   PvIndexRow,
   PvPlacement,
 } from './types';
+
+export class MissingManifestWalError extends Error {
+  public readonly walKey: string;
+  public readonly manifestSeq: number;
+
+  public constructor(walKey: string, manifestSeq: number) {
+    super(
+      `Manifest seq=${manifestSeq} references missing WAL object "${walKey}" that is not marked as intentionally purged/expired`
+    );
+    this.name = 'MissingManifestWalError';
+    this.walKey = walKey;
+    this.manifestSeq = manifestSeq;
+  }
+}
 
 export interface ShardLoaderOptions {
   readonly region: DataRegion;
@@ -115,6 +130,11 @@ export function formatWalShardPrefix(region: DataRegion, shardId: number): strin
   return `wal/${region}/${shardPadded}/`;
 }
 
+export function formatTombstonesObjectKey(region: DataRegion, shardId: number): string {
+  const shardPadded = Math.max(0, Math.floor(shardId)).toString().padStart(4, '0');
+  return `tombstones/${region}/${shardPadded}/tombstones.json`;
+}
+
 export async function listAllKeysWithPrefix(
   bucket: R2BucketLike,
   prefix: string
@@ -157,6 +177,7 @@ export class ShardLoader {
   private readonly deletedPvKeys = new Set<string>();
   private readonly deletedVisitorKeys = new Set<string>();
   private readonly deletedMemberHashes = new Set<string>();
+  private readonly purgedWalKeys = new Set<string>();
 
   public constructor(options: ShardLoaderOptions) {
     this.region = options.region;
@@ -166,10 +187,11 @@ export class ShardLoader {
   }
 
   /**
-   * Registers subject deletion tombstones so neither late-arriving frames nor
-   * full WAL replay (`replayAllFromWal`) can resurrect erased subjects (H-19).
+   * Registers subject deletion tombstones AND persists them to
+   * `tombstones/{region}/{shard}/tombstones.json` so neither late-arriving frames
+   * nor failover/handover manifest replay can resurrect erased subjects (H-19 / Codex R2 #10).
    */
-  public registerDeletionTombstones(spec: DeletionTombstoneSpec): void {
+  public async registerDeletionTombstones(spec: DeletionTombstoneSpec): Promise<void> {
     for (const pvId of spec.pvIds ?? []) {
       this.deletedPvKeys.add(makePvCompositeKey(spec.tenantId, spec.siteId, pvId));
     }
@@ -178,6 +200,75 @@ export class ShardLoader {
     }
     for (const mh of spec.memberHashes ?? []) {
       this.deletedMemberHashes.add(makePvCompositeKey(spec.tenantId, spec.siteId, mh));
+    }
+    await this.persistTombstonesToBucket();
+  }
+
+  /** Singular alias for `registerDeletionTombstones`. */
+  public async registerDeletionTombstone(spec: DeletionTombstoneSpec): Promise<void> {
+    await this.registerDeletionTombstones(spec);
+  }
+
+  /**
+   * Marks WAL keys as intentionally purged/expired so subsequent manifest syncs
+   * distinguish expected retention/erasure purges from unexplained WAL loss (Codex R2 #10).
+   */
+  public async markWalKeysPurged(walKeys: readonly string[]): Promise<void> {
+    for (const wk of walKeys) {
+      this.purgedWalKeys.add(wk);
+    }
+    await this.persistTombstonesToBucket();
+  }
+
+  private async persistTombstonesToBucket(): Promise<void> {
+    const key = formatTombstonesObjectKey(this.region, this.shardId);
+    // Merge with any previously persisted tombstones so concurrent/prior updates are preserved.
+    await this.loadPersistedTombstonesFromBucket(this.manifestBucket);
+    const payload: PersistedShardTombstones = {
+      version: 1,
+      region: this.region,
+      shard_id: this.shardId,
+      deleted_pv_keys: Array.from(this.deletedPvKeys).sort(),
+      deleted_visitor_keys: Array.from(this.deletedVisitorKeys).sort(),
+      deleted_member_hashes: Array.from(this.deletedMemberHashes).sort(),
+      purged_wal_keys: Array.from(this.purgedWalKeys).sort(),
+    };
+    await this.manifestBucket.put(key, canonicalJsonStringify(payload), {
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: {
+        region: this.region,
+        shard_id: String(this.shardId),
+      },
+    });
+  }
+
+  /**
+   * Loads persisted deletion tombstones (and intentionally purged WAL keys) from bucket.
+   */
+  public async loadPersistedTombstonesFromBucket(sourceBucket?: R2BucketLike): Promise<void> {
+    const key = formatTombstonesObjectKey(this.region, this.shardId);
+    const bucketsToRead: R2BucketLike[] = sourceBucket
+      ? [sourceBucket]
+      : this.manifestBucket === this.bucket
+        ? [this.manifestBucket]
+        : [this.manifestBucket, this.bucket];
+
+    for (const b of bucketsToRead) {
+      const raw = await b.get(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(await raw.text()) as Partial<PersistedShardTombstones>;
+      for (const pvKey of parsed.deleted_pv_keys ?? []) {
+        this.deletedPvKeys.add(pvKey);
+      }
+      for (const visitorKey of parsed.deleted_visitor_keys ?? []) {
+        this.deletedVisitorKeys.add(visitorKey);
+      }
+      for (const memberHash of parsed.deleted_member_hashes ?? []) {
+        this.deletedMemberHashes.add(memberHash);
+      }
+      for (const purgedWalKey of parsed.purged_wal_keys ?? []) {
+        this.purgedWalKeys.add(purgedWalKey);
+      }
     }
   }
 
@@ -204,33 +295,38 @@ export class ShardLoader {
   }
 
   /**
-   * Synchronizes committed manifests from R2 on startup/failover AND replays
-   * every newly discovered manifest's WAL keys in manifest order so the loader
-   * restores exact committed `pvIndex`, `pvStates`, `frameLog`, `events`,
-   * `dirtyCells`, and `controlTotals` before accepting any new frames (Codex #10).
+   * Synchronizes committed manifests from R2 on startup/failover:
+   * 1. Loads persisted deletion tombstones FIRST before replaying any WAL keys so
+   *    deleted subjects can NEVER be resurrected (Codex R2 #10).
+   * 2. Replays every newly discovered manifest's WAL keys in manifest order.
+   * 3. Throws `MissingManifestWalError` without advancing `appliedManifestSeqs` or
+   *    `nextManifestSeq` if any referenced `wal_key` is missing and not marked purged/expired.
    */
-  public async syncManifestsFromBucket(): Promise<number> {
+  public async syncManifestsFromBucket(options?: {
+    readonly allowedMissingWalKeys?: ReadonlySet<string>;
+  }): Promise<number> {
+    // Codex R2 #10: Restore persisted deletion tombstones FIRST before replaying any manifest WAL!
+    await this.loadPersistedTombstonesFromBucket();
+
     const prefix = `manifest/${this.region}/${this.shardId.toString().padStart(4, '0')}/`;
     const keys = await listAllKeysWithPrefix(this.manifestBucket, prefix);
-    let maxSeq = 0;
+    let appliedMaxSeq = 0;
+    for (const seq of this.appliedManifestSeqs) {
+      if (seq > appliedMaxSeq) appliedMaxSeq = seq;
+    }
     const newlyDiscovered: LoadManifest[] = [];
 
     for (const key of keys) {
       const obj = await this.manifestBucket.get(key);
       if (!obj) continue;
       const manifest = JSON.parse(await obj.text()) as LoadManifest;
-      if (manifest.manifest_seq > maxSeq) {
-        maxSeq = manifest.manifest_seq;
-      }
-      if (!this.committedManifests.some((m) => m.manifest_seq === manifest.manifest_seq)) {
-        this.committedManifests.push(manifest);
-      }
       if (!this.appliedManifestSeqs.has(manifest.manifest_seq)) {
         newlyDiscovered.push(manifest);
+      } else if (manifest.manifest_seq > appliedMaxSeq) {
+        appliedMaxSeq = manifest.manifest_seq;
       }
     }
 
-    this.committedManifests.sort((a, b) => a.manifest_seq - b.manifest_seq);
     newlyDiscovered.sort((a, b) => a.manifest_seq - b.manifest_seq);
 
     // Replay WAL objects in committed manifest order to restore PV state & control totals
@@ -239,11 +335,19 @@ export class ShardLoader {
       for (const walKey of manifest.wal_keys) {
         if (this.processedWalKeys.has(walKey)) continue;
         const walObjRaw = await this.bucket.get(walKey);
-        if (walObjRaw) {
-          const walObj = JSON.parse(await walObjRaw.text()) as WalObject;
-          for (const record of walObj.records) {
-            replayItems.push({ walKey, record });
+        if (!walObjRaw) {
+          const isIntentionallyPurged =
+            this.purgedWalKeys.has(walKey) ||
+            (manifest.purged_wal_keys?.includes(walKey) ?? false) ||
+            (options?.allowedMissingWalKeys?.has(walKey) ?? false);
+          if (!isIntentionallyPurged) {
+            throw new MissingManifestWalError(walKey, manifest.manifest_seq);
           }
+          continue;
+        }
+        const walObj = JSON.parse(await walObjRaw.text()) as WalObject;
+        for (const record of walObj.records) {
+          replayItems.push({ walKey, record });
         }
       }
 
@@ -255,11 +359,18 @@ export class ShardLoader {
       for (const wk of manifest.wal_keys) {
         this.processedWalKeys.add(wk);
       }
+      if (!this.committedManifests.some((m) => m.manifest_seq === manifest.manifest_seq)) {
+        this.committedManifests.push(manifest);
+        this.committedManifests.sort((a, b) => a.manifest_seq - b.manifest_seq);
+      }
       this.appliedManifestSeqs.add(manifest.manifest_seq);
+      if (manifest.manifest_seq > appliedMaxSeq) {
+        appliedMaxSeq = manifest.manifest_seq;
+      }
+      this.nextManifestSeq = Math.max(this.nextManifestSeq, manifest.manifest_seq + 1);
     }
 
-    this.nextManifestSeq = Math.max(this.nextManifestSeq, maxSeq + 1);
-    return maxSeq;
+    return appliedMaxSeq;
   }
 
   /**
@@ -847,8 +958,9 @@ export async function replayAllFromWal(options: {
     bucket: options.walBucket,
     manifestBucket: replayManifestBucket,
   });
+  await loader.loadPersistedTombstonesFromBucket(options.walBucket);
   for (const ts of options.deletionTombstones ?? []) {
-    loader.registerDeletionTombstones(ts);
+    await loader.registerDeletionTombstones(ts);
   }
 
   const chunkSize = Math.max(1, options.chunkSize ?? 250);

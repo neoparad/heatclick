@@ -355,7 +355,9 @@ export function computeSimultaneousWilsonIntervals(
 }
 
 /**
- * Conservative ratio interval arithmetic [A_L, A_U] / [B_L, B_U] (for non-negative quantities).
+ * Conservative signed ratio interval arithmetic [A_L, A_U] / [B_L, B_U] with strictly positive
+ * denominator CI [B_L, B_U] (0 < B_L <= B_U). Preserves signed numerator bounds before any
+ * domain clamping so impossible negative upper bounds are detected rather than collapsed to 0.
  * NEVER divides by a point estimate when the denominator CI contains or touches 0!
  */
 export function divideConfidenceIntervalsConservative(
@@ -375,12 +377,16 @@ export function divideConfidenceIntervalsConservative(
       reason: 'denominator_ci_contains_zero',
     })
   }
-  const numL = Math.max(0, numerator.lower)
+  const numL = numerator.lower
   const numU = Math.max(numL, numerator.upper)
+  const denomL = denominator.lower
+  const denomU = Math.max(denomL, denominator.upper)
+  const lower = numL >= 0 ? numL / denomU : numL / denomL
+  const upper = numU >= 0 ? numU / denomL : numU / denomU
   return Object.freeze({
     identifiable: true,
-    lower: numL / denominator.upper,
-    upper: numU / denominator.lower,
+    lower,
+    upper,
     reason: 'ok',
   })
 }
@@ -434,12 +440,15 @@ export function boundWildAiPrevalenceAndLift(params: {
 
   // Mixture: f = fpr + pi * (tpr - fpr) => pi = (f - fpr) / (tpr - fpr)
   // Denominator lower CI bound is tpr_L - fpr_U. If <= 0, prevalence upper bound is unidentifiable from data!
+  // Keep SIGNED numerator bounds [f_L - fpr_U, f_U - fpr_L] BEFORE intersecting with [0, piMax]
+  // so that f_U < fpr_L (impossible under non-negative prevalence when tpr > fpr) is flagged as
+  // assumption_inconsistent with intersection_empty: true instead of collapsing to [0, 0]!
   const denomLower = tprCi.lower - fprCi.upper
   const denomUpper = Math.min(1, Math.max(denomLower, tprCi.upper - fprCi.lower))
   const ratio = divideConfidenceIntervalsConservative(
     {
-      lower: Math.max(0, fCi.lower - fprCi.upper),
-      upper: Math.max(0, fCi.upper - fprCi.lower),
+      lower: fCi.lower - fprCi.upper,
+      upper: fCi.upper - fprCi.lower,
     },
     { lower: denomLower, upper: denomUpper },
   )
@@ -461,13 +470,11 @@ export function boundWildAiPrevalenceAndLift(params: {
     })
   }
 
-  const dataLower = Math.max(0, ratio.lower)
-  const dataUpper = Math.min(1, ratio.upper)
-  const intLower = Math.max(dataLower, 0)
-  const intUpper = Math.min(dataUpper, piMax)
+  const rawLower = ratio.lower
+  const rawUpper = ratio.upper
 
-  // Empty intersection between empirical data lower bound and disclosed prior upper bound!
-  if (dataLower > piMax || intLower > intUpper) {
+  // Empty intersection between signed empirical bounds [rawLower, rawUpper] and [0, piMax]!
+  if (rawUpper < 0 || rawLower > piMax) {
     return Object.freeze({
       identifiable: false,
       status: 'assumption_inconsistent',
@@ -478,12 +485,17 @@ export function boundWildAiPrevalenceAndLift(params: {
       upper: null,
       prevalence_lower: null,
       prevalence_upper: null,
-      data_lower: dataLower,
-      data_upper: dataUpper,
+      data_lower: rawLower,
+      data_upper: rawUpper,
       disclosed_pi_max: piMax,
-      reason: 'data_lower_exceeds_prior_upper',
+      reason: rawUpper < 0 ? 'observed_below_fpr_lower' : 'data_lower_exceeds_prior_upper',
     })
   }
+
+  const dataLower = Math.max(0, rawLower)
+  const dataUpper = Math.min(1, rawUpper)
+  const intLower = Math.max(dataLower, 0)
+  const intUpper = Math.min(dataUpper, piMax)
 
   return Object.freeze({
     identifiable: true,
@@ -654,13 +666,18 @@ function validateGaussianProfile60(
       return `dimension_mismatch:${label}_diagonal_vars_len=${diagonalVars60.length}!=60`
     }
     for (let i = 0; i < BEHAVIORAL_STAT_COUNT; i++) {
-      if (!Number.isFinite(diagonalVars60[i]) || diagonalVars60[i] <= 0) {
+      const vi = diagonalVars60[i]
+      if (!Number.isFinite(vi) || vi <= 0 || !Number.isFinite(Math.log(vi))) {
         return `invalid_variance:${label}[${i}]`
       }
     }
   } else {
     if (!Number.isFinite(scale) || scale <= 0) {
       return `invalid_scale:${label}=${scale}`
+    }
+    const derivedVar = scale * scale
+    if (!Number.isFinite(derivedVar) || derivedVar <= 0 || !Number.isFinite(Math.log(derivedVar))) {
+      return `invalid_derived_variance:${label}:scale=${scale}`
     }
   }
   return null
@@ -694,15 +711,27 @@ export function computeGaussianLogDensity60(
 
   const dim = BEHAVIORAL_STAT_COUNT
   const fallbackVar = scale * scale
+  if (
+    diagonalVars60 === undefined &&
+    (!Number.isFinite(fallbackVar) || fallbackVar <= 0 || !Number.isFinite(Math.log(fallbackVar)))
+  ) {
+    throw new Error(`Exact 60D Gaussian derived variance underflow/overflow: scale=${scale}`)
+  }
   let logDet = 0
   let mahalSq = 0
   for (let i = 0; i < dim; i++) {
     const vi = diagonalVars60 ? diagonalVars60[i] : fallbackVar
+    if (!Number.isFinite(vi) || vi <= 0 || !Number.isFinite(Math.log(vi))) {
+      throw new Error(`Exact 60D Gaussian variance invalid at index ${i}`)
+    }
     const diff = x[i] - centroid[i]
     logDet += Math.log(vi)
     mahalSq += (diff * diff) / vi
   }
   const logDensity = -0.5 * dim * LOG_TWO_PI - 0.5 * logDet - 0.5 * mahalSq
+  if (!Number.isFinite(logDensity) || !Number.isFinite(mahalSq)) {
+    throw new Error(`Exact 60D Gaussian density overflow/NaN`)
+  }
   return { logDensity, mahalanobisSq: mahalSq }
 }
 

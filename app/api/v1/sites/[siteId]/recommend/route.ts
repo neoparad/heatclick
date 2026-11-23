@@ -50,7 +50,9 @@ export async function POST(
         req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
         req.headers.get('x-real-ip')?.trim() ??
         undefined,
-      dpopThumbprint: req.headers.get('x-dpop-jkt') ?? undefined,
+      dpopProof: req.headers.get('dpop')?.trim() ?? undefined,
+      httpMethod: req.method,
+      httpUri: req.nextUrl ? `${req.nextUrl.origin}${req.nextUrl.pathname}` : undefined,
       requestedRevision: req.headers.get('x-ugoki-revision'),
       callerSuppliedTenantId,
       body: { ...body, site_id: pathSiteId },

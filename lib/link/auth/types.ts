@@ -468,9 +468,15 @@ export interface AuthorizationRequest {
   readonly passkeyAssertion?: PasskeyAssertionInput;
   /**
    * When true, verifies the Passkey approval read-only without marking it consumed;
-   * caller MUST atomically call `consumePasskeyApproval()` after idempotency/rate-limit checks.
+   * caller MUST atomically call `consumePasskeyApproval()` (or `commitR4Destruction()` for R4)
+   * after idempotency/rate-limit checks.
    */
   readonly deferApprovalConsumption?: boolean;
+  /**
+   * When true, makes R4 authorization strictly read-only (no Passkey consumption, no daily
+   * counter increment, no destruction reservation) until `commitR4Destruction()` is called.
+   */
+  readonly deferSideEffects?: boolean;
   /**
    * Set true ONLY when the pipeline has verified an exact idempotent replay hit in its
    * idempotency store, so a previously consumed approval matching tenant/site/action/diff
@@ -514,6 +520,8 @@ export interface AuthorizationDecision {
     readonly approvalId: string;
     readonly actionPayload: unknown;
   };
+  /** Present when R4 authorization ran read-only and requires `commitR4Destruction()` after pre-checks. */
+  readonly pendingDestructionCommit?: boolean;
   readonly destructionRequest?: {
     readonly requestId: string;
     readonly undoToken: string;

@@ -29,6 +29,7 @@ import {
   formatUtcMinuteBucket,
   formatWalObjectKey,
   LinkManagedStorageAdapter,
+  R2_MAX_DELETE_BATCH,
   type ExportNotificationReceipt,
   type StorageTierAdapter,
 } from './storage-adapter';
@@ -538,6 +539,24 @@ export class WalWriter {
         };
       }
 
+      // Enforce Decision 29 / §11.11.13 region residency boundary FIRST (Codex R2 #11):
+      // check `storage_region !== this.region` BEFORE tenant_id / site_id / frame validation
+      // so ANY wrong-region delivery (even malformed or missing site_id) NEVER writes to local WAL or quarantine!
+      try {
+        assertRegionPinned(this.region, item.storage_region);
+      } catch (err) {
+        return {
+          ok: false,
+          failed: {
+            payload: item,
+            reason: err instanceof Error ? `region_mismatch:${err.message}` : 'region_mismatch',
+            validationResult: null,
+            isRegionMismatch: true,
+            actualRegion: String(item.storage_region),
+          },
+        };
+      }
+
       if (typeof item.tenant_id !== 'string' || item.tenant_id.trim().length === 0) {
         return {
           ok: false,
@@ -556,22 +575,6 @@ export class WalWriter {
             payload: item,
             reason: 'missing_site_id',
             validationResult: null,
-          },
-        };
-      }
-
-      // Enforce Decision 29 / §11.11.13 region residency boundary (Codex #11: NEVER quarantine locally!)
-      try {
-        assertRegionPinned(this.region, item.storage_region);
-      } catch (err) {
-        return {
-          ok: false,
-          failed: {
-            payload: item,
-            reason: err instanceof Error ? `region_mismatch:${err.message}` : 'region_mismatch',
-            validationResult: null,
-            isRegionMismatch: true,
-            actualRegion: String(item.storage_region),
           },
         };
       }
@@ -1084,8 +1087,9 @@ export class WalWriter {
       cursor = page.truncated ? page.cursor : undefined;
     } while (cursor);
 
-    if (toDelete.length > 0) {
-      await this.adapter.deleteObjects(toDelete);
+    // Codex R2 #13: Chunk delete calls to at most R2_MAX_DELETE_BATCH (1,000) keys per call.
+    for (let i = 0; i < toDelete.length; i += R2_MAX_DELETE_BATCH) {
+      await this.adapter.deleteObjects(toDelete.slice(i, i + R2_MAX_DELETE_BATCH));
     }
 
     return {
@@ -1135,8 +1139,9 @@ export class WalWriter {
       cursor = page.truncated ? page.cursor : undefined;
     } while (cursor);
 
-    if (expired.length > 0) {
-      await this.adapter.deleteObjects(expired);
+    // Codex R2 #13: Chunk delete calls to at most R2_MAX_DELETE_BATCH (1,000) keys per call.
+    for (let i = 0; i < expired.length; i += R2_MAX_DELETE_BATCH) {
+      await this.adapter.deleteObjects(expired.slice(i, i + R2_MAX_DELETE_BATCH));
     }
 
     return {

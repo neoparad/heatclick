@@ -39,6 +39,7 @@ final class UgokiLink_Companion_Plugin
     public const OPTION_BOUND_TENANT_ID = 'ugk_bound_tenant_id';
     public const OPTION_BOUND_SITE_ID = 'ugk_bound_site_id';
     public const OPTION_LAST_SEQ = 'ugk_last_command_seq';
+    public const OPTION_PENDING_JOURNAL = 'ugk_pending_command_journal';
     public const OPTION_MANIFEST_JSON = 'ugk_inline_manifest_json';
     public const OPTION_FILTER_PATCHES = 'ugk_render_filter_patches';
     public const NONCE_ACTION_LOCAL_APPROVE = 'ugokilink_local_approve';
@@ -418,8 +419,87 @@ final class UgokiLink_Companion_Plugin
         return ['ok' => true, 'payload' => $payload];
     }
 
+    /**
+     * Reconciles any `in_progress` pending-command journal entries left behind by a crash between
+     * `wp_update_post` and approval commit (`[#7]`):
+     * - If current `sha256(post_content) === expected_after_sha256`, finishes committing `claimed -> consumed`.
+     * - Otherwise releases `claimed -> unused` and conditionally CAS-rolls back `OPTION_LAST_SEQ`
+     *   ONLY when `currentSeq === command_seq` (never overwriting a concurrent newer `seq`).
+     */
+    public static function reconcilePendingCommands(): void
+    {
+        $journal = get_option(self::OPTION_PENDING_JOURNAL, []);
+        if (!is_array($journal) || count($journal) === 0) {
+            return;
+        }
+
+        $changed = false;
+        foreach ($journal as $seqKey => $entry) {
+            if (!is_array($entry) || ($entry['status'] ?? '') !== 'in_progress') {
+                continue;
+            }
+            $cmdSeq = (int) ($entry['command_seq'] ?? 0);
+            $postId = (int) ($entry['post_id'] ?? 0);
+            $digest = isset($entry['approval_digest']) && is_string($entry['approval_digest']) ? $entry['approval_digest'] : null;
+            $claimToken = isset($entry['claim_token']) && is_string($entry['claim_token']) ? $entry['claim_token'] : null;
+            $expectedAfter = isset($entry['expected_after_sha256']) && is_string($entry['expected_after_sha256'])
+                ? $entry['expected_after_sha256']
+                : '';
+            $prevSeq = (int) ($entry['prev_seq'] ?? 0);
+
+            $post = $postId > 0 ? get_post($postId) : null;
+            $currentSha = $post instanceof \WP_Post ? hash('sha256', (string) $post->post_content) : null;
+
+            if ($currentSha !== null && $expectedAfter !== '' && hash_equals($expectedAfter, $currentSha)) {
+                if ($digest !== null && $claimToken !== null) {
+                    self::commitLocalWpAdminApproval($digest, $claimToken);
+                }
+            } else {
+                if ($digest !== null && $claimToken !== null) {
+                    self::releaseLocalWpAdminApproval($digest, $claimToken);
+                }
+                if ($cmdSeq > 0 && (int) get_option(self::OPTION_LAST_SEQ, 0) === $cmdSeq) {
+                    update_option(self::OPTION_LAST_SEQ, $prevSeq, false);
+                }
+            }
+
+            unset($journal[$seqKey]);
+            $changed = true;
+        }
+
+        if ($changed) {
+            update_option(self::OPTION_PENDING_JOURNAL, $journal, false);
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $record
+     */
+    private static function writePendingCommandJournal(int $cmdSeq, array $record): void
+    {
+        $journal = get_option(self::OPTION_PENDING_JOURNAL, []);
+        if (!is_array($journal)) {
+            $journal = [];
+        }
+        $journal[(string) $cmdSeq] = $record;
+        update_option(self::OPTION_PENDING_JOURNAL, $journal, false);
+    }
+
+    private static function clearPendingCommandJournal(int $cmdSeq): void
+    {
+        $journal = get_option(self::OPTION_PENDING_JOURNAL, []);
+        if (!is_array($journal) || !isset($journal[(string) $cmdSeq])) {
+            return;
+        }
+        unset($journal[(string) $cmdSeq]);
+        update_option(self::OPTION_PENDING_JOURNAL, $journal, false);
+    }
+
     public static function handleSignedCommand(\WP_REST_Request $request): \WP_REST_Response
     {
+        // [#7] Reconcile any in_progress pending-command journal records left by a prior crash
+        self::reconcilePendingCommands();
+
         $envelope = $request->get_json_params();
         if (!is_array($envelope)) {
             return new \WP_REST_Response(['error' => 'invalid_json'], 400);
@@ -461,70 +541,278 @@ final class UgokiLink_Companion_Plugin
     }
 
     /**
-     * Extracts canonical indexable SEO nodes from a FULL HTML document (`[#6]`):
-     * `<h1>`, `<title>`, `<meta>`, `<link rel="canonical">`, `<a href>` (href/rel attrs),
-     * and `<script type="application/ld+json">`.
-     * Comparing full `before_html` vs `after_html` catches text-only edits inside existing tags!
+     * Quote-aware HTML attribute parser (`[#6]`):
+     * Properly tracks single/double-quoted attribute values so `>` inside quotes never
+     * closes a tag prematurely. Returns `['ok' => false]` on unclosed quotes/malformed attributes.
+     *
+     * @return array{ok: bool, attrs: array<string, string>, canonical: string}
      */
-    private static function extractIndexableSeoSignature(string $html): string
+    private static function parseHtmlAttributesQuoteAware(string $rawAttrs): array
+    {
+        $attrs = [];
+        $parts = [];
+        $len = strlen($rawAttrs);
+        $i = 0;
+
+        while ($i < $len) {
+            while ($i < $len && ($rawAttrs[$i] === ' ' || $rawAttrs[$i] === "\t" || $rawAttrs[$i] === "\n" || $rawAttrs[$i] === "\r" || $rawAttrs[$i] === '/')) {
+                $i++;
+            }
+            if ($i >= $len) {
+                break;
+            }
+
+            $nameStart = $i;
+            while (
+                $i < $len
+                && $rawAttrs[$i] !== '='
+                && $rawAttrs[$i] !== ' '
+                && $rawAttrs[$i] !== "\t"
+                && $rawAttrs[$i] !== "\n"
+                && $rawAttrs[$i] !== "\r"
+                && $rawAttrs[$i] !== '/'
+                && $rawAttrs[$i] !== '>'
+            ) {
+                if ($rawAttrs[$i] === '"' || $rawAttrs[$i] === "'" || $rawAttrs[$i] === '<') {
+                    return ['ok' => false, 'attrs' => [], 'canonical' => ''];
+                }
+                $i++;
+            }
+            $name = strtolower(substr($rawAttrs, $nameStart, $i - $nameStart));
+            if ($name === '') {
+                return ['ok' => false, 'attrs' => [], 'canonical' => ''];
+            }
+
+            while ($i < $len && ($rawAttrs[$i] === ' ' || $rawAttrs[$i] === "\t" || $rawAttrs[$i] === "\n" || $rawAttrs[$i] === "\r")) {
+                $i++;
+            }
+
+            $value = '';
+            if ($i < $len && $rawAttrs[$i] === '=') {
+                $i++;
+                while ($i < $len && ($rawAttrs[$i] === ' ' || $rawAttrs[$i] === "\t" || $rawAttrs[$i] === "\n" || $rawAttrs[$i] === "\r")) {
+                    $i++;
+                }
+                if ($i >= $len) {
+                    return ['ok' => false, 'attrs' => [], 'canonical' => ''];
+                }
+                $ch = $rawAttrs[$i];
+                if ($ch === '"' || $ch === "'") {
+                    $quote = $ch;
+                    $i++;
+                    $valStart = $i;
+                    while ($i < $len && $rawAttrs[$i] !== $quote) {
+                        $i++;
+                    }
+                    if ($i >= $len) {
+                        return ['ok' => false, 'attrs' => [], 'canonical' => ''];
+                    }
+                    $value = substr($rawAttrs, $valStart, $i - $valStart);
+                    $i++;
+                } else {
+                    $valStart = $i;
+                    while (
+                        $i < $len
+                        && $rawAttrs[$i] !== ' '
+                        && $rawAttrs[$i] !== "\t"
+                        && $rawAttrs[$i] !== "\n"
+                        && $rawAttrs[$i] !== "\r"
+                        && $rawAttrs[$i] !== '>'
+                    ) {
+                        if ($rawAttrs[$i] === '"' || $rawAttrs[$i] === "'" || $rawAttrs[$i] === '<') {
+                            return ['ok' => false, 'attrs' => [], 'canonical' => ''];
+                        }
+                        $i++;
+                    }
+                    $value = substr($rawAttrs, $valStart, $i - $valStart);
+                }
+            }
+
+            if (!array_key_exists($name, $attrs)) {
+                $attrs[$name] = $value;
+            }
+            $normVal = (string) preg_replace('/\s+/', ' ', trim($value));
+            $parts[] = $name . '="' . $normVal . '"';
+        }
+
+        return ['ok' => true, 'attrs' => $attrs, 'canonical' => implode(' ', $parts)];
+    }
+
+    /**
+     * Quote-aware HTML tag/attribute scanner extracting canonical indexable SEO nodes from a FULL
+     * HTML document (`[#6]`): `<h1>`, `<title>`, `<meta>`, `<link rel="canonical">`, `<a href>`,
+     * and `<script type="application/ld+json">`.
+     *
+     * Returns `null` if HTML is unparseable or contains unclosed tags/quotes/comments/blocks so
+     * `cmdApply` FAILS CLOSED by requiring local WP 2-key approval!
+     */
+    private static function extractIndexableSeoSignature(string $html): ?string
     {
         $parts = [];
+        $len = strlen($html);
+        $i = 0;
 
-        // 1. <h1>...</h1> and <title>...</title> (full attributes + inner text/content)
-        if (preg_match_all('/<\s*(h1|title)\b([^>]*)>([\s\S]*?)<\/\s*\1\s*>/i', $html, $m, PREG_SET_ORDER)) {
-            foreach ($m as $match) {
-                $tag = strtolower($match[1]);
-                $attrs = preg_replace('/\s+/', ' ', trim($match[2]));
-                $body = preg_replace('/\s+/', ' ', trim($match[3]));
-                $parts[] = $tag . '[' . $attrs . ']=' . $body;
+        while ($i < $len) {
+            $lt = strpos($html, '<', $i);
+            if ($lt === false) {
+                break;
             }
-        }
 
-        // 2. <meta ...> tags
-        if (preg_match_all('/<\s*meta\b([^>]*)>/i', $html, $m, PREG_SET_ORDER)) {
-            foreach ($m as $match) {
-                $attrs = preg_replace('/\s+/', ' ', trim($match[1]));
-                $parts[] = 'meta[' . $attrs . ']';
+            // HTML comment <!-- ... -->
+            if (substr($html, $lt, 4) === '<!--') {
+                $commentEnd = strpos($html, '-->', $lt + 4);
+                if ($commentEnd === false) {
+                    return null;
+                }
+                $i = $commentEnd + 3;
+                continue;
             }
-        }
 
-        // 3. <link ... rel="canonical" ...> tags
-        if (preg_match_all('/<\s*link\b([^>]*)>/i', $html, $m, PREG_SET_ORDER)) {
-            foreach ($m as $match) {
-                $attrs = preg_replace('/\s+/', ' ', trim($match[1]));
-                if (preg_match('/\brel\s*=\s*(?:"[^"]*\bcanonical\b[^"]*"|\'[^\']*\bcanonical\b[^\']*\'|canonical\b)/i', (string) $attrs) === 1) {
-                    $parts[] = 'link_canonical[' . $attrs . ']';
+            // Declaration / PI (<!DOCTYPE ...> or <?...?>)
+            if ($lt + 1 < $len && ($html[$lt + 1] === '!' || $html[$lt + 1] === '?')) {
+                $j = $lt + 2;
+                $q = null;
+                while ($j < $len) {
+                    $ch = $html[$j];
+                    if ($q !== null) {
+                        if ($ch === $q) {
+                            $q = null;
+                        }
+                    } elseif ($ch === '"' || $ch === "'") {
+                        $q = $ch;
+                    } elseif ($ch === '>') {
+                        break;
+                    }
+                    $j++;
+                }
+                if ($j >= $len || $q !== null) {
+                    return null;
+                }
+                $i = $j + 1;
+                continue;
+            }
+
+            $p = $lt + 1;
+            while ($p < $len && ($html[$p] === ' ' || $html[$p] === "\t" || $html[$p] === "\n" || $html[$p] === "\r")) {
+                $p++;
+            }
+            $isClosing = $p < $len && $html[$p] === '/';
+            if ($isClosing) {
+                $p++;
+                while ($p < $len && ($html[$p] === ' ' || $html[$p] === "\t" || $html[$p] === "\n" || $html[$p] === "\r")) {
+                    $p++;
                 }
             }
-        }
 
-        // 4. <a ... href=...> tags (href & rel attributes)
-        if (preg_match_all('/<\s*a\b([^>]*)>/i', $html, $m, PREG_SET_ORDER)) {
-            foreach ($m as $match) {
-                $attrs = (string) $match[1];
-                $href = '';
-                $rel = '';
-                if (preg_match('/\bhref\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))/i', $attrs, $hm) === 1) {
-                    $href = $hm[1] !== '' ? $hm[1] : ($hm[2] !== '' ? $hm[2] : ($hm[3] ?? ''));
+            $nameStart = $p;
+            if ($p < $len && ctype_alpha($html[$p])) {
+                $p++;
+                while ($p < $len && (ctype_alnum($html[$p]) || $html[$p] === ':' || $html[$p] === '-')) {
+                    $p++;
                 }
-                if (preg_match('/\brel\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))/i', $attrs, $rm) === 1) {
-                    $rel = $rm[1] !== '' ? $rm[1] : ($rm[2] !== '' ? $rm[2] : ($rm[3] ?? ''));
+            } else {
+                $i = $lt + 1;
+                continue;
+            }
+
+            $tagName = strtolower(substr($html, $nameStart, $p - $nameStart));
+            if ($p >= $len) {
+                return null;
+            }
+            $afterName = $html[$p];
+            if ($afterName !== '>' && $afterName !== '/' && $afterName !== ' ' && $afterName !== "\t" && $afterName !== "\n" && $afterName !== "\r") {
+                $i = $lt + 1;
+                continue;
+            }
+
+            // Scan to unquoted closing '>' tracking single/double quotes!
+            $attrStart = $p;
+            $j = $p;
+            $quote = null;
+            while ($j < $len) {
+                $ch = $html[$j];
+                if ($quote !== null) {
+                    if ($ch === $quote) {
+                        $quote = null;
+                    }
+                } elseif ($ch === '"' || $ch === "'") {
+                    $quote = $ch;
+                } elseif ($ch === '>') {
+                    break;
                 }
+                $j++;
+            }
+            if ($j >= $len || $quote !== null) {
+                return null;
+            }
+
+            if ($isClosing) {
+                $i = $j + 1;
+                continue;
+            }
+
+            $rawAttrs = trim(substr($html, $attrStart, $j - $attrStart));
+            if (str_ends_with($rawAttrs, '/')) {
+                $rawAttrs = trim(substr($rawAttrs, 0, -1));
+            }
+            $parsedAttrs = self::parseHtmlAttributesQuoteAware($rawAttrs);
+            if (!$parsedAttrs['ok']) {
+                return null;
+            }
+
+            if ($tagName === 'h1' || $tagName === 'title') {
+                if (preg_match('/<\s*\/\s*' . $tagName . '\s*>/i', $html, $cm, PREG_OFFSET_CAPTURE, $j + 1) !== 1) {
+                    return null;
+                }
+                $closeStart = (int) $cm[0][1];
+                $closeEnd = $closeStart + strlen((string) $cm[0][0]);
+                $body = (string) preg_replace('/\s+/', ' ', trim(substr($html, $j + 1, $closeStart - ($j + 1))));
+                $parts[] = $tagName . '[' . $parsedAttrs['canonical'] . ']=' . $body;
+                $i = $closeEnd;
+                continue;
+            }
+
+            if ($tagName === 'meta') {
+                $parts[] = 'meta[' . $parsedAttrs['canonical'] . ']';
+                $i = $j + 1;
+                continue;
+            }
+
+            if ($tagName === 'link') {
+                $rel = $parsedAttrs['attrs']['rel'] ?? '';
+                if (preg_match('/\bcanonical\b/i', $rel) === 1) {
+                    $parts[] = 'link_canonical[' . $parsedAttrs['canonical'] . ']';
+                }
+                $i = $j + 1;
+                continue;
+            }
+
+            if ($tagName === 'a') {
+                $href = trim($parsedAttrs['attrs']['href'] ?? '');
+                $rel = trim($parsedAttrs['attrs']['rel'] ?? '');
                 if ($href !== '') {
-                    $parts[] = 'a[href=' . trim($href) . ';rel=' . trim($rel) . ']';
+                    $parts[] = 'a[href=' . $href . ';rel=' . $rel . ']';
                 }
+                $i = $j + 1;
+                continue;
             }
-        }
 
-        // 5. <script type="application/ld+json">...</script>
-        if (preg_match_all('/<\s*script\b([^>]*)>([\s\S]*?)<\/\s*script\s*>/i', $html, $m, PREG_SET_ORDER)) {
-            foreach ($m as $match) {
-                $attrs = (string) $match[1];
-                if (preg_match('/\btype\s*=\s*(?:"application\/ld\+json"|\'application\/ld\+json\'|application\/ld\+json\b)/i', $attrs) === 1) {
-                    $body = preg_replace('/\s+/', ' ', trim($match[2]));
+            if ($tagName === 'script') {
+                if (preg_match('/<\s*\/\s*script\s*>/i', $html, $cm, PREG_OFFSET_CAPTURE, $j + 1) !== 1) {
+                    return null;
+                }
+                $closeStart = (int) $cm[0][1];
+                $closeEnd = $closeStart + strlen((string) $cm[0][0]);
+                $type = strtolower(trim($parsedAttrs['attrs']['type'] ?? ''));
+                if ($type === 'application/ld+json') {
+                    $body = (string) preg_replace('/\s+/', ' ', trim(substr($html, $j + 1, $closeStart - ($j + 1))));
                     $parts[] = 'ld_json=' . $body;
                 }
+                $i = $closeEnd;
+                continue;
             }
+
+            $i = $j + 1;
         }
 
         return implode("\n", $parts);
@@ -638,12 +926,13 @@ final class UgokiLink_Companion_Plugin
             $postImageHash = hash('sha256', $newContent);
 
             // 4. [C-17] & [#6]: True 2-key local WP-Admin approval verification!
-            // Compare FULL before/after HTML documents so text-only edits inside <h1>, <title>,
-            // <meta>, <link rel="canonical">, <a href>, and JSON-LD NEVER bypass touch_indexable_seo.
-            $seoChangedInFullDoc = !hash_equals(
-                self::extractIndexableSeoSignature($currentContent),
-                self::extractIndexableSeoSignature($newContent)
-            );
+            // Compare FULL before/after HTML documents using quote-aware HTML scanning (fail-closed if null!).
+            $beforeSeoSig = self::extractIndexableSeoSignature($currentContent);
+            $afterSeoSig = self::extractIndexableSeoSignature($newContent);
+            $seoChangedInFullDoc =
+                $beforeSeoSig === null
+                || $afterSeoSig === null
+                || !hash_equals($beforeSeoSig, $afterSeoSig);
             $touchesIndexableSeo =
                 $changeClass === 'touch_indexable_seo'
                 || $changeClass === 'indexable_major'
@@ -690,26 +979,39 @@ final class UgokiLink_Companion_Plugin
                 'applied_at_gmt' => gmdate('Y-m-d H:i:s'),
             ]));
 
+            // 5b. [#7] Write recoverable pending-command journal record BEFORE wp_update_post
+            self::writePendingCommandJournal($seq, [
+                'command_seq' => $seq,
+                'post_id' => $postId,
+                'approval_digest' => $claimedApprovalDigest,
+                'claim_token' => $claimedApprovalToken,
+                'expected_after_sha256' => $postImageHash,
+                'prev_seq' => isset($payload['__prev_seq']) ? (int) $payload['__prev_seq'] : 0,
+                'status' => 'in_progress',
+            ]);
+
             $result = wp_update_post([
                 'ID' => $postId,
                 'post_content' => wp_slash($newContent),
             ], true);
 
             if (is_wp_error($result)) {
-                // [#7] Roll back claimed approval to `unused` so a clean retry succeeds
+                // [#7] Roll back claimed approval to `unused`, conditionally CAS-rollback seq, and clear journal
                 if ($claimedApprovalDigest !== null && $claimedApprovalToken !== null) {
                     self::releaseLocalWpAdminApproval($claimedApprovalDigest, $claimedApprovalToken);
                 }
                 if (isset($payload['__prev_seq']) && (int) get_option(self::OPTION_LAST_SEQ, 0) === $seq) {
                     update_option(self::OPTION_LAST_SEQ, (int) $payload['__prev_seq'], false);
                 }
+                self::clearPendingCommandJournal($seq);
                 return new \WP_REST_Response(['error' => 'wp_update_post_failed'], 500);
             }
 
-            // [#7] Commit claimed approval (`claimed` -> `consumed`) ONLY after post update succeeds
+            // [#7] Commit claimed approval (`claimed` -> `consumed`) ONLY after post update succeeds, then clear journal
             if ($claimedApprovalDigest !== null && $claimedApprovalToken !== null) {
                 self::commitLocalWpAdminApproval($claimedApprovalDigest, $claimedApprovalToken);
             }
+            self::clearPendingCommandJournal($seq);
 
             // Increment per-UTC-day apply counter (pruning stale days)
             $dailyCounters = [$utcDay => $usedToday + 1];

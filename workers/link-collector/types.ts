@@ -60,6 +60,8 @@ export interface SiteKeyRegistration {
   readonly edgeHandoffMacKey?: string;
   readonly originAttestKey?: string;
   readonly tenantMemberHashKey: string;
+  /** Previous rotated tenant member-hash keys retained for non-destructive subject erasure lookup (Codex R2 #9). */
+  readonly rotatedMemberHashKeys?: readonly string[];
   readonly urlRules?: UrlKeyV2Rules;
   /** 28-day same-hour baseline PVs/window for surge circuit breaker (§11.8). */
   readonly baseline28dHourVolume: number;
@@ -181,6 +183,13 @@ export interface SubjectDeletionRequest {
   readonly siteId: string;
   readonly subjectKind: 'visitor_id' | 'member_hash' | 'external_id' | 'ga_client_id' | 'optout_cookie';
   readonly subjectHmac: string | null;
+  /**
+   * Versioned canonical + legacy HMAC lookup candidates computed across current and
+   * rotated tenant keys at intake time so downstream deletion needs ZERO plaintext (Codex R2 #9).
+   */
+  readonly subject_hmac_candidates: readonly string[];
+  /** CamelCase alias of `subject_hmac_candidates` for ergonomic TypeScript consumption. */
+  readonly subjectHmacCandidates: readonly string[];
   readonly requestedAtMs: number;
   readonly slaDays: 14;
 }

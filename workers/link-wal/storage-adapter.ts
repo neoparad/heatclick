@@ -22,11 +22,39 @@ import {
   type StorageTier,
 } from './types';
 
+export const R2_MAX_DELETE_BATCH = 1000;
+
+/**
+ * Deletes R2 objects in sequential chunks of at most `R2_MAX_DELETE_BATCH` (1,000) keys
+ * so multi-page deletion sweeps never exceed R2's 1,000-key batch limit (Codex R2 #13).
+ */
+export async function deleteKeysInChunks(
+  bucket: R2BucketLike,
+  keys: string | readonly string[],
+  maxBatchSize = R2_MAX_DELETE_BATCH
+): Promise<void> {
+  if (typeof keys === 'string') {
+    await bucket.delete(keys);
+    return;
+  }
+  if (keys.length === 0) return;
+  const chunkSize = Math.max(1, Math.min(R2_MAX_DELETE_BATCH, Math.floor(maxBatchSize)));
+  for (let i = 0; i < keys.length; i += chunkSize) {
+    const chunk = keys.slice(i, i + chunkSize);
+    await bucket.delete(chunk);
+  }
+}
+
+export function computeExportIdempotencyKey(sinkId: string, walKey: string): string {
+  return sha256Hex(`${sinkId}\u0000${walKey}`);
+}
+
 export interface ExportNotificationReceipt {
   readonly exportBatchId: string;
   readonly sinkId: string;
   readonly region: DataRegion;
   readonly walKey: string;
+  readonly idempotencyKey?: string;
   readonly tenantIds: readonly string[];
   readonly deletionEpoch: number;
   readonly exportedAtMs: number;
@@ -41,6 +69,7 @@ export interface ExportSinkPort {
     readonly tenantIds: readonly string[];
     readonly deletionEpoch: number;
     readonly exportedAtMs: number;
+    readonly idempotencyKey?: string;
   }): Promise<ExportNotificationReceipt>;
 }
 
@@ -213,10 +242,13 @@ export function formatExportReceiptKey(
   region: DataRegion,
   tenantId: string,
   siteId: string,
-  walKey: string
+  walKey: string,
+  sinkId?: string
 ): string {
-  const walKeyHash = sha256Hex(walKey);
-  return `export-receipts/${region}/${tenantId}/${siteId}/${walKeyHash}.json`;
+  const keyDigest = sinkId
+    ? computeExportIdempotencyKey(sinkId, walKey)
+    : sha256Hex(walKey);
+  return `export-receipts/${region}/${tenantId}/${siteId}/${keyDigest}.json`;
 }
 
 /**
@@ -291,7 +323,7 @@ export class LinkManagedStorageAdapter implements StorageTierAdapter {
   }
 
   public async deleteObjects(keys: string | readonly string[]): Promise<void> {
-    await this.bucket.delete(keys);
+    await deleteKeysInChunks(this.bucket, keys);
   }
 }
 
@@ -357,11 +389,13 @@ export class LinkPlusExportStorageAdapter implements StorageTierAdapter {
       this.boundScope?.siteId ??
       this.extractSiteId(args.body) ??
       '_default_site';
+    const idempotencyKey = computeExportIdempotencyKey(this.exportSink.sinkId, args.key);
     const receiptKey = formatExportReceiptKey(
       this.descriptor.region,
       tenantId,
       siteId,
-      args.key
+      args.key,
+      this.exportSink.sinkId
     );
 
     // Codex #12: Always check durable export receipt even when primary was already written
@@ -375,13 +409,18 @@ export class LinkPlusExportStorageAdapter implements StorageTierAdapter {
       };
     }
 
-    const exportReceipt = await this.exportSink.writeExportBatch({
+    const rawExportReceipt = await this.exportSink.writeExportBatch({
       walKey: args.key,
       body: args.body,
       tenantIds: args.tenantIds,
       deletionEpoch: args.deletionEpoch,
       exportedAtMs: args.nowMs,
+      idempotencyKey,
     });
+    const exportReceipt: ExportNotificationReceipt = {
+      ...rawExportReceipt,
+      idempotencyKey: rawExportReceipt.idempotencyKey ?? idempotencyKey,
+    };
 
     await this.receiptBucket.put(receiptKey, canonicalJsonStringify(exportReceipt), {
       httpMetadata: { contentType: 'application/json' },
@@ -392,6 +431,7 @@ export class LinkPlusExportStorageAdapter implements StorageTierAdapter {
         wal_key: args.key,
         export_sink_id: this.exportSink.sinkId,
         export_batch_id: exportReceipt.exportBatchId,
+        idempotency_key: idempotencyKey,
       },
     });
 
@@ -503,16 +543,19 @@ export class CustomerSorStorageAdapter implements StorageTierAdapter {
   }
 
   public async deleteObjects(keys: string | readonly string[]): Promise<void> {
-    await this.customerBucket.delete(keys);
+    await deleteKeysInChunks(this.customerBucket, keys);
   }
 }
 
 /**
  * In-memory ExportSinkPort helper for Tier 2 testing and dry-run verification.
+ * Deduplicates on deterministic `(sinkId, walKey)` `idempotencyKey` (Codex R2 #12).
  */
 export class InMemoryExportSink implements ExportSinkPort {
   public readonly receipts: ExportNotificationReceipt[] = [];
   public readonly payloads = new Map<string, string>();
+  public readonly seenIdempotencyKeys: string[] = [];
+  private readonly receiptsByIdempotencyKey = new Map<string, ExportNotificationReceipt>();
   private seq = 0;
 
   public constructor(
@@ -526,7 +569,17 @@ export class InMemoryExportSink implements ExportSinkPort {
     readonly tenantIds: readonly string[];
     readonly deletionEpoch: number;
     readonly exportedAtMs: number;
+    readonly idempotencyKey?: string;
   }): Promise<ExportNotificationReceipt> {
+    const idempotencyKey =
+      args.idempotencyKey ?? computeExportIdempotencyKey(this.sinkId, args.walKey);
+    this.seenIdempotencyKeys.push(idempotencyKey);
+
+    const existing = this.receiptsByIdempotencyKey.get(idempotencyKey);
+    if (existing) {
+      return existing;
+    }
+
     this.seq += 1;
     const exportBatchId = `${this.sinkId}-batch-${this.seq}`;
     this.payloads.set(args.walKey, args.body);
@@ -535,10 +588,12 @@ export class InMemoryExportSink implements ExportSinkPort {
       sinkId: this.sinkId,
       region: this.region,
       walKey: args.walKey,
+      idempotencyKey,
       tenantIds: [...args.tenantIds],
       deletionEpoch: args.deletionEpoch,
       exportedAtMs: args.exportedAtMs,
     };
+    this.receiptsByIdempotencyKey.set(idempotencyKey, receipt);
     this.receipts.push(receipt);
     return receipt;
   }

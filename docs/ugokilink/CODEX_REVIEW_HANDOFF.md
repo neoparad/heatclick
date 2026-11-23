@@ -175,3 +175,29 @@ Codex 第 1 回レビュー（High 24 / Medium 5 / Low 1 = 計 30 件）に対�
 | 28 | Medium | Wilson 下限 > 事前上限の空共通部分を `assumption_inconsistent` として検知 | `lib/link/ai-layer/local-ai-scorer.ts` | `ai-layer.test.ts`（`[#28]`） |
 | 29 | Medium | ガウス尤度比計算前の 60 次元一致・有限・正分散強制 | `lib/link/ai-layer/local-ai-scorer.ts` | `ai-layer.test.ts`（`[#29]`） |
 | 30 | Low | SSRF 予約帯判定から `TEST-NET-2/3` 例外を撤去 | `lib/link/linkage/grant-service.ts` | `linkage.test.ts`, `export.test.ts` |
+
+
+---
+
+## 8. Wave 10: Codex 第 2 回レビュー（`f50b877`）残存 20 件エッジケース完全是正
+
+Codex 第 2 回レビューで残存指摘された 20 件（一部修正 14 件 ＋ 関連不具合 6 件）をすべて解消し、全 **56/56 Jest スイート（1,141 テスト）・`inspect-prod-baseline`（9/9）・`event-ingest`（101/101）・`npm run type-check`（0 エラー）・`npm run build`（exit 0）** を確認済み：
+
+- **#1**: `ast-inspector.ts` で multi-table `JOIN` 時の全参照テーブル別名へ `alias.site_id` 述語を強制（未修飾 `site_id`・片側限定を拒否）
+- **#2**: 共有 `DpopReplayStore` 注入＆未期限 `jti` 非退去 fail-closed (`503`)、`app/api/v1/{recommend,sites/[siteId]/recommend}/route.ts` と `callRecommendMcpTool` へ署名付き `DPoP`・`httpMethod`・`httpUri` 転送
+- **#6**: WP TS/PHP 双方で引用符内 `>` に対応した `parseHtmlAttributesQuoteAware` 実装＆解析不能時 fail-closed 承認必須化
+- **#7**: WP TS/PHP 双方で `in_progress` ペンディングコマンドジャーナル＋`reconcilePendingCommands()` 回復＋CAS `lastSeq` ロールバック実装
+- **#8**: `/v1/optout` 503 時に `ugk_optout=1` 即時設定しつつ短寿命署名付き `ugk_del_retry` Cookie を発行し再送時に元の訪問者を特定可能に保持
+- **#9**: `/v1/optout` 受付時に現行＋旧鍵の `subject_hmac_candidates` をキューへ平文ゼロで永続化し、`DeletionExecutionEngine` がキュー内容のみで現行＋旧形式行を消去
+- **#10**: `ShardLoader` が削除印をバケットへ永続化・`syncManifestsFromBucket()` で再生より先に削除印を復元・説明不能な欠損 WAL は `MissingManifestWalError` で停止
+- **#11**: `WalWriter` でリージョン照合を `tenant_id`/`site_id`/フレーム検証より最優先実行
+- **#12**: Tier 2 顧客 export に決定論的 `computeExportIdempotencyKey(sinkId, walKey)` を導入し、受領記録失敗後の再送でも重複ゼロを保証
+- **#13**: R2 削除を `R2_MAX_DELETE_BATCH = 1000` チャンクに分割し 1,050 件超の一括削除を安全完了
+- **#15 / #17**: Ask の全拒否経路から `<10` 実人数を完全除去し、RREF 保護下で `cohortMemberIds` 欠落行を非公開化＆事前/行別/合計の RREF 履歴を承認確定時のみ原子コミット
+- **#19**: ヒートマップキャッシュキーに正規化 `redaction_boxes`・`ocr_policy_version`・フィルタ済 `embedded_texts` ダイジェストを組み込み
+- **#20**: $K \le 2$ で全候補数 $N$ に対する厳密閉形式 Plackett-Luce 周辺確率（17 件 2 枠で厳密 `2/17`）を算出し `display_prob_method: 'exact' | 'monte_carlo'` を明示
+- **#22**: LORD++ の `1e-12` 誤差許容を廃止し厳密一致のみ冪等返却（判定反転再送は `IdempotencyConflictError`）
+- **#23**: `priorSplitAssignments` 永続割当により既存の `train`/`select_tune` 例が `final_eval` へ移動することを禁止
+- **#25**: `R4` 削除認可を副作用ゼロ化し、冪等キャッシュ照会・レート制限通過後の `commitR4Destruction()` でのみ予約登録・承認消費を実行
+- **#26**: Worker 内エラー切詰めを UTF-8 コードポイント完全境界（継続バイト＋未完結先頭バイト双方を巻き戻し）に修正
+- **#28 / #29**: Wilson 分子の符号を `[0, piMax]` 切詰め前まで保持して負の有病率不整合を `assumption_inconsistent` 検知、ガウス派生分散 `scale * scale` のアンダーフロー/オーバーフローを `scorable: false` で遮断

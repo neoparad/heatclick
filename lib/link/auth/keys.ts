@@ -113,40 +113,49 @@ export interface DpopPublicJwk {
   readonly y?: string;
 }
 
-export class DpopReplayCache {
+export interface DpopReplayClaimResult {
+  readonly ok: boolean;
+  readonly reason?: 'replayed' | 'saturated';
+}
+
+export interface DpopReplayStore {
+  claimJti(jti: string, expiresAtMs: number, nowMs: number): DpopReplayClaimResult;
+}
+
+export class InMemoryDpopReplayStore implements DpopReplayStore {
   private readonly seen = new Map<string, number>();
   public readonly maxEntries: number;
   public readonly ttlMs: number;
 
   constructor(options?: { readonly maxEntries?: number; readonly ttlMs?: number }) {
-    this.maxEntries = Math.max(16, Math.floor(options?.maxEntries ?? 10_000));
+    this.maxEntries = Math.max(1, Math.floor(options?.maxEntries ?? 10_000));
     this.ttlMs = Math.max(1_000, Math.floor(options?.ttlMs ?? 120_000));
   }
 
-  public checkAndRecord(jti: string, nowMs: number = Date.now()): boolean {
-    const existingExp = this.seen.get(jti);
-    if (existingExp !== undefined) {
-      if (nowMs < existingExp) {
-        return false; // Replay detected
+  public claimJti(
+    jti: string,
+    expiresAtMs: number,
+    nowMs: number = Date.now()
+  ): DpopReplayClaimResult {
+    // 1. Purge expired entries first (expiresAtMs <= nowMs)
+    for (const [k, exp] of this.seen.entries()) {
+      if (exp <= nowMs) {
+        this.seen.delete(k);
       }
-      this.seen.delete(jti);
     }
 
+    // 2. Reject replay if jti is still live
+    if (this.seen.has(jti)) {
+      return { ok: false, reason: 'replayed' };
+    }
+
+    // 3. NEVER evict unexpired entries — fail closed when saturated
     if (this.seen.size >= this.maxEntries) {
-      for (const [k, exp] of this.seen.entries()) {
-        if (nowMs >= exp) {
-          this.seen.delete(k);
-        }
-      }
-      while (this.seen.size >= this.maxEntries) {
-        const oldest = this.seen.keys().next().value;
-        if (oldest === undefined) break;
-        this.seen.delete(oldest);
-      }
+      return { ok: false, reason: 'saturated' };
     }
 
-    this.seen.set(jti, nowMs + this.ttlMs);
-    return true;
+    this.seen.set(jti, expiresAtMs);
+    return { ok: true };
   }
 
   public size(): number {
@@ -154,7 +163,17 @@ export class DpopReplayCache {
   }
 }
 
-const DEFAULT_DPOP_REPLAY_CACHE = new DpopReplayCache();
+export class DpopReplayCache extends InMemoryDpopReplayStore {
+  constructor(options?: { readonly maxEntries?: number; readonly ttlMs?: number }) {
+    super(options);
+  }
+
+  public checkAndRecord(jti: string, nowMs: number = Date.now()): boolean {
+    return this.claimJti(jti, nowMs + this.ttlMs, nowMs).ok;
+  }
+}
+
+const DEFAULT_DPOP_REPLAY_STORE: DpopReplayStore = new InMemoryDpopReplayStore();
 
 /**
  * Computes canonical RFC 7638 SHA-256 JWK Thumbprint (`jkt`) for public OKP (Ed25519)
@@ -225,6 +244,7 @@ export interface DpopVerifyOptions {
   readonly accessToken?: string;
   readonly expectedJkt?: string;
   readonly maxClockSkewSec?: number;
+  readonly replayStore?: DpopReplayStore;
   readonly replayCache?: DpopReplayCache;
   readonly now?: Date;
 }
@@ -241,6 +261,7 @@ export type DpopVerifyResult =
     }
   | {
       readonly ok: false;
+      readonly httpStatus?: 401 | 503;
       readonly code: string;
       readonly reason: string;
     };
@@ -251,7 +272,7 @@ export type DpopVerifyResult =
 export function verifyDpopProofJwt(options: DpopVerifyOptions): DpopVerifyResult {
   const now = options.now ?? new Date();
   const maxSkew = options.maxClockSkewSec ?? DPOP_DEFAULT_MAX_SKEW_SEC;
-  const replayCache = options.replayCache ?? DEFAULT_DPOP_REPLAY_CACHE;
+  const replayStore = options.replayStore ?? options.replayCache ?? DEFAULT_DPOP_REPLAY_STORE;
 
   const raw = options.dpopProof.trim();
   const parts = raw.split('.');
@@ -418,10 +439,21 @@ export function verifyDpopProofJwt(options: DpopVerifyOptions): DpopVerifyResult
     }
   }
 
-  // Bounded JTI replay check (recorded only after all stateless checks pass)
-  if (!replayCache.checkAndRecord(jti, now.getTime())) {
+  // Atomic JTI replay check (recorded only after all stateless checks pass; fails closed on saturation)
+  const expiresAtMs = Math.max((iat + maxSkew + 1) * 1000, now.getTime() + 1_000);
+  const claim = replayStore.claimJti(jti, expiresAtMs, now.getTime());
+  if (!claim.ok) {
+    if (claim.reason === 'saturated') {
+      return {
+        ok: false,
+        httpStatus: 503,
+        code: 'DPOP_REPLAY_STORE_SATURATED',
+        reason: 'DPoP replay store is saturated with unexpired entries; failing closed',
+      };
+    }
     return {
       ok: false,
+      httpStatus: 401,
       code: 'DPOP_JTI_REPLAYED',
       reason: 'DPoP proof jti has already been used (replay detected)',
     };
@@ -682,7 +714,7 @@ export type VerifyCredentialResult =
   | { readonly ok: true; readonly principal: VerifiedPrincipal }
   | {
       readonly ok: false;
-      readonly httpStatus: 401 | 403 | 429;
+      readonly httpStatus: 401 | 403 | 429 | 503;
       readonly code: string;
       readonly reason: string;
     };
@@ -712,19 +744,21 @@ export class IdentityKeyRegistry {
 
   private readonly publicKeySigningPairs = new Map<string, Ed25519KeyPair>();
   private readonly oemSigningPair: Ed25519KeyPair;
-  private readonly dpopReplayCache = new DpopReplayCache();
+  private readonly dpopReplayStore: DpopReplayStore;
 
   constructor(options: {
     readonly pepperVersion: string;
     readonly pepperSecret: string;
     readonly publicKeySigningPair?: Ed25519KeyPair;
     readonly oemSigningPair?: Ed25519KeyPair;
+    readonly dpopReplayStore?: DpopReplayStore;
   }) {
     this.activePepperVersion = options.pepperVersion;
     this.peppers.set(options.pepperVersion, options.pepperSecret);
     const pubPair = options.publicKeySigningPair ?? generateEd25519KeyPair('v1');
     this.publicKeySigningPairs.set(pubPair.kid, pubPair);
     this.oemSigningPair = options.oemSigningPair ?? generateEd25519KeyPair('oem_v1');
+    this.dpopReplayStore = options.dpopReplayStore ?? new InMemoryDpopReplayStore();
   }
 
   // ---- Pepper & Org/Tenant/Site/Principal Registration ----
@@ -1141,7 +1175,7 @@ export class IdentityKeyRegistry {
     readonly now: Date;
   }):
     | { readonly ok: true; readonly senderConstrained: boolean }
-    | { readonly ok: false; readonly httpStatus: 401; readonly code: string; readonly reason: string } {
+    | { readonly ok: false; readonly httpStatus: 401 | 503; readonly code: string; readonly reason: string } {
     if (params.boundThumbprint) {
       if (params.dpopProof) {
         if (!params.httpMethod || !params.httpUri) {
@@ -1158,13 +1192,13 @@ export class IdentityKeyRegistry {
           httpUri: params.httpUri,
           accessToken: params.accessToken,
           expectedJkt: params.boundThumbprint,
-          replayCache: this.dpopReplayCache,
+          replayStore: this.dpopReplayStore,
           now: params.now,
         });
         if (!dpopRes.ok) {
           return {
             ok: false,
-            httpStatus: 401,
+            httpStatus: dpopRes.httpStatus ?? 401,
             code: dpopRes.code,
             reason: dpopRes.reason,
           };
@@ -1209,13 +1243,13 @@ export class IdentityKeyRegistry {
         httpMethod: params.httpMethod,
         httpUri: params.httpUri,
         accessToken: params.accessToken,
-        replayCache: this.dpopReplayCache,
+        replayStore: this.dpopReplayStore,
         now: params.now,
       });
       if (!dpopRes.ok) {
         return {
           ok: false,
-          httpStatus: 401,
+          httpStatus: dpopRes.httpStatus ?? 401,
           code: dpopRes.code,
           reason: dpopRes.reason,
         };
@@ -1427,7 +1461,7 @@ export class IdentityKeyRegistry {
     readonly now?: Date;
   }):
     | { readonly ok: true; readonly token: string; readonly claims: OemExchangedTokenClaims }
-    | { readonly ok: false; readonly httpStatus: 401 | 403 | 404; readonly code: string; readonly reason: string } {
+    | { readonly ok: false; readonly httpStatus: 401 | 403 | 404 | 503; readonly code: string; readonly reason: string } {
     const now = params.now ?? new Date();
     const verified = this.verifyOemManagementKey(params.rawOemKey, now);
     if (!verified.ok) {

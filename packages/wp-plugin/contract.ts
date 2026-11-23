@@ -60,6 +60,16 @@ export interface WpLocalAdminApprovalRecord {
   consumed: boolean;
 }
 
+export interface WpPendingCommandJournalRecord {
+  readonly command_seq: number;
+  readonly post_id: number;
+  readonly approval_digest: string | null;
+  readonly claim_token: string | null;
+  readonly expected_after_sha256: string;
+  readonly prev_seq: number;
+  status: 'in_progress';
+}
+
 export interface WpPostRecord {
   readonly post_id: number;
   readonly permalink: string;
@@ -134,61 +144,283 @@ const SCRIPT_OR_HANDLER_RE =
   /<\s*(?:script|iframe|object|embed|style|svg)\b[\s\S]*?(?:<\/\s*(?:script|iframe|object|embed|style|svg)\s*>|>)|\bon[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)|javascript\s*:/gi;
 
 /**
- * Extracts canonical indexable SEO nodes from a FULL HTML document (`[#6]`):
- * `<h1>`, `<title>`, `<meta>`, `<link rel="canonical">`, `<a href>` (href/rel attrs),
+ * Quote-aware HTML attribute parser (`[#6]`):
+ * Properly tracks single- and double-quoted attribute values so `>` inside quotes never
+ * terminates a tag or splits an attribute value. Returns `{ ok: false }` on malformed/unclosed quotes.
+ */
+function parseHtmlAttributesQuoteAware(rawAttrs: string): {
+  readonly ok: boolean;
+  readonly attrs: ReadonlyMap<string, string>;
+  readonly canonical: string;
+} {
+  const attrs = new Map<string, string>();
+  const parts: string[] = [];
+  const len = rawAttrs.length;
+  let i = 0;
+
+  while (i < len) {
+    while (i < len && (rawAttrs[i] === ' ' || rawAttrs[i] === '\t' || rawAttrs[i] === '\n' || rawAttrs[i] === '\r' || rawAttrs[i] === '/')) {
+      i += 1;
+    }
+    if (i >= len) break;
+
+    const nameStart = i;
+    while (
+      i < len &&
+      rawAttrs[i] !== '=' &&
+      rawAttrs[i] !== ' ' &&
+      rawAttrs[i] !== '\t' &&
+      rawAttrs[i] !== '\n' &&
+      rawAttrs[i] !== '\r' &&
+      rawAttrs[i] !== '/' &&
+      rawAttrs[i] !== '>'
+    ) {
+      if (rawAttrs[i] === '"' || rawAttrs[i] === "'" || rawAttrs[i] === '<') {
+        return { ok: false, attrs, canonical: '' };
+      }
+      i += 1;
+    }
+    const name = rawAttrs.slice(nameStart, i).toLowerCase();
+    if (!name) {
+      return { ok: false, attrs, canonical: '' };
+    }
+
+    while (i < len && (rawAttrs[i] === ' ' || rawAttrs[i] === '\t' || rawAttrs[i] === '\n' || rawAttrs[i] === '\r')) {
+      i += 1;
+    }
+
+    let value = '';
+    if (i < len && rawAttrs[i] === '=') {
+      i += 1;
+      while (i < len && (rawAttrs[i] === ' ' || rawAttrs[i] === '\t' || rawAttrs[i] === '\n' || rawAttrs[i] === '\r')) {
+        i += 1;
+      }
+      if (i >= len) {
+        return { ok: false, attrs, canonical: '' };
+      }
+      const ch = rawAttrs[i];
+      if (ch === '"' || ch === "'") {
+        const quote = ch;
+        i += 1;
+        const valStart = i;
+        while (i < len && rawAttrs[i] !== quote) {
+          i += 1;
+        }
+        if (i >= len) {
+          // Unclosed quoted attribute value -> fail closed
+          return { ok: false, attrs, canonical: '' };
+        }
+        value = rawAttrs.slice(valStart, i);
+        i += 1; // consume closing quote
+      } else {
+        const valStart = i;
+        while (
+          i < len &&
+          rawAttrs[i] !== ' ' &&
+          rawAttrs[i] !== '\t' &&
+          rawAttrs[i] !== '\n' &&
+          rawAttrs[i] !== '\r' &&
+          rawAttrs[i] !== '>'
+        ) {
+          if (rawAttrs[i] === '"' || rawAttrs[i] === "'" || rawAttrs[i] === '<') {
+            return { ok: false, attrs, canonical: '' };
+          }
+          i += 1;
+        }
+        value = rawAttrs.slice(valStart, i);
+      }
+    }
+
+    if (!attrs.has(name)) {
+      attrs.set(name, value);
+    }
+    parts.push(`${name}="${value.trim().replace(/\s+/g, ' ')}"`);
+  }
+
+  return { ok: true, attrs, canonical: parts.join(' ') };
+}
+
+function findClosingTagQuoteAware(
+  html: string,
+  tagName: string,
+  fromIndex: number
+): { readonly contentEnd: number; readonly tagEnd: number } | null {
+  const re = new RegExp(`<\\s*\\/\\s*${tagName}\\s*>`, 'gi');
+  re.lastIndex = fromIndex;
+  const m = re.exec(html);
+  if (!m) return null;
+  return { contentEnd: m.index, tagEnd: m.index + m[0].length };
+}
+
+/**
+ * Quote-aware HTML tag/attribute scanner extracting canonical indexable SEO nodes from a FULL HTML
+ * document (`[#6]`): `<h1>`, `<title>`, `<meta>`, `<link rel="canonical">`, `<a href>` (href/rel),
  * and `<script type="application/ld+json">`.
+ *
+ * Returns `null` if HTML is unparseable or contains unclosed tags/quotes/comments/blocks so callers
+ * FAIL CLOSED by requiring local WP 2-key approval!
  * Mirrors `UgokiLink_Companion_Plugin::extractIndexableSeoSignature` 1:1.
  */
-export function extractIndexableSeoSignature(html: string): string {
+export function extractIndexableSeoSignature(html: string): string | null {
   const parts: string[] = [];
+  const len = html.length;
+  let i = 0;
 
-  // 1. <h1>...</h1> and <title>...</title> (full attributes + inner text/content)
-  const blockRe = /<\s*(h1|title)\b([^>]*)>([\s\S]*?)<\/\s*\1\s*>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = blockRe.exec(html)) !== null) {
-    const tag = m[1].toLowerCase();
-    const attrs = m[2].trim().replace(/\s+/g, ' ');
-    const body = m[3].trim().replace(/\s+/g, ' ');
-    parts.push(`${tag}[${attrs}]=${body}`);
-  }
+  while (i < len) {
+    const lt = html.indexOf('<', i);
+    if (lt === -1) break;
 
-  // 2. <meta ...> tags
-  const metaRe = /<\s*meta\b([^>]*)>/gi;
-  while ((m = metaRe.exec(html)) !== null) {
-    const attrs = m[1].trim().replace(/\s+/g, ' ');
-    parts.push(`meta[${attrs}]`);
-  }
-
-  // 3. <link ... rel="canonical" ...> tags
-  const linkRe = /<\s*link\b([^>]*)>/gi;
-  while ((m = linkRe.exec(html)) !== null) {
-    const attrs = m[1].trim().replace(/\s+/g, ' ');
-    if (/\brel\s*=\s*(?:"[^"]*\bcanonical\b[^"]*"|'[^']*\bcanonical\b[^']*'|canonical\b)/i.test(attrs)) {
-      parts.push(`link_canonical[${attrs}]`);
+    // HTML comment <!-- ... -->
+    if (html.startsWith('<!--', lt)) {
+      const commentEnd = html.indexOf('-->', lt + 4);
+      if (commentEnd === -1) return null;
+      i = commentEnd + 3;
+      continue;
     }
-  }
 
-  // 4. <a ... href=...> tags (href & rel attributes)
-  const anchorRe = /<\s*a\b([^>]*)>/gi;
-  while ((m = anchorRe.exec(html)) !== null) {
-    const attrs = m[1];
-    const hm = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
-    const rm = /\brel\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
-    const href = hm ? (hm[1] ?? hm[2] ?? hm[3] ?? '').trim() : '';
-    const rel = rm ? (rm[1] ?? rm[2] ?? rm[3] ?? '').trim() : '';
-    if (href !== '') {
-      parts.push(`a[href=${href};rel=${rel}]`);
+    // Declaration / PI (<!DOCTYPE ...> or <?...?>)
+    if (lt + 1 < len && (html[lt + 1] === '!' || html[lt + 1] === '?')) {
+      let j = lt + 2;
+      let q: '"' | "'" | null = null;
+      while (j < len) {
+        const ch = html[j];
+        if (q !== null) {
+          if (ch === q) q = null;
+        } else if (ch === '"' || ch === "'") {
+          q = ch;
+        } else if (ch === '>') {
+          break;
+        }
+        j += 1;
+      }
+      if (j >= len || q !== null) return null;
+      i = j + 1;
+      continue;
     }
-  }
 
-  // 5. <script type="application/ld+json">...</script>
-  const scriptRe = /<\s*script\b([^>]*)>([\s\S]*?)<\/\s*script\s*>/gi;
-  while ((m = scriptRe.exec(html)) !== null) {
-    const attrs = m[1];
-    if (/\btype\s*=\s*(?:"application\/ld\+json"|'application\/ld\+json'|application\/ld\+json\b)/i.test(attrs)) {
-      const body = m[2].trim().replace(/\s+/g, ' ');
-      parts.push(`ld_json=${body}`);
+    // Parse optional whitespace, optional '/', then ASCII tag name
+    let p = lt + 1;
+    while (p < len && (html[p] === ' ' || html[p] === '\t' || html[p] === '\n' || html[p] === '\r')) {
+      p += 1;
     }
+    const isClosing = p < len && html[p] === '/';
+    if (isClosing) {
+      p += 1;
+      while (p < len && (html[p] === ' ' || html[p] === '\t' || html[p] === '\n' || html[p] === '\r')) {
+        p += 1;
+      }
+    }
+
+    const nameStart = p;
+    if (p < len && /[a-zA-Z]/.test(html[p])) {
+      p += 1;
+      while (p < len && /[a-zA-Z0-9:-]/.test(html[p])) {
+        p += 1;
+      }
+    } else {
+      // Bare '<' in text content (not a tag)
+      i = lt + 1;
+      continue;
+    }
+
+    const tagName = html.slice(nameStart, p).toLowerCase();
+
+    // Must be followed by whitespace, '/', or '>' (otherwise bare '<' in text, or EOF = unclosed tag)
+    if (p >= len) return null;
+    const afterName = html[p];
+    if (
+      afterName !== '>' &&
+      afterName !== '/' &&
+      afterName !== ' ' &&
+      afterName !== '\t' &&
+      afterName !== '\n' &&
+      afterName !== '\r'
+    ) {
+      i = lt + 1;
+      continue;
+    }
+
+    // Scan to unquoted closing '>' tracking single/double quotes!
+    const attrStart = p;
+    let j = p;
+    let quote: '"' | "'" | null = null;
+    while (j < len) {
+      const ch = html[j];
+      if (quote !== null) {
+        if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === '>') {
+        break;
+      }
+      j += 1;
+    }
+    if (j >= len || quote !== null) {
+      // Unclosed tag or unclosed attribute quote -> fail closed!
+      return null;
+    }
+
+    if (isClosing) {
+      i = j + 1;
+      continue;
+    }
+
+    let rawAttrs = html.slice(attrStart, j).trim();
+    if (rawAttrs.endsWith('/')) {
+      rawAttrs = rawAttrs.slice(0, -1).trim();
+    }
+    const parsedAttrs = parseHtmlAttributesQuoteAware(rawAttrs);
+    if (!parsedAttrs.ok) {
+      return null;
+    }
+
+    if (tagName === 'h1' || tagName === 'title') {
+      const close = findClosingTagQuoteAware(html, tagName, j + 1);
+      if (!close) return null;
+      const body = html.slice(j + 1, close.contentEnd).trim().replace(/\s+/g, ' ');
+      parts.push(`${tagName}[${parsedAttrs.canonical}]=${body}`);
+      i = close.tagEnd;
+      continue;
+    }
+
+    if (tagName === 'meta') {
+      parts.push(`meta[${parsedAttrs.canonical}]`);
+      i = j + 1;
+      continue;
+    }
+
+    if (tagName === 'link') {
+      const rel = parsedAttrs.attrs.get('rel') ?? '';
+      if (/\bcanonical\b/i.test(rel)) {
+        parts.push(`link_canonical[${parsedAttrs.canonical}]`);
+      }
+      i = j + 1;
+      continue;
+    }
+
+    if (tagName === 'a') {
+      const href = (parsedAttrs.attrs.get('href') ?? '').trim();
+      const rel = (parsedAttrs.attrs.get('rel') ?? '').trim();
+      if (href !== '') {
+        parts.push(`a[href=${href};rel=${rel}]`);
+      }
+      i = j + 1;
+      continue;
+    }
+
+    if (tagName === 'script') {
+      const close = findClosingTagQuoteAware(html, 'script', j + 1);
+      if (!close) return null;
+      const type = (parsedAttrs.attrs.get('type') ?? '').trim().toLowerCase();
+      if (type === 'application/ld+json') {
+        const body = html.slice(j + 1, close.contentEnd).trim().replace(/\s+/g, ' ');
+        parts.push(`ld_json=${body}`);
+      }
+      i = close.tagEnd;
+      continue;
+    }
+
+    i = j + 1;
   }
 
   return parts.join('\n');
@@ -291,8 +523,11 @@ export class WpPluginEngine {
   private readonly localApprovals = new Map<string, WpLocalAdminApprovalRecord>();
   /** Mirrors atomic per-digest `add_option('ugk_approval_claim_' . $digest)` lock (`[#7]`). */
   private readonly approvalClaimLocks = new Set<string>();
+  /** Mirrors `wp_options['ugk_pending_command_journal']` for crash-safe approval reconciliation (`[#7]`). */
+  private readonly pendingCommandJournal = new Map<number, WpPendingCommandJournalRecord>();
   private claimTokenSeq = 0;
   private postUpdateHook?: (post: WpPostRecord, nextContent: string) => Promise<void> | void;
+  private afterPostUpdateBeforeCommitHook?: (post: WpPostRecord, nextContent: string) => Promise<void> | void;
   /** Mirrors `wp_options['ugk_daily_apply_counter']` keyed by UTC `YYYY-MM-DD` (`[H-08]`). */
   private readonly dailyApplyCountByUtcDay = new Map<string, number>();
   private ownerPolicy: WpOwnerLocalPolicy;
@@ -430,6 +665,50 @@ export class WpPluginEngine {
     this.postUpdateHook = hook;
   }
 
+  public setAfterPostUpdateBeforeCommitHook(
+    hook?: (post: WpPostRecord, nextContent: string) => Promise<void> | void
+  ): void {
+    this.afterPostUpdateBeforeCommitHook = hook;
+  }
+
+  public getPendingCommandJournal(): readonly WpPendingCommandJournalRecord[] {
+    return Array.from(this.pendingCommandJournal.values()).map((r) => ({ ...r }));
+  }
+
+  /**
+   * Reconciles any `in_progress` pending-command journal entries left behind by a crash between
+   * `wp_update_post` and approval commit (`[#7]`):
+   * - If `sha256(post.content) === expected_after_sha256`, finishes committing `claimed -> consumed`
+   *   and clears the journal entry so the approval can never be reused.
+   * - Otherwise releases `claimed -> unused`, conditionally rolls back `lastSeq` ONLY if
+   *   `this.lastSeq === entry.command_seq` (CAS — never clobbering a concurrent newer `seq`), and
+   *   clears the journal entry.
+   */
+  public async reconcilePendingCommands(): Promise<void> {
+    if (this.pendingCommandJournal.size === 0) return;
+
+    for (const [cmdSeq, entry] of Array.from(this.pendingCommandJournal.entries())) {
+      if (entry.status !== 'in_progress') continue;
+      const post = this.posts.get(entry.post_id);
+      const currentSha = post ? await sha256Hex(post.content) : null;
+
+      if (currentSha !== null && currentSha === entry.expected_after_sha256) {
+        if (entry.approval_digest && entry.claim_token) {
+          this.commitLocalWpAdminApproval(entry.approval_digest, entry.claim_token);
+        }
+      } else {
+        if (entry.approval_digest && entry.claim_token) {
+          this.releaseLocalWpAdminApproval(entry.approval_digest, entry.claim_token);
+        }
+        if (this.lastSeq === entry.command_seq) {
+          this.lastSeq = entry.prev_seq;
+        }
+      }
+
+      this.pendingCommandJournal.delete(cmdSeq);
+    }
+  }
+
   /**
    * Atomically claims an unused local WP-Admin approval (`unused` -> `claimed`, `[#7]`).
    * Returns a unique claim token on success, or `null` if already claimed/consumed/expired/missing.
@@ -515,6 +794,9 @@ export class WpPluginEngine {
     envelope: SignedWpCommandEnvelope,
     nowMs = Date.now()
   ): Promise<WpCommandResult> {
+    // 0. [#7] Reconcile any in_progress pending-command journal records left by a prior crash
+    await this.reconcilePendingCommands();
+
     // 1. Offline-pinned Ed25519 signature verification over `payload_canonical_json` ([H-08])
     const pubKey = this.pinnedPubKeys.get(envelope.kid);
     if (!pubKey || typeof envelope.payload_canonical_json !== 'string' || envelope.payload_canonical_json === '') {
@@ -685,11 +967,12 @@ export class WpPluginEngine {
       const postImageSha = await sha256Hex(newContent);
 
       // [C-17] & [#6]: True 2-key local WP-Admin approval verification!
-      // Compare FULL before/after HTML documents so text-only edits inside <h1>, <title>,
-      // <meta>, <link rel="canonical">, <a href>, and JSON-LD NEVER bypass touch_indexable_seo.
+      // Compare FULL before/after HTML documents using quote-aware HTML scanning (fail-closed if null!).
       const changeClass = p.change_class ?? '';
+      const beforeSeoSig = extractIndexableSeoSignature(post.content);
+      const afterSeoSig = extractIndexableSeoSignature(newContent);
       const seoChangedInFullDoc =
-        extractIndexableSeoSignature(post.content) !== extractIndexableSeoSignature(newContent);
+        beforeSeoSig === null || afterSeoSig === null || beforeSeoSig !== afterSeoSig;
       const touchesIndexableSeo =
         changeClass === 'touch_indexable_seo' ||
         changeClass === 'indexable_major' ||
@@ -742,6 +1025,17 @@ export class WpPluginEngine {
         applied_at_gmt: new Date(nowMs).toISOString(),
       });
 
+      // [#7] Write recoverable pending-command journal record BEFORE wp_update_post
+      this.pendingCommandJournal.set(p.seq, {
+        command_seq: p.seq,
+        post_id: postId,
+        approval_digest: claimedApprovalDigest,
+        claim_token: claimedApprovalToken,
+        expected_after_sha256: postImageSha,
+        prev_seq: prevSeq,
+        status: 'in_progress',
+      });
+
       try {
         if (this.postUpdateHook) {
           await this.postUpdateHook({ ...post }, newContent);
@@ -749,20 +1043,27 @@ export class WpPluginEngine {
         post.content = newContent;
         post.modified_gmt = new Date(nowMs).toISOString();
       } catch {
-        // [#7] Roll back claimed approval to `unused` and restore seq on wp_update_post failure
+        // [#7] Roll back claimed approval to `unused`, conditionally CAS-rollback seq, and clear journal
         if (claimedApprovalDigest && claimedApprovalToken) {
           this.releaseLocalWpAdminApproval(claimedApprovalDigest, claimedApprovalToken);
         }
         if (this.lastSeq === p.seq) {
           this.lastSeq = prevSeq;
         }
+        this.pendingCommandJournal.delete(p.seq);
         return { status: 500, ok: false, error: 'wp_update_post_failed' };
       }
 
-      // [#7] Commit claimed approval (`claimed` -> `consumed`) ONLY after post update succeeds
+      // Optional test hook to simulate a process crash AFTER post update and BEFORE approval commit
+      if (this.afterPostUpdateBeforeCommitHook) {
+        await this.afterPostUpdateBeforeCommitHook({ ...post }, newContent);
+      }
+
+      // [#7] Commit claimed approval (`claimed` -> `consumed`) ONLY after post update succeeds, then clear journal
       if (claimedApprovalDigest && claimedApprovalToken) {
         this.commitLocalWpAdminApproval(claimedApprovalDigest, claimedApprovalToken);
       }
+      this.pendingCommandJournal.delete(p.seq);
 
       this.dailyApplyCountByUtcDay.set(utcDay, usedToday + 1);
       this.cachePurgeLog.push(postId);
@@ -862,8 +1163,11 @@ export function auditPhpPluginSource(phpSource: string): PhpStaticAuditResult {
     ['ugokilink_local_approvals', 'True 2-key local WP-Admin approval storage ([C-17])'],
     ['ugokilink_local_approve', 'WP-Admin nonce action for local 2-key approval ([C-17])'],
     ['extractIndexableSeoSignature', 'Full before/after HTML document SEO comparison ([#6])'],
+    ['parseHtmlAttributesQuoteAware', 'Quote-aware HTML tag/attribute scanner ([#6])'],
     ['claimLocalWpAdminApproval', 'Atomic conditional approval claim ([#7])'],
     ['releaseLocalWpAdminApproval', 'Approval rollback on post update failure ([#7])'],
+    ['reconcilePendingCommands', 'Recoverable pending-command journal reconciliation ([#7])'],
+    ['OPTION_PENDING_JOURNAL', 'Pending-command journal option storage ([#7])'],
     ['add_option($lockOption', 'Per-digest atomic add_option claim lock ([#7])'],
     ['owner_daily_apply_cap_exceeded', 'Per-UTC-day daily_apply_cap enforcement ([H-08])'],
     ['$acquiredLock', 'Edit lock ownership guard in finally ([H-08])'],

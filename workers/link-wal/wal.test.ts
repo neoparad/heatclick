@@ -5,9 +5,11 @@
 import {
   CODEC_VERSION,
   computeFrameChecksum,
+  sha256Hex,
   type TelemetryFrame,
 } from '../../packages/contract/schema';
 import {
+  computeExportIdempotencyKey,
   CrossTenantWalViolationError,
   CustomerSorStorageAdapter,
   DEFAULT_POST_ACK_GRACE_MS,
@@ -17,6 +19,7 @@ import {
   InMemoryR2Bucket,
   LinkPlusExportStorageAdapter,
   PostAckLossDetector,
+  R2_MAX_DELETE_BATCH,
   WalWriter,
   type DataRegion,
   type QuarantineObject,
@@ -720,5 +723,135 @@ describe('workers/link-wal', () => {
     expect(
       await bucket.get('quarantine/jp/tenant-page/site-page/2026-11-01/obj_1040.json')
     ).toBeNull();
+  });
+
+  test('Wave 10 Codex R2 #11: region pinning is checked BEFORE missing site_id / tenant_id so wrong-region malformed payloads write 0 local WAL or quarantine objects', async () => {
+    const jpBucket = new InMemoryR2Bucket();
+    const jpWriter = new WalWriter({ region: 'jp', bucket: jpBucket });
+    const t0 = Date.UTC(2026, 10, 23, 11, 0, 0);
+
+    const euMissingSite = makeQueuePayload(makeValidFrame({ seq: 0 }), {
+      tenant_id: 'tenant-eu-01',
+      site_id: '',
+      storage_region: 'eu',
+      received_at_ms: t0,
+    });
+    const euMissingTenant = makeQueuePayload(makeValidFrame({ seq: 1 }), {
+      tenant_id: '',
+      site_id: '',
+      storage_region: 'eu',
+      received_at_ms: t0,
+    });
+
+    const res = await jpWriter.consumeBatch([euMissingSite, euMissingTenant], t0);
+    expect(res.acceptedCount).toBe(0);
+    expect(res.quarantinedCount).toBe(0);
+    expect(res.regionMismatchCount).toBe(2);
+    expect(res.rejectedRegionMismatch).toHaveLength(2);
+    expect(jpBucket.keys('wal/')).toHaveLength(0);
+    expect(jpBucket.keys('quarantine/')).toHaveLength(0);
+    expect(jpBucket.size()).toBe(0);
+  });
+
+  test('Wave 10 Codex R2 #12: Tier 2 export uses deterministic (sinkId, walKey) idempotencyKey so receipt-write failure + retry produces strictly 1 exported batch', async () => {
+    const t0 = Date.UTC(2026, 10, 23, 12, 0, 0);
+    const primaryBucket = new InMemoryR2Bucket();
+    const innerReceiptBucket = new InMemoryR2Bucket();
+    const innerSink = new InMemoryExportSink('customer-gcs-jp-idem', 'jp');
+    let failReceiptPutOnce = true;
+
+    const flakyReceiptBucket = {
+      put: async (
+        key: string,
+        value: string | Uint8Array | ArrayBuffer,
+        options?: Parameters<InMemoryR2Bucket['put']>[2]
+      ) => {
+        if (failReceiptPutOnce) {
+          failReceiptPutOnce = false;
+          throw new Error('Transient R2 receipt put failure');
+        }
+        return innerReceiptBucket.put(key, value, options);
+      },
+      get: (key: string) => innerReceiptBucket.get(key),
+      head: (key: string) => innerReceiptBucket.head(key),
+      list: (options?: Parameters<InMemoryR2Bucket['list']>[0]) =>
+        innerReceiptBucket.list(options),
+      delete: (keys: string | readonly string[]) => innerReceiptBucket.delete(keys),
+    };
+
+    const tier2Adapter = new LinkPlusExportStorageAdapter(
+      primaryBucket,
+      innerSink,
+      'jp',
+      undefined,
+      flakyReceiptBucket
+    );
+    const writer = new WalWriter({ region: 'jp', adapter: tier2Adapter, deletionEpoch: 4 });
+    const payload = makeQueuePayload(makeValidFrame({ seq: 0 }), { received_at_ms: t0 });
+
+    // Attempt 1: Export sink succeeds, ONLY receipt persistence fails -> throws for retry
+    await expect(writer.consumeBatch([payload], t0)).rejects.toThrow(
+      /Transient R2 receipt put failure/
+    );
+    expect(innerSink.receipts).toHaveLength(1);
+    expect(innerReceiptBucket.keys('export-receipts/jp/')).toHaveLength(0);
+
+    // Attempt 2: Retry sends the EXACT same deterministic idempotencyKey -> sink deduplicates, strictly 1 batch stored!
+    const attempt2 = await writer.consumeBatch([payload], t0 + 1000);
+    expect(attempt2.dedupedObjectsCount).toBe(1);
+    expect(attempt2.exportReceipts).toHaveLength(1);
+    expect(innerSink.receipts).toHaveLength(1);
+    expect(innerSink.seenIdempotencyKeys).toHaveLength(2);
+    expect(innerSink.seenIdempotencyKeys[0]).toBe(innerSink.seenIdempotencyKeys[1]);
+
+    const walKey = primaryBucket.keys('wal/jp/')[0]!;
+    const expectedIdemKey = sha256Hex(`${innerSink.sinkId}\u0000${walKey}`);
+    expect(expectedIdemKey).toBe(computeExportIdempotencyKey(innerSink.sinkId, walKey));
+    expect(innerSink.seenIdempotencyKeys[0]).toBe(expectedIdemKey);
+    expect(innerSink.receipts[0]!.idempotencyKey).toBe(expectedIdemKey);
+    expect(innerReceiptBucket.keys('export-receipts/jp/')).toHaveLength(1);
+  });
+
+  test('Wave 10 Codex R2 #13: bulk quarantine deletion chunks bucket.delete calls to at most 1,000 keys per call and deletes all 1,050 matching objects', async () => {
+    const bucket = new InMemoryR2Bucket();
+    const writer = new WalWriter({ region: 'jp', bucket });
+    const t0 = Date.UTC(2026, 10, 23, 13, 0, 0);
+    const TOTAL_MATCHING = 1050;
+
+    // Populate 1,050 expired quarantine objects all matching the expired sweep window
+    for (let i = 0; i < TOTAL_MATCHING; i += 1) {
+      const idxStr = String(i).padStart(4, '0');
+      const key = `quarantine/jp/tenant-chunk/site-chunk/2026-11-01/exp_${idxStr}.json`;
+      await bucket.put(key, JSON.stringify({ expires_at_ms: t0 - 5000 }), {
+        customMetadata: {
+          tenant_id: 'tenant-chunk',
+          site_id: 'site-chunk',
+          expires_at_ms: String(t0 - 5000),
+        },
+      });
+    }
+    expect(bucket.keys('quarantine/jp/tenant-chunk/site-chunk/')).toHaveLength(TOTAL_MATCHING);
+
+    const deleteBatchSizes: number[] = [];
+    const origDelete = bucket.delete.bind(bucket);
+    const deleteSpy = jest
+      .spyOn(bucket, 'delete')
+      .mockImplementation(async (keys: string | readonly string[]) => {
+        const size = typeof keys === 'string' ? 1 : keys.length;
+        deleteBatchSizes.push(size);
+        return origDelete(keys);
+      });
+
+    const purgeRes = await writer.purgeExpiredQuarantine(t0);
+    expect(purgeRes.scannedCount).toBe(TOTAL_MATCHING);
+    expect(purgeRes.purgedKeys).toHaveLength(TOTAL_MATCHING);
+    expect(bucket.keys('quarantine/jp/tenant-chunk/site-chunk/')).toHaveLength(0);
+
+    expect(deleteSpy).toHaveBeenCalledTimes(2);
+    expect(deleteBatchSizes).toEqual([R2_MAX_DELETE_BATCH, TOTAL_MATCHING - R2_MAX_DELETE_BATCH]);
+    for (const sz of deleteBatchSizes) {
+      expect(sz).toBeLessThanOrEqual(R2_MAX_DELETE_BATCH);
+    }
+    deleteSpy.mockRestore();
   });
 });

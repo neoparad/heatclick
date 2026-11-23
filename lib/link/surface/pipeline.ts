@@ -35,6 +35,7 @@ import type { ConsentMode } from '@/packages/contract/schema';
 import {
   AuthorizationGateway,
   IdentityKeyRegistry,
+  type AuthorizationRequest,
   type FieldProvenance,
   type PasskeyAssertionInput,
   type VerifiedPrincipal,
@@ -783,9 +784,9 @@ export class SurfacePipeline {
         : undefined;
     const isExactIdempotentReplay = Boolean(cachedIdem && cachedIdem.payloadHash === idemPayloadHash);
 
-    // Step 3: Unified Authorization Gateway (read-only Passkey approval verification; consumption
-    // is deferred until AFTER idempotency cache lookup, rate limit, and isolation checks!)
-    const authz = this.gateway.authorize({
+    // Step 3: Unified Authorization Gateway (strictly read-only Passkey approval & R4 pre-check;
+    // side effects are deferred until AFTER idempotency cache lookup, rate limit, and isolation checks!)
+    const authzReq: AuthorizationRequest = {
       principal,
       action: op.operationId,
       riskClass: op.riskClass,
@@ -802,6 +803,7 @@ export class SurfacePipeline {
       passkeyApprovalId: inv.passkeyApprovalId,
       passkeyAssertion: inv.passkeyAssertion,
       deferApprovalConsumption: true,
+      deferSideEffects: true,
       allowConsumedApprovalForReplay: isExactIdempotentReplay,
       autonomyEnvelopeId: inv.autonomyEnvelopeId,
       fieldProvenance: inv.fieldProvenance,
@@ -816,7 +818,8 @@ export class SurfacePipeline {
             }
           : undefined,
       now,
-    });
+    };
+    const authz = this.gateway.authorize(authzReq);
 
     if (!authz.allowed) {
       return {
@@ -899,9 +902,30 @@ export class SurfacePipeline {
       };
     }
 
-    // Step 5b: Atomically consume single-use Passkey approval ONLY now that all pre-checks
-    // (authz, idempotency cache, rate limit, isolation hold) have passed (#25)
-    if (authz.pendingApprovalConsumption) {
+    // Step 5b: Atomically commit R4 destruction (Passkey consumption + daily counter + reservation)
+    // or consume single-use Passkey approval ONLY now that all pre-checks (authz, idempotency cache,
+    // rate limit, isolation hold) have passed (#25)
+    let effectiveAuthz = authz;
+    if (authz.pendingDestructionCommit) {
+      const committed = this.gateway.commitR4Destruction(authzReq);
+      if (!committed.ok) {
+        return {
+          httpStatus: committed.httpStatus,
+          headers: versionHeaders,
+          error: {
+            code: committed.code,
+            message: committed.reason,
+            approvalUrl: committed.approvalUrl,
+            auditEntryId: committed.auditEntryId,
+          },
+        };
+      }
+      effectiveAuthz = {
+        ...authz,
+        auditEntryId: committed.auditEntryId,
+        destructionRequest: committed.destructionRequest,
+      };
+    } else if (authz.pendingApprovalConsumption) {
       const consumed = this.gateway.consumePasskeyApproval({
         approvalId: authz.pendingApprovalConsumption.approvalId,
         tenantId: principal.tenantId,
@@ -927,11 +951,19 @@ export class SurfacePipeline {
       ...versionHeaders,
       'X-UGOKI-Cost-Units': String(op.costUnits),
       'X-UGOKI-Cost-Units-Remaining': String(rateCheck.remaining),
-      'X-UGOKI-Audit-Id': authz.auditEntryId,
+      'X-UGOKI-Audit-Id': effectiveAuthz.auditEntryId,
     };
 
     // Step 6: Execute operation and serialize through single `buildResponseEnvelope` (I1–I7)
-    const execResult = this.dispatchOperation(op, principal, siteCfg, inv, authz, enrichedHeaders, now);
+    const execResult = this.dispatchOperation(
+      op,
+      principal,
+      siteCfg,
+      inv,
+      effectiveAuthz,
+      enrichedHeaders,
+      now
+    );
     if (idemStoreKey && idemPayloadHash && execResult.httpStatus >= 200 && execResult.httpStatus < 300) {
       this.idempotencyStore.set(
         idemStoreKey,

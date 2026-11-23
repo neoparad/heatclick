@@ -5,6 +5,7 @@ import {
   WpPluginEngine,
   auditPhpPluginSource,
   computeWpLocalApprovalDigest,
+  extractIndexableSeoSignature,
   normalizeWpHomeUrl,
   sanitizeWpKsesPost,
   signWpCommand,
@@ -1038,5 +1039,220 @@ describe('packages/wp-plugin — WordPress Companion Plugin Protocol & del.D20 C
     expect(rejectedCount).toBe(1);
     expect(engine.getPost(701)?.content).toBe(afterHtml);
     expect(engine.getLocalApprovalState(digest)).toBe('consumed');
+  });
+
+  test('[#6] quote-aware HTML parser detects edits after ">" inside quoted <meta> attribute values and fails closed on unclosed HTML', async () => {
+    const keyPair = await generateEd25519KeyPair();
+    const engine = new WpPluginEngine({
+      pinnedPubKeys: new Map([['k1', keyPair.publicKey]]),
+      tenantId: 'ten_quote',
+      siteId: 'site_quote',
+      homeUrl: 'https://quote.example.jp',
+      ownerPolicy: {
+        local_stop: false,
+        allowed_auto_classes: ['cta_copy'],
+        daily_apply_cap: 10,
+        require_admin_confirmation_classes: ['touch_indexable_seo'],
+      },
+    });
+
+    const beforeHtml = '<head><meta name="description" content="fast > slow old"></head><p>Body</p>';
+    const afterHtml = '<head><meta name="description" content="fast > slow new"></head><p>Body</p>';
+
+    // Direct quote-aware signature comparison MUST detect the edit after `>`!
+    const beforeSig = extractIndexableSeoSignature(beforeHtml);
+    const afterSig = extractIndexableSeoSignature(afterHtml);
+    expect(beforeSig).not.toBeNull();
+    expect(afterSig).not.toBeNull();
+    expect(beforeSig).not.toBe(afterSig);
+
+    // Unclosed / malformed HTML MUST return null (fail closed)
+    expect(extractIndexableSeoSignature('<meta name="description" content="unclosed')).toBeNull();
+    expect(extractIndexableSeoSignature('<h1>Unclosed heading')).toBeNull();
+
+    const byteStart = beforeHtml.indexOf('old');
+    const byteEnd = byteStart + 'old'.length;
+    const beforeSha = await sha256Hex(beforeHtml);
+    const mod = '2026-11-20T00:00:00.000Z';
+    engine.seedPost({
+      post_id: 602,
+      permalink: '/meta-quote/',
+      content: beforeHtml,
+      modified_gmt: mod,
+      edit_lock_user_id: null,
+    });
+
+    const unapprovedEnv = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 1,
+        not_after: futureIso,
+        tenant_id: 'ten_quote',
+        site_id: 'site_quote',
+        home_url: 'https://quote.example.jp',
+        post_id: 602,
+        promotion_id: 'promo_meta_gt_edit',
+        change_class: 'cta_copy',
+        expected_content_sha256: beforeSha,
+        expected_modified_gmt: mod,
+        byte_start: byteStart,
+        byte_end: byteEnd,
+        replacement_html: 'new',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    const rejected = await engine.handleSignedCommand(unapprovedEnv);
+    expect(rejected.status).toBe(403);
+    expect(rejected.error).toBe('owner_local_policy_requires_admin_confirmation');
+    expect(engine.getPost(602)?.content).toBe(beforeHtml);
+  });
+
+  test('[#7] recoverable pending-command journal commits approval after crash-after-update and CAS seq rollback never clobbers a concurrent newer seq', async () => {
+    const keyPair = await generateEd25519KeyPair();
+    const engine = new WpPluginEngine({
+      pinnedPubKeys: new Map([['k1', keyPair.publicKey]]),
+      tenantId: 'ten_rec',
+      siteId: 'site_rec',
+      homeUrl: 'https://rec.example.jp',
+      ownerPolicy: {
+        local_stop: false,
+        allowed_auto_classes: ['cta_copy'],
+        daily_apply_cap: 10,
+        require_admin_confirmation_classes: ['touch_indexable_seo'],
+      },
+    });
+
+    const beforeHtml = '<h1>Before Crash</h1>';
+    const afterHtml = '<h1>After Crash</h1>';
+    const byteStart = beforeHtml.indexOf('Before Crash');
+    const byteEnd = byteStart + 'Before Crash'.length;
+    const beforeSha = await sha256Hex(beforeHtml);
+    const afterSha = await sha256Hex(afterHtml);
+    const mod = '2026-11-20T00:00:00.000Z';
+
+    engine.seedPost({
+      post_id: 702,
+      permalink: '/crash-recovery/',
+      content: beforeHtml,
+      modified_gmt: mod,
+      edit_lock_user_id: null,
+    });
+
+    const nowMs = Date.now();
+    const approved = await engine.recordLocalWpAdminApproval({
+      hasManageOptionsCapability: true,
+      wpAdminNonceVerified: true,
+      postId: 702,
+      beforeSha256: beforeSha,
+      afterSha256: afterSha,
+      commandSeq: 1,
+      nowMs,
+    });
+    expect(approved.ok).toBe(true);
+    const digest = approved.digest!;
+
+    // (a) Simulate crash AFTER post update persisted and BEFORE approval commit
+    engine.setAfterPostUpdateBeforeCommitHook(() => {
+      throw new Error('simulated_process_crash_before_commit');
+    });
+
+    const crashEnv = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 1,
+        not_after: futureIso,
+        tenant_id: 'ten_rec',
+        site_id: 'site_rec',
+        home_url: 'https://rec.example.jp',
+        post_id: 702,
+        promotion_id: 'promo_crash_1',
+        change_class: 'touch_indexable_seo',
+        expected_content_sha256: beforeSha,
+        expected_modified_gmt: mod,
+        byte_start: byteStart,
+        byte_end: byteEnd,
+        replacement_html: 'After Crash',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+
+    await expect(engine.handleSignedCommand(crashEnv, nowMs + 100)).rejects.toThrow(
+      'simulated_process_crash_before_commit'
+    );
+
+    // Post WAS updated, approval is still `claimed`, and journal holds the `in_progress` record
+    expect(engine.getPost(702)?.content).toBe(afterHtml);
+    expect(engine.getLocalApprovalState(digest)).toBe('claimed');
+    expect(engine.getPendingCommandJournal()).toHaveLength(1);
+
+    // Reconcile pending commands -> finishes committing `claimed -> consumed` and clears journal!
+    engine.setAfterPostUpdateBeforeCommitHook(undefined);
+    await engine.reconcilePendingCommands();
+    expect(engine.getLocalApprovalState(digest)).toBe('consumed');
+    expect(engine.getPendingCommandJournal()).toHaveLength(0);
+    // Approval cannot be reclaimed/reused
+    expect(engine.claimLocalWpAdminApproval(digest, nowMs + 200)).toBeNull();
+
+    // (b) Conditional CAS lastSeq rollback NEVER clobbers a concurrent newer seq!
+    const html2 = '<p>Safe Body</p>';
+    const sha2 = await sha256Hex(html2);
+    engine.seedPost({
+      post_id: 703,
+      permalink: '/cas-seq/',
+      content: html2,
+      modified_gmt: mod,
+      edit_lock_user_id: null,
+    });
+
+    const concurrentNewerCmd = await signWpCommand(
+      {
+        command: 'capabilities',
+        seq: 20,
+        not_after: futureIso,
+        tenant_id: 'ten_rec',
+        site_id: 'site_rec',
+        home_url: 'https://rec.example.jp',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+
+    // During seq=10 post update, a concurrent seq=20 command arrives and advances lastSeq to 20,
+    // then seq=10 fails -> CAS rollback MUST NOT overwrite lastSeq=20 back to 1!
+    engine.setPostUpdateHook(async () => {
+      const capRes = await engine.handleSignedCommand(concurrentNewerCmd, nowMs + 300);
+      expect(capRes.status).toBe(200);
+      expect(engine.getLastSeq()).toBe(20);
+      throw new Error('simulated_db_failure_after_newer_seq');
+    });
+
+    const failingSeq10Env = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 10,
+        not_after: futureIso,
+        tenant_id: 'ten_rec',
+        site_id: 'site_rec',
+        home_url: 'https://rec.example.jp',
+        post_id: 703,
+        promotion_id: 'promo_cas_10',
+        change_class: 'cta_copy',
+        expected_content_sha256: sha2,
+        expected_modified_gmt: mod,
+        byte_start: 3,
+        byte_end: 12,
+        replacement_html: 'New Body',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+
+    const failRes = await engine.handleSignedCommand(failingSeq10Env, nowMs + 250);
+    expect(failRes.status).toBe(500);
+    expect(failRes.error).toBe('wp_update_post_failed');
+    // lastSeq MUST remain 20 (never clobbered to 1)!
+    expect(engine.getLastSeq()).toBe(20);
   });
 });

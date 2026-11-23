@@ -1302,18 +1302,127 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
     };
 
     const deletionEngine = new DeletionExecutionEngine(adapter, keyRegistry);
-    deletionEngine.scheduleRequest({
-      requestId: queuedDeletions[0].receiptId,
-      tenantId: site.tenantId,
-      siteId: site.siteId,
-      subjectKind: 'member_hash',
-      rawSubjectValue: rawMemberHash,
-      requestedAtMs: now,
-    });
-    await deletionEngine.executeMaskPhase(queuedDeletions[0].receiptId, now + 1000);
-    await deletionEngine.executePhysicalPurgePhase(queuedDeletions[0].receiptId, now + 2000);
+    const queuedReq = queuedDeletions[0]!;
+    // Codex R2 #9: Verify ZERO plaintext is stored on the queued SubjectDeletionRequest
+    expect(JSON.stringify(queuedReq)).not.toContain(rawMemberHash);
+    expect(queuedReq.subject_hmac_candidates.length).toBeGreaterThanOrEqual(2);
+    expect(queuedReq.subjectHmacCandidates).toEqual(queuedReq.subject_hmac_candidates);
 
-    // Both the newly collected canonical row AND the legacy row were found and erased!
+    // Pass ONLY the queued SubjectDeletionRequest (ZERO plaintext rawSubjectValue!)
+    deletionEngine.scheduleRequest({
+      requestId: queuedReq.receiptId,
+      tenantId: queuedReq.tenantId,
+      siteId: queuedReq.siteId,
+      subjectKind: queuedReq.subjectKind as 'member_hash',
+      subjectHmac: queuedReq.subjectHmac,
+      subjectHmacCandidates: queuedReq.subject_hmac_candidates,
+      requestedAtMs: queuedReq.requestedAtMs,
+    });
+    await deletionEngine.executeMaskPhase(queuedReq.receiptId, now + 1000);
+    await deletionEngine.executePhysicalPurgePhase(queuedReq.receiptId, now + 2000);
+
+    // Both the newly collected canonical row AND the legacy row were found and erased with ZERO plaintext!
     expect(storedRows.size).toBe(0);
+  });
+
+  test('Wave 10 Codex R2 #8: cookie-only visitor /v1/optout 503 preserves signed HttpOnly ugk_del_retry cookie before clearing ugk_vid, enabling retry with only ugk_del_retry', async () => {
+    const q = makeMemoryQueue<PersistedCollectorRecord>();
+    const customQ = makeMemoryQueue<CustomEventPersistedRecord>();
+    const spill = makeMemoryR2();
+    const hold = makeMemoryR2();
+    const quarantine = makeMemoryR2();
+    const site = makeTestSite({
+      tenantId: 'ten_retry_cookie',
+      siteId: 'site_retry_cookie',
+      tenantMemberHashKey: 'retry_cookie_member_key_2026',
+    });
+    const now = Date.parse('2026-11-23T08:00:00.000Z');
+    const originalVisitorId = 'vis_cookie_only_9988776655443322';
+    const expectedVisitorHmac = computeCanonicalSubjectHmac({
+      tenantId: site.tenantId,
+      subjectKind: 'visitor_id',
+      subjectValue: originalVisitorId,
+      secretKey: site.tenantMemberHashKey,
+    });
+
+    let sinkHealthy = false;
+    const queuedDeletions: SubjectDeletionRequest[] = [];
+    const worker = createCollectorWorker({
+      sitesByPublishableKey: new Map([[site.publishableKey, site]]),
+      continuityTokenSecret: 'cont_sec_retry_test',
+      labMarkerSecret: 'lab_sec',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      deletionSink: {
+        enqueueSubjectDeletion: async (req) => {
+          if (!sinkHealthy) {
+            throw new Error('Deletion sink temporarily unavailable');
+          }
+          queuedDeletions.push(req);
+          return { receiptId: req.receiptId };
+        },
+      },
+      nowMs: () => now,
+    });
+
+    // Attempt 1: Cookie-only visitor hits /v1/optout while sink is down -> 503
+    const res503 = await worker.fetch(
+      new Request('https://collect.ugokilink.example/v1/optout', {
+        method: 'POST',
+        headers: {
+          'x-ugk-key': site.publishableKey,
+          cookie: `ugk_vid=${originalVisitorId}; ugk_sid=sess_abc123`,
+        },
+      })
+    );
+    expect(res503.status).toBe(503);
+    const body503 = (await res503.json()) as Record<string, unknown>;
+    expect(body503.deletion_queued).toBe(false);
+    expect(body503.optout_cookie_set).toBe(true);
+
+    const setCookies503 = res503.headers.getSetCookie
+      ? res503.headers.getSetCookie()
+      : (res503.headers.get('set-cookie') ?? '').split(/,(?=\s*ugk_)/);
+    const optoutIdx = setCookies503.findIndex((c) => c.startsWith('ugk_optout=1'));
+    const sidClearIdx = setCookies503.findIndex((c) => c.startsWith('ugk_sid=;'));
+    const delRetryIdx = setCookies503.findIndex((c) => c.startsWith('ugk_del_retry='));
+    const vidClearIdx = setCookies503.findIndex((c) => c.startsWith('ugk_vid=;'));
+    expect(optoutIdx).toBeGreaterThanOrEqual(0);
+    expect(sidClearIdx).toBeGreaterThanOrEqual(0);
+    expect(delRetryIdx).toBeGreaterThanOrEqual(0);
+    expect(vidClearIdx).toBeGreaterThan(delRetryIdx); // ugk_del_retry issued BEFORE clearing ugk_vid!
+    expect(setCookies503[delRetryIdx]).toContain('HttpOnly');
+    expect(setCookies503[delRetryIdx]).toContain('Secure');
+
+    const delRetryCookiePair = setCookies503[delRetryIdx]!.split(';')[0]!;
+    expect(delRetryCookiePair).toMatch(/^ugk_del_retry=.+\.[0-9a-f]{64}$/);
+
+    // Attempt 2: Sink recovers; browser retries /v1/optout with ONLY ugk_del_retry (no ugk_vid, no body)
+    sinkHealthy = true;
+    const res200 = await worker.fetch(
+      new Request('https://collect.ugokilink.example/v1/optout', {
+        method: 'POST',
+        headers: {
+          'x-ugk-key': site.publishableKey,
+          cookie: `ugk_optout=1; ${delRetryCookiePair}`,
+        },
+      })
+    );
+    expect(res200.status).toBe(200);
+    const body200 = (await res200.json()) as Record<string, unknown>;
+    expect(body200.deletion_queued).toBe(true);
+    expect(queuedDeletions).toHaveLength(1);
+    expect(queuedDeletions[0]!.subjectKind).toBe('visitor_id');
+    expect(queuedDeletions[0]!.subjectHmac).toBe(expectedVisitorHmac);
+    expect(queuedDeletions[0]!.subject_hmac_candidates).toContain(expectedVisitorHmac);
+
+    // Once 200 succeeds, ugk_del_retry MUST be cleared (Max-Age=0)
+    const setCookies200 = res200.headers.getSetCookie
+      ? res200.headers.getSetCookie()
+      : (res200.headers.get('set-cookie') ?? '').split(/,(?=\s*ugk_)/);
+    expect(setCookies200.some((c) => c.startsWith('ugk_del_retry=;') && c.includes('Max-Age=0'))).toBe(true);
   });
 });

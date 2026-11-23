@@ -53,6 +53,7 @@ import {
   rerankCandidatesInBrowser,
   sampleFullPlackettLuceOrdering,
   scoreCandidateByRung,
+  type DisplayProbMethod,
   type RecommendCandidateItem,
   type RecommenderRung,
 } from './recommend/recommender';
@@ -180,7 +181,6 @@ export interface RecommendInvocation {
   readonly httpMethod?: string;
   readonly httpUri?: string;
   readonly mtlsThumbprint?: string;
-  readonly dpopThumbprint?: string;
   readonly callerSuppliedTenantId?: string;
   readonly requestedRevision?: string | null;
   readonly body: Readonly<Record<string, unknown>>;
@@ -220,6 +220,7 @@ interface SafeSerializedArticleItem {
   readonly title: UntrustedValue;
   readonly url: UntrustedValue;
   readonly display_prob: VerifiedMetricValue<number>;
+  readonly display_prob_method: DisplayProbMethod;
   readonly slot_cond_prob: VerifiedMetricValue<number>;
   readonly click_only_evidence: boolean;
 }
@@ -677,6 +678,7 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
         display_prob: createModelRegistryMetric(entry.display_prob, `${ref.ref_id}:prob:${idx}`, {
           createdAt: nowIso,
         }),
+        display_prob_method: entry.display_prob_method,
         slot_cond_prob: createModelRegistryMetric(
           entry.slot_cond_prob,
           `${ref.ref_id}:slot_cond_prob:${idx}`,
@@ -709,6 +711,7 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
         display_prob: createModelRegistryMetric(entry.display_prob, `${ref.ref_id}:prob:${idx}`, {
           createdAt: nowIso,
         }),
+        display_prob_method: entry.display_prob_method,
         slot_cond_prob: createModelRegistryMetric(
           entry.slot_cond_prob,
           `${ref.ref_id}:slot_cond_prob:${idx}`,
@@ -1003,7 +1006,10 @@ export function executeRecommendRequest(inv: RecommendInvocation): RecommendExec
 export function callRecommendMcpTool(params: {
   readonly bearerToken?: string;
   readonly sessionPrincipal?: VerifiedPrincipal;
-  readonly dpopThumbprint?: string;
+  readonly dpopProof?: string;
+  readonly httpMethod?: string;
+  readonly httpUri?: string;
+  readonly mtlsThumbprint?: string;
   readonly clientIp?: string;
   readonly callerSuppliedTenantId?: string;
   readonly arguments: Readonly<Record<string, unknown>>;
@@ -1015,7 +1021,10 @@ export function callRecommendMcpTool(params: {
     channel: 'mcp',
     bearerToken: params.bearerToken,
     sessionPrincipal: params.sessionPrincipal,
-    dpopThumbprint: params.dpopThumbprint,
+    dpopProof: params.dpopProof,
+    httpMethod: params.httpMethod,
+    httpUri: params.httpUri,
+    mtlsThumbprint: params.mtlsThumbprint,
     clientIp: params.clientIp,
     callerSuppliedTenantId: params.callerSuppliedTenantId,
     body: params.arguments,

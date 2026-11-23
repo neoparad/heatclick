@@ -931,4 +931,28 @@ describe('lib/link/export/self-serve-billing (§11.11 #1 & #7)', () => {
     expect(hugeErr.error).toBeDefined();
     expect(Buffer.byteLength(hugeErr.error!, 'utf8')).toBeLessThanOrEqual(512);
   });
+
+  test('Wave 10 Regression (#26): strict UTF-8 code-point boundary error truncation inside worker never exceeds 512 bytes and never emits U+FFFD', () => {
+    const payloads = [
+      // Exact 2-byte char at 510..511 (512 bytes) + trailing ASCII
+      `'a'.repeat(510) + '\\u00e9' + 'x'.repeat(20)`,
+      // Orphan 2-byte lead byte 0xC3 at byte 511
+      `'a'.repeat(511) + '\\u00e9' + 'x'.repeat(20)`,
+      // 3-byte CJK char split across 510..512
+      `'a'.repeat(510) + '\\u3042' + 'x'.repeat(20)`,
+      // 4-byte emoji split across 509..512
+      `'a'.repeat(509) + '\\uD83D\\uDE80' + 'x'.repeat(20)`,
+    ];
+
+    for (const expr of payloads) {
+      const res = executeDestinationFunctionSandboxed({
+        code: `function transform() { throw new Error(${expr}); }`,
+        eventInput: {},
+      });
+      expect(res.ok).toBe(false);
+      expect(res.error).toBeDefined();
+      expect(Buffer.byteLength(res.error!, 'utf8')).toBeLessThanOrEqual(512);
+      expect(res.error!).not.toContain('\uFFFD');
+    }
+  });
 });

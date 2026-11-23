@@ -771,4 +771,74 @@ describe('Bundle 4-H: §8.14 Fine-Tuning Pipeline (Zero-Jev Provenance, 3-Way Sp
       })
     ).toThrow(/INSUFFICIENT_SPLIT_COMPONENTS/);
   });
+
+  test('[#23] persistent priorSplitAssignments locks prior train/select_tune components and prevents train/select_tune -> final_eval contamination across batches', () => {
+    const batch1: CandidateTrainingExample[] = Array.from({ length: 5 }, (_, i) =>
+      makeCleanExample(900 + i, {
+        site_id: 'site_persist',
+        page_lineage_id: `persist_lineage_${i}`,
+        public_text: `バッチ1の独立ページ${i}。料金プランや契約条件の説明本文です。`,
+      })
+    );
+
+    const ds1 = buildThreeWayTrainingDataset({
+      examples: batch1,
+      scope: 'shared_adapter',
+      taskKind: 'section_reading',
+      seed: 'persistent_split_seed_v1',
+    });
+
+    expect(ds1.splitAssignmentsByComponent.size).toBe(5);
+    expect(ds1.splitAssignmentsByExample.size).toBe(5);
+
+    const priorTrainAndTuneIds = new Set([
+      ...ds1.train.map((e) => e.example_id),
+      ...ds1.select_tune.map((e) => e.example_id),
+    ]);
+    expect(priorTrainAndTuneIds.size).toBeGreaterThan(0);
+
+    // Batch 2 adds 6 new examples with the SAME seed and passes batch 1's persistent split assignments
+    const batch2New: CandidateTrainingExample[] = Array.from({ length: 6 }, (_, i) =>
+      makeCleanExample(920 + i, {
+        site_id: 'site_persist',
+        page_lineage_id: `persist_lineage_new_${i}`,
+        public_text: `バッチ2で新規追加された独立ページ${i}。導入事例やFAQの詳細ガイドです。`,
+      })
+    );
+
+    const ds2 = buildThreeWayTrainingDataset({
+      examples: [...batch1, ...batch2New],
+      scope: 'shared_adapter',
+      taskKind: 'section_reading',
+      seed: 'persistent_split_seed_v1',
+      priorSplitAssignments: ds1.splitAssignmentsByComponent,
+    });
+
+    // ZERO prior train/select_tune examples may move into final_eval!
+    const contaminated = ds2.final_eval.filter((e) => priorTrainAndTuneIds.has(e.example_id));
+    expect(contaminated).toHaveLength(0);
+
+    // Every prior example preserves its exact prior split
+    for (const [exId, priorSplit] of ds1.splitAssignmentsByExample.entries()) {
+      expect(ds2.splitAssignmentsByExample.get(exId)).toBe(priorSplit);
+    }
+
+    // If all components are locked into train/select_tune only (leaving final_eval empty), fail closed!
+    const allLockedNonEval = new Map<string, 'train' | 'select_tune'>([
+      ['persist_lineage_0', 'train'],
+      ['persist_lineage_1', 'train'],
+      ['persist_lineage_2', 'select_tune'],
+      ['persist_lineage_3', 'select_tune'],
+      ['persist_lineage_4', 'train'],
+    ]);
+    expect(() =>
+      buildThreeWayTrainingDataset({
+        examples: batch1,
+        scope: 'shared_adapter',
+        taskKind: 'section_reading',
+        seed: 'persistent_split_seed_v1',
+        priorSplitAssignments: allLockedNonEval,
+      })
+    ).toThrow(InsufficientSplitComponentsError);
+  });
 });

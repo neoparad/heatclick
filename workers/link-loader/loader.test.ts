@@ -20,8 +20,10 @@ import {
   areMergedStatesEquivalent,
   computeFastFrameHash,
   computeInitialPlacement,
+  formatTombstonesObjectKey,
   HOUR_MS,
   mergeFrameIntoPvState,
+  MissingManifestWalError,
   replayAllFromWal,
   runPurePvSchedule,
   SealedRollupBuilder,
@@ -1015,5 +1017,84 @@ describe('workers/link-loader', () => {
     // Monday floor is <= exact expiry and within 6 days prior, so TTL exp_week DELETE expires on Monday 2026-11-30 (0 extra +7d lag!)
     expect(expWeekUtcMs).toBeLessThanOrEqual(exactExpiryMs);
     expect(exactExpiryMs - expWeekUtcMs).toBeLessThan(7 * 86_400_000);
+  });
+
+  test('Wave 10 Codex R2 #10: syncManifestsFromBucket restores persisted tombstones BEFORE manifest replay (no PV resurrection) and throws MissingManifestWalError on unexplained missing WAL without advancing progress', async () => {
+    const bucket = new InMemoryR2Bucket();
+    const writer = new WalWriter({ region: 'jp', bucket });
+    const t0 = Date.UTC(2026, 10, 23, 10, 0, 0);
+    const pvDeleted = 'dddd0000111122223333444455556666';
+    const pvKept = 'eeee0000111122223333444455556666';
+
+    // 1. Write WAL containing two PVs and ingest on Loader A
+    const frameDeleted = buildFrameFromStep(
+      GROUND_TRUTH_STEPS[0]!,
+      -1,
+      [GROUND_TRUTH_STEPS[0]!.newLogItem!],
+      pvDeleted,
+      '91001',
+      t0
+    );
+    const frameKept = buildFrameFromStep(
+      GROUND_TRUTH_STEPS[0]!,
+      -1,
+      [GROUND_TRUTH_STEPS[0]!.newLogItem!],
+      pvKept,
+      '91002',
+      t0
+    );
+    const walRes = await writer.consumeBatch(
+      [
+        {
+          tenant_id: 't-r2-10',
+          site_id: 's-r2-10',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: t0 + 100,
+          raw_frame: frameDeleted,
+        },
+        {
+          tenant_id: 't-r2-10',
+          site_id: 's-r2-10',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: t0 + 200,
+          raw_frame: frameKept,
+        },
+      ],
+      t0 + 200
+    );
+    expect(walRes.walKeys).toHaveLength(1);
+    const committedWalKey = walRes.walKeys[0]!;
+
+    const loaderA = new ShardLoader({ region: 'jp', shardId: 0, bucket });
+    const commitA = await loaderA.loadPendingWalObjects(t0 + 500);
+    expect(commitA.committed).toBe(true);
+    expect(commitA.manifestSeq).toBe(1);
+    expect(loaderA.getPvIndexRow('t-r2-10', 's-r2-10', pvDeleted)).toBeDefined();
+
+    // 2. Register deletion tombstone on Loader A -> persisted to tombstones/jp/0000/tombstones.json
+    await loaderA.registerDeletionTombstones({
+      tenantId: 't-r2-10',
+      siteId: 's-r2-10',
+      pvIds: [pvDeleted],
+    });
+    expect(await bucket.get(formatTombstonesObjectKey('jp', 0))).not.toBeNull();
+
+    // 3. Loader B takes over while the old WAL STILL EXISTS in bucket -> deleted PV MUST NOT be resurrected!
+    const loaderB = new ShardLoader({ region: 'jp', shardId: 0, bucket });
+    const syncedSeq = await loaderB.syncManifestsFromBucket();
+    expect(syncedSeq).toBe(1);
+    expect(loaderB.getPvIndexRow('t-r2-10', 's-r2-10', pvDeleted)).toBeUndefined();
+    expect(loaderB.getPvState('t-r2-10', 's-r2-10', pvDeleted)).toBeUndefined();
+    expect(loaderB.getPvIndexRow('t-r2-10', 's-r2-10', pvKept)).toBeDefined();
+
+    // 4. Delete the WAL object referenced by manifest 1 WITHOUT marking it intentionally purged/expired
+    await bucket.delete(committedWalKey);
+    const loaderC = new ShardLoader({ region: 'jp', shardId: 0, bucket });
+    await expect(loaderC.syncManifestsFromBucket()).rejects.toThrow(MissingManifestWalError);
+    // Progress MUST NOT advance when manifest sync fails on missing WAL!
+    expect(loaderC.getCommittedManifests()).toHaveLength(0);
+    expect(loaderC.getNextManifestSeq()).toBe(1);
   });
 });

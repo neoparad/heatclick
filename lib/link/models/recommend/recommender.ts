@@ -217,6 +217,8 @@ export function scoreCandidateByRung(params: {
   return { score: Number(Math.max(1e-6, baseScore).toFixed(6)), yen_value: yenValue };
 }
 
+export type DisplayProbMethod = 'exact' | 'monte_carlo';
+
 export interface PlackettLuceRankedEntry<T> {
   readonly item: T;
   readonly rank: number; // 1-based position in FULL ordering
@@ -232,6 +234,8 @@ export interface PlackettLuceRankedEntry<T> {
    * permutations (`[M-13]`), satisfying `sum_i display_prob_i === min(K, N)` for unbiased IPS/DR OPE.
    */
   readonly display_prob: number;
+  /** Explicitly indicates whether `display_prob` was computed analytically/DP (`exact`) or via MC (`monte_carlo`). */
+  readonly display_prob_method: DisplayProbMethod;
 }
 
 function hashSeedToUint32(seedKey: string): number {
@@ -255,31 +259,55 @@ function mulberry32Pl(seed: number): () => number {
 
 /**
  * Computes true marginal inclusion probability $P(\text{item } i \in \text{Top-}K)$ under
- * Plackett-Luce sequential sampling without replacement (`[M-13]`):
- * - Exact Subset Dynamic Programming over bitmasks when $K \le 5$ and $N \le 16$
- *   (machine-precision exact, $\sum_i P(i \in \text{Top-}K) = K$).
- * - High-precision seeded Gumbel-Top-$K$ Monte Carlo ($M = 4,096$ permutations, equivalent to
- *   Plackett-Luce by Yellott's theorem) for larger $N$ or $K$.
+ * Plackett-Luce sequential sampling without replacement (`[M-13]` / `[#20]`) along with an
+ * explicit `method: 'exact' | 'monte_carlo'` tag so MC estimates are never mislabeled as exact:
+ * - Exact closed-form $O(N)$ for $K = 1$ ($w_i / W$) and $K = 2$
+ *   ($\frac{w_i}{W} + \sum_{j \neq i} \frac{w_j}{W}\cdot\frac{w_i}{W - w_j}$) for ANY $N$.
+ * - Exact Subset Dynamic Programming over bitmasks when $3 \le K \le 5$ and $N \le 16$.
+ * - High-precision seeded Gumbel-Top-$K$ Monte Carlo ($M = 4,096$ permutations) otherwise.
  */
-export function computePlackettLuceMarginalInclusionProbs(
+export function computePlackettLuceMarginalInclusionProbsWithMethod(
   weights: readonly number[],
   topK: number,
   seedKey = 'pl_marginal_default',
   mcSamples = 4096
-): readonly number[] {
+): { readonly probs: readonly number[]; readonly method: DisplayProbMethod } {
   const n = weights.length;
-  if (n === 0) return [];
+  if (n === 0) return { probs: [], method: 'exact' };
   const kEff = Math.max(0, Math.min(n, Math.trunc(topK)));
-  if (kEff === 0) return new Array<number>(n).fill(0);
-  if (kEff === n) return new Array<number>(n).fill(1);
+  if (kEff === 0) return { probs: new Array<number>(n).fill(0), method: 'exact' };
+  if (kEff === n) return { probs: new Array<number>(n).fill(1), method: 'exact' };
 
   const posWeights = weights.map((w) => (Number.isFinite(w) && w > 0 ? w : 1e-6));
   const totalW = posWeights.reduce((s, w) => s + w, 0);
   if (kEff === 1) {
-    return posWeights.map((w) => w / totalW);
+    return {
+      probs: posWeights.map((w) => Math.max(0, Math.min(1, w / totalW))),
+      method: 'exact',
+    };
   }
 
-  // Exact bitmask Subset DP for K <= 5 and N <= 16 (at most C(16, <=5) = 6,885 states -> < 1 ms!)
+  // Exact O(N) closed-form for K = 2 for ANY N:
+  // P(i in top 2) = (w_i / W) + sum_{j != i} (w_j / W) * (w_i / (W - w_j))
+  //               = (w_i / W) * (1 + sum_j (w_j / (W - w_j)) - w_i / (W - w_i))
+  if (kEff === 2) {
+    let totalRatioSum = 0;
+    const ratios = new Float64Array(n);
+    for (let j = 0; j < n; j += 1) {
+      const rem = totalW - posWeights[j];
+      const r = rem > 0 ? posWeights[j] / rem : 0;
+      ratios[j] = r;
+      totalRatioSum += r;
+    }
+    const probs = new Array<number>(n);
+    for (let i = 0; i < n; i += 1) {
+      const p = (posWeights[i] / totalW) * (1 + (totalRatioSum - ratios[i]));
+      probs[i] = Math.max(0, Math.min(1, p));
+    }
+    return { probs, method: 'exact' };
+  }
+
+  // Exact bitmask Subset DP for 3 <= K <= 5 and N <= 16 (at most C(16, <=5) = 6,885 states -> < 1 ms!)
   if (kEff <= 5 && n <= 16) {
     let currentLayer = new Map<number, number>([[0, 1.0]]);
     for (let step = 0; step < kEff; step += 1) {
@@ -312,10 +340,13 @@ export function computePlackettLuceMarginalInclusionProbs(
         }
       }
     }
-    return marginals.map((p) => Math.max(0, Math.min(1, p)));
+    return {
+      probs: marginals.map((p) => Math.max(0, Math.min(1, p))),
+      method: 'exact',
+    };
   }
 
-  // High-precision Gumbel-Top-K Monte Carlo for larger candidate pools (e.g. N=50)
+  // High-precision Gumbel-Top-K Monte Carlo for larger candidate pools (e.g. N > 16 and K >= 3)
   const m = Math.max(512, mcSamples);
   const logWeights = new Float64Array(n);
   for (let i = 0; i < n; i += 1) {
@@ -351,7 +382,23 @@ export function computePlackettLuceMarginalInclusionProbs(
     }
   }
 
-  return Array.from(hitCounts, (c) => c / m);
+  return {
+    probs: Array.from(hitCounts, (c) => c / m),
+    method: 'monte_carlo',
+  };
+}
+
+/**
+ * Computes true marginal inclusion probability $P(\text{item } i \in \text{Top-}K)$ under
+ * Plackett-Luce sequential sampling without replacement (`[M-13]` / `[#20]`).
+ */
+export function computePlackettLuceMarginalInclusionProbs(
+  weights: readonly number[],
+  topK: number,
+  seedKey = 'pl_marginal_default',
+  mcSamples = 4096
+): readonly number[] {
+  return computePlackettLuceMarginalInclusionProbsWithMethod(weights, topK, seedKey, mcSamples).probs;
 }
 
 /**
@@ -376,11 +423,12 @@ export function sampleFullPlackettLuceOrdering<T extends { readonly id: string; 
   }));
 
   const effectiveTopK = topK !== undefined ? topK : items.length;
-  const marginalProbs = computePlackettLuceMarginalInclusionProbs(
-    initialPool.map((p) => p.effWeight),
-    effectiveTopK,
-    seedKey
-  );
+  const { probs: marginalProbs, method: displayProbMethod } =
+    computePlackettLuceMarginalInclusionProbsWithMethod(
+      initialPool.map((p) => p.effWeight),
+      effectiveTopK,
+      seedKey
+    );
 
   const remaining = [...initialPool];
   const totalInitialWeight = remaining.reduce((s, r) => s + r.effWeight, 0);
@@ -407,7 +455,8 @@ export function sampleFullPlackettLuceOrdering<T extends { readonly id: string; 
       step_propensity: condProb,
       slot_cond_prob: condProb,
       top1_propensity: Number((picked.effWeight / totalInitialWeight).toFixed(6)),
-      display_prob: Number((marginalProbs[picked.origIdx] ?? 0).toFixed(6)),
+      display_prob: marginalProbs[picked.origIdx] ?? 0,
+      display_prob_method: displayProbMethod,
     });
   }
 

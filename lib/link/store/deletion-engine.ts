@@ -278,7 +278,7 @@ export interface DeletionStoreAdapter {
     readonly tenantId: string;
     readonly siteId: string;
     readonly subjectKind: DeletionSubjectKind;
-    readonly rawSubjectValue: string;
+    readonly rawSubjectValue: string | null;
     readonly keyedDigests: readonly KeyedSubjectDigest[];
   }): Promise<ResolvedSubjectKeys>;
 
@@ -447,6 +447,7 @@ const DAY_MS = 86_400_000;
 interface InternalRequestState {
   record: DeletionRequestRecord;
   rawSubjectValue: string | null;
+  precomputedCandidates: readonly string[] | null;
   keyedDigests: readonly KeyedSubjectDigest[];
   ecMemberDeleted: number;
   edgeCachePurged: number;
@@ -512,7 +513,9 @@ export class DeletionExecutionEngine {
     readonly tenantId: string;
     readonly siteId: string;
     readonly subjectKind: DeletionSubjectKind;
-    readonly rawSubjectValue: string;
+    readonly rawSubjectValue?: string;
+    readonly subjectHmac?: string | null;
+    readonly subjectHmacCandidates?: readonly string[];
     readonly requestedAtMs?: number;
   }): DeletionRequestRecord {
     if (this.requests.has(args.requestId)) {
@@ -522,15 +525,73 @@ export class DeletionExecutionEngine {
       throw new Error(`Unsupported subject_kind: ${args.subjectKind}`);
     }
 
+    const hasRawSubject =
+      typeof args.rawSubjectValue === 'string' && args.rawSubjectValue.length > 0;
+    const precomputedCandidatesSet = new Set<string>();
+    if (typeof args.subjectHmac === 'string' && args.subjectHmac.length > 0) {
+      precomputedCandidatesSet.add(args.subjectHmac);
+    }
+    for (const candidate of args.subjectHmacCandidates ?? []) {
+      if (typeof candidate === 'string' && candidate.length > 0) {
+        precomputedCandidatesSet.add(candidate);
+      }
+    }
+    const precomputedCandidates = Array.from(precomputedCandidatesSet);
+
+    if (!hasRawSubject && precomputedCandidates.length === 0) {
+      throw new Error(
+        `Deletion request "${args.requestId}" requires either rawSubjectValue or non-empty subjectHmacCandidates`
+      );
+    }
+
     const requestedAtMs = args.requestedAtMs ?? Date.now();
     this.deletionEpochCounter += 1;
     const deletionEpoch = this.deletionEpochCounter;
 
-    const keyedDigests = this.keyRegistry.computeSubjectDigestsAcrossAllVersions(
-      args.tenantId,
-      args.subjectKind,
-      args.rawSubjectValue
-    );
+    let keyedDigests: readonly KeyedSubjectDigest[];
+    let keyVersionsSearched: readonly number[];
+
+    if (hasRawSubject) {
+      const computed = this.keyRegistry.computeSubjectDigestsAcrossAllVersions(
+        args.tenantId,
+        args.subjectKind,
+        args.rawSubjectValue!
+      );
+      if (precomputedCandidates.length > 0) {
+        keyedDigests = computed.map((d, idx) =>
+          idx === 0
+            ? {
+                ...d,
+                lookupCandidates: Array.from(
+                  new Set([...(d.lookupCandidates ?? []), ...precomputedCandidates])
+                ),
+              }
+            : d
+        );
+      } else {
+        keyedDigests = computed;
+      }
+      keyVersionsSearched = keyedDigests.map((d) => d.keyVersion);
+    } else {
+      // Codex R2 #9: Zero-plaintext path — use precomputed versioned HMAC candidates directly!
+      const searchableVersions = this.keyRegistry.getSearchableKeyVersions(args.tenantId);
+      const primaryKeyVersion = searchableVersions[0]?.keyVersion ?? 0;
+      const primaryHmac =
+        typeof args.subjectHmac === 'string' && args.subjectHmac.length > 0
+          ? args.subjectHmac
+          : precomputedCandidates[0]!;
+      keyedDigests = [
+        {
+          keyVersion: primaryKeyVersion,
+          hmacHex: primaryHmac,
+          lookupCandidates: precomputedCandidates,
+        },
+      ];
+      keyVersionsSearched =
+        searchableVersions.length > 0
+          ? searchableVersions.map((v) => v.keyVersion)
+          : [primaryKeyVersion];
+    }
 
     const record: DeletionRequestRecord = {
       requestId: args.requestId,
@@ -554,14 +615,15 @@ export class DeletionExecutionEngine {
 
     this.requests.set(args.requestId, {
       record,
-      rawSubjectValue: args.rawSubjectValue,
+      rawSubjectValue: hasRawSubject ? args.rawSubjectValue! : null,
+      precomputedCandidates: precomputedCandidates.length > 0 ? precomputedCandidates : null,
       keyedDigests,
       ecMemberDeleted: 0,
       edgeCachePurged: 0,
       tableResults: [],
       externalStoreResults: [],
       exportNotifications: [],
-      keyVersionsSearched: keyedDigests.map((d) => d.keyVersion),
+      keyVersionsSearched,
       downstreamSummary: {
         liveDoUnitsPurged: 0,
         continuousStreamItemsPurged: 0,
@@ -647,18 +709,42 @@ export class DeletionExecutionEngine {
         `Cannot execute physical purge phase from state "${internal.record.state}" (mask phase must complete first)`
       );
     }
-    if (internal.rawSubjectValue === null) {
+    if (
+      internal.record.subjectDigestRedacted ||
+      (internal.rawSubjectValue === null && internal.precomputedCandidates === null)
+    ) {
       throw new Error(`Subject value already redacted for request "${requestId}"`);
     }
 
-    // Re-evaluate searchable key versions in case a rotation occurred since scheduling
-    const keyedDigests = this.keyRegistry.computeSubjectDigestsAcrossAllVersions(
-      internal.record.tenantId,
-      internal.record.subjectKind,
-      internal.rawSubjectValue
-    );
-    internal.keyedDigests = keyedDigests;
-    internal.keyVersionsSearched = keyedDigests.map((d) => d.keyVersion);
+    // Re-evaluate searchable key versions if rawSubjectValue is available;
+    // otherwise reuse precomputed zero-plaintext HMAC lookup candidates (Codex R2 #9).
+    let keyedDigests = internal.keyedDigests;
+    if (internal.rawSubjectValue !== null) {
+      const recomputed = this.keyRegistry.computeSubjectDigestsAcrossAllVersions(
+        internal.record.tenantId,
+        internal.record.subjectKind,
+        internal.rawSubjectValue
+      );
+      if (internal.precomputedCandidates && internal.precomputedCandidates.length > 0) {
+        keyedDigests = recomputed.map((d, idx) =>
+          idx === 0
+            ? {
+                ...d,
+                lookupCandidates: Array.from(
+                  new Set([
+                    ...(d.lookupCandidates ?? []),
+                    ...internal.precomputedCandidates!,
+                  ])
+                ),
+              }
+            : d
+        );
+      } else {
+        keyedDigests = recomputed;
+      }
+      internal.keyedDigests = keyedDigests;
+      internal.keyVersionsSearched = keyedDigests.map((d) => d.keyVersion);
+    }
 
     const resolvedKeys = await this.storeAdapter.resolveSubjectKeys({
       tenantId: internal.record.tenantId,
@@ -882,8 +968,9 @@ export class DeletionExecutionEngine {
       downstreamPurgeSummary: { ...internal.downstreamSummary },
     };
 
-    // Redact raw subject identifier once certified
+    // Redact raw subject identifier and precomputed digest candidates once certified
     internal.rawSubjectValue = null;
+    internal.precomputedCandidates = null;
     internal.keyedDigests = [];
     internal.record = {
       ...internal.record,

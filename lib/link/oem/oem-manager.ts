@@ -72,7 +72,7 @@ export type OemOperationOutcome<T> =
   | {
       readonly ok: false;
       readonly status: 'not_entitled' | 'forbidden' | 'not_found' | 'invalid_request';
-      readonly httpStatus: 400 | 401 | 403 | 404;
+      readonly httpStatus: 400 | 401 | 403 | 404 | 503;
       readonly reason: string;
     };
 

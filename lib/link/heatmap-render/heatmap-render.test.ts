@@ -1104,4 +1104,56 @@ describe('Wave 9 Codex Remediation Regressions: [#15], [#16], [#19]', () => {
     expect(res.artifacts[0].untrusted_embedded_texts[0].__untrusted).toBe(true)
     expect(res.artifacts[0].untrusted_embedded_texts[0].value).toBe('SAFE_PUBLIC_POST_MASK_HEADING')
   })
+
+  test('[#19] includes canonical redaction_boxes, ocr_policy_version, and post-mask OCR digest in cache key so added mask boxes miss cache and omit newly redacted text', () => {
+    const svc = new HeatmapRenderService()
+    const ocrSamples = [
+      {
+        text: 'LATE_REDACTED_OCR_SECRET',
+        from_masked_image: true,
+        overlaps_masked_region: false,
+        bbox: { x: 20, y: 20, width: 30, height: 15 },
+      },
+      {
+        text: 'PUBLIC_HEADING_UNCHANGED',
+        from_masked_image: true,
+        overlaps_masked_region: false,
+        bbox: { x: 100, y: 120, width: 50, height: 14 },
+      },
+    ]
+
+    // 1. First render with redaction_boxes = [] populates the artifact cache
+    const dsUnmasked = makeUnitDataset({
+      screenshot: makeLabScreenshot({
+        redaction_boxes: [],
+        embedded_text_samples: ocrSamples,
+      }),
+    })
+    const res1 = svc.renderHeatmap(OWNER_PRINCIPAL, makeBaseRequest({ unit_datasets: [dsUnmasked] }))
+    expect(res1.http_status).toBe(200)
+    expect(res1.artifacts[0].cache_hit).toBe(false)
+    expect(res1.artifacts[0].untrusted_embedded_texts.map((t) => t.value)).toEqual([
+      'LATE_REDACTED_OCR_SECRET',
+      'PUBLIC_HEADING_UNCHANGED',
+    ])
+
+    // 2. Re-render EXACT SAME page, base-image, and build_seq with an added redaction box covering the secret OCR snippet
+    const dsMasked = makeUnitDataset({
+      screenshot: makeLabScreenshot({
+        redaction_boxes: [{ x: 15, y: 15, width: 40, height: 25, reason: 'pii_region' }],
+        embedded_text_samples: ocrSamples,
+      }),
+    })
+    const res2 = svc.renderHeatmap(OWNER_PRINCIPAL, makeBaseRequest({ unit_datasets: [dsMasked] }))
+    expect(res2.http_status).toBe(200)
+    expect(res2.artifacts[0].cache_hit).toBe(false)
+    expect(res2.artifacts[0].build_seq).toBe(res1.artifacts[0].build_seq)
+    expect(res2.artifacts[0].reproducibility_hash).toBeTruthy()
+    expect(res2.artifacts[0].reproducibility_hash).not.toBe(res1.artifacts[0].reproducibility_hash)
+    expect(res2.artifacts[0].artifact_id).not.toBe(res1.artifacts[0].artifact_id)
+    expect(res2.artifacts[0].untrusted_embedded_texts.map((t) => t.value)).toEqual([
+      'PUBLIC_HEADING_UNCHANGED',
+    ])
+    expect(JSON.stringify(res2)).not.toContain('LATE_REDACTED_OCR_SECRET')
+  })
 })
