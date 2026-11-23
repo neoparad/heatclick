@@ -754,6 +754,7 @@ export class AskService {
       windowEnd,
       skipWindowCheck: false,
       predeclaredCohortMemberIds: plan.cohortMemberIds,
+      deferCommit: true,
       differencingGuard: this.differencingGuard,
     });
 
@@ -934,6 +935,8 @@ export class AskService {
       returnedUnauthorizedData: false,
       auditCode: 'OK',
     };
+    // Commit differencing history ONLY after final answer numeric grounding & envelope construction succeed!
+    filterVerdict.commitDisclosureHistory?.();
     this.storeCache(sessionKey, cacheKey, outcome);
     return outcome;
   }

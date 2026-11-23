@@ -877,7 +877,7 @@ describe('workers/link-loader', () => {
     );
 
     await loader.loadPendingWalObjects(dayStart + 25 * 60_000);
-    loader.deletePvs('t-quiet', 's-quiet', [pvDeleted], dayStart + 30 * 60_000);
+    await loader.deletePvs('t-quiet', 's-quiet', [pvDeleted], dayStart + 30 * 60_000);
     builder.sealEligibleHours(loader, dayStart + 4 * HOUR_MS + 35 * 60_000);
 
     expect(builder.getCurrentSiteHourRollup('t-quiet', 's-quiet', dayStart)?.pvCount).toBe(1);
@@ -1096,5 +1096,134 @@ describe('workers/link-loader', () => {
     // Progress MUST NOT advance when manifest sync fails on missing WAL!
     expect(loaderC.getCommittedManifests()).toHaveLength(0);
     expect(loaderC.getNextManifestSeq()).toBe(1);
+  });
+
+  test('Wave 11 Codex R3 #10: deletePvs() durably persists tombstones for handover AND concurrent ShardLoader writers preserve both tombstones via CAS read-merge-write', async () => {
+    const bucket = new InMemoryR2Bucket();
+    const writer = new WalWriter({ region: 'jp', bucket });
+    const t0 = Date.UTC(2026, 10, 23, 14, 0, 0);
+    const pvDeleted = '1111aaaa2222bbbb3333cccc4444dddd';
+    const pvKept = '5555eeee6666ffff7777000088889999';
+
+    // (a) Calling deletePvs() directly (WITHOUT registerDeletionTombstones) persists tombstones
+    await writer.consumeBatch(
+      [
+        {
+          tenant_id: 't-r3-10',
+          site_id: 's-r3-10',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: t0 + 100,
+          raw_frame: buildFrameFromStep(
+            GROUND_TRUTH_STEPS[0]!,
+            -1,
+            [GROUND_TRUTH_STEPS[0]!.newLogItem!],
+            pvDeleted,
+            '92001',
+            t0
+          ),
+        },
+        {
+          tenant_id: 't-r3-10',
+          site_id: 's-r3-10',
+          storage_region: 'jp',
+          shard_id: 0,
+          received_at_ms: t0 + 200,
+          raw_frame: buildFrameFromStep(
+            GROUND_TRUTH_STEPS[0]!,
+            -1,
+            [GROUND_TRUTH_STEPS[0]!.newLogItem!],
+            pvKept,
+            '92002',
+            t0
+          ),
+        },
+      ],
+      t0 + 200
+    );
+
+    const loaderA = new ShardLoader({ region: 'jp', shardId: 0, bucket });
+    await loaderA.loadPendingWalObjects(t0 + 500);
+    expect(loaderA.getPvIndexRow('t-r3-10', 's-r3-10', pvDeleted)).toBeDefined();
+
+    // Call deletePvs() directly — do NOT call registerDeletionTombstones()
+    const delRes = await loaderA.deletePvs('t-r3-10', 's-r3-10', [pvDeleted], t0 + 600);
+    expect(delRes.deletedPvs).toBe(1);
+    expect(await bucket.get(formatTombstonesObjectKey('jp', 0))).not.toBeNull();
+
+    // Handover Loader B syncs manifests while WAL still exists -> pvDeleted MUST NOT be resurrected!
+    const loaderB = new ShardLoader({ region: 'jp', shardId: 0, bucket });
+    await loaderB.syncManifestsFromBucket();
+    expect(loaderB.getPvIndexRow('t-r3-10', 's-r3-10', pvDeleted)).toBeUndefined();
+    expect(loaderB.getPvState('t-r3-10', 's-r3-10', pvDeleted)).toBeUndefined();
+    expect(loaderB.getPvIndexRow('t-r3-10', 's-r3-10', pvKept)).toBeDefined();
+
+    // (b) Two concurrent ShardLoader instances persisting DIFFERENT tombstones to the same bucket
+    // Force both initial get() calls to synchronize at a barrier before either put() runs so CAS
+    // conflict is guaranteed on the second writer and resolved via read-merge-write retry!
+    const sharedBucket = new InMemoryR2Bucket();
+    let initialGetsSeen = 0;
+    let releaseBarrier: (() => void) | null = null;
+    const barrier = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    let casConflicts = 0;
+
+    const racingBucket = {
+      async get(key: string) {
+        const res = await sharedBucket.get(key);
+        if (key === formatTombstonesObjectKey('jp', 1) && initialGetsSeen < 2) {
+          initialGetsSeen += 1;
+          if (initialGetsSeen === 2) {
+            releaseBarrier?.();
+          } else {
+            await barrier;
+          }
+        }
+        return res;
+      },
+      async put(
+        key: string,
+        value: string | Uint8Array | ArrayBuffer,
+        options?: Parameters<InMemoryR2Bucket['put']>[2]
+      ) {
+        const res = await sharedBucket.put(key, value, options);
+        if (res === null && key === formatTombstonesObjectKey('jp', 1)) {
+          casConflicts += 1;
+        }
+        return res;
+      },
+      head: (key: string) => sharedBucket.head(key),
+      list: (options?: Parameters<InMemoryR2Bucket['list']>[0]) => sharedBucket.list(options),
+      delete: (keys: string | readonly string[]) => sharedBucket.delete(keys),
+    };
+
+    const concurrentLoader1 = new ShardLoader({ region: 'jp', shardId: 1, bucket: racingBucket });
+    const concurrentLoader2 = new ShardLoader({ region: 'jp', shardId: 1, bucket: racingBucket });
+
+    const pvConcurrentA = 'aaaa0000aaaa0000aaaa0000aaaa0001';
+    const pvConcurrentB = 'bbbb0000bbbb0000bbbb0000bbbb0002';
+
+    await Promise.all([
+      concurrentLoader1.registerDeletionTombstones({
+        tenantId: 't-cas',
+        siteId: 's-cas',
+        pvIds: [pvConcurrentA],
+      }),
+      concurrentLoader2.registerDeletionTombstones({
+        tenantId: 't-cas',
+        siteId: 's-cas',
+        pvIds: [pvConcurrentB],
+      }),
+    ]);
+
+    expect(casConflicts).toBeGreaterThanOrEqual(1);
+    const persistedObj = await sharedBucket.get(formatTombstonesObjectKey('jp', 1));
+    expect(persistedObj).not.toBeNull();
+    const persisted = JSON.parse(await persistedObj!.text()) as {
+      deleted_pv_keys: string[];
+    };
+    expect(persisted.deleted_pv_keys).toContain(`t-cas\u0000s-cas\u0000${pvConcurrentA}`);
+    expect(persisted.deleted_pv_keys).toContain(`t-cas\u0000s-cas\u0000${pvConcurrentB}`);
   });
 });

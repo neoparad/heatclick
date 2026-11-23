@@ -82,8 +82,16 @@ export interface KeyVersionDestructionResult {
   readonly reason: string;
 }
 
+export interface SubjectHmacVersionedCandidate {
+  readonly key_version: string | number;
+  readonly format: string;
+  readonly hmac_hex: string;
+}
+
 export interface KeyedSubjectDigest {
   readonly keyVersion: number;
+  /** Optional raw string key-version label (e.g. `'key_v1'`, `'1'`) preserved from collector candidates (Codex R3 #9). */
+  readonly keyVersionLabel?: string;
   readonly hmacHex: string;
   /**
    * Canonical `v1` digest plus legacy compatibility digests (`value`, `kind:value`,
@@ -91,6 +99,69 @@ export interface KeyedSubjectDigest {
    * and historical rows (Codex #9).
    */
   readonly lookupCandidates?: readonly string[];
+}
+
+function parseKeyVersionNumber(keyVersion: string | number): number {
+  if (typeof keyVersion === 'number' && Number.isFinite(keyVersion)) {
+    return Math.trunc(keyVersion);
+  }
+  const trimmed = String(keyVersion).trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Number.parseInt(trimmed, 10);
+  }
+  const suffixMatch = /^(?:key_)?v(\d+)$/i.exec(trimmed);
+  if (suffixMatch) {
+    return Number.parseInt(suffixMatch[1]!, 10);
+  }
+  return 0;
+}
+
+function buildKeyedDigestsFromVersionedCandidates(
+  candidates: readonly SubjectHmacVersionedCandidate[]
+): readonly KeyedSubjectDigest[] {
+  const byVersionLabel = new Map<
+    string,
+    {
+      keyVersion: number;
+      keyVersionLabel: string;
+      canonicalHmac: string | null;
+      digests: Set<string>;
+    }
+  >();
+
+  for (const item of candidates) {
+    if (!item || typeof item.hmac_hex !== 'string' || item.hmac_hex.length === 0) {
+      continue;
+    }
+    const label = String(item.key_version);
+    let group = byVersionLabel.get(label);
+    if (!group) {
+      group = {
+        keyVersion: parseKeyVersionNumber(item.key_version),
+        keyVersionLabel: label,
+        canonicalHmac: null,
+        digests: new Set<string>(),
+      };
+      byVersionLabel.set(label, group);
+    }
+    if (item.format === 'canonical_v1' && group.canonicalHmac === null) {
+      group.canonicalHmac = item.hmac_hex;
+    }
+    group.digests.add(item.hmac_hex);
+  }
+
+  const out: KeyedSubjectDigest[] = [];
+  for (const group of byVersionLabel.values()) {
+    const lookupCandidates = Array.from(group.digests);
+    if (lookupCandidates.length === 0) continue;
+    out.push({
+      keyVersion: group.keyVersion,
+      keyVersionLabel: group.keyVersionLabel,
+      hmacHex: group.canonicalHmac ?? lookupCandidates[0]!,
+      lookupCandidates,
+    });
+  }
+  return out;
 }
 
 /**
@@ -516,6 +587,8 @@ export class DeletionExecutionEngine {
     readonly rawSubjectValue?: string;
     readonly subjectHmac?: string | null;
     readonly subjectHmacCandidates?: readonly string[];
+    readonly subjectHmacVersionedCandidates?: readonly SubjectHmacVersionedCandidate[];
+    readonly subject_hmac_versioned_candidates?: readonly SubjectHmacVersionedCandidate[];
     readonly requestedAtMs?: number;
   }): DeletionRequestRecord {
     if (this.requests.has(args.requestId)) {
@@ -527,6 +600,8 @@ export class DeletionExecutionEngine {
 
     const hasRawSubject =
       typeof args.rawSubjectValue === 'string' && args.rawSubjectValue.length > 0;
+    const versionedCandidates =
+      args.subjectHmacVersionedCandidates ?? args.subject_hmac_versioned_candidates ?? [];
     const precomputedCandidatesSet = new Set<string>();
     if (typeof args.subjectHmac === 'string' && args.subjectHmac.length > 0) {
       precomputedCandidatesSet.add(args.subjectHmac);
@@ -534,6 +609,11 @@ export class DeletionExecutionEngine {
     for (const candidate of args.subjectHmacCandidates ?? []) {
       if (typeof candidate === 'string' && candidate.length > 0) {
         precomputedCandidatesSet.add(candidate);
+      }
+    }
+    for (const vc of versionedCandidates) {
+      if (typeof vc?.hmac_hex === 'string' && vc.hmac_hex.length > 0) {
+        precomputedCandidatesSet.add(vc.hmac_hex);
       }
     }
     const precomputedCandidates = Array.from(precomputedCandidatesSet);
@@ -557,7 +637,27 @@ export class DeletionExecutionEngine {
         args.subjectKind,
         args.rawSubjectValue!
       );
-      if (precomputedCandidates.length > 0) {
+      if (versionedCandidates.length > 0) {
+        const versionedDigests = buildKeyedDigestsFromVersionedCandidates(versionedCandidates);
+        const merged = computed.map((d) => {
+          const matching = versionedDigests.find((vd) => vd.keyVersion === d.keyVersion);
+          if (!matching) return d;
+          return {
+            ...d,
+            keyVersionLabel: matching.keyVersionLabel ?? d.keyVersionLabel,
+            lookupCandidates: Array.from(
+              new Set([...(d.lookupCandidates ?? []), ...(matching.lookupCandidates ?? [])])
+            ),
+          };
+        });
+        const existingVersions = new Set(merged.map((d) => d.keyVersion));
+        for (const vd of versionedDigests) {
+          if (!existingVersions.has(vd.keyVersion)) {
+            merged.push(vd);
+          }
+        }
+        keyedDigests = merged;
+      } else if (precomputedCandidates.length > 0) {
         keyedDigests = computed.map((d, idx) =>
           idx === 0
             ? {
@@ -572,8 +672,15 @@ export class DeletionExecutionEngine {
         keyedDigests = computed;
       }
       keyVersionsSearched = keyedDigests.map((d) => d.keyVersion);
+    } else if (versionedCandidates.length > 0) {
+      // Codex R3 #9: Zero-plaintext key-versioned path — pair each key_version with ONLY
+      // the digests computed under THAT key so (oldKeyVersion, oldDigest) rows are matched!
+      keyedDigests = buildKeyedDigestsFromVersionedCandidates(versionedCandidates);
+      keyVersionsSearched = Array.from(new Set(keyedDigests.map((d) => d.keyVersion))).sort(
+        (a, b) => a - b
+      );
     } else {
-      // Codex R2 #9: Zero-plaintext path — use precomputed versioned HMAC candidates directly!
+      // Codex R2 #9: Backward-compatible zero-plaintext flat-candidates path
       const searchableVersions = this.keyRegistry.getSearchableKeyVersions(args.tenantId);
       const primaryKeyVersion = searchableVersions[0]?.keyVersion ?? 0;
       const primaryHmac =

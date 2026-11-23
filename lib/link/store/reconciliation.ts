@@ -528,7 +528,7 @@ export async function runClosure3CanaryOracleReplay(
   });
 
   // Step 3: Subject erasure deletes pvDelete AFTER seal
-  loader.deletePvs(tenantId, siteId, [pvDelete], baseHourMs + HOUR_MS + 42 * 60_000);
+  await loader.deletePvs(tenantId, siteId, [pvDelete], baseHourMs + HOUR_MS + 42 * 60_000);
 
   // Re-seal dirty cell after late frame + deletion
   builder.sealEligibleHours(loader, baseHourMs + HOUR_MS + 45 * 60_000);

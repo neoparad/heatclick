@@ -1425,4 +1425,313 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
       : (res200.headers.get('set-cookie') ?? '').split(/,(?=\s*ugk_)/);
     expect(setCookies200.some((c) => c.startsWith('ugk_del_retry=;') && c.includes('Max-Age=0'))).toBe(true);
   });
+
+  test('Wave 11 Codex R3 #8: ugk_del_retry cookie verifies across rotated continuityTokenSecret via rotatedContinuityTokenSecrets', async () => {
+    const q = makeMemoryQueue<PersistedCollectorRecord>();
+    const customQ = makeMemoryQueue<CustomEventPersistedRecord>();
+    const spill = makeMemoryR2();
+    const hold = makeMemoryR2();
+    const quarantine = makeMemoryR2();
+    const site = makeTestSite({
+      tenantId: 'ten_r3_8',
+      siteId: 'site_r3_8',
+      tenantMemberHashKey: 'member_key_r3_8',
+    });
+    const now = Date.parse('2026-11-23T11:00:00.000Z');
+    const originalVisitorId = 'vis_rotated_secret_112233445566';
+    const expectedVisitorHmac = computeCanonicalSubjectHmac({
+      tenantId: site.tenantId,
+      subjectKind: 'visitor_id',
+      subjectValue: originalVisitorId,
+      secretKey: site.tenantMemberHashKey,
+    });
+
+    // 1. Worker under secret S1 fails with 503 and issues ugk_del_retry signed under S1
+    const workerS1 = createCollectorWorker({
+      sitesByPublishableKey: new Map([[site.publishableKey, site]]),
+      continuityTokenSecret: 'S1',
+      labMarkerSecret: 'lab_sec',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      deletionSink: {
+        enqueueSubjectDeletion: async () => {
+          throw new Error('Transient sink outage');
+        },
+      },
+      nowMs: () => now,
+    });
+
+    const res503 = await workerS1.fetch(
+      new Request('https://collect.ugokilink.example/v1/optout', {
+        method: 'POST',
+        headers: {
+          'x-ugk-key': site.publishableKey,
+          cookie: `ugk_vid=${originalVisitorId}`,
+        },
+      })
+    );
+    expect(res503.status).toBe(503);
+    const setCookies503 = res503.headers.getSetCookie
+      ? res503.headers.getSetCookie()
+      : (res503.headers.get('set-cookie') ?? '').split(/,(?=\s*ugk_)/);
+    const delRetryCookiePair = setCookies503
+      .find((c) => c.startsWith('ugk_del_retry='))!
+      .split(';')[0]!;
+    expect(delRetryCookiePair).toMatch(/^ugk_del_retry=.+\.[0-9a-f]{64}$/);
+
+    // 2. Worker rotated to S2 WITHOUT rotatedContinuityTokenSecrets cannot recover visitor
+    const unrotatedQueued: SubjectDeletionRequest[] = [];
+    const workerS2Only = createCollectorWorker({
+      sitesByPublishableKey: new Map([[site.publishableKey, site]]),
+      continuityTokenSecret: 'S2',
+      labMarkerSecret: 'lab_sec',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      deletionSink: {
+        enqueueSubjectDeletion: async (req) => {
+          unrotatedQueued.push(req);
+          return { receiptId: req.receiptId };
+        },
+      },
+      nowMs: () => now + 5_000,
+    });
+    const resWithoutRotated = await workerS2Only.fetch(
+      new Request('https://collect.ugokilink.example/v1/optout', {
+        method: 'POST',
+        headers: {
+          'x-ugk-key': site.publishableKey,
+          cookie: `ugk_optout=1; ${delRetryCookiePair}`,
+        },
+      })
+    );
+    expect(resWithoutRotated.status).toBe(200);
+    expect(unrotatedQueued[0]!.subjectKind).toBe('optout_cookie');
+    expect(unrotatedQueued[0]!.subjectHmac).toBeNull();
+
+    // 3. Worker rotated to S2 WITH rotatedContinuityTokenSecrets: ['S1'] recovers exact original visitor!
+    const queuedDeletions: SubjectDeletionRequest[] = [];
+    const workerS2WithRotated = createCollectorWorker({
+      sitesByPublishableKey: new Map([[site.publishableKey, site]]),
+      continuityTokenSecret: 'S2',
+      rotatedContinuityTokenSecrets: ['S1'],
+      labMarkerSecret: 'lab_sec',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      deletionSink: {
+        enqueueSubjectDeletion: async (req) => {
+          queuedDeletions.push(req);
+          return { receiptId: req.receiptId };
+        },
+      },
+      nowMs: () => now + 10_000,
+    });
+
+    const res200 = await workerS2WithRotated.fetch(
+      new Request('https://collect.ugokilink.example/v1/optout', {
+        method: 'POST',
+        headers: {
+          'x-ugk-key': site.publishableKey,
+          cookie: `ugk_optout=1; ${delRetryCookiePair}`,
+        },
+      })
+    );
+    expect(res200.status).toBe(200);
+    expect(queuedDeletions).toHaveLength(1);
+    expect(queuedDeletions[0]!.subjectKind).toBe('visitor_id');
+    expect(queuedDeletions[0]!.subjectHmac).toBe(expectedVisitorHmac);
+    expect(queuedDeletions[0]!.subject_hmac_candidates).toContain(expectedVisitorHmac);
+  });
+
+  test('Wave 11 Codex R3 #9: key-versioned subject HMAC candidates match historical (key_v1, digest_v1) row after rotation to key_v2 with ZERO plaintext', async () => {
+    const q = makeMemoryQueue<PersistedCollectorRecord>();
+    const customQ = makeMemoryQueue<CustomEventPersistedRecord>();
+    const spill = makeMemoryR2();
+    const hold = makeMemoryR2();
+    const quarantine = makeMemoryR2();
+    const now = Date.parse('2026-11-23T11:30:00.000Z');
+    const rawMemberHash = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+
+    // 1. Collect a row under key_v1
+    const siteV1 = makeTestSite({
+      tenantId: 'ten_r3_9',
+      siteId: 'site_r3_9',
+      tenantMemberHashKey: 'secret_key_v1',
+      tenantMemberHashKeyVersion: 'key_v1',
+    });
+    const workerV1 = createCollectorWorker({
+      sitesByPublishableKey: new Map([[siteV1.publishableKey, siteV1]]),
+      continuityTokenSecret: 'cont_sec',
+      labMarkerSecret: 'lab_sec',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      nowMs: () => now,
+    });
+    const collectRes = await workerV1.collector.handleTelemetryFrame({
+      publishableKey: siteV1.publishableKey,
+      body: makeValidFrame({
+        pv_id: '11112222333344445555666677778888',
+        seq: 1,
+        consent_mode: 'full',
+        purposes: ['member_link', 'experiment'],
+        member_hash: rawMemberHash,
+      }),
+      networkPrefix: '203.0.113.0/24',
+    });
+    expect(collectRes.status).toBe(200);
+    const digestV1 = collectRes.persistedRecord!.frame.member_hash!;
+
+    // Row stored in ClickHouse tagged with keyVersion = 1 (key_v1)
+    const storedRows = new Map<string, { pvId: string; keyVersion: number; memberHmac: string }>([
+      ['pv_v1', { pvId: '11112222333344445555666677778888', keyVersion: 1, memberHmac: digestV1 }],
+    ]);
+
+    // 2. Rotate site to key_v2 while retaining key_v1 in rotatedMemberHashKeyVersions
+    const siteV2 = makeTestSite({
+      tenantId: 'ten_r3_9',
+      siteId: 'site_r3_9',
+      tenantMemberHashKey: 'secret_key_v2',
+      tenantMemberHashKeyVersion: 'key_v2',
+      rotatedMemberHashKeyVersions: [{ keyVersion: 'key_v1', secretKey: 'secret_key_v1' }],
+    });
+    const queuedDeletions: SubjectDeletionRequest[] = [];
+    const workerV2 = createCollectorWorker({
+      sitesByPublishableKey: new Map([[siteV2.publishableKey, siteV2]]),
+      continuityTokenSecret: 'cont_sec',
+      labMarkerSecret: 'lab_sec',
+      mainQueue: q.queue,
+      customEventQueue: customQ.queue,
+      r2SpillBucket: spill.bucket,
+      r2HoldBucket: hold.bucket,
+      r2QuarantineBucket: quarantine.bucket,
+      deletionSink: {
+        enqueueSubjectDeletion: async (req) => {
+          queuedDeletions.push(req);
+          return { receiptId: req.receiptId };
+        },
+      },
+      nowMs: () => now + 60_000,
+    });
+
+    const optRes = await workerV2.fetch(
+      new Request('https://collect.ugokilink.example/v1/optout', {
+        method: 'POST',
+        headers: { 'x-ugk-key': siteV2.publishableKey, 'content-type': 'application/json' },
+        body: JSON.stringify({ member_hash: rawMemberHash }),
+      })
+    );
+    expect(optRes.status).toBe(200);
+    expect(queuedDeletions).toHaveLength(1);
+    const queuedReq = queuedDeletions[0]!;
+
+    // Verify ZERO plaintext and explicit per-key-version pairing
+    expect(JSON.stringify(queuedReq)).not.toContain(rawMemberHash);
+    expect(queuedReq.subject_hmac_versioned_candidates).toBeDefined();
+    expect(
+      queuedReq.subject_hmac_versioned_candidates!.some(
+        (c) => c.key_version === 'key_v1' && c.format === 'canonical_v1' && c.hmac_hex === digestV1
+      )
+    ).toBe(true);
+
+    // 3. Pass ONLY the queued record (zero plaintext!) to DeletionExecutionEngine
+    // Adapter enforces strict (keyVersion, hmac) matching so mis-versioned digests fail to match!
+    const keyRegistry = new TenantKeyVersionRegistry();
+    keyRegistry.registerKeyVersion({
+      tenantId: siteV2.tenantId,
+      keyVersion: 1,
+      secretSalt: 'secret_key_v1',
+      status: 'draining',
+      activeRowCount: 1,
+      createdAtMs: now - 86_400_000,
+    });
+    keyRegistry.registerKeyVersion({
+      tenantId: siteV2.tenantId,
+      keyVersion: 2,
+      secretSalt: 'secret_key_v2',
+      status: 'active',
+      activeRowCount: 0,
+      createdAtMs: now,
+    });
+
+    const strictAdapter: DeletionStoreAdapter = {
+      async resolveSubjectKeys({ keyedDigests }) {
+        const matchedPvIds: string[] = [];
+        const matchedVersions = new Set<number>();
+        for (const row of storedRows.values()) {
+          const matched = keyedDigests.some(
+            (kd) =>
+              kd.keyVersion === row.keyVersion &&
+              (kd.hmacHex === row.memberHmac ||
+                (kd.lookupCandidates ?? []).includes(row.memberHmac))
+          );
+          if (matched) {
+            matchedPvIds.push(row.pvId);
+            matchedVersions.add(row.keyVersion);
+          }
+        }
+        return {
+          visitorKeys: [],
+          sessionKeys: [],
+          pvIds: matchedPvIds,
+          reqUids: [],
+          unitIds: [],
+          touchedPvHoursMs: [],
+          matchedKeyVersions: Array.from(matchedVersions),
+        };
+      },
+      async maskSubjectImmediate() {
+        return { ecMemberSummaryDeleted: 1, edgeCacheKeysPurged: 0 };
+      },
+      async purgeTable({ table, resolvedKeys }) {
+        if (table.tableName === 'page_view_state') {
+          let deleted = 0;
+          for (const [k, row] of storedRows.entries()) {
+            if (resolvedKeys.pvIds.includes(row.pvId)) {
+              storedRows.delete(k);
+              deleted += 1;
+            }
+          }
+          return { matchedRows: deleted, deletedRows: deleted };
+        }
+        return { matchedRows: 0, deletedRows: 0 };
+      },
+      async purgeExternalStore() {
+        return { deletedObjects: 0, status: 'expired_or_empty' };
+      },
+      async markRollupHoursDirty() {},
+      async notifyCustomerExportSinks() {
+        return [];
+      },
+    };
+
+    const deletionEngine = new DeletionExecutionEngine(strictAdapter, keyRegistry);
+    deletionEngine.scheduleRequest({
+      requestId: queuedReq.receiptId,
+      tenantId: queuedReq.tenantId,
+      siteId: queuedReq.siteId,
+      subjectKind: queuedReq.subjectKind as 'member_hash',
+      subjectHmac: queuedReq.subjectHmac,
+      subjectHmacCandidates: queuedReq.subject_hmac_candidates,
+      subjectHmacVersionedCandidates: queuedReq.subject_hmac_versioned_candidates,
+      requestedAtMs: queuedReq.requestedAtMs,
+    });
+    await deletionEngine.executeMaskPhase(queuedReq.receiptId, now + 61_000);
+    await deletionEngine.executePhysicalPurgePhase(queuedReq.receiptId, now + 62_000);
+    const cert = deletionEngine.issueCertificate(queuedReq.receiptId, now + 63_000);
+
+    // The historical (key_v1, digest_v1) row MUST be matched and erased!
+    expect(storedRows.size).toBe(0);
+    expect(cert.keyVersionsSearched).toEqual([1, 2]);
+  });
 });

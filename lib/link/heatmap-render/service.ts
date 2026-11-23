@@ -956,13 +956,17 @@ interface StoredArtifactEntry {
   readonly png_bytes: Uint8Array | null
   readonly deletion_epoch: number
   readonly build_seq: number
+  readonly mask_policy_epoch: number
 }
 
 interface InvalidatedArtifactTombstone {
   readonly tenant_id: string
   readonly site_id: string
   readonly page_url_key: string
-  readonly reason: 'artifact_invalidated_by_deletion' | 'artifact_invalidated_by_rebuild'
+  readonly reason:
+    | 'artifact_invalidated_by_deletion'
+    | 'artifact_invalidated_by_rebuild'
+    | 'artifact_invalidated_by_mask_correction'
 }
 
 export class HeatmapRenderService {
@@ -972,6 +976,8 @@ export class HeatmapRenderService {
   private readonly tenantRevocationEpochs = new Map<string, number>()
   private readonly deletionEpochs = new Map<string, number>() // tenant|site|url -> epoch
   private readonly buildSeqs = new Map<string, number>() // tenant|site|url -> seq
+  private readonly maskPolicyEpochs = new Map<string, number>() // tenant|site|url -> mask policy epoch
+  private readonly activeMaskPolicyHashes = new Map<string, string>() // tenant|site|url -> active mask policy hash
   private readonly artifactsById = new Map<string, StoredArtifactEntry>()
   private readonly artifactsByReproHash = new Map<string, StoredArtifactEntry>()
   private readonly invalidatedArtifactTombstones = new Map<string, InvalidatedArtifactTombstone>()
@@ -1054,11 +1060,29 @@ export class HeatmapRenderService {
     return nextSeq
   }
 
+  /**
+   * マスクポリシー訂正（redaction_boxes / OCRポリシー変更）時:
+   * maskPolicyEpoch を進め、当該ページの古い派生画像・キャッシュ・ID保持エントリを即時ゼロ埋め物理消去する (§11.12)。
+   */
+  invalidateOnMaskCorrection(tenantId: string, siteId: string, pageUrlOrKey: string): number {
+    const urlKey = pageUrlOrKey.includes('://')
+      ? computeUrlKeyV2(pageUrlOrKey).url_key_v2
+      : pageUrlOrKey
+    const pk = this.pageScopeKey(tenantId, siteId, urlKey)
+    const nextEpoch = (this.maskPolicyEpochs.get(pk) ?? 0) + 1
+    this.maskPolicyEpochs.set(pk, nextEpoch)
+    this.evictStaleArtifacts(tenantId, siteId, urlKey, 'artifact_invalidated_by_mask_correction')
+    return nextEpoch
+  }
+
   private evictStaleArtifacts(
     tenantId: string,
     siteId: string,
     urlKey: string,
-    reason: 'artifact_invalidated_by_deletion' | 'artifact_invalidated_by_rebuild',
+    reason:
+      | 'artifact_invalidated_by_deletion'
+      | 'artifact_invalidated_by_rebuild'
+      | 'artifact_invalidated_by_mask_correction',
   ): void {
     for (const [hash, entry] of this.artifactsByReproHash.entries()) {
       if (
@@ -1309,15 +1333,22 @@ export class HeatmapRenderService {
       })
     }
 
-    // Re-check deletion_epoch & build_seq on every fetch (and before pending job publish!)
+    // Re-check deletion_epoch, build_seq & mask_policy_epoch on every fetch (and before pending job publish!)
     const pk = this.pageScopeKey(entry!.tenant_id, entry!.site_id, entry!.page_url_key)
     const curDelEpoch = this.deletionEpochs.get(pk) ?? 0
     const curBuildSeq = this.buildSeqs.get(pk) ?? 1
-    if (entry!.deletion_epoch < curDelEpoch || entry!.build_seq < curBuildSeq) {
+    const curMaskEpoch = this.maskPolicyEpochs.get(pk) ?? 0
+    if (
+      entry!.deletion_epoch < curDelEpoch ||
+      entry!.build_seq < curBuildSeq ||
+      entry!.mask_policy_epoch < curMaskEpoch
+    ) {
       const reason =
         entry!.deletion_epoch < curDelEpoch
           ? 'artifact_invalidated_by_deletion'
-          : 'artifact_invalidated_by_rebuild'
+          : entry!.mask_policy_epoch < curMaskEpoch
+            ? 'artifact_invalidated_by_mask_correction'
+            : 'artifact_invalidated_by_rebuild'
       entry!.png_bytes?.fill(0)
       this.artifactsById.delete(params.artifact_id)
       this.invalidatedArtifactTombstones.set(params.artifact_id, {
@@ -1457,8 +1488,27 @@ export class HeatmapRenderService {
     this.principalActiveJobs.set(principal.principal_id, activeCount + 1)
     try {
       const pk = this.pageScopeKey(req.tenant_id, req.site_id, urlKey)
+      if (req.unit_datasets.some((d) => d.screenshot !== undefined)) {
+        const pageMaskPolicyHash = createHash('sha256')
+          .update(
+            JSON.stringify({
+              ocr_policy_version: HEATMAP_OCR_POLICY_VERSION,
+              redaction_boxes: canonicalizeRedactionBoxes(
+                req.unit_datasets.flatMap((d) => d.screenshot?.redaction_boxes ?? []),
+              ),
+            }),
+            'utf8',
+          )
+          .digest('hex')
+        const prevMaskPolicyHash = this.activeMaskPolicyHashes.get(pk)
+        if (prevMaskPolicyHash !== undefined && prevMaskPolicyHash !== pageMaskPolicyHash) {
+          this.invalidateOnMaskCorrection(req.tenant_id, req.site_id, urlKey)
+        }
+        this.activeMaskPolicyHashes.set(pk, pageMaskPolicyHash)
+      }
       const curDelEpoch = this.deletionEpochs.get(pk) ?? 0
       const curBuildSeq = this.buildSeqs.get(pk) ?? 1
+      const curMaskEpoch = this.maskPolicyEpochs.get(pk) ?? 0
 
       const allLimitations = new Set<string>()
       const artifacts: RenderedHeatmapUnitArtifact[] = []
@@ -1608,7 +1658,8 @@ export class HeatmapRenderService {
           cached &&
           cached.audience === principal.audience &&
           cached.deletion_epoch === curDelEpoch &&
-          cached.build_seq === curBuildSeq
+          cached.build_seq === curBuildSeq &&
+          cached.mask_policy_epoch === curMaskEpoch
         ) {
           artifacts.push(Object.freeze({ ...cached.artifact, cache_hit: true }))
           continue
@@ -1669,7 +1720,7 @@ export class HeatmapRenderService {
           limitations: [...allLimitations],
         })
 
-        const artifactId = `hm_${reproHash.slice(0, 16)}_${curDelEpoch}_${curBuildSeq}`
+        const artifactId = `hm_${reproHash.slice(0, 16)}_${curDelEpoch}_${curBuildSeq}_${curMaskEpoch}`
         const artifact: RenderedHeatmapUnitArtifact = Object.freeze({
           artifact_id: artifactId,
           unit_key: unitKeyStr,
@@ -1702,7 +1753,12 @@ export class HeatmapRenderService {
         // Re-check live generation before publishing to cache/store (§11.12)
         const postRenderDelEpoch = this.deletionEpochs.get(pk) ?? 0
         const postRenderBuildSeq = this.buildSeqs.get(pk) ?? 1
-        if (postRenderDelEpoch === curDelEpoch && postRenderBuildSeq === curBuildSeq) {
+        const postRenderMaskEpoch = this.maskPolicyEpochs.get(pk) ?? 0
+        if (
+          postRenderDelEpoch === curDelEpoch &&
+          postRenderBuildSeq === curBuildSeq &&
+          postRenderMaskEpoch === curMaskEpoch
+        ) {
           const entry: StoredArtifactEntry = {
             artifact,
             tenant_id: req.tenant_id,
@@ -1713,6 +1769,7 @@ export class HeatmapRenderService {
             png_bytes: rendered.png_bytes,
             deletion_epoch: curDelEpoch,
             build_seq: curBuildSeq,
+            mask_policy_epoch: curMaskEpoch,
           }
           this.artifactsById.set(artifactId, entry)
           this.artifactsByReproHash.set(cacheKey, entry)

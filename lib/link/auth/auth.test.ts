@@ -1251,6 +1251,22 @@ describe('lib/link/auth — Account Plane, 4 Key Kinds, OAuth 2.1, Risk Classes 
     if (!consume2.ok) expect(consume2.code).toBe('APPROVAL_ALREADY_CONSUMED');
   });
 
+  test('Wave 10 production DPoP requires an explicitly configured replay store', () => {
+    const env = jest.replaceProperty(process, 'env', { ...process.env, NODE_ENV: 'production' });
+    try {
+      const pair = crypto.generateKeyPairSync('ed25519');
+      const uri = 'https://example.test/metrics';
+      const proof = createDpopProofJwt({
+        alg: 'EdDSA', publicJwk: pair.publicKey.export({ format: 'jwk' }),
+        privateKey: pair.privateKey, htm: 'GET', htu: uri,
+      });
+      expect(verifyDpopProofJwt({ dpopProof: proof, httpMethod: 'GET', httpUri: uri }))
+        .toMatchObject({ ok: false, httpStatus: 503, code: 'DPOP_REPLAY_STORE_UNAVAILABLE' });
+    } finally {
+      env.restore();
+    }
+  });
+
   test('Wave 10 Regression (#2 Auth): shared DpopReplayStore blocks cross-instance jti replay and fails closed (503) on saturation without evicting unexpired entries', () => {
     const now = new Date('2026-11-20T12:00:00Z');
     const sharedStore = new InMemoryDpopReplayStore({ maxEntries: 2 });

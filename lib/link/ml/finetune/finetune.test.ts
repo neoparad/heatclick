@@ -5,6 +5,8 @@ import {
   InsufficientSplitComponentsError,
   JevTeacherProhibitedError,
   JevTrainingProhibitedError,
+  MissingPriorSplitAssignmentsError,
+  SplitContaminationConflictError,
   UnmanagedDestinationDeletionGuardError,
   adjudicateAndEvaluateLabelBatch,
   buildBlindAnnotationTask,
@@ -840,5 +842,88 @@ describe('Bundle 4-H: §8.14 Fine-Tuning Pipeline (Zero-Jev Provenance, 3-Way Sp
         priorSplitAssignments: allLockedNonEval,
       })
     ).toThrow(InsufficientSplitComponentsError);
+  });
+
+  test('[#23] rejects near-duplicate bridge across prior train & final_eval with SplitContaminationConflictError and enforces MissingPriorSplitAssignmentsError in strict rebuild mode', () => {
+    const batch1: CandidateTrainingExample[] = Array.from({ length: 6 }, (_, i) =>
+      makeCleanExample(950 + i, {
+        site_id: 'site_bridge_conflict',
+        page_lineage_id: `bridge_conflict_lin_${i}`,
+        public_text: `再構築テスト用の独立ドキュメント番号${i}。料金比較と導入ステップを詳しく解説しています。`,
+      })
+    );
+
+    const ds1 = buildThreeWayTrainingDataset({
+      examples: batch1,
+      scope: 'shared_adapter',
+      taskKind: 'section_reading',
+      seed: 'strict_rebuild_conflict_seed',
+    });
+
+    const priorTrainEx = ds1.train[0];
+    const priorEvalEx = ds1.final_eval[0];
+    expect(priorTrainEx).toBeDefined();
+    expect(priorEvalEx).toBeDefined();
+
+    // (a) Add a new near-duplicate example that shares priorEvalEx's page_lineage_id AND is a near-duplicate
+    //     of priorTrainEx's public_text — bridging the prior `train` and `final_eval` components!
+    //     MUST throw SplitContaminationConflictError and NEVER silently merge `final_eval` into `train`!
+    const bridgingNearDup = makeCleanExample(999, {
+      site_id: 'site_bridge_conflict',
+      page_lineage_id: priorEvalEx.page_lineage_id,
+      public_text: `${priorTrainEx.public_text}！`,
+    });
+
+    expect(() =>
+      buildThreeWayTrainingDataset({
+        examples: [...batch1, bridgingNearDup],
+        scope: 'shared_adapter',
+        taskKind: 'section_reading',
+        seed: 'strict_rebuild_conflict_seed',
+        priorSplitAssignments: ds1.splitAssignmentsByExample,
+        isRebuild: true,
+      })
+    ).toThrow(SplitContaminationConflictError);
+
+    // (b) Strict rebuild mode (`isRebuild: true`) MUST fail closed with MissingPriorSplitAssignmentsError
+    //     when `priorSplitAssignments` is omitted or empty!
+    expect(() =>
+      buildThreeWayTrainingDataset({
+        examples: batch1,
+        scope: 'shared_adapter',
+        taskKind: 'section_reading',
+        seed: 'strict_rebuild_conflict_seed',
+        isRebuild: true,
+      })
+    ).toThrow(MissingPriorSplitAssignmentsError);
+
+    expect(() =>
+      buildThreeWayTrainingDataset({
+        examples: batch1,
+        scope: 'shared_adapter',
+        taskKind: 'section_reading',
+        seed: 'strict_rebuild_conflict_seed',
+        priorSplitAssignments: new Map(),
+        isRebuild: true,
+      })
+    ).toThrow(MissingPriorSplitAssignmentsError);
+
+    // Non-bridging rebuild with `isRebuild: true` and valid `priorSplitAssignments` succeeds cleanly!
+    const cleanNewEx = makeCleanExample(998, {
+      site_id: 'site_bridge_conflict',
+      page_lineage_id: 'bridge_conflict_lin_clean_new',
+      public_text: '全く新しいセキュリティ認証と監査ログ保存ポリシーに関する専用ガイド本文です。',
+    });
+    const rebuilt = buildThreeWayTrainingDataset({
+      examples: [...batch1, cleanNewEx],
+      scope: 'shared_adapter',
+      taskKind: 'section_reading',
+      seed: 'strict_rebuild_conflict_seed',
+      priorSplitAssignments: ds1.splitAssignmentsByExample,
+      isRebuild: true,
+    });
+    expect(rebuilt.overlap_audit.passed).toBe(true);
+    expect(rebuilt.splitAssignmentsByExample.get(priorEvalEx.example_id)).toBe('final_eval');
+    expect(rebuilt.splitAssignmentsByExample.get(priorTrainEx.example_id)).toBe('train');
   });
 });

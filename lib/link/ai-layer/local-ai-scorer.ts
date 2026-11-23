@@ -725,8 +725,15 @@ export function computeGaussianLogDensity60(
       throw new Error(`Exact 60D Gaussian variance invalid at index ${i}`)
     }
     const diff = x[i] - centroid[i]
+    const term = (diff * diff) / vi
+    if (!Number.isFinite(term)) {
+      throw new Error(`Exact 60D Gaussian density overflow/NaN at index ${i}`)
+    }
     logDet += Math.log(vi)
-    mahalSq += (diff * diff) / vi
+    mahalSq += term
+    if (!Number.isFinite(mahalSq)) {
+      throw new Error(`Exact 60D Gaussian density overflow/NaN`)
+    }
   }
   const logDensity = -0.5 * dim * LOG_TWO_PI - 0.5 * logDet - 0.5 * mahalSq
   if (!Number.isFinite(logDensity) || !Number.isFinite(mahalSq)) {
@@ -820,12 +827,17 @@ export class LocalAiLikelihoodScorer {
       }
     }
 
-    const humanGauss = computeGaussianLogDensity60(
-      x,
-      this.config.human_centroid_60,
-      this.config.human_scale,
-      this.config.human_diagonal_vars_60,
-    )
+    let humanGauss: { readonly logDensity: number; readonly mahalanobisSq: number }
+    try {
+      humanGauss = computeGaussianLogDensity60(
+        x,
+        this.config.human_centroid_60,
+        this.config.human_scale,
+        this.config.human_diagonal_vars_60,
+      )
+    } catch {
+      return this.buildUnscorable(input.pv_id, 'gaussian_density_overflow:human')
+    }
     const logPHuman = humanGauss.logDensity
 
     const familyLrs: Record<string, number> = {}
@@ -833,12 +845,17 @@ export class LocalAiLikelihoodScorer {
     let topFamily: string | null = null
 
     for (const prof of this.config.family_profiles) {
-      const famGauss = computeGaussianLogDensity60(
-        x,
-        prof.centroid_60,
-        prof.scale,
-        prof.diagonal_vars_60,
-      )
+      let famGauss: { readonly logDensity: number; readonly mahalanobisSq: number }
+      try {
+        famGauss = computeGaussianLogDensity60(
+          x,
+          prof.centroid_60,
+          prof.scale,
+          prof.diagonal_vars_60,
+        )
+      } catch {
+        return this.buildUnscorable(input.pv_id, `gaussian_density_overflow:family:${prof.family_id}`)
+      }
       const logPFam = famGauss.logDensity
       const lr = Math.exp(Math.max(-60, Math.min(60, logPFam - logPHuman)))
       familyLrs[prof.family_id] = lr
@@ -849,6 +866,9 @@ export class LocalAiLikelihoodScorer {
     }
 
     const novelty = Math.sqrt(humanGauss.mahalanobisSq / BEHAVIORAL_STAT_COUNT)
+    if (!Number.isFinite(novelty) || !Number.isFinite(maxLr)) {
+      return this.buildUnscorable(input.pv_id, 'gaussian_score_non_finite')
+    }
     const autoLrThresh = this.config.automated_lr_threshold ?? 10
     const humanLrThresh = this.config.human_lr_threshold ?? 0.5
     const noveltyThresh = this.config.novelty_automated_threshold ?? 3.5

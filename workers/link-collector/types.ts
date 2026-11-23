@@ -60,8 +60,15 @@ export interface SiteKeyRegistration {
   readonly edgeHandoffMacKey?: string;
   readonly originAttestKey?: string;
   readonly tenantMemberHashKey: string;
+  /** Key version identifier for `tenantMemberHashKey` (Codex R3 #9). Defaults to `1`. */
+  readonly tenantMemberHashKeyVersion?: string | number;
   /** Previous rotated tenant member-hash keys retained for non-destructive subject erasure lookup (Codex R2 #9). */
   readonly rotatedMemberHashKeys?: readonly string[];
+  /** Previous rotated tenant member-hash keys paired with their explicit key versions (Codex R3 #9). */
+  readonly rotatedMemberHashKeyVersions?: readonly {
+    readonly keyVersion: string | number;
+    readonly secretKey: string;
+  }[];
   readonly urlRules?: UrlKeyV2Rules;
   /** 28-day same-hour baseline PVs/window for surge circuit breaker (§11.8). */
   readonly baseline28dHourVolume: number;
@@ -177,6 +184,16 @@ export interface LiveTailSinkLike {
   publishLiveFrame(event: LiveTailFrameEvent): Promise<void>;
 }
 
+export interface SubjectHmacVersionedCandidate {
+  readonly key_version: string;
+  readonly format:
+    | 'canonical_v1'
+    | 'legacy_value'
+    | 'legacy_kind_value'
+    | 'legacy_tenant_kind_value';
+  readonly hmac_hex: string;
+}
+
 export interface SubjectDeletionRequest {
   readonly receiptId: string;
   readonly tenantId: string;
@@ -190,6 +207,13 @@ export interface SubjectDeletionRequest {
   readonly subject_hmac_candidates: readonly string[];
   /** CamelCase alias of `subject_hmac_candidates` for ergonomic TypeScript consumption. */
   readonly subjectHmacCandidates: readonly string[];
+  /**
+   * Key-versioned HMAC lookup candidates pairing each historical key's `key_version`
+   * with the exact digests computed under THAT key (Codex R3 #9).
+   */
+  readonly subject_hmac_versioned_candidates?: readonly SubjectHmacVersionedCandidate[];
+  /** CamelCase alias of `subject_hmac_versioned_candidates`. */
+  readonly subjectHmacVersionedCandidates?: readonly SubjectHmacVersionedCandidate[];
   readonly requestedAtMs: number;
   readonly slaDays: 14;
 }
@@ -203,6 +227,8 @@ export interface SubjectDeletionSinkLike {
 export interface CollectorDeps {
   readonly sitesByPublishableKey: ReadonlyMap<string, SiteKeyRegistration>;
   readonly continuityTokenSecret: string;
+  /** Previous rotated continuity token secrets retained to verify in-flight `ugk_del_retry` cookies across secret rotation (Codex R3 #8). */
+  readonly rotatedContinuityTokenSecrets?: readonly string[];
   readonly labMarkerSecret: string;
   readonly mainQueue: QueueLike<PersistedCollectorRecord>;
   readonly r2SpillBucket: R2BucketLike;

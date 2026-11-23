@@ -826,4 +826,110 @@ describe('lib/link/store/reconciliation (Independent Closures ①–④)', () =>
       walReplayTombstonesRegistered: true,
     });
   });
+
+  test('Wave 11 Codex R3 #9: DeletionExecutionEngine pairs each key_version with ONLY its own versioned HMAC candidates in zero-plaintext mode', async () => {
+    const t0 = Date.UTC(2026, 10, 23, 12, 0, 0);
+    const digestV1 = computeTenantSubjectHmac('salt-v1', 'ten-v', 'visitor_id', 'vis-123');
+    const digestV2 = computeTenantSubjectHmac('salt-v2', 'ten-v', 'visitor_id', 'vis-123');
+
+    const reg = new TenantKeyVersionRegistry();
+    reg.registerKeyVersion({
+      tenantId: 'ten-v',
+      keyVersion: 1,
+      secretSalt: 'salt-v1',
+      status: 'draining',
+      activeRowCount: 1,
+      createdAtMs: t0 - 86_400_000,
+    });
+    reg.registerKeyVersion({
+      tenantId: 'ten-v',
+      keyVersion: 2,
+      secretSalt: 'salt-v2',
+      status: 'active',
+      activeRowCount: 1,
+      createdAtMs: t0,
+    });
+
+    const rows = new Map<string, { keyVersion: number; digest: string }>([
+      ['pv-old', { keyVersion: 1, digest: digestV1 }],
+    ]);
+
+    const seenKeyedDigests: Array<{ keyVersion: number; lookupCandidates: readonly string[] }> = [];
+    const adapter: DeletionStoreAdapter = {
+      async resolveSubjectKeys({ keyedDigests }) {
+        for (const kd of keyedDigests) {
+          seenKeyedDigests.push({
+            keyVersion: kd.keyVersion,
+            lookupCandidates: kd.lookupCandidates ?? [],
+          });
+        }
+        const matchedPvIds: string[] = [];
+        for (const [pvId, row] of rows.entries()) {
+          if (
+            keyedDigests.some(
+              (kd) =>
+                kd.keyVersion === row.keyVersion &&
+                (kd.hmacHex === row.digest || (kd.lookupCandidates ?? []).includes(row.digest))
+            )
+          ) {
+            matchedPvIds.push(pvId);
+          }
+        }
+        return {
+          visitorKeys: [],
+          sessionKeys: [],
+          pvIds: matchedPvIds,
+          reqUids: [],
+          unitIds: [],
+          touchedPvHoursMs: [],
+          matchedKeyVersions: [1],
+        };
+      },
+      async maskSubjectImmediate() {
+        return { ecMemberSummaryDeleted: 0, edgeCacheKeysPurged: 0 };
+      },
+      async purgeTable({ table, resolvedKeys }) {
+        if (table.tableName === 'page_view_state') {
+          let deleted = 0;
+          for (const pvId of resolvedKeys.pvIds) {
+            if (rows.delete(pvId)) deleted += 1;
+          }
+          return { matchedRows: deleted, deletedRows: deleted };
+        }
+        return { matchedRows: 0, deletedRows: 0 };
+      },
+      async purgeExternalStore() {
+        return { deletedObjects: 0, status: 'expired_or_empty' };
+      },
+      async markRollupHoursDirty() {},
+      async notifyCustomerExportSinks() {
+        return [];
+      },
+    };
+
+    const engine = new DeletionExecutionEngine(adapter, reg);
+    engine.scheduleRequest({
+      requestId: 'req-r3-9-versioned',
+      tenantId: 'ten-v',
+      siteId: 'site-v',
+      subjectKind: 'visitor_id',
+      subjectHmac: digestV2,
+      subjectHmacVersionedCandidates: [
+        { key_version: 'key_v2', format: 'canonical_v1', hmac_hex: digestV2 },
+        { key_version: 'key_v1', format: 'canonical_v1', hmac_hex: digestV1 },
+      ],
+      requestedAtMs: t0,
+    });
+    await engine.executeMaskPhase('req-r3-9-versioned', t0 + 1000);
+    await engine.executePhysicalPurgePhase('req-r3-9-versioned', t0 + 2000);
+    const cert = engine.issueCertificate('req-r3-9-versioned', t0 + 3000);
+
+    expect(rows.size).toBe(0);
+    expect(cert.keyVersionsSearched).toEqual([1, 2]);
+    // Verify v1 entry ONLY carries v1 digest and v2 entry ONLY carries v2 digest
+    const v1Entry = seenKeyedDigests.find((d) => d.keyVersion === 1)!;
+    const v2Entry = seenKeyedDigests.find((d) => d.keyVersion === 2)!;
+    expect(v1Entry.lookupCandidates).toEqual([digestV1]);
+    expect(v2Entry.lookupCandidates).toEqual([digestV2]);
+  });
 });

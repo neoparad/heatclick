@@ -662,6 +662,35 @@ export class InsufficientSplitComponentsError extends Error {
   }
 }
 
+export class SplitContaminationConflictError extends Error {
+  public readonly groupKey: string;
+  public readonly conflictingSplits: readonly SplitName[];
+  public readonly exampleIds: readonly string[];
+
+  constructor(
+    groupKey: string,
+    conflictingSplits: readonly SplitName[],
+    exampleIds: readonly string[]
+  ) {
+    super(
+      `SPLIT_CONTAMINATION_CONFLICT (groupKey=${groupKey}, splits=${conflictingSplits.join(',')}): Connected component bridges prior locked assignments across distinct splits; refusing silent merge (examples=${exampleIds.join(',')})`
+    );
+    this.name = 'SplitContaminationConflictError';
+    this.groupKey = groupKey;
+    this.conflictingSplits = conflictingSplits;
+    this.exampleIds = exampleIds;
+  }
+}
+
+export class MissingPriorSplitAssignmentsError extends Error {
+  constructor(
+    detail = 'isRebuild=true requires non-empty priorSplitAssignments to prevent cross-split leakage'
+  ) {
+    super(`MISSING_PRIOR_SPLIT_ASSIGNMENTS: ${detail}`);
+    this.name = 'MissingPriorSplitAssignmentsError';
+  }
+}
+
 /**
  * Builds a provenance-verified, poisoning-quarantined, deduplicated 3-way split dataset
  * (`train` / `select_tune` / `final_eval`, `[H-04]` / `[#23]`):
@@ -692,13 +721,24 @@ export function buildThreeWayTrainingDataset(params: {
    * Persistent split assignments from prior dataset builds (`[#23]`).
    * Keys may be component `groupKey` (`splitAssignmentsByComponent`), `page_lineage_id`, or `example_id`
    * (`splitAssignmentsByExample`). Every previously assigned component/example is strictly locked to its
-   * original split so a prior `train` or `select_tune` example can NEVER migrate into `final_eval`.
+   * original split so a prior `train` or `select_tune` example can NEVER migrate into `final_eval`,
+   * and bridging two distinct prior splits immediately throws `SplitContaminationConflictError`.
    */
   readonly priorSplitAssignments?: ReadonlyMap<string, SplitName>;
+  /**
+   * Strict rebuild mode (`[#23]`): when `true`, `priorSplitAssignments` MUST be provided and non-empty
+   * or the builder fails closed with `MissingPriorSplitAssignmentsError`.
+   */
+  readonly isRebuild?: boolean;
   readonly ratios?: { readonly train: number; readonly select_tune: number; readonly final_eval: number };
 }): ThreeWayDatasetBuildResult {
   // 0. [H-04]: Run D-31b Jev provenance check FIRST on ALL raw examples (even if text looks like poisoning!)
   assertZeroJevProvenanceFirst(params.examples);
+
+  // 0b. [#23]: Strict rebuild mode MUST provide non-empty priorSplitAssignments (fail closed!)
+  if (params.isRebuild === true && (!params.priorSplitAssignments || params.priorSplitAssignments.size === 0)) {
+    throw new MissingPriorSplitAssignmentsError();
+  }
 
   // 1. Quarantine suspected poisoning / prompt-injection examples BEFORE splitting (§8.14)
   const quarantinedPoisoningIds: string[] = [];
@@ -829,15 +869,9 @@ export function buildThreeWayTrainingDataset(params: {
     components.set(r, list);
   }
 
-  // [#23] Fail closed if fewer than 3 independent connected components exist for a 3-way split!
-  if (components.size < 3) {
-    throw new InsufficientSplitComponentsError(
-      components.size,
-      'At least 3 disjoint connected components are required to populate train, select_tune, and final_eval'
-    );
-  }
-
   // 4. Assign each connected component atomically to ONE split, locking any prior assignments (`[#23]`)!
+  //    Detect conflicting prior-split bridges BEFORE checking component count so a bridge that collapses
+  //    3 components into 2 still fails explicitly with SplitContaminationConflictError!
   const ratios = params.ratios ?? { train: 0.6, select_tune: 0.2, final_eval: 0.2 };
   const priorSplits = params.priorSplitAssignments;
   const componentList = Array.from(components.entries()).map(([compRoot, indices]) => {
@@ -867,21 +901,28 @@ export function buildThreeWayTrainingDataset(params: {
         const byLin = priorSplits.get(ex.page_lineage_id);
         if (byLin) matchedPrior.add(byLin);
       }
-      if (matchedPrior.size > 0) {
+      if (matchedPrior.size > 1) {
+        // [#23] NEVER silently merge distinct prior splits (e.g. final_eval into train) — fail closed!
+        const sortedSplits = Array.from(matchedPrior).sort() as SplitName[];
+        const compExampleIds = indices.map((idx) => weightedExamples[idx].example_id).sort();
+        throw new SplitContaminationConflictError(groupKey, sortedSplits, compExampleIds);
+      }
+      if (matchedPrior.size === 1) {
         locked = true;
-        // Never allow a prior `train` or `select_tune` component to contaminate `final_eval`!
-        if (matchedPrior.has('train')) {
-          initialSplit = 'train';
-        } else if (matchedPrior.has('select_tune')) {
-          initialSplit = 'select_tune';
-        } else {
-          initialSplit = 'final_eval';
-        }
+        initialSplit = Array.from(matchedPrior)[0];
       }
     }
 
     return { compRoot, indices, groupKey, hashU, split: initialSplit, locked };
   });
+
+  // [#23] Fail closed if fewer than 3 independent connected components exist for a 3-way split!
+  if (components.size < 3) {
+    throw new InsufficientSplitComponentsError(
+      components.size,
+      'At least 3 disjoint connected components are required to populate train, select_tune, and final_eval'
+    );
+  }
 
   // Ensure every split receives at least 1 atomic component when components.size >= 3,
   // moving ONLY unlocked (newly arrived) components so prior assignments are NEVER mutated (`[#23]`)!

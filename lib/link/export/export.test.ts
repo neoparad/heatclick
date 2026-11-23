@@ -944,7 +944,8 @@ describe('lib/link/export/self-serve-billing (§11.11 #1 & #7)', () => {
       `'a'.repeat(509) + '\\uD83D\\uDE80' + 'x'.repeat(20)`,
     ];
 
-    for (const expr of payloads) {
+    const expected = ['a'.repeat(510) + '\u00e9', 'a'.repeat(511), 'a'.repeat(510), 'a'.repeat(509)];
+    for (const [index, expr] of payloads.entries()) {
       const res = executeDestinationFunctionSandboxed({
         code: `function transform() { throw new Error(${expr}); }`,
         eventInput: {},
@@ -953,6 +954,7 @@ describe('lib/link/export/self-serve-billing (§11.11 #1 & #7)', () => {
       expect(res.error).toBeDefined();
       expect(Buffer.byteLength(res.error!, 'utf8')).toBeLessThanOrEqual(512);
       expect(res.error!).not.toContain('\uFFFD');
+      expect(res.error).toBe(expected[index]);
     }
   });
 });

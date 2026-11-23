@@ -272,7 +272,8 @@ export type DpopVerifyResult =
 export function verifyDpopProofJwt(options: DpopVerifyOptions): DpopVerifyResult {
   const now = options.now ?? new Date();
   const maxSkew = options.maxClockSkewSec ?? DPOP_DEFAULT_MAX_SKEW_SEC;
-  const replayStore = options.replayStore ?? options.replayCache ?? DEFAULT_DPOP_REPLAY_STORE;
+  const replayStore = options.replayStore ?? options.replayCache ??
+    (process.env.NODE_ENV === 'production' ? undefined : DEFAULT_DPOP_REPLAY_STORE);
 
   const raw = options.dpopProof.trim();
   const parts = raw.split('.');
@@ -441,6 +442,10 @@ export function verifyDpopProofJwt(options: DpopVerifyOptions): DpopVerifyResult
 
   // Atomic JTI replay check (recorded only after all stateless checks pass; fails closed on saturation)
   const expiresAtMs = Math.max((iat + maxSkew + 1) * 1000, now.getTime() + 1_000);
+  if (!replayStore) {
+    return { ok: false, httpStatus: 503, code: 'DPOP_REPLAY_STORE_UNAVAILABLE',
+      reason: 'A shared DPoP replay store is required in production' };
+  }
   const claim = replayStore.claimJti(jti, expiresAtMs, now.getTime());
   if (!claim.ok) {
     if (claim.reason === 'saturated') {
@@ -744,7 +749,7 @@ export class IdentityKeyRegistry {
 
   private readonly publicKeySigningPairs = new Map<string, Ed25519KeyPair>();
   private readonly oemSigningPair: Ed25519KeyPair;
-  private readonly dpopReplayStore: DpopReplayStore;
+  private readonly dpopReplayStore?: DpopReplayStore;
 
   constructor(options: {
     readonly pepperVersion: string;
@@ -758,7 +763,8 @@ export class IdentityKeyRegistry {
     const pubPair = options.publicKeySigningPair ?? generateEd25519KeyPair('v1');
     this.publicKeySigningPairs.set(pubPair.kid, pubPair);
     this.oemSigningPair = options.oemSigningPair ?? generateEd25519KeyPair('oem_v1');
-    this.dpopReplayStore = options.dpopReplayStore ?? new InMemoryDpopReplayStore();
+    this.dpopReplayStore = options.dpopReplayStore ??
+      (process.env.NODE_ENV === 'production' ? undefined : new InMemoryDpopReplayStore());
   }
 
   // ---- Pepper & Org/Tenant/Site/Principal Registration ----

@@ -854,4 +854,61 @@ describe('workers/link-wal', () => {
     }
     deleteSpy.mockRestore();
   });
+
+  test('Wave 11 Codex R3 #12: ExportSinkPort requires idempotencyKey and LinkPlusExportStorageAdapter honors legacy receipt key on re-delivery', async () => {
+    const t0 = Date.UTC(2026, 10, 23, 15, 0, 0);
+    const primaryBucket = new InMemoryR2Bucket();
+    const receiptBucket = new InMemoryR2Bucket();
+    const exportSink = new InMemoryExportSink('customer-gcs-jp-legacy', 'jp');
+
+    // First compute the exact WAL key that WalWriter will produce by running against a scratch bucket
+    const scratchBucket = new InMemoryR2Bucket();
+    const scratchWriter = new WalWriter({ region: 'jp', bucket: scratchBucket });
+    const payload = makeQueuePayload(makeValidFrame({ seq: 0 }), { received_at_ms: t0 });
+    const scratchRes = await scratchWriter.consumeBatch([payload], t0);
+    const walKey = scratchRes.walKeys[0]!;
+
+    // Pre-seed a LEGACY receipt key (`export-receipts/{region}/{tenantId}/{siteId}/{sha256Hex(walKey)}.json`)
+    const legacyReceiptKey = `export-receipts/jp/tenant-alpha/site-main/${sha256Hex(walKey)}.json`;
+    await receiptBucket.put(
+      legacyReceiptKey,
+      JSON.stringify({
+        exportBatchId: 'legacy-batch-1',
+        sinkId: exportSink.sinkId,
+        region: 'jp',
+        walKey,
+        tenantIds: ['tenant-alpha'],
+        deletionEpoch: 1,
+        exportedAtMs: t0 - 60_000,
+      })
+    );
+
+    const tier2Adapter = new LinkPlusExportStorageAdapter(
+      primaryBucket,
+      exportSink,
+      'jp',
+      undefined,
+      receiptBucket
+    );
+    const writer = new WalWriter({ region: 'jp', adapter: tier2Adapter, deletionEpoch: 2 });
+
+    // Re-delivery MUST detect the legacy receipt and SKIP re-exporting!
+    const res = await writer.consumeBatch([payload], t0);
+    expect(res.walKeys).toEqual([walKey]);
+    expect(res.exportReceipts).toHaveLength(0);
+    expect(exportSink.receipts).toHaveLength(0);
+    expect(exportSink.seenIdempotencyKeys).toHaveLength(0);
+
+    // Runtime check: ExportSinkPort.writeExportBatch rejects missing/empty idempotencyKey
+    await expect(
+      exportSink.writeExportBatch({
+        walKey,
+        body: '{}',
+        tenantIds: ['tenant-alpha'],
+        deletionEpoch: 2,
+        exportedAtMs: t0,
+        idempotencyKey: '',
+      })
+    ).rejects.toThrow(/idempotencyKey/i);
+  });
 });

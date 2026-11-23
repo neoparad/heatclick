@@ -22,8 +22,8 @@
   - `.env*` ファイルの読み取り・改変・コミット 0 件（新規環境変数 34 件の名称と用途のみ `env.example` に追記）。
   - 未追跡作業資料 `docs/proposals/2026-11-19-ugokilink-v2-working/` は `.git/info/exclude` により保護・未コミット・実行時参照 0 件。
   - **Jev 出力の学習・重み・蒸留先生利用は一切実装せず、決定 31-b による永久禁止をコードと深さ無制限の機械検査で固定**。
-- **最終検証結果サマリー（Wave 9 Codex 30 件是正後）**:
-  - **UGOKI LINK v2 全 Jest テスト**: **56 スイート / 1,122 テスト全 PASS（失敗 0・保留 0）**
+- **最終検証結果サマリー（Wave 11 Codex 協働 3 ラウンド完全是正後）**:
+  - **UGOKI LINK v2 全 Jest テスト**: **56 スイート / 1,154 テスト全 PASS（失敗 0・保留 0）**
   - **Node テスト**: `scripts/link/inspect-prod-baseline.test.mjs` **9/9 PASS**、既存 `workers/event-ingest` **101/101 PASS**
   - **型検査 (`npm run type-check`)**: **0 エラー（exit 0）**
   - **本番ビルド (`npm run build`)**: **成功（exit 0、静的 60 ページ ＋ `/api/v1/**` 全 20 ルート［`OPERATION_CATALOG` 26 操作と 1:1 完全一致］すべてビルド完了）**
@@ -164,7 +164,7 @@
 
 | 検証種別 | コマンド | 結果 | 備考 |
 |---|---|---|---|
-| **UGOKI LINK v2 全 Jest（Wave 9 是正後）** | `npx jest packages/contract packages/sdk-* packages/wp-plugin workers/link-* lib/link middleware.classify.test.ts __tests__/api-utils.test.ts app/api/scenarios/runtime/route.test.ts tests/unit/wave0-no-dummy-and-tenant-guard.test.ts tests/unit/ugokilink-v2-integration.test.ts` | **56/56 スイート・1,122/1,122 テスト PASS** | 失敗 0・**保留 0**（Wave 8 +131件 ＋ Wave 9 +33件回帰テスト追加済） |
+| **UGOKI LINK v2 全 Jest（Wave 11 是正後）** | `npx jest packages/contract packages/sdk-* packages/wp-plugin workers/link-* lib/link middleware.classify.test.ts __tests__/api-utils.test.ts app/api/scenarios/runtime/route.test.ts tests/unit/wave0-no-dummy-and-tenant-guard.test.ts tests/unit/ugokilink-v2-integration.test.ts` | **56/56 スイート・1,154/1,154 テスト PASS** | 失敗 0・**保留 0**（Wave 8–11 +196 件回帰テスト追加済） |
 | **既存連携回帰 Jest** | `npx jest --runTestsByPath lib/ml/pragmatic-ml-engine.test.ts lib/heatmap/agent-heatmap-client.test.ts` | **2/2 スイート・10/10 テスト PASS** | 分離リファクタ後回帰 0 |
 | **0-C 本番記録 Node 試験** | `node --test scripts/link/inspect-prod-baseline.test.mjs` | **9/9 PASS** | `.env*` 非参照・SELECT/SHOW 限定確認 |
 | **既存 Worker 回帰試験** | `npm test --prefix workers/event-ingest` | **101/101 PASS** | 既存稼働 Worker 無破壊確認 |

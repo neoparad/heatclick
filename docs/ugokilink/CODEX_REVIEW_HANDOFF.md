@@ -201,3 +201,26 @@ Codex 第 2 回レビューで残存指摘された 20 件（一部修正 14 件
 - **#25**: `R4` 削除認可を副作用ゼロ化し、冪等キャッシュ照会・レート制限通過後の `commitR4Destruction()` でのみ予約登録・承認消費を実行
 - **#26**: Worker 内エラー切詰めを UTF-8 コードポイント完全境界（継続バイト＋未完結先頭バイト双方を巻き戻し）に修正
 - **#28 / #29**: Wilson 分子の符号を `[0, piMax]` 切詰め前まで保持して負の有病率不整合を `assumption_inconsistent` 検知、ガウス派生分散 `scale * scale` のアンダーフロー/オーバーフローを `scorable: false` で遮断
+
+
+---
+
+## 9. Wave 11: Codex 直接修正 3 件取込 ＋ 最終残存 10 件の完全是正
+
+Codex 第 3 回レビューでの直接修正 3 件（`#2`, `#20`, `#26`）を取り込んだ上で、残存した最終 10 件（`#6`, `#7`, `#8`, `#9`, `#10`, `#12`, `#17`, `#19`, `#23`, `#29`）をすべて修正・回帰テスト追加し、全 **56/56 Jest スイート（1,154 テスト）・`inspect-prod-baseline`（9/9）・`event-ingest`（101/101）・`npm run type-check`（0 エラー）・`npm run build`（exit 0）** を確認済み：
+
+- **Codex 直接修正（取込済）**:
+  - **#2**: 本番経路で共有 `DpopReplayStore` 未接続時は `503` fail-closed（`lib/link/auth/keys.ts`）
+  - **#20**: 極端重み比 `[1e16, 1, 1]` の桁落ち回避（`lib/link/models/recommend/recommender.ts`）
+  - **#26**: 512 バイトちょうどに収まる末尾マルチバイト文字保持（`lib/link/export/destination-functions.ts`）
+- **Wave 11 最終 10 件是正**:
+  - **#6**: WP PHP/TS 双方で引用符なし属性値（`<a href=https://example.com/path/>`）の末尾 `/` をタグ終端として除去しないよう修正
+  - **#7**: WP `in_progress` ジャーナルへ `lease_token`・`lease_expires_at_ms` を導入（有効リース中は `409 command_in_flight` で保護）、PHP `rollbackLastSeqIfMatches()` を単一条件付き SQL `UPDATE ... WHERE option_name = %s AND option_value = %s` + `wp_cache_delete` 化
+  - **#8**: `ugk_del_retry` Cookie を `[continuityTokenSecret, ...rotatedContinuityTokenSecrets]` で検証
+  - **#9**: `/v1/optout` 受付時に `(key_version, format, hmac_hex)` 版付き候補をキュー保存し、`DeletionExecutionEngine` が各鍵版ごとに厳密照合
+  - **#10**: `ShardLoader.deletePvs()` 自体が削除印をバケットへ永続化し、`persistTombstonesToBucket()` を `onlyIf: { etagMatches }` CAS read-merge-write リトライ化
+  - **#12**: `ExportSinkPort.writeExportBatch` の `idempotencyKey` を必須化し、新・旧両形式の受領キーを照会
+  - **#17**: 初回セッション含む全グループ行で `cohortMemberIds` 必須化、`deferCommit: true` により最終回答数値検証＆封筒構築成功後のみ RREF 履歴を原子コミット
+  - **#19**: マスク領域・OCR ポリシー変更時に旧 `artifact_id` を即時失効（`png_bytes` ゼロ埋め＋`410 artifact_invalidated_by_mask_correction`）
+  - **#23**: 近重複が既存の異なる分割（例: `train` と `final_eval`）を橋渡しした場合は `SplitContaminationConflictError` で即拒否、`isRebuild: true` 時は `priorSplitAssignments` 必須化
+  - **#29**: `scale=1e-160` 等による `(diff * diff) / variance` オーバーフローを個別観測単位で捕捉し `scoreBatch` を落とさず該当 PV のみ `scorable: false` 化

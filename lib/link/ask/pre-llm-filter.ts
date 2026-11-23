@@ -999,6 +999,8 @@ export function filterQueryAndRowsBeforeLlm(params: {
   readonly skipWindowCheck?: boolean;
   readonly predeclaredCohortMemberIds?: ReadonlyArray<string>;
   readonly requireCohortMembership?: boolean;
+  readonly requireMembershipForGroupedRows?: boolean;
+  readonly deferCommit?: boolean;
   readonly differencingGuard: DifferencingGuard;
   readonly minCellK?: number;
 }): PreLlmFilterVerdict {
@@ -1128,6 +1130,8 @@ export function filterQueryAndRowsBeforeLlm(params: {
   //    Complementary secondary suppression on GROUP BY results.
   //    (Compute the exact set of disclosed rows FIRST so we feed pre-query + every disclosed row +
   //     total into atomic batch RREF differencing without ever committing suppressed rows.)
+  const isGroupedQuery = params.groupByColumns.length > 0 || params.rows.length > 1;
+  const requireMembershipForGroupedRows = params.requireMembershipForGroupedRows !== false;
   const hasCohortHistory = params.differencingGuard.hasCohortHistory(params.sessionKey);
   const hasPredeclaredCohort =
     params.predeclaredCohortMemberIds !== undefined &&
@@ -1140,6 +1144,9 @@ export function filterQueryAndRowsBeforeLlm(params: {
     hasCohortHistory ||
     hasPredeclaredCohort ||
     anyRowHasCohortIds;
+  const mustEnforceGroupedMembership =
+    (isGroupedQuery && requireMembershipForGroupedRows) ||
+    (rrefActive && params.groupByColumns.length > 0);
 
   const disclosedWithCohorts: Array<{
     readonly safeRow: AggregateQueryRow;
@@ -1160,11 +1167,10 @@ export function filterQueryAndRowsBeforeLlm(params: {
       primarySuppressedCount += 1;
       continue;
     }
-    // When RREF / differencing protection is active on grouped rows, EVERY non-suppressed
-    // disclosed row MUST carry cohortMemberIds — never release an unchecked grouped row!
+    // Always enforce mandatory cohortMemberIds on grouped rows (even on a brand-new session
+    // with zero prior history and no pre-declared cohort) unless explicitly opted out.
     if (
-      rrefActive &&
-      params.groupByColumns.length > 0 &&
+      mustEnforceGroupedMembership &&
       (!row.cohortMemberIds || row.cohortMemberIds.length === 0)
     ) {
       missingMembershipSuppressedCount += 1;
@@ -1189,7 +1195,7 @@ export function filterQueryAndRowsBeforeLlm(params: {
   // could recover that single suppressed cell by subtracting all remaining sibling cells. Suppress
   // the next-smallest sibling cell (`unitCount`, tie-broken by `|metricValue|` then `bucketLabel`)!
   if (
-    params.groupByColumns.length > 0 &&
+    isGroupedQuery &&
     primarySuppressedCount === 1 &&
     disclosedWithCohorts.length >= 1
   ) {
@@ -1293,12 +1299,25 @@ export function filterQueryAndRowsBeforeLlm(params: {
     }
   }
 
-  // 8. Entire Ask disclosure approved: atomically commit window + cohort batch equations!
-  if (pendingWindowCheck) {
-    params.differencingGuard.checkAndRecordWindow(pendingWindowCheck, { commit: true });
-  }
-  if (batchEntries.length > 0) {
-    params.differencingGuard.checkAndRecordBatch(params.sessionKey, batchEntries, { commit: true });
+  // 8. Entire Ask disclosure approved: build idempotent atomic commit callback for window + cohort
+  //    batch equations. When `deferCommit: true`, caller MUST invoke `commitDisclosureHistory()`
+  //    ONLY after final answer validation (`verifyAnswerNumericReferences` / `buildResponseEnvelope`).
+  let committed = false;
+  const commitDisclosureHistory = (): void => {
+    if (committed) return;
+    committed = true;
+    if (pendingWindowCheck) {
+      params.differencingGuard.checkAndRecordWindow(pendingWindowCheck, { commit: true });
+    }
+    if (batchEntries.length > 0) {
+      params.differencingGuard.checkAndRecordBatch(params.sessionKey, batchEntries, {
+        commit: true,
+      });
+    }
+  };
+
+  if (!params.deferCommit) {
+    commitDisclosureHistory();
   }
 
   return {
@@ -1306,6 +1325,7 @@ export function filterQueryAndRowsBeforeLlm(params: {
     safeRows,
     suppressedCount,
     secondarySuppressedCount,
+    commitDisclosureHistory,
   };
 }
 

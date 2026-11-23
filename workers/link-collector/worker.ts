@@ -32,11 +32,14 @@ import type {
   LabMarkerToken,
   QueueLike,
   SubjectDeletionRequest,
+  SubjectHmacVersionedCandidate,
 } from './types';
 
 export interface CollectorWorkerDeps extends CollectorDeps {
   readonly customEventQueue: QueueLike<CustomEventPersistedRecord>;
 }
+
+export type CollectorWorkerDependencies = CollectorWorkerDeps;
 
 function parseLabMarkerHeader(headerVal: string | null): LabMarkerToken | null {
   if (!headerVal) return null;
@@ -106,7 +109,7 @@ function verifyDeletionRetryHandle(args: {
   readonly token: string;
   readonly expectedTenantId: string;
   readonly expectedSiteId: string;
-  readonly signingSecret: string;
+  readonly signingSecrets: readonly string[];
   readonly nowMs: number;
 }): string | null {
   const dot = args.token.indexOf('.');
@@ -115,8 +118,16 @@ function verifyDeletionRetryHandle(args: {
   const providedSig = args.token.slice(dot + 1);
   if (payloadB64.length === 0 || providedSig.length === 0) return null;
 
-  const expectedSig = hmacSha256Hex(args.signingSecret, `ugk_del_retry:v1:${payloadB64}`);
-  if (!constantTimeHexEqual(providedSig, expectedSig)) return null;
+  let signatureValid = false;
+  for (const secret of args.signingSecrets) {
+    if (!secret) continue;
+    const expectedSig = hmacSha256Hex(secret, `ugk_del_retry:v1:${payloadB64}`);
+    if (constantTimeHexEqual(providedSig, expectedSig)) {
+      signatureValid = true;
+      break;
+    }
+  }
+  if (!signatureValid) return null;
 
   const decoded = base64UrlDecodeUtf8(payloadB64);
   if (!decoded) return null;
@@ -199,13 +210,33 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
         const cookieHeader = request.headers.get('cookie');
         const cookieVid = extractCookieValue(cookieHeader, 'ugk_vid');
         const retrySigningSecret = `${deps.continuityTokenSecret}:${site.tenantMemberHashKey}`;
+        // Codex R3 #8: Verify ugk_del_retry across current + rotated continuity secrets
+        // (and current + rotated tenant member-hash keys) so secret rotation never strands retries.
+        const continuitySecretsForRetry = [
+          deps.continuityTokenSecret,
+          ...(deps.rotatedContinuityTokenSecrets ?? []),
+        ];
+        const memberKeysForRetry = [
+          site.tenantMemberHashKey,
+          ...(site.rotatedMemberHashKeyVersions?.map((k) => k.secretKey) ?? []),
+          ...(site.rotatedMemberHashKeys ?? []),
+        ];
+        const retryVerificationSecrets: string[] = [];
+        for (const cs of continuitySecretsForRetry) {
+          for (const mk of memberKeysForRetry) {
+            const combined = `${cs}:${mk}`;
+            if (!retryVerificationSecrets.includes(combined)) {
+              retryVerificationSecrets.push(combined);
+            }
+          }
+        }
         const rawDelRetryCookie = extractCookieValue(cookieHeader, DELETION_RETRY_COOKIE_NAME);
         const verifiedRetryVid = rawDelRetryCookie
           ? verifyDeletionRetryHandle({
               token: rawDelRetryCookie,
               expectedTenantId: site.tenantId,
               expectedSiteId: site.siteId,
-              signingSecret: retrySigningSecret,
+              signingSecrets: retryVerificationSecrets,
               nowMs: now,
             })
           : null;
@@ -256,12 +287,41 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
               secretKey: site.tenantMemberHashKey,
             })
           : null;
-        // Codex R2 #9: Precompute canonical + legacy HMAC lookup candidates across
-        // current + rotated tenant keys at intake time so downstream deletion needs ZERO plaintext!
-        const secretKeysForCandidates = [
-          site.tenantMemberHashKey,
-          ...(site.rotatedMemberHashKeys ?? []),
+        // Codex R2 #9 & R3 #9: Precompute canonical + legacy HMAC lookup candidates across
+        // current + rotated tenant keys at intake time, preserving exact per-key-version
+        // pairing so downstream deletion matches (key_version, hmac_hex) with ZERO plaintext!
+        const versionedKeysForCandidates: Array<{
+          readonly keyVersion: string;
+          readonly secretKey: string;
+        }> = [
+          {
+            keyVersion: String(site.tenantMemberHashKeyVersion ?? 1),
+            secretKey: site.tenantMemberHashKey,
+          },
         ];
+        const seenSecretKeys = new Set<string>([site.tenantMemberHashKey]);
+        for (const entry of site.rotatedMemberHashKeyVersions ?? []) {
+          if (entry.secretKey && !seenSecretKeys.has(entry.secretKey)) {
+            seenSecretKeys.add(entry.secretKey);
+            versionedKeysForCandidates.push({
+              keyVersion: String(entry.keyVersion),
+              secretKey: entry.secretKey,
+            });
+          }
+        }
+        let fallbackRotatedIdx = 0;
+        for (const rotatedKey of site.rotatedMemberHashKeys ?? []) {
+          if (rotatedKey && !seenSecretKeys.has(rotatedKey)) {
+            seenSecretKeys.add(rotatedKey);
+            fallbackRotatedIdx += 1;
+            versionedKeysForCandidates.push({
+              keyVersion: `rotated_${fallbackRotatedIdx}`,
+              secretKey: rotatedKey,
+            });
+          }
+        }
+
+        const secretKeysForCandidates = versionedKeysForCandidates.map((k) => k.secretKey);
         const subjectHmacCandidates =
           rawSubject && subjectKind !== 'optout_cookie'
             ? computeSubjectHmacLookupCandidates({
@@ -271,6 +331,41 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
                 secretKeys: secretKeysForCandidates,
               })
             : [];
+        const subjectHmacVersionedCandidates: SubjectHmacVersionedCandidate[] = [];
+        if (rawSubject && subjectKind !== 'optout_cookie') {
+          for (const { keyVersion, secretKey } of versionedKeysForCandidates) {
+            subjectHmacVersionedCandidates.push(
+              {
+                key_version: keyVersion,
+                format: 'canonical_v1',
+                hmac_hex: computeCanonicalSubjectHmac({
+                  tenantId: site.tenantId,
+                  subjectKind,
+                  subjectValue: rawSubject,
+                  secretKey,
+                }),
+              },
+              {
+                key_version: keyVersion,
+                format: 'legacy_value',
+                hmac_hex: hmacSha256Hex(secretKey, rawSubject),
+              },
+              {
+                key_version: keyVersion,
+                format: 'legacy_kind_value',
+                hmac_hex: hmacSha256Hex(secretKey, `${subjectKind}:${rawSubject}`),
+              },
+              {
+                key_version: keyVersion,
+                format: 'legacy_tenant_kind_value',
+                hmac_hex: hmacSha256Hex(
+                  secretKey,
+                  `${site.tenantId}:${subjectKind}:${rawSubject}`
+                ),
+              }
+            );
+          }
+        }
         const generatedReceiptId = `del_${sha256Hex(
           `${site.tenantId}:${site.siteId}:${subjectKind}:${subjectHmac ?? 'anon'}:${now}`
         ).slice(0, 24)}`;
@@ -283,6 +378,8 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
           subjectHmac,
           subject_hmac_candidates: subjectHmacCandidates,
           subjectHmacCandidates,
+          subject_hmac_versioned_candidates: subjectHmacVersionedCandidates,
+          subjectHmacVersionedCandidates,
           requestedAtMs: now,
           slaDays: 14,
         };

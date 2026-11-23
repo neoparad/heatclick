@@ -316,9 +316,25 @@ export class EvalGroundTruthExecutor implements AskDataExecutor {
     }
 
     if (params.viewName === 'v_pub_segment_agg') {
+      const desktopMembers = Array.from({ length: 15 }, (_, idx) => `seg_desktop_u_${idx}`);
+      const mobileMembers = Array.from({ length: 15 }, (_, idx) => `seg_mobile_u_${idx}`);
       const rows: AggregateQueryRow[] = [
-        { bucketLabel: 'seg_desktop', unitCount: 800, metricKey: 'page_views', metricValue: 800, unit: 'page_views' },
-        { bucketLabel: 'seg_mobile', unitCount: 400, metricKey: 'page_views', metricValue: 400, unit: 'page_views' },
+        {
+          bucketLabel: 'seg_desktop',
+          unitCount: 800,
+          metricKey: 'page_views',
+          metricValue: 800,
+          unit: 'page_views',
+          cohortMemberIds: desktopMembers,
+        },
+        {
+          bucketLabel: 'seg_mobile',
+          unitCount: 400,
+          metricKey: 'page_views',
+          metricValue: 400,
+          unit: 'page_views',
+          cohortMemberIds: mobileMembers,
+        },
       ];
       return {
         connected: true,
@@ -337,6 +353,7 @@ export class EvalGroundTruthExecutor implements AskDataExecutor {
       reach_rate: { val: 0.72, unit: 'ratio' },
     };
     const m = metricMap[params.metricName] ?? { val: 1200, unit: 'page_views' };
+    const viewMembers = Array.from({ length: 15 }, (_, idx) => `${params.viewName}_u_${idx}`);
     const rows: AggregateQueryRow[] = [
       {
         bucketLabel: '2026-11-20',
@@ -344,6 +361,7 @@ export class EvalGroundTruthExecutor implements AskDataExecutor {
         metricKey: params.metricName,
         metricValue: m.val,
         unit: m.unit,
+        cohortMemberIds: viewMembers,
       },
     ];
     return {

@@ -40,6 +40,7 @@ final class UgokiLink_Companion_Plugin
     public const OPTION_BOUND_SITE_ID = 'ugk_bound_site_id';
     public const OPTION_LAST_SEQ = 'ugk_last_command_seq';
     public const OPTION_PENDING_JOURNAL = 'ugk_pending_command_journal';
+    public const PENDING_COMMAND_LEASE_MS = 30000;
     public const OPTION_MANIFEST_JSON = 'ugk_inline_manifest_json';
     public const OPTION_FILTER_PATCHES = 'ugk_render_filter_patches';
     public const NONCE_ACTION_LOCAL_APPROVE = 'ugokilink_local_approve';
@@ -420,24 +421,67 @@ final class UgokiLink_Companion_Plugin
     }
 
     /**
-     * Reconciles any `in_progress` pending-command journal entries left behind by a crash between
-     * `wp_update_post` and approval commit (`[#7]`):
-     * - If current `sha256(post_content) === expected_after_sha256`, finishes committing `claimed -> consumed`.
-     * - Otherwise releases `claimed -> unused` and conditionally CAS-rolls back `OPTION_LAST_SEQ`
-     *   ONLY when `currentSeq === command_seq` (never overwriting a concurrent newer `seq`).
+     * Atomically rolls back `OPTION_LAST_SEQ` from `$expectedSeq` to `$prevSeq` using a single
+     * conditional SQL UPDATE so a stalled failure never clobbers a concurrent newer `seq` (`[#7]`).
      */
-    public static function reconcilePendingCommands(): void
+    private static function rollbackLastSeqIfMatches(int $expectedSeq, int $prevSeq): bool
     {
+        if ($expectedSeq <= 0) {
+            return false;
+        }
+        global $wpdb;
+        $affected = $wpdb->query(
+            $wpdb->prepare(
+                "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s",
+                (string) $prevSeq,
+                self::OPTION_LAST_SEQ,
+                (string) $expectedSeq
+            )
+        );
+        if (is_int($affected) && $affected > 0) {
+            wp_cache_delete(self::OPTION_LAST_SEQ, 'options');
+            wp_cache_delete('alloptions', 'options');
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Reconciles expired `in_progress` pending-command journal entries left behind by a crash between
+     * `wp_update_post` and approval commit (`[#7]`):
+     * - If an `in_progress` entry's lease is STILL ACTIVE (`$nowMs < lease_expires_at_ms`), DO NOT
+     *   roll it back or release its approval; return `blockedByInFlight => true` so concurrent requests
+     *   fail closed with HTTP `409 command_in_flight`.
+     * - For expired leases (`$nowMs >= lease_expires_at_ms`):
+     *   - If current `sha256(post_content) === expected_after_sha256`, finishes committing `claimed -> consumed`.
+     *   - Otherwise releases `claimed -> unused` and atomically CAS-rolls back `OPTION_LAST_SEQ`
+     *     ONLY when `option_value === command_seq` via a single conditional SQL UPDATE.
+     *
+     * @return array{blockedByInFlight: bool, reconciledCount: int}
+     */
+    public static function reconcilePendingCommands(?int $nowMs = null): array
+    {
+        $nowMs = $nowMs ?? (int) round(microtime(true) * 1000);
         $journal = get_option(self::OPTION_PENDING_JOURNAL, []);
         if (!is_array($journal) || count($journal) === 0) {
-            return;
+            return ['blockedByInFlight' => false, 'reconciledCount' => 0];
         }
 
         $changed = false;
+        $blockedByInFlight = false;
+        $reconciledCount = 0;
+
         foreach ($journal as $seqKey => $entry) {
             if (!is_array($entry) || ($entry['status'] ?? '') !== 'in_progress') {
                 continue;
             }
+
+            $leaseExpiresAtMs = isset($entry['lease_expires_at_ms']) ? (int) $entry['lease_expires_at_ms'] : 0;
+            if ($leaseExpiresAtMs > 0 && $nowMs < $leaseExpiresAtMs) {
+                $blockedByInFlight = true;
+                continue;
+            }
+
             $cmdSeq = (int) ($entry['command_seq'] ?? 0);
             $postId = (int) ($entry['post_id'] ?? 0);
             $digest = isset($entry['approval_digest']) && is_string($entry['approval_digest']) ? $entry['approval_digest'] : null;
@@ -458,18 +502,24 @@ final class UgokiLink_Companion_Plugin
                 if ($digest !== null && $claimToken !== null) {
                     self::releaseLocalWpAdminApproval($digest, $claimToken);
                 }
-                if ($cmdSeq > 0 && (int) get_option(self::OPTION_LAST_SEQ, 0) === $cmdSeq) {
-                    update_option(self::OPTION_LAST_SEQ, $prevSeq, false);
+                if ($cmdSeq > 0) {
+                    self::rollbackLastSeqIfMatches($cmdSeq, $prevSeq);
                 }
             }
 
             unset($journal[$seqKey]);
             $changed = true;
+            $reconciledCount++;
         }
 
         if ($changed) {
             update_option(self::OPTION_PENDING_JOURNAL, $journal, false);
         }
+
+        return [
+            'blockedByInFlight' => $blockedByInFlight,
+            'reconciledCount' => $reconciledCount,
+        ];
     }
 
     /**
@@ -497,8 +547,11 @@ final class UgokiLink_Companion_Plugin
 
     public static function handleSignedCommand(\WP_REST_Request $request): \WP_REST_Response
     {
-        // [#7] Reconcile any in_progress pending-command journal records left by a prior crash
-        self::reconcilePendingCommands();
+        // [#7] Reconcile expired pending-command journal records; reject concurrent requests while an active lease is in flight
+        $reconcile = self::reconcilePendingCommands();
+        if ($reconcile['blockedByInFlight']) {
+            return new \WP_REST_Response(['error' => 'command_in_flight'], 409);
+        }
 
         $envelope = $request->get_json_params();
         if (!is_array($envelope)) {
@@ -752,7 +805,20 @@ final class UgokiLink_Companion_Plugin
             }
 
             $rawAttrs = trim(substr($html, $attrStart, $j - $attrStart));
-            if (str_ends_with($rawAttrs, '/')) {
+            $rawLen = strlen($rawAttrs);
+            if (
+                $rawAttrs === '/'
+                || (
+                    $rawLen >= 2
+                    && $rawAttrs[$rawLen - 1] === '/'
+                    && (
+                        $rawAttrs[$rawLen - 2] === ' '
+                        || $rawAttrs[$rawLen - 2] === "\t"
+                        || $rawAttrs[$rawLen - 2] === "\n"
+                        || $rawAttrs[$rawLen - 2] === "\r"
+                    )
+                )
+            ) {
                 $rawAttrs = trim(substr($rawAttrs, 0, -1));
             }
             $parsedAttrs = self::parseHtmlAttributesQuoteAware($rawAttrs);
@@ -979,7 +1045,9 @@ final class UgokiLink_Companion_Plugin
                 'applied_at_gmt' => gmdate('Y-m-d H:i:s'),
             ]));
 
-            // 5b. [#7] Write recoverable pending-command journal record BEFORE wp_update_post
+            // 5b. [#7] Write recoverable pending-command journal record with active lease BEFORE wp_update_post
+            $leaseNowMs = (int) round(microtime(true) * 1000);
+            $leaseToken = 'lease_' . $seq . '_' . bin2hex(random_bytes(8));
             self::writePendingCommandJournal($seq, [
                 'command_seq' => $seq,
                 'post_id' => $postId,
@@ -987,6 +1055,8 @@ final class UgokiLink_Companion_Plugin
                 'claim_token' => $claimedApprovalToken,
                 'expected_after_sha256' => $postImageHash,
                 'prev_seq' => isset($payload['__prev_seq']) ? (int) $payload['__prev_seq'] : 0,
+                'lease_token' => $leaseToken,
+                'lease_expires_at_ms' => $leaseNowMs + self::PENDING_COMMAND_LEASE_MS,
                 'status' => 'in_progress',
             ]);
 
@@ -996,12 +1066,12 @@ final class UgokiLink_Companion_Plugin
             ], true);
 
             if (is_wp_error($result)) {
-                // [#7] Roll back claimed approval to `unused`, conditionally CAS-rollback seq, and clear journal
+                // [#7] Roll back claimed approval to `unused`, atomically CAS-rollback seq via single SQL UPDATE, and clear journal
                 if ($claimedApprovalDigest !== null && $claimedApprovalToken !== null) {
                     self::releaseLocalWpAdminApproval($claimedApprovalDigest, $claimedApprovalToken);
                 }
-                if (isset($payload['__prev_seq']) && (int) get_option(self::OPTION_LAST_SEQ, 0) === $seq) {
-                    update_option(self::OPTION_LAST_SEQ, (int) $payload['__prev_seq'], false);
+                if (isset($payload['__prev_seq'])) {
+                    self::rollbackLastSeqIfMatches($seq, (int) $payload['__prev_seq']);
                 }
                 self::clearPendingCommandJournal($seq);
                 return new \WP_REST_Response(['error' => 'wp_update_post_failed'], 500);

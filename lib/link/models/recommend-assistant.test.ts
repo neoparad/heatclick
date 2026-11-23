@@ -1131,6 +1131,13 @@ describe('Wave 6 Bundle 6-D.4: POST /v1/recommend Route & MCP Tool Parity', () =
     expect(browserItems[1].slot_cond_prob).toBeCloseTo(1 / 2, 5);
   });
 
+  test('[#20] dominant first choice preserves the remaining slot probability', () => {
+    const probs = computePlackettLuceMarginalInclusionProbs([1e16, 1, 1], 2);
+    expect(probs[1]).toBeCloseTo(0.5, 12);
+    expect(probs[2]).toBeCloseTo(0.5, 12);
+    expect(probs.reduce((sum, p) => sum + p, 0)).toBeCloseTo(2, 12);
+  });
+
   test('[#20] 17 equal-weight articles with top_k=2 computes exact analytical display_prob (2/17 within 1e-12) and tags display_prob_method === "exact"', () => {
     const fx = setupSurfaceFixture();
     const equal17: RecommendCandidateItem[] = Array.from({ length: 17 }, (_, i) => ({

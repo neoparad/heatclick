@@ -1156,4 +1156,70 @@ describe('Wave 9 Codex Remediation Regressions: [#15], [#16], [#19]', () => {
     ])
     expect(JSON.stringify(res2)).not.toContain('LATE_REDACTED_OCR_SECRET')
   })
+
+  test('[#19 Round 3] invalidates and zero-fills old stored artifact_id on mask policy correction (returns 410 artifact_invalidated_by_mask_correction with png_bytes=null)', () => {
+    const svc = new HeatmapRenderService()
+    const ocrSamples = [
+      {
+        text: 'SENSITIVE_UNMASKED_TEXT',
+        from_masked_image: true,
+        overlaps_masked_region: false,
+        bbox: { x: 20, y: 20, width: 30, height: 15 },
+      },
+    ]
+
+    // 1. Render with redaction_boxes: [] -> obtain oldArtifactId and verify it is fetchable (200)
+    const dsUnmasked = makeUnitDataset({
+      screenshot: makeLabScreenshot({
+        redaction_boxes: [],
+        embedded_text_samples: ocrSamples,
+      }),
+    })
+    const res1 = svc.renderHeatmap(OWNER_PRINCIPAL, makeBaseRequest({ unit_datasets: [dsUnmasked] }))
+    expect(res1.http_status).toBe(200)
+    const oldArtifactId = res1.artifacts[0].artifact_id
+    const fetchBefore = svc.fetchArtifactById({
+      principal: OWNER_PRINCIPAL,
+      artifact_id: oldArtifactId,
+      now_iso: '2026-11-20T12:01:00Z',
+    })
+    expect(fetchBefore.http_status).toBe(200)
+    expect(fetchBefore.png_bytes).not.toBeNull()
+    const oldPngRef = fetchBefore.png_bytes!
+
+    // 2. Re-render EXACT SAME page, base-image, and build_seq with an added redaction box
+    const dsMasked = makeUnitDataset({
+      screenshot: makeLabScreenshot({
+        redaction_boxes: [{ x: 15, y: 15, width: 40, height: 25, reason: 'pii_region' }],
+        embedded_text_samples: ocrSamples,
+      }),
+    })
+    const res2 = svc.renderHeatmap(OWNER_PRINCIPAL, makeBaseRequest({ unit_datasets: [dsMasked] }))
+    expect(res2.http_status).toBe(200)
+    expect(res2.artifacts[0].build_seq).toBe(res1.artifacts[0].build_seq)
+    const newArtifactId = res2.artifacts[0].artifact_id
+    expect(newArtifactId).not.toBe(oldArtifactId)
+
+    // 3. Old artifact_id MUST now return HTTP 410 artifact_invalidated_by_mask_correction with png_bytes === null,
+    //    and its prior in-memory PNG buffer MUST be zero-filled!
+    const fetchOldAfter = svc.fetchArtifactById({
+      principal: OWNER_PRINCIPAL,
+      artifact_id: oldArtifactId,
+      now_iso: '2026-11-20T12:02:00Z',
+    })
+    expect(fetchOldAfter.http_status).toBe(410)
+    expect(fetchOldAfter.reason).toBe('artifact_invalidated_by_mask_correction')
+    expect(fetchOldAfter.artifact).toBeNull()
+    expect(fetchOldAfter.png_bytes).toBeNull()
+    expect(oldPngRef.every((b) => b === 0)).toBe(true)
+
+    // 4. New redacted artifact_id remains fetchable (200)
+    const fetchNewAfter = svc.fetchArtifactById({
+      principal: OWNER_PRINCIPAL,
+      artifact_id: newArtifactId,
+      now_iso: '2026-11-20T12:02:00Z',
+    })
+    expect(fetchNewAfter.http_status).toBe(200)
+    expect(fetchNewAfter.png_bytes).not.toBeNull()
+  })
 })

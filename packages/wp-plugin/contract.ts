@@ -28,6 +28,7 @@ export const DEFAULT_WP_TENANT_ID = 'tenant_default';
 export const DEFAULT_WP_SITE_ID = 'site_default';
 export const DEFAULT_WP_HOME_URL = 'https://wp.ugokilink.local';
 export const SODIUM_CRYPTO_SIGN_BYTES = 64;
+export const DEFAULT_WP_PENDING_COMMAND_LEASE_MS = 30_000;
 
 export type WpCommandKind =
   | 'apply'
@@ -67,6 +68,8 @@ export interface WpPendingCommandJournalRecord {
   readonly claim_token: string | null;
   readonly expected_after_sha256: string;
   readonly prev_seq: number;
+  readonly lease_token: string;
+  readonly lease_expires_at_ms: number;
   status: 'in_progress';
 }
 
@@ -366,7 +369,12 @@ export function extractIndexableSeoSignature(html: string): string | null {
     }
 
     let rawAttrs = html.slice(attrStart, j).trim();
-    if (rawAttrs.endsWith('/')) {
+    if (
+      rawAttrs === '/' ||
+      (rawAttrs.length >= 2 &&
+        rawAttrs.endsWith('/') &&
+        /[ \t\n\r]/.test(rawAttrs[rawAttrs.length - 2]))
+    ) {
       rawAttrs = rawAttrs.slice(0, -1).trim();
     }
     const parsedAttrs = parseHtmlAttributesQuoteAware(rawAttrs);
@@ -526,6 +534,7 @@ export class WpPluginEngine {
   /** Mirrors `wp_options['ugk_pending_command_journal']` for crash-safe approval reconciliation (`[#7]`). */
   private readonly pendingCommandJournal = new Map<number, WpPendingCommandJournalRecord>();
   private claimTokenSeq = 0;
+  private leaseTokenSeq = 0;
   private postUpdateHook?: (post: WpPostRecord, nextContent: string) => Promise<void> | void;
   private afterPostUpdateBeforeCommitHook?: (post: WpPostRecord, nextContent: string) => Promise<void> | void;
   /** Mirrors `wp_options['ugk_daily_apply_counter']` keyed by UTC `YYYY-MM-DD` (`[H-08]`). */
@@ -676,19 +685,36 @@ export class WpPluginEngine {
   }
 
   /**
-   * Reconciles any `in_progress` pending-command journal entries left behind by a crash between
+   * Reconciles expired `in_progress` pending-command journal entries left behind by a crash between
    * `wp_update_post` and approval commit (`[#7]`):
-   * - If `sha256(post.content) === expected_after_sha256`, finishes committing `claimed -> consumed`
-   *   and clears the journal entry so the approval can never be reused.
-   * - Otherwise releases `claimed -> unused`, conditionally rolls back `lastSeq` ONLY if
-   *   `this.lastSeq === entry.command_seq` (CAS — never clobbering a concurrent newer `seq`), and
-   *   clears the journal entry.
+   * - If an `in_progress` entry's lease is STILL ACTIVE (`nowMs < lease_expires_at_ms`), DO NOT roll
+   *   it back or release its approval; return `{ blockedByInFlight: true }` so concurrent callers fail
+   *   closed with HTTP `409 command_in_flight`.
+   * - For expired leases (`nowMs >= lease_expires_at_ms`):
+   *   - If `sha256(post.content) === expected_after_sha256`, finishes committing `claimed -> consumed`
+   *     and clears the journal entry so the approval can never be reused.
+   *   - Otherwise releases `claimed -> unused`, conditionally rolls back `lastSeq` ONLY if
+   *     `this.lastSeq === entry.command_seq` (CAS — never clobbering a concurrent newer `seq`), and
+   *     clears the journal entry.
    */
-  public async reconcilePendingCommands(): Promise<void> {
-    if (this.pendingCommandJournal.size === 0) return;
+  public async reconcilePendingCommands(nowMs = Date.now()): Promise<{
+    readonly blockedByInFlight: boolean;
+    readonly reconciledCount: number;
+  }> {
+    if (this.pendingCommandJournal.size === 0) {
+      return { blockedByInFlight: false, reconciledCount: 0 };
+    }
+
+    let blockedByInFlight = false;
+    let reconciledCount = 0;
 
     for (const [cmdSeq, entry] of Array.from(this.pendingCommandJournal.entries())) {
       if (entry.status !== 'in_progress') continue;
+      if (entry.lease_expires_at_ms > 0 && nowMs < entry.lease_expires_at_ms) {
+        blockedByInFlight = true;
+        continue;
+      }
+
       const post = this.posts.get(entry.post_id);
       const currentSha = post ? await sha256Hex(post.content) : null;
 
@@ -706,7 +732,10 @@ export class WpPluginEngine {
       }
 
       this.pendingCommandJournal.delete(cmdSeq);
+      reconciledCount += 1;
     }
+
+    return { blockedByInFlight, reconciledCount };
   }
 
   /**
@@ -794,8 +823,11 @@ export class WpPluginEngine {
     envelope: SignedWpCommandEnvelope,
     nowMs = Date.now()
   ): Promise<WpCommandResult> {
-    // 0. [#7] Reconcile any in_progress pending-command journal records left by a prior crash
-    await this.reconcilePendingCommands();
+    // 0. [#7] Reconcile expired pending-command journal records; reject concurrent requests while an active lease is in flight
+    const reconcile = await this.reconcilePendingCommands(nowMs);
+    if (reconcile.blockedByInFlight) {
+      return { status: 409, ok: false, error: 'command_in_flight' };
+    }
 
     // 1. Offline-pinned Ed25519 signature verification over `payload_canonical_json` ([H-08])
     const pubKey = this.pinnedPubKeys.get(envelope.kid);
@@ -1025,7 +1057,8 @@ export class WpPluginEngine {
         applied_at_gmt: new Date(nowMs).toISOString(),
       });
 
-      // [#7] Write recoverable pending-command journal record BEFORE wp_update_post
+      // [#7] Write recoverable pending-command journal record with active lease BEFORE wp_update_post
+      this.leaseTokenSeq += 1;
       this.pendingCommandJournal.set(p.seq, {
         command_seq: p.seq,
         post_id: postId,
@@ -1033,6 +1066,8 @@ export class WpPluginEngine {
         claim_token: claimedApprovalToken,
         expected_after_sha256: postImageSha,
         prev_seq: prevSeq,
+        lease_token: `lease_${p.seq}_${this.leaseTokenSeq}`,
+        lease_expires_at_ms: nowMs + DEFAULT_WP_PENDING_COMMAND_LEASE_MS,
         status: 'in_progress',
       });
 
@@ -1168,6 +1203,11 @@ export function auditPhpPluginSource(phpSource: string): PhpStaticAuditResult {
     ['releaseLocalWpAdminApproval', 'Approval rollback on post update failure ([#7])'],
     ['reconcilePendingCommands', 'Recoverable pending-command journal reconciliation ([#7])'],
     ['OPTION_PENDING_JOURNAL', 'Pending-command journal option storage ([#7])'],
+    ['lease_expires_at_ms', 'Active in-flight command lease expiration timestamp ([#7])'],
+    ['lease_token', 'Active in-flight command lease token ([#7])'],
+    ['command_in_flight', 'HTTP 409 command_in_flight rejection while lease is active ([#7])'],
+    ['WHERE option_name = %s AND option_value = %s', 'Single atomic conditional SQL seq rollback ([#7])'],
+    ['wp_cache_delete', 'Options cache invalidation after atomic conditional SQL seq rollback ([#7])'],
     ['add_option($lockOption', 'Per-digest atomic add_option claim lock ([#7])'],
     ['owner_daily_apply_cap_exceeded', 'Per-UTC-day daily_apply_cap enforcement ([H-08])'],
     ['$acquiredLock', 'Edit lock ownership guard in finally ([H-08])'],

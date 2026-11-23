@@ -291,17 +291,24 @@ export function computePlackettLuceMarginalInclusionProbsWithMethod(
   // P(i in top 2) = (w_i / W) + sum_{j != i} (w_j / W) * (w_i / (W - w_j))
   //               = (w_i / W) * (1 + sum_j (w_j / (W - w_j)) - w_i / (W - w_i))
   if (kEff === 2) {
+    const largest = posWeights.reduce((best, w, i) => w > posWeights[best] ? i : best, 0);
+    const nextWeight = posWeights.reduce((m, w, i) => i === largest ? m : Math.max(m, w), 0);
+    const rest = posWeights.reduce((s, w, i) => i === largest ? s : s + w / nextWeight, 0);
+    const scaled = posWeights.map(w => w / posWeights[largest]);
+    const sum = scaled.reduce((s, w) => s + w, 0);
     let totalRatioSum = 0;
     const ratios = new Float64Array(n);
     for (let j = 0; j < n; j += 1) {
-      const rem = totalW - posWeights[j];
-      const r = rem > 0 ? posWeights[j] / rem : 0;
+      if (j === largest) continue;
+      const r = scaled[j] / (sum - scaled[j]);
       ratios[j] = r;
       totalRatioSum += r;
     }
     const probs = new Array<number>(n);
     for (let i = 0; i < n; i += 1) {
-      const p = (posWeights[i] / totalW) * (1 + (totalRatioSum - ratios[i]));
+      // Condition separately on the largest item being chosen first to avoid cancellation.
+      const afterLargest = i === largest ? 0 : (posWeights[i] / nextWeight) / rest / sum;
+      const p = scaled[i] / sum * (1 + (totalRatioSum - ratios[i])) + afterLargest;
       probs[i] = Math.max(0, Math.min(1, p));
     }
     return { probs, method: 'exact' };

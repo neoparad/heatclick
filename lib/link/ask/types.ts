@@ -139,6 +139,7 @@ export interface PreLlmFilterVerdict {
   readonly safeRows: ReadonlyArray<AggregateQueryRow>;
   readonly suppressedCount: number;
   readonly secondarySuppressedCount?: number;
+  readonly commitDisclosureHistory?: () => void;
 }
 
 // =========================================================================

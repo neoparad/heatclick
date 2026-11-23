@@ -698,4 +698,74 @@ describe('Wave 9 Codex Remediation Regressions: [#28] Empty Intersection & [#29]
       expect(JSON.stringify(scored)).not.toContain('Infinity')
     }
   })
+
+  test('[#29 Round 3] guards per-observation (diff*diff)/variance overflow (scale=1e-160) so scoreBatch does not throw and marks overflowing PV unscorable while scoring normal PVs', () => {
+    const center = new Array<number>(60).fill(0)
+    const residualOne = new Array<number>(60).fill(1) // diff = 1.0 -> (1.0)^2 / 1e-320 = Infinity
+
+    // scale = 1e-160 has scale*scale = 1e-320 (positive finite subnormal), so direct density overflows on residual-1
+    expect(() => computeGaussianLogDensity60(residualOne, center, 1e-160)).toThrow(/overflow\/NaN/)
+
+    const validCert = buildLocalAiModelCertificate({
+      certificate_id: 'cert_29_subnormal_overflow',
+      model_version: 'local-ai/1',
+      issued_at: '2026-11-20T00:00:00Z',
+      positive_family_recalls: {
+        f1: 0.9, f2: 0.9, f3: 0.9, f4: 0.9, f5: 0.9, f6: 0.9, f7: 0.9, f8: 0.9,
+      },
+      unseen_framework_recalls: { f_unseen: 0.7 },
+      threshold_panel_n: 300,
+      test_panel_n: 1000,
+      test_panel_false_positives: 0,
+      panel_cohort_coverage: {
+        assistive_tech_included: true,
+        input_methods_included: true,
+        ad_blockers_included: true,
+      },
+      wild_flagged_rate: 0.01,
+      panel_vs_wild_auc: 0.5,
+    })
+
+    const scorer = new LocalAiLikelihoodScorer({
+      certificate: validCert,
+      human_centroid_60: center,
+      human_scale: 1e-160,
+      family_profiles: [{ family_id: 'f1', centroid_60: center, scale: 1 }],
+    })
+
+    const overflowBytes = compressBehavioralStats60({ stats_60: residualOne })
+    const normalBytes = compressBehavioralStats60({ stats_60: center })
+
+    const batch = scorer.scoreBatch([
+      {
+        pv_id: 'pv_overflow_residual_1',
+        pointer_type: 'fine',
+        interaction_event_count: 25,
+        compressed_stats_60: overflowBytes,
+      },
+      {
+        pv_id: 'pv_normal_at_center',
+        pointer_type: 'fine',
+        interaction_event_count: 25,
+        compressed_stats_60: normalBytes,
+      },
+    ])
+
+    expect(batch.total_pvs).toBe(2)
+    expect(batch.unscorable_pvs).toBe(1)
+    expect(batch.scorable_pvs).toBe(1)
+
+    const overflowRes = batch.results.find((r) => r.pv_id === 'pv_overflow_residual_1')!
+    expect(overflowRes.scorable).toBe(false)
+    expect(overflowRes.status).toBe('unscorable')
+    expect(overflowRes.unscorable_reason).toMatch(/gaussian_density_overflow/)
+    expect(overflowRes.max_likelihood_ratio).toBeNull()
+    expect(overflowRes.novelty_score).toBeNull()
+
+    const normalRes = batch.results.find((r) => r.pv_id === 'pv_normal_at_center')!
+    expect(normalRes.scorable).toBe(true)
+    expect(normalRes.status).not.toBe('unscorable')
+    expect(JSON.stringify(batch)).not.toContain('NaN')
+    expect(JSON.stringify(batch)).not.toContain('Infinity')
+  })
 })

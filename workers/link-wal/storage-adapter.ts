@@ -69,7 +69,7 @@ export interface ExportSinkPort {
     readonly tenantIds: readonly string[];
     readonly deletionEpoch: number;
     readonly exportedAtMs: number;
-    readonly idempotencyKey?: string;
+    readonly idempotencyKey: string;
   }): Promise<ExportNotificationReceipt>;
 }
 
@@ -397,10 +397,20 @@ export class LinkPlusExportStorageAdapter implements StorageTierAdapter {
       args.key,
       this.exportSink.sinkId
     );
+    const legacyReceiptKey = formatExportReceiptKey(
+      this.descriptor.region,
+      tenantId,
+      siteId,
+      args.key
+    );
 
-    // Codex #12: Always check durable export receipt even when primary was already written
-    // (`primaryRes.written === false`), so a retry after a prior export failure still delivers!
-    const existingReceipt = await this.receiptBucket.get(receiptKey);
+    // Codex #12 / R3 #12: Always check durable export receipt even when primary was already written
+    // (`primaryRes.written === false`), and check BOTH the sink-scoped receipt key AND the legacy
+    // receipt key (`export-receipts/{region}/{tenantId}/{siteId}/{sha256Hex(walKey)}.json`) so
+    // WALs already exported under the legacy receipt format are never re-exported!
+    const existingReceipt =
+      (await this.receiptBucket.get(receiptKey)) ??
+      (await this.receiptBucket.get(legacyReceiptKey));
     if (existingReceipt !== null) {
       return {
         ...primaryRes,
@@ -569,10 +579,12 @@ export class InMemoryExportSink implements ExportSinkPort {
     readonly tenantIds: readonly string[];
     readonly deletionEpoch: number;
     readonly exportedAtMs: number;
-    readonly idempotencyKey?: string;
+    readonly idempotencyKey: string;
   }): Promise<ExportNotificationReceipt> {
-    const idempotencyKey =
-      args.idempotencyKey ?? computeExportIdempotencyKey(this.sinkId, args.walKey);
+    if (typeof args.idempotencyKey !== 'string' || args.idempotencyKey.trim().length === 0) {
+      throw new Error('ExportSinkPort.writeExportBatch requires a non-empty idempotencyKey');
+    }
+    const idempotencyKey = args.idempotencyKey;
     this.seenIdempotencyKeys.push(idempotencyKey);
 
     const existing = this.receiptsByIdempotencyKey.get(idempotencyKey);

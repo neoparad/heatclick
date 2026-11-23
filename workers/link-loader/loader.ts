@@ -222,24 +222,62 @@ export class ShardLoader {
 
   private async persistTombstonesToBucket(): Promise<void> {
     const key = formatTombstonesObjectKey(this.region, this.shardId);
-    // Merge with any previously persisted tombstones so concurrent/prior updates are preserved.
-    await this.loadPersistedTombstonesFromBucket(this.manifestBucket);
-    const payload: PersistedShardTombstones = {
-      version: 1,
-      region: this.region,
-      shard_id: this.shardId,
-      deleted_pv_keys: Array.from(this.deletedPvKeys).sort(),
-      deleted_visitor_keys: Array.from(this.deletedVisitorKeys).sort(),
-      deleted_member_hashes: Array.from(this.deletedMemberHashes).sort(),
-      purged_wal_keys: Array.from(this.purgedWalKeys).sort(),
-    };
-    await this.manifestBucket.put(key, canonicalJsonStringify(payload), {
-      httpMetadata: { contentType: 'application/json' },
-      customMetadata: {
+    const maxCasAttempts = 8;
+
+    // Codex R3 #10: CAS read-merge-write retry loop using `onlyIf: { etagMatches }`
+    // (or `etagDoesNotMatch: '*'` on initial create) so concurrent writers NEVER overwrite
+    // or drop each other's tombstones.
+    for (let attempt = 0; attempt < maxCasAttempts; attempt += 1) {
+      const existing = await this.manifestBucket.get(key);
+      let expectedEtag: string | null = null;
+
+      if (existing !== null) {
+        expectedEtag = existing.etag;
+        const parsed = JSON.parse(await existing.text()) as Partial<PersistedShardTombstones>;
+        for (const pvKey of parsed.deleted_pv_keys ?? []) {
+          this.deletedPvKeys.add(pvKey);
+        }
+        for (const visitorKey of parsed.deleted_visitor_keys ?? []) {
+          this.deletedVisitorKeys.add(visitorKey);
+        }
+        for (const memberHash of parsed.deleted_member_hashes ?? []) {
+          this.deletedMemberHashes.add(memberHash);
+        }
+        for (const purgedWalKey of parsed.purged_wal_keys ?? []) {
+          this.purgedWalKeys.add(purgedWalKey);
+        }
+      }
+
+      const payload: PersistedShardTombstones = {
+        version: 1,
         region: this.region,
-        shard_id: String(this.shardId),
-      },
-    });
+        shard_id: this.shardId,
+        deleted_pv_keys: Array.from(this.deletedPvKeys).sort(),
+        deleted_visitor_keys: Array.from(this.deletedVisitorKeys).sort(),
+        deleted_member_hashes: Array.from(this.deletedMemberHashes).sort(),
+        purged_wal_keys: Array.from(this.purgedWalKeys).sort(),
+      };
+
+      const putResult = await this.manifestBucket.put(key, canonicalJsonStringify(payload), {
+        onlyIf:
+          expectedEtag !== null
+            ? { etagMatches: expectedEtag }
+            : { etagDoesNotMatch: '*' },
+        httpMetadata: { contentType: 'application/json' },
+        customMetadata: {
+          region: this.region,
+          shard_id: String(this.shardId),
+        },
+      });
+
+      if (putResult !== null) {
+        return;
+      }
+    }
+
+    throw new Error(
+      `Failed to persist tombstones for ${this.region}/shard-${this.shardId} after ${maxCasAttempts} CAS attempts`
+    );
   }
 
   /**
@@ -763,20 +801,21 @@ export class ShardLoader {
   }
 
   /**
-   * Removes subject PVs from all base tables and marks affected `(tenant, site, pv_hour)`
-   * cells dirty with reason `'deletion'` so the rollup builder re-seals them.
+   * Removes subject PVs from all base tables, marks affected `(tenant, site, pv_hour)`
+   * cells dirty with reason `'deletion'` so the rollup builder re-seals them, AND
+   * durably persists deletion tombstones via CAS so handover NEVER resurrects deleted PVs (Codex R3 #10).
    */
-  public deletePvs(
+  public async deletePvs(
     tenantId: string,
     siteId: string,
     pvIds: ReadonlySet<string> | readonly string[],
     nowMs = Date.now()
-  ): {
+  ): Promise<{
     readonly deletedPvs: number;
     readonly deletedFrames: number;
     readonly deletedEvents: number;
     readonly affectedCellKeys: readonly string[];
-  } {
+  }> {
     const pvSet = pvIds instanceof Set ? pvIds : new Set(pvIds);
     let deletedPvs = 0;
     let deletedFrames = 0;
@@ -823,6 +862,10 @@ export class ShardLoader {
         this.events.delete(ek);
         deletedEvents += 1;
       }
+    }
+
+    if (pvSet.size > 0) {
+      await this.persistTombstonesToBucket();
     }
 
     return {

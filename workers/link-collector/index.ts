@@ -38,4 +38,8 @@ export {
   type SegmentIngestDeps,
   type SegmentIngestResult,
 } from './segment-compat';
-export { createCollectorWorker, type CollectorWorkerDeps } from './worker';
+export {
+  createCollectorWorker,
+  type CollectorWorkerDependencies,
+  type CollectorWorkerDeps,
+} from './worker';

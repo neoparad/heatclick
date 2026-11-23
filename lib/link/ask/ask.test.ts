@@ -319,6 +319,8 @@ describe('lib/link/ask — POST /v1/ask Read-Only Planner, Pre-LLM Privacy Filte
 
     // 3 buckets where ONLY 1 bucket has unitCount < 10 (n=1):
     // Both `seg_vip` (n=1) AND next-smallest sibling `seg_mobile` (n=300) MUST be suppressed!
+    const desktopIds = Array.from({ length: 15 }, (_, i) => `comp_d_${i}`);
+    const mobileIds = Array.from({ length: 15 }, (_, i) => `comp_m_${i}`);
     const threeGroup = filterQueryAndRowsBeforeLlm({
       viewName: 'v_pub_segment_agg',
       metricName: 'page_views',
@@ -326,9 +328,9 @@ describe('lib/link/ask — POST /v1/ask Read-Only Planner, Pre-LLM Privacy Filte
       requestedColumns: ['segment_id', 'page_views'],
       groupByColumns: ['segment_id'],
       rows: [
-        { bucketLabel: 'seg_desktop', unitCount: 500, metricKey: 'page_views', metricValue: 500, unit: 'page_views' },
-        { bucketLabel: 'seg_mobile', unitCount: 300, metricKey: 'page_views', metricValue: 300, unit: 'page_views' },
-        { bucketLabel: 'seg_vip', unitCount: 1, metricKey: 'page_views', metricValue: 5, unit: 'page_views' },
+        { bucketLabel: 'seg_desktop', unitCount: 500, metricKey: 'page_views', metricValue: 500, unit: 'page_views', cohortMemberIds: desktopIds },
+        { bucketLabel: 'seg_mobile', unitCount: 300, metricKey: 'page_views', metricValue: 300, unit: 'page_views', cohortMemberIds: mobileIds },
+        { bucketLabel: 'seg_vip', unitCount: 1, metricKey: 'page_views', metricValue: 5, unit: 'page_views', cohortMemberIds: ['comp_vip_0'] },
       ],
       sessionKey: 'comp_s1',
       filterSignature: 'comp_f1',
@@ -349,8 +351,8 @@ describe('lib/link/ask — POST /v1/ask Read-Only Planner, Pre-LLM Privacy Filte
       requestedColumns: ['segment_id', 'page_views'],
       groupByColumns: ['segment_id'],
       rows: [
-        { bucketLabel: 'seg_desktop', unitCount: 500, metricKey: 'page_views', metricValue: 500, unit: 'page_views' },
-        { bucketLabel: 'seg_vip', unitCount: 1, metricKey: 'page_views', metricValue: 5, unit: 'page_views' },
+        { bucketLabel: 'seg_desktop', unitCount: 500, metricKey: 'page_views', metricValue: 500, unit: 'page_views', cohortMemberIds: desktopIds },
+        { bucketLabel: 'seg_vip', unitCount: 1, metricKey: 'page_views', metricValue: 5, unit: 'page_views', cohortMemberIds: ['comp_vip_0'] },
       ],
       sessionKey: 'comp_s2',
       filterSignature: 'comp_f2',
@@ -836,5 +838,102 @@ describe('lib/link/ask — POST /v1/ask Read-Only Planner, Pre-LLM Privacy Filte
     // DifferencingGuard history MUST be completely untouched after post-row rejection!
     expect(atomicGuard.getCohortHistoryLength(atomicSessionKey)).toBe(0);
     expect(atomicGuard.getWindowHistoryLength(atomicSessionKey)).toBe(0);
+  });
+
+  test('[#17 Round 3] rejects grouped rows missing cohortMemberIds on a brand-new session with 0 prior history AND leaves DifferencingGuard untouched when final answer verification fails', () => {
+    const sql = lookupPrecompiledPublicViewSql('v_pub_segment_agg', 'page_views')!;
+
+    // (a) Brand-new session with 0 prior history and NO pre-declared cohort:
+    //     grouped rows missing cohortMemberIds MUST NOT bypass RREF or be disclosed unchecked!
+    const freshGuard = new DifferencingGuard(10);
+    const freshSession = 'tenant_eval_a:site_eval_a:ep_brand_new_17';
+    expect(freshGuard.getCohortHistoryLength(freshSession)).toBe(0);
+    expect(freshGuard.getWindowHistoryLength(freshSession)).toBe(0);
+
+    const freshGroupedVerdict = filterQueryAndRowsBeforeLlm({
+      viewName: 'v_pub_segment_agg',
+      metricName: 'page_views',
+      sql,
+      requestedColumns: ['segment_id', 'page_views'],
+      groupByColumns: ['segment_id'],
+      rows: [
+        { bucketLabel: 'seg_desktop', unitCount: 50, metricKey: 'page_views', metricValue: 500, unit: 'page_views' },
+        { bucketLabel: 'seg_mobile', unitCount: 40, metricKey: 'page_views', metricValue: 400, unit: 'page_views' },
+      ],
+      sessionKey: freshSession,
+      filterSignature: 'cohort:fresh_grouped_no_ids',
+      differencingGuard: freshGuard,
+    });
+    expect(freshGroupedVerdict.allowed).toBe(false);
+    expect(freshGroupedVerdict.blockedCode).toBe('DIFFERENCING_ATTACK_BLOCKED');
+    expect(freshGroupedVerdict.safeRows).toHaveLength(0);
+    expect(freshGuard.getCohortHistoryLength(freshSession)).toBe(0);
+
+    // (b) Deferred commit in AskService: when final answer verification (`verifyAnswerNumericReferences`)
+    //     fails AFTER filterQueryAndRowsBeforeLlm approves the rows, DifferencingGuard history
+    //     MUST remain completely untouched (0 cohort entries, 0 window entries)!
+    const verifyFailGuard = new DifferencingGuard(10);
+    const verifyFailSessionKey = AskService.buildSessionKey('tenant_eval_a', 'site_eval_a', 173);
+    const validCohort20 = Array.from({ length: 20 }, (_, i) => `vfail_u_${i}`);
+
+    const planner: AskPlannerProvider = {
+      providerId: 'local_llm',
+      modelName: 'gemma-4-local',
+      hosting: 'self_hosted_local',
+      plan: () => ({
+        kind: 'execute_query',
+        toolName: 'query_public_segment_agg',
+        viewName: 'v_pub_segment_agg',
+        metricName: 'page_views',
+        sql,
+        requestedColumns: ['segment_id', 'page_views'],
+        groupByColumns: ['segment_id'],
+        filterSignature: 'cohort:verify_fail_test',
+        cohortMemberIds: validCohort20,
+      }),
+    };
+    const ungroundedBucketExecutor: AskDataExecutor = {
+      executePublicViewQuery: () => ({
+        connected: true,
+        // Passes k-anonymity + RREF membership, but bucketLabel injects ungrounded literal "99999"
+        // which causes verifyAnswerNumericReferences() to fail!
+        rows: [
+          {
+            bucketLabel: 'segment 99999',
+            unitCount: 20,
+            metricKey: 'page_views',
+            metricValue: 200,
+            unit: 'page_views',
+            cohortMemberIds: validCohort20,
+          },
+        ],
+        queryRefId: 'qref_verify_fail',
+        paramsHash: 'ph_verify_fail',
+        resultDigest: 'rd_verify_fail',
+      }),
+    };
+
+    const svcVerifyFail = new AskService({
+      planner,
+      executor: ungroundedBucketExecutor,
+      differencingGuard: verifyFailGuard,
+    });
+
+    expect(() =>
+      svcVerifyFail.ask({
+        principal: CALLER_A,
+        siteId: 'site_eval_a',
+        siteTenantId: 'tenant_eval_a',
+        siteConsentMode: 'full',
+        permissionEpoch: 173,
+        question: 'セグメント別PV集計',
+        windowStart: '2026-11-01T00:00:00Z',
+        windowEnd: '2026-11-28T00:00:00Z',
+      })
+    ).toThrow(/Numeric grounding invariant failed/);
+
+    // DifferencingGuard history MUST have 0 entries committed when final answer verification failed!
+    expect(verifyFailGuard.getCohortHistoryLength(verifyFailSessionKey)).toBe(0);
+    expect(verifyFailGuard.getWindowHistoryLength(verifyFailSessionKey)).toBe(0);
   });
 });

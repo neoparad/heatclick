@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { generateEd25519KeyPair, sha256Hex } from '../../workers/link-signer';
 import {
+  DEFAULT_WP_PENDING_COMMAND_LEASE_MS,
   WpPluginEngine,
   auditPhpPluginSource,
   computeWpLocalApprovalDigest,
@@ -1187,9 +1188,20 @@ describe('packages/wp-plugin — WordPress Companion Plugin Protocol & del.D20 C
     expect(engine.getLocalApprovalState(digest)).toBe('claimed');
     expect(engine.getPendingCommandJournal()).toHaveLength(1);
 
-    // Reconcile pending commands -> finishes committing `claimed -> consumed` and clears journal!
+    // While lease is STILL ACTIVE (nowMs + 500 < nowMs + 100 + 30_000), reconcile blocks and does NOT touch approval
     engine.setAfterPostUpdateBeforeCommitHook(undefined);
-    await engine.reconcilePendingCommands();
+    const activeReconcile = await engine.reconcilePendingCommands(nowMs + 500);
+    expect(activeReconcile.blockedByInFlight).toBe(true);
+    expect(activeReconcile.reconciledCount).toBe(0);
+    expect(engine.getLocalApprovalState(digest)).toBe('claimed');
+    expect(engine.getPendingCommandJournal()).toHaveLength(1);
+
+    // After lease expires (nowMs >= lease_expires_at_ms), reconcile finishes committing `claimed -> consumed` and clears journal!
+    const expiredReconcile = await engine.reconcilePendingCommands(
+      nowMs + 100 + DEFAULT_WP_PENDING_COMMAND_LEASE_MS
+    );
+    expect(expiredReconcile.blockedByInFlight).toBe(false);
+    expect(expiredReconcile.reconciledCount).toBe(1);
     expect(engine.getLocalApprovalState(digest)).toBe('consumed');
     expect(engine.getPendingCommandJournal()).toHaveLength(0);
     // Approval cannot be reclaimed/reused
@@ -1219,10 +1231,13 @@ describe('packages/wp-plugin — WordPress Companion Plugin Protocol & del.D20 C
       'k1'
     );
 
-    // During seq=10 post update, a concurrent seq=20 command arrives and advances lastSeq to 20,
-    // then seq=10 fails -> CAS rollback MUST NOT overwrite lastSeq=20 back to 1!
+    // During a stalled seq=10 post update, after seq=10's lease expires a newer seq=20 command arrives
+    // and advances lastSeq to 20; when stalled seq=10 then fails, CAS rollback MUST NOT overwrite lastSeq=20 back to 1!
     engine.setPostUpdateHook(async () => {
-      const capRes = await engine.handleSignedCommand(concurrentNewerCmd, nowMs + 300);
+      const capRes = await engine.handleSignedCommand(
+        concurrentNewerCmd,
+        nowMs + 250 + DEFAULT_WP_PENDING_COMMAND_LEASE_MS + 100
+      );
       expect(capRes.status).toBe(200);
       expect(engine.getLastSeq()).toBe(20);
       throw new Error('simulated_db_failure_after_newer_seq');
@@ -1254,5 +1269,267 @@ describe('packages/wp-plugin — WordPress Companion Plugin Protocol & del.D20 C
     expect(failRes.error).toBe('wp_update_post_failed');
     // lastSeq MUST remain 20 (never clobbered to 1)!
     expect(engine.getLastSeq()).toBe(20);
+  });
+
+  test('[#6] preserves trailing "/" in unquoted attribute values like <a href=https://example.com/path/> and rejects unapproved edit', async () => {
+    const keyPair = await generateEd25519KeyPair();
+    const engine = new WpPluginEngine({
+      pinnedPubKeys: new Map([['k1', keyPair.publicKey]]),
+      tenantId: 'ten_slash',
+      siteId: 'site_slash',
+      homeUrl: 'https://slash.example.jp',
+      ownerPolicy: {
+        local_stop: false,
+        allowed_auto_classes: ['cta_copy'],
+        daily_apply_cap: 10,
+        require_admin_confirmation_classes: ['touch_indexable_seo'],
+      },
+    });
+
+    const beforeHtml = '<a href=https://example.com/path>Go</a>';
+    const afterHtml = '<a href=https://example.com/path/>Go</a>';
+
+    // Signatures MUST differ when only adding/removing a trailing '/' on an unquoted href!
+    const beforeSig = extractIndexableSeoSignature(beforeHtml);
+    const afterSig = extractIndexableSeoSignature(afterHtml);
+    expect(beforeSig).not.toBeNull();
+    expect(afterSig).not.toBeNull();
+    expect(beforeSig).not.toBe(afterSig);
+    expect(afterSig).toContain('https://example.com/path/');
+
+    // Whitespace-preceded self-closing '/' and bare '<tag/>' still parse cleanly
+    expect(extractIndexableSeoSignature('<br/><meta name="description" content="ok" />')).toBe(
+      'meta[name="description" content="ok"]'
+    );
+
+    const beforeSha = await sha256Hex(beforeHtml);
+    const mod = '2026-11-20T00:00:00.000Z';
+    engine.seedPost({
+      post_id: 603,
+      permalink: '/unquoted-slash/',
+      content: beforeHtml,
+      modified_gmt: mod,
+      edit_lock_user_id: null,
+    });
+
+    const byteStart = beforeHtml.indexOf('path');
+    const byteEnd = byteStart + 'path'.length;
+    const unapprovedEnv = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 1,
+        not_after: futureIso,
+        tenant_id: 'ten_slash',
+        site_id: 'site_slash',
+        home_url: 'https://slash.example.jp',
+        post_id: 603,
+        promotion_id: 'promo_trailing_slash',
+        change_class: 'cta_copy',
+        expected_content_sha256: beforeSha,
+        expected_modified_gmt: mod,
+        byte_start: byteStart,
+        byte_end: byteEnd,
+        replacement_html: 'path/',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    const rejected = await engine.handleSignedCommand(unapprovedEnv);
+    expect(rejected.status).toBe(403);
+    expect(rejected.error).toBe('owner_local_policy_requires_admin_confirmation');
+    expect(engine.getPost(603)?.content).toBe(beforeHtml);
+  });
+
+  test('[#7] active in-flight command lease rejects concurrent requests with 409 command_in_flight without releasing approval, reconciles after expiry, and PHP uses single conditional SQL seq rollback', async () => {
+    const keyPair = await generateEd25519KeyPair();
+    const engine = new WpPluginEngine({
+      pinnedPubKeys: new Map([['k1', keyPair.publicKey]]),
+      tenantId: 'ten_lease',
+      siteId: 'site_lease',
+      homeUrl: 'https://lease.example.jp',
+      ownerPolicy: {
+        local_stop: false,
+        allowed_auto_classes: ['cta_copy'],
+        daily_apply_cap: 10,
+        require_admin_confirmation_classes: ['touch_indexable_seo'],
+      },
+    });
+
+    const beforeHtml = '<h1>In-Flight Old</h1>';
+    const afterHtml = '<h1>In-Flight New</h1>';
+    const byteStart = beforeHtml.indexOf('In-Flight Old');
+    const byteEnd = byteStart + 'In-Flight Old'.length;
+    const beforeSha = await sha256Hex(beforeHtml);
+    const afterSha = await sha256Hex(afterHtml);
+    const mod = '2026-11-20T00:00:00.000Z';
+
+    engine.seedPost({
+      post_id: 704,
+      permalink: '/in-flight-lease/',
+      content: beforeHtml,
+      modified_gmt: mod,
+      edit_lock_user_id: null,
+    });
+
+    const nowMs = Date.now();
+    const approved = await engine.recordLocalWpAdminApproval({
+      hasManageOptionsCapability: true,
+      wpAdminNonceVerified: true,
+      postId: 704,
+      beforeSha256: beforeSha,
+      afterSha256: afterSha,
+      commandSeq: 1,
+      nowMs,
+    });
+    expect(approved.ok).toBe(true);
+    const digest = approved.digest!;
+
+    const applyEnv = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 1,
+        not_after: futureIso,
+        tenant_id: 'ten_lease',
+        site_id: 'site_lease',
+        home_url: 'https://lease.example.jp',
+        post_id: 704,
+        promotion_id: 'promo_lease_1',
+        change_class: 'touch_indexable_seo',
+        expected_content_sha256: beforeSha,
+        expected_modified_gmt: mod,
+        byte_start: byteStart,
+        byte_end: byteEnd,
+        replacement_html: 'In-Flight New',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+
+    const concurrentNextCmd = await signWpCommand(
+      {
+        command: 'capabilities',
+        seq: 2,
+        not_after: futureIso,
+        tenant_id: 'ten_lease',
+        site_id: 'site_lease',
+        home_url: 'https://lease.example.jp',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+
+    // (a) While seq=1 is in_progress with an active lease, a concurrent next request gets 409 command_in_flight
+    //     and MUST NOT release seq=1's claimed approval!
+    let concurrentResStatus = -1;
+    let concurrentResError: string | undefined;
+    let approvalStateAfterConcurrentReq: string | null = null;
+
+    engine.setPostUpdateHook(async () => {
+      const concurrentRes = await engine.handleSignedCommand(concurrentNextCmd, nowMs + 1_000);
+      concurrentResStatus = concurrentRes.status;
+      concurrentResError = concurrentRes.error;
+      approvalStateAfterConcurrentReq = engine.getLocalApprovalState(digest);
+    });
+
+    const firstRes = await engine.handleSignedCommand(applyEnv, nowMs + 500);
+    expect(firstRes.status).toBe(200);
+    expect(concurrentResStatus).toBe(409);
+    expect(concurrentResError).toBe('command_in_flight');
+    expect(approvalStateAfterConcurrentReq).toBe('claimed');
+    expect(engine.getLocalApprovalState(digest)).toBe('consumed');
+    expect(engine.getPost(704)?.content).toBe(afterHtml);
+
+    // (b) Simulate a crashed in_progress entry whose post update did NOT land;
+    //     active lease blocks recovery (409 command_in_flight), and after nowMs >= lease_expires_at_ms
+    //     reconciliation releases the approval back to unused and rolls back seq!
+    const beforeHtml2 = '<h1>Crash Before Update</h1>';
+    const afterHtml2 = '<h1>Never Written</h1>';
+    const beforeSha2 = await sha256Hex(beforeHtml2);
+    const afterSha2 = await sha256Hex(afterHtml2);
+    engine.seedPost({
+      post_id: 705,
+      permalink: '/expired-lease/',
+      content: beforeHtml2,
+      modified_gmt: mod,
+      edit_lock_user_id: null,
+    });
+    const approved2 = await engine.recordLocalWpAdminApproval({
+      hasManageOptionsCapability: true,
+      wpAdminNonceVerified: true,
+      postId: 705,
+      beforeSha256: beforeSha2,
+      afterSha256: afterSha2,
+      commandSeq: 5,
+      nowMs: nowMs + 2_000,
+    });
+    const digest2 = approved2.digest!;
+
+    // Crash right after post update hook (simulate hard crash without post content mutating)
+    engine.setPostUpdateHook(undefined);
+    engine.setAfterPostUpdateBeforeCommitHook(() => {
+      throw new Error('hard_process_crash');
+    });
+    const applyEnv5 = await signWpCommand(
+      {
+        command: 'apply',
+        seq: 5,
+        not_after: futureIso,
+        tenant_id: 'ten_lease',
+        site_id: 'site_lease',
+        home_url: 'https://lease.example.jp',
+        post_id: 705,
+        promotion_id: 'promo_lease_5',
+        change_class: 'touch_indexable_seo',
+        expected_content_sha256: beforeSha2,
+        expected_modified_gmt: mod,
+        byte_start: 4,
+        byte_end: 23,
+        replacement_html: 'Never Written',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    await expect(engine.handleSignedCommand(applyEnv5, nowMs + 2_500)).rejects.toThrow(
+      'hard_process_crash'
+    );
+    engine.setAfterPostUpdateBeforeCommitHook(undefined);
+
+    const journalEntry = engine.getPendingCommandJournal()[0];
+    expect(journalEntry.lease_token).toMatch(/^lease_5_/);
+    expect(journalEntry.lease_expires_at_ms).toBe(nowMs + 2_500 + DEFAULT_WP_PENDING_COMMAND_LEASE_MS);
+
+    // Before lease_expires_at_ms -> 409 command_in_flight
+    const blockedCmd = await signWpCommand(
+      {
+        command: 'capabilities',
+        seq: 6,
+        not_after: futureIso,
+        tenant_id: 'ten_lease',
+        site_id: 'site_lease',
+        home_url: 'https://lease.example.jp',
+      },
+      keyPair.privateKey,
+      'k1'
+    );
+    const blockedRes = await engine.handleSignedCommand(blockedCmd, journalEntry.lease_expires_at_ms - 1);
+    expect(blockedRes.status).toBe(409);
+    expect(blockedRes.error).toBe('command_in_flight');
+    expect(engine.getLocalApprovalState(digest2)).toBe('claimed');
+
+    // At nowMs >= lease_expires_at_ms -> reconciles cleanly (commits consumed since post updated) and processes seq=6!
+    const afterExpiryRes = await engine.handleSignedCommand(blockedCmd, journalEntry.lease_expires_at_ms);
+    expect(afterExpiryRes.status).toBe(200);
+    expect(engine.getLocalApprovalState(digest2)).toBe('consumed');
+    expect(engine.getPendingCommandJournal()).toHaveLength(0);
+
+    // (c) Static PHP audit verifies single conditional SQL UPDATE ... WHERE option_name = %s AND option_value = %s
+    const phpPath = path.join(__dirname, 'ugokilink-companion.php');
+    const phpSource = fs.readFileSync(phpPath, 'utf8');
+    const audit = auditPhpPluginSource(phpSource);
+    expect(audit.errors).toEqual([]);
+    expect(audit.passed).toBe(true);
+    expect(phpSource).toMatch(
+      /UPDATE \{\$wpdb->options\} SET option_value = %s WHERE option_name = %s AND option_value = %s/
+    );
   });
 });
