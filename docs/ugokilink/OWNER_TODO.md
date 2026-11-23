@@ -47,7 +47,7 @@
 ---
 
 ## 4. 自社5サイトでの作業
-- [ ] **サーバー・CDN生ログの保全設定**: 5媒体（`wakegai.jp`, `bihadashop.jp`, `bousuikouji.info`, `nvrseen.com`, `link-th.co.jp`）のアクセスログ・WP改訂履歴・アフィリエイト報告を消さずに残す設定。
+- [ ] **サーバー・CDN生ログの保全設定**: 自社媒体（`bihadashop.jp`, `bousuikouji.info`, `nvrseen.com`, `link-th.co.jp` 等）のアクセスログ・WP改訂履歴・アフィリエイト報告を消さずに残す設定（※ `wakegai.jp` は**顧客サイト**のため別テナント扱い・自社共通 LoRA 学習対象外）。
 - [ ] **新スニペット貼付・開示文面掲載**（手順 11 準備完了後）。
 
 ### 波 0-D / 波 1 追加タスク
