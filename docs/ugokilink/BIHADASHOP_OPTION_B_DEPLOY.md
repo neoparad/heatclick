@@ -1,6 +1,6 @@
-# UGOKI LINK v2 — `bihadashop.jp` Option B（既存 ClickHouse 別 DB `ugoki_link_v2`）並行配備手順書
+# UGOKI LINK v2 — `bihadashop.jp` & `link-th.co.jp` Option B（既存 ClickHouse 別 DB `ugoki_link_v2`）並行配備手順書
 
-既存の稼働環境（旧 `clickinsight` DB・旧 `workers/event-ingest`・`bihadashop.jp` の旧タグ）を一切止めずに、**既存 ClickHouse 上の別データベース `ugoki_link_v2`** を使って `bihadashop.jp` で UGOKI LINK v2 を並行稼働させる手順です。
+既存の稼働環境（旧 `clickinsight` DB・旧 `workers/event-ingest`・各サイトの旧タグ）を一切止めずに、**既存 ClickHouse 上の別データベース `ugoki_link_v2`** を使って、まず **`bihadashop.jp`** で疎通し、続けて **`link-th.co.jp`** でもテスト稼働させる手順です（2 サイト分の鍵とタグを 1 コマンドで同時生成します）。
 
 > 後日、専用の 8 GiB ClickHouse ノード（Option A）へ切り替える際は、環境変数 `UGK_CLICKHOUSE_V2_URL`（および `ugokilink-loader-jp` の `CLICKHOUSE_URL`）を新ノードへ向けるだけで移行できます。
 
@@ -46,13 +46,13 @@ npx wrangler queues create ugk-deletion-jp
 
 ---
 
-## Step 3: `bihadashop.jp` 用キーとスニペットを生成
+## Step 3: `bihadashop.jp` & `link-th.co.jp` 用キーとスニペットをまとめて生成
 
 ```powershell
 node scripts/link/bootstrap-bihadashop.mjs --collector-url "https://ugokilink-collector-jp.<your-subdomain>.workers.dev"
 ```
 
-出力されたシークレット類（コミット禁止）を、以下のコマンドで Cloudflare Workers と Vercel へ投入します。
+既定で **`bihadashop` (`bihadashop.jp`)** と **`link-th` (`link-th.co.jp`)** の 2 サイト分をまとめて含む `SITE_KEYS_JSON` / `UGK_SITES_BOOTSTRAP_JSON` と、サイト別の並行 HTML スニペット 2 本が出力されます（シークレットはコミット禁止）。
 
 ---
 
@@ -97,12 +97,16 @@ npx wrangler deploy
 
 ---
 
-## Step 6: `bihadashop.jp` へ並行タグを貼付して疎通確認
+## Step 6: 並行タグを貼付して疎通確認（まず `bihadashop.jp` → 続けて `link-th.co.jp`）
 
-1. `bihadashop.jp` に入っている **既存の旧タグは消さずにそのまま残し**、Step 3 で出力された並行スニペットを追加設置します。
+1. まず **`bihadashop.jp`** の既存旧タグを残したまま、Step 3 で出力された `[1/2] bihadashop.jp` 用スニペットを追加設置します。
 2. ブラウザで `bihadashop.jp` を 1 ページ開き、DevTools の Network タブで `ugokilink-collector-jp` への `POST /v1/collect/events` が HTTP `200` になることを確認します。
-3. 1〜2 分後に ClickHouse で行が入ったことを確認します：
+3. 同様に **`link-th.co.jp`** にも `[2/2] link-th.co.jp` 用スニペットを追加設置して 1 ページ開きます（Workers 側の再デプロイは不要 — Step 3 で既に 2 サイト分登録済み）。
+4. 1〜2 分後に ClickHouse で 2 サイトそれぞれの行が入ったことを確認します：
    ```sql
-   SELECT count(), max(updated_at) FROM ugoki_link_v2.pv_state WHERE site_id = 'bihadashop';
+   SELECT site_id, count(), max(updated_at)
+   FROM ugoki_link_v2.pv_state
+   WHERE site_id IN ('bihadashop', 'link-th')
+   GROUP BY site_id;
    ```
-4. `/api/v1/sites/bihadashop/capabilities` および `/api/v1/sites/bihadashop/metrics` に Bearer キーで疎通し、実データが返ることを確認して運用開始します。
+5. `/api/v1/sites/bihadashop/metrics` および `/api/v1/sites/link-th/metrics` に Bearer キーで疎通し、実データが返ることを確認して運用開始します。
