@@ -1,0 +1,21 @@
+name = "ugokilink-loader-jp"
+main = "entry.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+STORAGE_REGION = "jp"
+CLICKHOUSE_DB = "ugoki_link_v2"
+SHARD_COUNT = "64"
+
+[triggers]
+crons = ["* * * * *"]
+
+[[r2_buckets]]
+binding = "R2_WAL"
+bucket_name = "ugk-wal-jp"
+
+# Required secrets (set via `npx wrangler secret put <NAME>`):
+#   CLICKHOUSE_URL      — Option B: existing ClickHouse URL (Option A later: dedicated 8 GiB URL)
+#   CLICKHOUSE_USERNAME — ClickHouse writer/loader user
+#   CLICKHOUSE_PASSWORD — ClickHouse password

@@ -24,6 +24,11 @@ import {
   SurfacePipeline,
   type SurfaceExecutionResult,
 } from './pipeline';
+import {
+  ClickHouseSurfaceRepository,
+  parseSitesBootstrapFromEnv,
+  resolveClickHouseV2ConfigFromEnv,
+} from './clickhouse-repository';
 
 export class KeyPepperUnconfiguredError extends Error {
   public readonly code = 'UGOKILINK_KEY_PEPPER_UNCONFIGURED' as const;
@@ -55,7 +60,7 @@ export interface SurfaceRuntimeContext {
   readonly pipeline: SurfacePipeline;
   readonly mcpServer: LinkMcpServer;
   readonly askService: AskService;
-  readonly repository: EmptyUnconnectedRepository;
+  readonly repository: EmptyUnconnectedRepository | ClickHouseSurfaceRepository;
   readonly heatmapService?: HeatmapRenderService;
   readonly heatmapDatasetProvider?: HeatmapDatasetProvider;
 }
@@ -99,7 +104,20 @@ export function getSurfaceRuntimeContext(): SurfaceRuntimeContext {
       pepperVersion: 'runtime_v1',
       pepperSecret,
     });
-    const repository = new EmptyUnconnectedRepository();
+    const chConfig =
+      process.env.UGK_ENABLE_V2_PROD_WIRING === 'true'
+        ? resolveClickHouseV2ConfigFromEnv()
+        : null;
+    const bootstrapSites =
+      process.env.UGK_ENABLE_V2_PROD_WIRING === 'true' ? parseSitesBootstrapFromEnv() : [];
+    const repository: EmptyUnconnectedRepository | ClickHouseSurfaceRepository = chConfig
+      ? new ClickHouseSurfaceRepository(chConfig, { initialSites: bootstrapSites })
+      : new EmptyUnconnectedRepository();
+    if (!(repository instanceof ClickHouseSurfaceRepository)) {
+      for (const s of bootstrapSites) {
+        repository.registerSiteConfig(s);
+      }
+    }
     const askService = new AskService({ executor: UNCONNECTED_ASK_EXECUTOR });
     const pipeline = new SurfacePipeline({
       keyRegistry,
@@ -230,6 +248,28 @@ export async function handleV1RestRoute(params: {
     (typeof body?.tenantId === 'string' ? body.tenantId : undefined) ??
     params.req.headers.get('x-tenant-id') ??
     undefined;
+
+  if (
+    ctx.repository instanceof ClickHouseSurfaceRepository &&
+    params.operationId === 'getSiteMetrics' &&
+    params.siteId
+  ) {
+    const siteCfg = ctx.repository.getSiteConfig(params.siteId);
+    if (siteCfg) {
+      const nowIso = new Date().toISOString();
+      const windowEnd = queryParams.windowEnd ?? queryParams.to ?? nowIso;
+      const windowStart =
+        queryParams.windowStart ??
+        queryParams.from ??
+        new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      await ctx.repository.prefetchSiteMetrics({
+        tenantId: siteCfg.tenantId,
+        siteId: siteCfg.siteId,
+        windowStart,
+        windowEnd,
+      });
+    }
+  }
 
   const result = ctx.pipeline.execute({
     operationId: params.operationId,

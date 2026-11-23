@@ -8,4 +8,5 @@ export * from './journeys';
 export * from './pipeline';
 export * from './mcp';
 export * from './internal-screens-adapter';
+export * from './clickhouse-repository';
 export * from './http-adapter';

@@ -1,0 +1,15 @@
+name = "ugokilink-live-jp"
+main = "entry.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+STORAGE_REGION = "jp"
+
+[[durable_objects.bindings]]
+name = "SITE_LIVE_DO"
+class_name = "SiteLiveDoWorker"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["SiteLiveDoWorker"]
