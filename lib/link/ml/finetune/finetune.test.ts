@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Int8ModelArtifactPayload } from '../foundation/int8-tree-runtime';
 import {
   AdapterDeletionManager,
@@ -10,7 +13,7 @@ import {
   UnmanagedDestinationDeletionGuardError,
   adjudicateAndEvaluateLabelBatch,
   buildBlindAnnotationTask,
-  buildThreeWayTrainingDataset,
+  buildThreeWayTrainingDataset as buildDataset,
   capMultiOwnerWeights,
   computeCohensKappa,
   computeNearDuplicateClusterId,
@@ -23,6 +26,14 @@ import {
   verifyTrainingDatasetProvenance,
   type CandidateTrainingExample,
 } from './index';
+
+let manifestDir: string;
+beforeEach(() => { manifestDir = mkdtempSync(join(tmpdir(), 'ugk-finetune-')); });
+afterEach(() => { rmSync(manifestDir, { recursive: true, force: true }); });
+
+function buildThreeWayTrainingDataset(params: Omit<Parameters<typeof buildDataset>[0], 'splitManifestPath'>) {
+  return buildDataset({ ...params, splitManifestPath: join(manifestDir, params.seed + '.json') });
+}
 
 function makeCleanExample(
   idx: number,
@@ -825,7 +836,7 @@ describe('Bundle 4-H: §8.14 Fine-Tuning Pipeline (Zero-Jev Provenance, 3-Way Sp
       expect(ds2.splitAssignmentsByExample.get(exId)).toBe(priorSplit);
     }
 
-    // If all components are locked into train/select_tune only (leaving final_eval empty), fail closed!
+    // Conflicting imports must not override a previously committed holdout.
     const allLockedNonEval = new Map<string, 'train' | 'select_tune'>([
       ['persist_lineage_0', 'train'],
       ['persist_lineage_1', 'train'],
@@ -841,7 +852,43 @@ describe('Bundle 4-H: §8.14 Fine-Tuning Pipeline (Zero-Jev Provenance, 3-Way Sp
         seed: 'persistent_split_seed_v1',
         priorSplitAssignments: allLockedNonEval,
       })
-    ).toThrow(InsufficientSplitComponentsError);
+    ).toThrow(SplitContaminationConflictError);
+  });
+
+  test('[#23] fresh build creates a manifest; unmarked appends preserve holdouts and reject bridges', () => {
+    const seed = 'durable_append';
+    const path = join(manifestDir, seed + '.json');
+    // All three initially hash to train; balancing lends lineage_1203 to tuning.
+    const examples = [1201, 1203, 1204].map((id, i) =>
+      makeCleanExample(id, { public_text: ['red', 'green', 'blue'][i] })
+    );
+    const options = { scope: 'shared_adapter', taskKind: 'section_reading', seed } as const;
+    const first = buildThreeWayTrainingDataset({ ...options, examples });
+    expect(first.splitAssignmentsByExample.get('ex_1203')).toBe('select_tune');
+    // This addition hashes to tuning; rebalancing from scratch would move ex_1203 into final_eval.
+    const added = makeCleanExample(1205, { public_text: 'purple' });
+    const next = buildThreeWayTrainingDataset({ ...options, examples: [added, ...examples].reverse() });
+    for (const [id, split] of first.splitAssignmentsByExample) {
+      expect(next.splitAssignmentsByExample.get(id)).toBe(split);
+    }
+    const bridge = makeCleanExample(1211, {
+      page_lineage_id: first.final_eval[0].page_lineage_id, public_text: first.train[0].public_text,
+    });
+    const saved = readFileSync(path, 'utf8');
+    expect(() => buildThreeWayTrainingDataset({ ...options, examples: [...examples, bridge] }))
+      .toThrow(SplitContaminationConflictError);
+    expect(readFileSync(path, 'utf8')).toBe(saved);
+    const lock = path + '.lock';
+    writeFileSync(lock, '', { flag: 'wx' });
+    try {
+      expect(() => buildThreeWayTrainingDataset({ ...options, examples })).toThrow(/EEXIST/);
+      expect(readFileSync(path, 'utf8')).toBe(saved);
+    } finally {
+      rmSync(lock);
+    }
+    writeFileSync(path, '{}');
+    expect(() => buildThreeWayTrainingDataset({ ...options, examples })).toThrow(/manifest/i);
+    expect(readFileSync(path, 'utf8')).toBe('{}');
   });
 
   test('[#23] rejects near-duplicate bridge across prior train & final_eval with SplitContaminationConflictError and enforces MissingPriorSplitAssignmentsError in strict rebuild mode', () => {
@@ -885,14 +932,13 @@ describe('Bundle 4-H: §8.14 Fine-Tuning Pipeline (Zero-Jev Provenance, 3-Way Sp
       })
     ).toThrow(SplitContaminationConflictError);
 
-    // (b) Strict rebuild mode (`isRebuild: true`) MUST fail closed with MissingPriorSplitAssignmentsError
-    //     when `priorSplitAssignments` is omitted or empty!
+    // A declared rebuild without either a committed manifest or a legacy import fails closed.
     expect(() =>
       buildThreeWayTrainingDataset({
         examples: batch1,
         scope: 'shared_adapter',
         taskKind: 'section_reading',
-        seed: 'strict_rebuild_conflict_seed',
+        seed: 'missing_manifest',
         isRebuild: true,
       })
     ).toThrow(MissingPriorSplitAssignmentsError);
@@ -902,7 +948,7 @@ describe('Bundle 4-H: §8.14 Fine-Tuning Pipeline (Zero-Jev Provenance, 3-Way Sp
         examples: batch1,
         scope: 'shared_adapter',
         taskKind: 'section_reading',
-        seed: 'strict_rebuild_conflict_seed',
+        seed: 'missing_manifest',
         priorSplitAssignments: new Map(),
         isRebuild: true,
       })
@@ -919,7 +965,6 @@ describe('Bundle 4-H: §8.14 Fine-Tuning Pipeline (Zero-Jev Provenance, 3-Way Sp
       scope: 'shared_adapter',
       taskKind: 'section_reading',
       seed: 'strict_rebuild_conflict_seed',
-      priorSplitAssignments: ds1.splitAssignmentsByExample,
       isRebuild: true,
     });
     expect(rebuilt.overlap_audit.passed).toBe(true);

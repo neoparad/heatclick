@@ -533,6 +533,7 @@ export class WpPluginEngine {
   private readonly approvalClaimLocks = new Set<string>();
   /** Mirrors `wp_options['ugk_pending_command_journal']` for crash-safe approval reconciliation (`[#7]`). */
   private readonly pendingCommandJournal = new Map<number, WpPendingCommandJournalRecord>();
+  private commandSessionHeld = false;
   private claimTokenSeq = 0;
   private leaseTokenSeq = 0;
   private postUpdateHook?: (post: WpPostRecord, nextContent: string) => Promise<void> | void;
@@ -641,6 +642,7 @@ export class WpPluginEngine {
       commandSeq: params.commandSeq,
     });
 
+    if (this.commandSessionHeld) return { ok: false, error: 'command_in_flight' };
     for (const [k, rec] of this.localApprovals.entries()) {
       if (rec.consumed || rec.expires_at_ms <= nowMs) {
         this.localApprovals.delete(k);
@@ -701,6 +703,16 @@ export class WpPluginEngine {
     readonly blockedByInFlight: boolean;
     readonly reconciledCount: number;
   }> {
+    if (this.commandSessionHeld) return { blockedByInFlight: true, reconciledCount: 0 };
+    this.commandSessionHeld = true;
+    try {
+      return await this.reconcileUnderLock(nowMs);
+    } finally {
+      this.commandSessionHeld = false;
+    }
+  }
+
+  private async reconcileUnderLock(nowMs: number) {
     if (this.pendingCommandJournal.size === 0) {
       return { blockedByInFlight: false, reconciledCount: 0 };
     }
@@ -823,8 +835,18 @@ export class WpPluginEngine {
     envelope: SignedWpCommandEnvelope,
     nowMs = Date.now()
   ): Promise<WpCommandResult> {
+    if (this.commandSessionHeld) return { status: 409, ok: false, error: 'command_in_flight' };
+    this.commandSessionHeld = true;
+    try {
+      return await this.handleUnderLock(envelope, nowMs);
+    } finally {
+      this.commandSessionHeld = false;
+    }
+  }
+
+  private async handleUnderLock(envelope: SignedWpCommandEnvelope, nowMs: number): Promise<WpCommandResult> {
     // 0. [#7] Reconcile expired pending-command journal records; reject concurrent requests while an active lease is in flight
-    const reconcile = await this.reconcilePendingCommands(nowMs);
+    const reconcile = await this.reconcileUnderLock(nowMs);
     if (reconcile.blockedByInFlight) {
       return { status: 409, ok: false, error: 'command_in_flight' };
     }

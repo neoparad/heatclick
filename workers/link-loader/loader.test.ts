@@ -609,6 +609,7 @@ describe('workers/link-loader', () => {
       region: 'jp',
       shardId: 0,
       walBucket: bucket,
+      manifestBucket: bucket,
       nowMs: sealNowMs,
       chunkSize: 50,
     });
@@ -896,6 +897,7 @@ describe('workers/link-loader', () => {
       region: 'jp',
       shardId: 0,
       walBucket: bucket,
+      manifestBucket: bucket,
       nowMs: dayStart + 5 * HOUR_MS,
       deletionTombstones: [{ tenantId: 't-quiet', siteId: 's-quiet', pvIds: [pvDeleted] }],
     });
@@ -992,6 +994,7 @@ describe('workers/link-loader', () => {
       region: 'jp',
       shardId: 0,
       walBucket: bucket,
+      manifestBucket: bucket,
       nowMs: t1 + 2000,
     });
     expect(loaderB.getControlTotals()).toEqual(fullReplay.controlTotals);
@@ -1142,17 +1145,21 @@ describe('workers/link-loader', () => {
       t0 + 200
     );
 
-    const loaderA = new ShardLoader({ region: 'jp', shardId: 0, bucket });
+    const manifests = new InMemoryR2Bucket();
+    const loaderA = new ShardLoader({ region: 'jp', shardId: 0, bucket, manifestBucket: manifests });
     await loaderA.loadPendingWalObjects(t0 + 500);
     expect(loaderA.getPvIndexRow('t-r3-10', 's-r3-10', pvDeleted)).toBeDefined();
 
     // Call deletePvs() directly — do NOT call registerDeletionTombstones()
     const delRes = await loaderA.deletePvs('t-r3-10', 's-r3-10', [pvDeleted], t0 + 600);
     expect(delRes.deletedPvs).toBe(1);
-    expect(await bucket.get(formatTombstonesObjectKey('jp', 0))).not.toBeNull();
+    expect(await manifests.get(formatTombstonesObjectKey('jp', 0))).not.toBeNull();
+    const rebuilt = await replayAllFromWal({ region: 'jp', shardId: 0, walBucket: bucket, manifestBucket: manifests });
+    expect(rebuilt.loader.getPvIndexRow('t-r3-10', 's-r3-10', pvDeleted)).toBeUndefined();
+    expect(rebuilt.loader.getPvIndexRow('t-r3-10', 's-r3-10', pvKept)).toBeDefined();
 
     // Handover Loader B syncs manifests while WAL still exists -> pvDeleted MUST NOT be resurrected!
-    const loaderB = new ShardLoader({ region: 'jp', shardId: 0, bucket });
+    const loaderB = new ShardLoader({ region: 'jp', shardId: 0, bucket, manifestBucket: manifests });
     await loaderB.syncManifestsFromBucket();
     expect(loaderB.getPvIndexRow('t-r3-10', 's-r3-10', pvDeleted)).toBeUndefined();
     expect(loaderB.getPvState('t-r3-10', 's-r3-10', pvDeleted)).toBeUndefined();

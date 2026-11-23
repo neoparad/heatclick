@@ -25,6 +25,7 @@
 
 import { requireDecisionEntitled } from '../../../../packages/contract/ledgers';
 import { sha256Hex, utf8ToBytes } from '../../../../packages/contract/schema';
+import { withSplitManifest } from './split-manifest';
 
 export type DatasetLabelSource =
   | 'human_label'
@@ -702,7 +703,10 @@ export class MissingPriorSplitAssignmentsError extends Error {
  * 3. Assigns each connected component atomically to ONE split (`train` / `select_tune` / `final_eval`),
  *    failing closed with `INSUFFICIENT_SPLIT_COMPONENTS` if all 3 splits cannot be populated!
  */
-export function buildThreeWayTrainingDataset(params: {
+interface ThreeWayDatasetParams {
+  /** Stable absolute file path per dataset series on durable storage shared by every builder.
+   * The parent directory must exist; the first successful build creates the manifest. */
+  readonly splitManifestPath: string;
   readonly examples: readonly CandidateTrainingExample[];
   readonly scope: AdapterTrainingScope;
   readonly targetTenantId?: string;
@@ -726,17 +730,22 @@ export function buildThreeWayTrainingDataset(params: {
    */
   readonly priorSplitAssignments?: ReadonlyMap<string, SplitName>;
   /**
-   * Strict rebuild mode (`[#23]`): when `true`, `priorSplitAssignments` MUST be provided and non-empty
-   * or the builder fails closed with `MissingPriorSplitAssignmentsError`.
+   * Require a committed manifest or explicit legacy assignments on the first import.
    */
   readonly isRebuild?: boolean;
   readonly ratios?: { readonly train: number; readonly select_tune: number; readonly final_eval: number };
-}): ThreeWayDatasetBuildResult {
+}
+
+export function buildThreeWayTrainingDataset(params: ThreeWayDatasetParams): ThreeWayDatasetBuildResult {
   // 0. [H-04]: Run D-31b Jev provenance check FIRST on ALL raw examples (even if text looks like poisoning!)
   assertZeroJevProvenanceFirst(params.examples);
 
-  // 0b. [#23]: Strict rebuild mode MUST provide non-empty priorSplitAssignments (fail closed!)
-  if (params.isRebuild === true && (!params.priorSplitAssignments || params.priorSplitAssignments.size === 0)) {
+  const scope = JSON.stringify([params.scope, params.targetTenantId ?? null, params.taskKind]);
+  return withSplitManifest(params.splitManifestPath, scope, (history) => buildWithHistory(params, history));
+}
+
+function buildWithHistory(params: ThreeWayDatasetParams, history: ReadonlyMap<string, SplitName>) {
+  if (params.isRebuild === true && !history.size && !params.priorSplitAssignments?.size) {
     throw new MissingPriorSplitAssignmentsError();
   }
 
@@ -809,6 +818,7 @@ export function buildThreeWayTrainingDataset(params: {
   // NEVER unconditionally union unrelated pages by `site_id` unless `splitBoundaryMode === 'site'`!
   const splitBoundaryMode = params.splitBoundaryMode ?? 'lineage';
   const keyFirstIndex = new Map<string, number>();
+  const manifestKeys: string[][] = [];
   for (let i = 0; i < n; i += 1) {
     const ex = weightedExamples[i];
     const boundaryKeys: string[] = [
@@ -825,6 +835,7 @@ export function buildThreeWayTrainingDataset(params: {
     if (ex.experiment_id) {
       boundaryKeys.push(`exp:${ex.experiment_id}`);
     }
+    manifestKeys.push([...boundaryKeys, 'example:' + ex.example_id].map((key) => sha256Hex(key)));
     for (const k of boundaryKeys) {
       const prev = keyFirstIndex.get(k);
       if (prev !== undefined) union(prev, i);
@@ -890,15 +901,19 @@ export function buildThreeWayTrainingDataset(params: {
           ? 'select_tune'
           : 'final_eval';
 
-    if (priorSplits && priorSplits.size > 0) {
+    if (history.size || priorSplits?.size) {
       const matchedPrior = new Set<SplitName>();
-      const byComp = priorSplits.get(groupKey);
+      const byComp = priorSplits?.get(groupKey);
       if (byComp) matchedPrior.add(byComp);
       for (const idx of indices) {
         const ex = weightedExamples[idx];
-        const byEx = priorSplits.get(ex.example_id);
+        for (const key of manifestKeys[idx]) {
+          const saved = history.get(key);
+          if (saved) matchedPrior.add(saved);
+        }
+        const byEx = priorSplits?.get(ex.example_id);
         if (byEx) matchedPrior.add(byEx);
-        const byLin = priorSplits.get(ex.page_lineage_id);
+        const byLin = priorSplits?.get(ex.page_lineage_id);
         if (byLin) matchedPrior.add(byLin);
       }
       if (matchedPrior.size > 1) {
@@ -1066,15 +1081,25 @@ export function buildThreeWayTrainingDataset(params: {
   const datasetId = `ds_${sha256Hex(`${params.taskKind}:${params.scope}:${params.seed}:${allKeptIds}`).slice(0, 20)}`;
 
   const splitAssignmentsByComponent = new Map<string, SplitName>();
+  const assignments = new Map<string, SplitName>();
   for (const comp of componentList) {
     splitAssignmentsByComponent.set(comp.groupKey, comp.split);
+    for (const idx of comp.indices) {
+      for (const key of manifestKeys[idx]) {
+        if (assignments.has(key) && assignments.get(key) !== comp.split) {
+          throw new SplitContaminationConflictError(comp.groupKey, [assignments.get(key)!, comp.split],
+            [weightedExamples[idx].example_id]);
+        }
+        assignments.set(key, comp.split);
+      }
+    }
   }
   const splitAssignmentsByExample = new Map<string, SplitName>();
   for (const item of [...train, ...selectTune, ...finalEval]) {
     splitAssignmentsByExample.set(item.example_id, item.split);
   }
 
-  return {
+  const result: ThreeWayDatasetBuildResult = {
     dataset_id: datasetId,
     provenance: finalProvenance,
     train,
@@ -1086,4 +1111,5 @@ export function buildThreeWayTrainingDataset(params: {
     splitAssignmentsByExample,
     overlap_audit: overlapAudit,
   };
+  return { result, assignments };
 }

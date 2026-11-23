@@ -280,6 +280,7 @@ describe('UGOKI LINK v2 — Wave 7-F Cross-Module E2E Pipeline & Repository Inva
       region: 'jp',
       shardId: directShardId,
       walBucket,
+      manifestBucket: walBucket,
       nowMs: baseWallMs + 7_000,
     });
     expect(replayRes.doublePlacementCount).toBe(0);

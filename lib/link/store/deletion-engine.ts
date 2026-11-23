@@ -101,67 +101,44 @@ export interface KeyedSubjectDigest {
   readonly lookupCandidates?: readonly string[];
 }
 
-function parseKeyVersionNumber(keyVersion: string | number): number {
-  if (typeof keyVersion === 'number' && Number.isFinite(keyVersion)) {
-    return Math.trunc(keyVersion);
-  }
-  const trimmed = String(keyVersion).trim();
-  if (/^\d+$/.test(trimmed)) {
-    return Number.parseInt(trimmed, 10);
-  }
-  const suffixMatch = /^(?:key_)?v(\d+)$/i.exec(trimmed);
-  if (suffixMatch) {
-    return Number.parseInt(suffixMatch[1]!, 10);
-  }
-  return 0;
+function parseKeyVersionNumber(keyVersion: string | number): number | null {
+  const match = /^(?:(?:key_)?v)?(\d+)$/i.exec(String(keyVersion).trim());
+  const version = match ? Number(match[1]) : NaN;
+  return Number.isSafeInteger(version) ? version : null;
 }
 
-function buildKeyedDigestsFromVersionedCandidates(
-  candidates: readonly SubjectHmacVersionedCandidate[]
-): readonly KeyedSubjectDigest[] {
-  const byVersionLabel = new Map<
-    string,
-    {
-      keyVersion: number;
-      keyVersionLabel: string;
-      canonicalHmac: string | null;
-      digests: Set<string>;
-    }
-  >();
+interface QueuedDigestPlan {
+  readonly scoped: ReadonlyMap<number, KeyedSubjectDigest>;
+  readonly unscoped: readonly string[];
+}
 
-  for (const item of candidates) {
-    if (!item || typeof item.hmac_hex !== 'string' || item.hmac_hex.length === 0) {
+function planQueuedDigests(flat: readonly string[], tagged: readonly SubjectHmacVersionedCandidate[]): QueuedDigestPlan {
+  const entries = tagged.filter((c) => c && typeof c.hmac_hex === 'string' && c.hmac_hex.length > 0);
+  const all = new Set([...flat, ...entries.map((c) => c.hmac_hex)]);
+  const scoped = new Map<number, KeyedSubjectDigest>();
+  // Earlier collectors also guessed the current version in envelopes with synthetic rotation labels.
+  if (entries.some((c) => /^rotated_\d+$/.test(String(c.key_version)))) {
+    return { scoped, unscoped: [...all] };
+  }
+  const unscoped = new Set(all);
+  const ambiguous = new Set<string>();
+  for (const c of entries) {
+    const version = parseKeyVersionNumber(c.key_version);
+    // Old collectors emitted the literal string '1' even when no version was configured.
+    if (version === null || c.key_version === '1') {
+      ambiguous.add(c.hmac_hex);
       continue;
     }
-    const label = String(item.key_version);
-    let group = byVersionLabel.get(label);
-    if (!group) {
-      group = {
-        keyVersion: parseKeyVersionNumber(item.key_version),
-        keyVersionLabel: label,
-        canonicalHmac: null,
-        digests: new Set<string>(),
-      };
-      byVersionLabel.set(label, group);
-    }
-    if (item.format === 'canonical_v1' && group.canonicalHmac === null) {
-      group.canonicalHmac = item.hmac_hex;
-    }
-    group.digests.add(item.hmac_hex);
-  }
-
-  const out: KeyedSubjectDigest[] = [];
-  for (const group of byVersionLabel.values()) {
-    const lookupCandidates = Array.from(group.digests);
-    if (lookupCandidates.length === 0) continue;
-    out.push({
-      keyVersion: group.keyVersion,
-      keyVersionLabel: group.keyVersionLabel,
-      hmacHex: group.canonicalHmac ?? lookupCandidates[0]!,
-      lookupCandidates,
+    const prev = scoped.get(version);
+    scoped.set(version, {
+      keyVersion: version,
+      keyVersionLabel: String(c.key_version),
+      hmacHex: c.format === 'canonical_v1' ? c.hmac_hex : prev?.hmacHex ?? c.hmac_hex,
+      lookupCandidates: [...new Set([...(prev?.lookupCandidates ?? []), c.hmac_hex])],
     });
+    unscoped.delete(c.hmac_hex);
   }
-  return out;
+  return { scoped, unscoped: [...new Set([...unscoped, ...ambiguous])] };
 }
 
 /**
@@ -518,7 +495,7 @@ const DAY_MS = 86_400_000;
 interface InternalRequestState {
   record: DeletionRequestRecord;
   rawSubjectValue: string | null;
-  precomputedCandidates: readonly string[] | null;
+  queuedDigestPlan: QueuedDigestPlan | null;
   keyedDigests: readonly KeyedSubjectDigest[];
   ecMemberDeleted: number;
   edgeCachePurged: number;
@@ -579,6 +556,37 @@ export class DeletionExecutionEngine {
     return this.deletionEpochCounter;
   }
 
+  private resolveRequestDigests(
+    tenantId: string,
+    kind: DeletionSubjectKind,
+    raw: string | null,
+    plan: QueuedDigestPlan
+  ): readonly KeyedSubjectDigest[] {
+    const computed = raw === null ? [] : this.keyRegistry.computeSubjectDigestsAcrossAllVersions(tenantId, kind, raw);
+    const fromRaw = new Map(computed.map((d) => [d.keyVersion, d] as const));
+    const searchable = this.keyRegistry.getSearchableKeyVersions(tenantId).map((v) => v.keyVersion);
+    if (plan.unscoped.length > 0 && searchable.length === 0) {
+      throw new Error('Unversioned deletion candidates require a searchable tenant key version');
+    }
+    const versions = new Set([...fromRaw.keys(), ...plan.scoped.keys(), ...(plan.unscoped.length ? searchable : [])]);
+    if (versions.size === 0) throw new Error('No searchable key version for deletion');
+    return [...versions].sort((a, b) => a - b).map((keyVersion) => {
+      const derived = fromRaw.get(keyVersion);
+      const tagged = plan.scoped.get(keyVersion);
+      const candidates = [...new Set([
+        ...(derived?.lookupCandidates ?? []),
+        ...(tagged?.lookupCandidates ?? []),
+        ...(searchable.includes(keyVersion) ? plan.unscoped : []),
+      ])];
+      return {
+        keyVersion,
+        ...(tagged ? { keyVersionLabel: tagged.keyVersionLabel } : {}),
+        hmacHex: derived?.hmacHex ?? tagged?.hmacHex ?? candidates[0]!,
+        lookupCandidates: candidates,
+      };
+    });
+  }
+
   public scheduleRequest(args: {
     readonly requestId: string;
     readonly tenantId: string;
@@ -587,6 +595,7 @@ export class DeletionExecutionEngine {
     readonly rawSubjectValue?: string;
     readonly subjectHmac?: string | null;
     readonly subjectHmacCandidates?: readonly string[];
+    readonly subject_hmac_candidates?: readonly string[];
     readonly subjectHmacVersionedCandidates?: readonly SubjectHmacVersionedCandidate[];
     readonly subject_hmac_versioned_candidates?: readonly SubjectHmacVersionedCandidate[];
     readonly requestedAtMs?: number;
@@ -598,107 +607,19 @@ export class DeletionExecutionEngine {
       throw new Error(`Unsupported subject_kind: ${args.subjectKind}`);
     }
 
-    const hasRawSubject =
-      typeof args.rawSubjectValue === 'string' && args.rawSubjectValue.length > 0;
-    const versionedCandidates =
-      args.subjectHmacVersionedCandidates ?? args.subject_hmac_versioned_candidates ?? [];
-    const precomputedCandidatesSet = new Set<string>();
-    if (typeof args.subjectHmac === 'string' && args.subjectHmac.length > 0) {
-      precomputedCandidatesSet.add(args.subjectHmac);
+    const rawSubject = typeof args.rawSubjectValue === 'string' && args.rawSubjectValue.length > 0
+      ? args.rawSubjectValue : null;
+    const flat = [args.subjectHmac, ...(args.subjectHmacCandidates ?? args.subject_hmac_candidates ?? [])]
+      .filter((v): v is string => typeof v === 'string' && v.length > 0);
+    const plan = planQueuedDigests(flat, args.subjectHmacVersionedCandidates ?? args.subject_hmac_versioned_candidates ?? []);
+    if (rawSubject === null && plan.scoped.size === 0 && plan.unscoped.length === 0) {
+      throw new Error('Deletion request requires either rawSubjectValue or non-empty subjectHmacCandidates');
     }
-    for (const candidate of args.subjectHmacCandidates ?? []) {
-      if (typeof candidate === 'string' && candidate.length > 0) {
-        precomputedCandidatesSet.add(candidate);
-      }
-    }
-    for (const vc of versionedCandidates) {
-      if (typeof vc?.hmac_hex === 'string' && vc.hmac_hex.length > 0) {
-        precomputedCandidatesSet.add(vc.hmac_hex);
-      }
-    }
-    const precomputedCandidates = Array.from(precomputedCandidatesSet);
-
-    if (!hasRawSubject && precomputedCandidates.length === 0) {
-      throw new Error(
-        `Deletion request "${args.requestId}" requires either rawSubjectValue or non-empty subjectHmacCandidates`
-      );
-    }
-
+    const keyedDigests = this.resolveRequestDigests(args.tenantId, args.subjectKind, rawSubject, plan);
+    const keyVersionsSearched = keyedDigests.map((d) => d.keyVersion);
     const requestedAtMs = args.requestedAtMs ?? Date.now();
     this.deletionEpochCounter += 1;
     const deletionEpoch = this.deletionEpochCounter;
-
-    let keyedDigests: readonly KeyedSubjectDigest[];
-    let keyVersionsSearched: readonly number[];
-
-    if (hasRawSubject) {
-      const computed = this.keyRegistry.computeSubjectDigestsAcrossAllVersions(
-        args.tenantId,
-        args.subjectKind,
-        args.rawSubjectValue!
-      );
-      if (versionedCandidates.length > 0) {
-        const versionedDigests = buildKeyedDigestsFromVersionedCandidates(versionedCandidates);
-        const merged = computed.map((d) => {
-          const matching = versionedDigests.find((vd) => vd.keyVersion === d.keyVersion);
-          if (!matching) return d;
-          return {
-            ...d,
-            keyVersionLabel: matching.keyVersionLabel ?? d.keyVersionLabel,
-            lookupCandidates: Array.from(
-              new Set([...(d.lookupCandidates ?? []), ...(matching.lookupCandidates ?? [])])
-            ),
-          };
-        });
-        const existingVersions = new Set(merged.map((d) => d.keyVersion));
-        for (const vd of versionedDigests) {
-          if (!existingVersions.has(vd.keyVersion)) {
-            merged.push(vd);
-          }
-        }
-        keyedDigests = merged;
-      } else if (precomputedCandidates.length > 0) {
-        keyedDigests = computed.map((d, idx) =>
-          idx === 0
-            ? {
-                ...d,
-                lookupCandidates: Array.from(
-                  new Set([...(d.lookupCandidates ?? []), ...precomputedCandidates])
-                ),
-              }
-            : d
-        );
-      } else {
-        keyedDigests = computed;
-      }
-      keyVersionsSearched = keyedDigests.map((d) => d.keyVersion);
-    } else if (versionedCandidates.length > 0) {
-      // Codex R3 #9: Zero-plaintext key-versioned path — pair each key_version with ONLY
-      // the digests computed under THAT key so (oldKeyVersion, oldDigest) rows are matched!
-      keyedDigests = buildKeyedDigestsFromVersionedCandidates(versionedCandidates);
-      keyVersionsSearched = Array.from(new Set(keyedDigests.map((d) => d.keyVersion))).sort(
-        (a, b) => a - b
-      );
-    } else {
-      // Codex R2 #9: Backward-compatible zero-plaintext flat-candidates path
-      const searchableVersions = this.keyRegistry.getSearchableKeyVersions(args.tenantId);
-      const primaryKeyVersion = searchableVersions[0]?.keyVersion ?? 0;
-      const primaryHmac =
-        typeof args.subjectHmac === 'string' && args.subjectHmac.length > 0
-          ? args.subjectHmac
-          : precomputedCandidates[0]!;
-      keyedDigests = [
-        {
-          keyVersion: primaryKeyVersion,
-          hmacHex: primaryHmac,
-          lookupCandidates: precomputedCandidates,
-        },
-      ];
-      keyVersionsSearched =
-        searchableVersions.length > 0
-          ? searchableVersions.map((v) => v.keyVersion)
-          : [primaryKeyVersion];
-    }
 
     const record: DeletionRequestRecord = {
       requestId: args.requestId,
@@ -722,8 +643,8 @@ export class DeletionExecutionEngine {
 
     this.requests.set(args.requestId, {
       record,
-      rawSubjectValue: hasRawSubject ? args.rawSubjectValue! : null,
-      precomputedCandidates: precomputedCandidates.length > 0 ? precomputedCandidates : null,
+      rawSubjectValue: rawSubject,
+      queuedDigestPlan: plan,
       keyedDigests,
       ecMemberDeleted: 0,
       edgeCachePurged: 0,
@@ -816,42 +737,15 @@ export class DeletionExecutionEngine {
         `Cannot execute physical purge phase from state "${internal.record.state}" (mask phase must complete first)`
       );
     }
-    if (
-      internal.record.subjectDigestRedacted ||
-      (internal.rawSubjectValue === null && internal.precomputedCandidates === null)
-    ) {
+    if (internal.record.subjectDigestRedacted || internal.queuedDigestPlan === null) {
       throw new Error(`Subject value already redacted for request "${requestId}"`);
     }
 
-    // Re-evaluate searchable key versions if rawSubjectValue is available;
-    // otherwise reuse precomputed zero-plaintext HMAC lookup candidates (Codex R2 #9).
-    let keyedDigests = internal.keyedDigests;
-    if (internal.rawSubjectValue !== null) {
-      const recomputed = this.keyRegistry.computeSubjectDigestsAcrossAllVersions(
-        internal.record.tenantId,
-        internal.record.subjectKind,
-        internal.rawSubjectValue
-      );
-      if (internal.precomputedCandidates && internal.precomputedCandidates.length > 0) {
-        keyedDigests = recomputed.map((d, idx) =>
-          idx === 0
-            ? {
-                ...d,
-                lookupCandidates: Array.from(
-                  new Set([
-                    ...(d.lookupCandidates ?? []),
-                    ...internal.precomputedCandidates!,
-                  ])
-                ),
-              }
-            : d
-        );
-      } else {
-        keyedDigests = recomputed;
-      }
-      internal.keyedDigests = keyedDigests;
-      internal.keyVersionsSearched = keyedDigests.map((d) => d.keyVersion);
-    }
+    const keyedDigests = this.resolveRequestDigests(
+      internal.record.tenantId, internal.record.subjectKind, internal.rawSubjectValue, internal.queuedDigestPlan
+    );
+    internal.keyedDigests = keyedDigests;
+    internal.keyVersionsSearched = keyedDigests.map((d) => d.keyVersion);
 
     const resolvedKeys = await this.storeAdapter.resolveSubjectKeys({
       tenantId: internal.record.tenantId,
@@ -1077,7 +971,7 @@ export class DeletionExecutionEngine {
 
     // Redact raw subject identifier and precomputed digest candidates once certified
     internal.rawSubjectValue = null;
-    internal.precomputedCandidates = null;
+    internal.queuedDigestPlan = null;
     internal.keyedDigests = [];
     internal.record = {
       ...internal.record,

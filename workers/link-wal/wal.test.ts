@@ -899,6 +899,16 @@ describe('workers/link-wal', () => {
     expect(exportSink.receipts).toHaveLength(0);
     expect(exportSink.seenIdempotencyKeys).toHaveLength(0);
 
+    const otherSink = new InMemoryExportSink('second-destination', 'jp');
+    const otherWriter = new WalWriter({
+      region: 'jp',
+      adapter: new LinkPlusExportStorageAdapter(primaryBucket, otherSink, 'jp', undefined, receiptBucket),
+      deletionEpoch: 2,
+    });
+    await otherWriter.consumeBatch([payload], t0);
+    await otherWriter.consumeBatch([payload], t0);
+    expect(otherSink.receipts).toHaveLength(1);
+
     // Runtime check: ExportSinkPort.writeExportBatch rejects missing/empty idempotencyKey
     await expect(
       exportSink.writeExportBatch({

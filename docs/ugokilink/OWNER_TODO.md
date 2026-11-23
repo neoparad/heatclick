@@ -137,3 +137,8 @@
 ### 波 6-C / 6-E 追加タスク
 - [ ] **[6-C / 6-E 判断 16 / 17 / 21 / 23]**: D-16（`json_ld`/`llms_txt`/`canonical`/`robots` 元サーバー操作解禁）、D-17（外部テナント CATE 個別最適化＆自律生成文の法務署名）、D-21（自律本採用 `n=59` 5% 巻戻し上限・180 日主張 TTL 定数確定）、D-23（テナント横断持ち寄り＆連合学習の法務検証・オプトイン統治、≥5/≥10 テナント到達後に開放）。
 - [ ] **[6-C / 6-E 本番資格確認]**: 各元サーバー生成器の自社 ≥30 ページ事前検査（≥28/30 合格）、対話 WebAuthn パスキーでの初回本番自律枠作成（露出人数・危険成果数上限を明記・割合段階公開禁止）、および多テナント連合学習開始後の 14 日離脱再学習 SLA 監視。
+
+- [ ] **[Codex APPROVE 後・実環境確認 3 点（#2 / #7 / #23）]**:
+  1. **#2 DPoP 共有リプレイストア配線**: 本番環境で DPoP 束縛トークンを利用可能にするため、インスタンス間で原子的に `jti` を記録する共有ストア（Redis / Postgres / Durable Objects 等）を `IdentityKeyRegistry` の `dpopReplayStore` へ接続する（未接続時は本番で 503 fail-closed）。
+  2. **#7 WordPress PHP/MySQL 実機 2 接続テスト実行**: PHP + WordPress / MySQL テスト環境にて `tests/wp-plugin/test-command-session.php` を実行し、DB サイトロック直列化と承認消費〜投稿更新の不可分性を実機確認する。
+  3. **#23 学習データ永続 split-manifest 共有設定**: 全学習ジョブ（Inngest GPU ジョブ等）が同一の永続 `split-manifest` ストア（`lib/link/ml/finetune/split-manifest.ts`）を参照する設定になっていることを確認する。

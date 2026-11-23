@@ -827,7 +827,7 @@ describe('lib/link/store/reconciliation (Independent Closures ①–④)', () =>
     });
   });
 
-  test('Wave 11 Codex R3 #9: DeletionExecutionEngine pairs each key_version with ONLY its own versioned HMAC candidates in zero-plaintext mode', async () => {
+  test.each(['versioned', 'flat', 'mixed', 'old synthetic labels', 'standalone legacy 1'] as const)('zero-plaintext erasure respects version-scoped rows: %s', async (format) => {
     const t0 = Date.UTC(2026, 10, 23, 12, 0, 0);
     const digestV1 = computeTenantSubjectHmac('salt-v1', 'ten-v', 'visitor_id', 'vis-123');
     const digestV2 = computeTenantSubjectHmac('salt-v2', 'ten-v', 'visitor_id', 'vis-123');
@@ -852,9 +852,11 @@ describe('lib/link/store/reconciliation (Independent Closures ①–④)', () =>
 
     const rows = new Map<string, { keyVersion: number; digest: string }>([
       ['pv-old', { keyVersion: 1, digest: digestV1 }],
+      ['pv-current', { keyVersion: 2, digest: digestV2 }],
     ]);
 
     const seenKeyedDigests: Array<{ keyVersion: number; lookupCandidates: readonly string[] }> = [];
+    const maskedVersions: number[] = [];
     const adapter: DeletionStoreAdapter = {
       async resolveSubjectKeys({ keyedDigests }) {
         for (const kd of keyedDigests) {
@@ -882,10 +884,15 @@ describe('lib/link/store/reconciliation (Independent Closures ①–④)', () =>
           reqUids: [],
           unitIds: [],
           touchedPvHoursMs: [],
-          matchedKeyVersions: [1],
+          matchedKeyVersions: [...new Set(matchedPvIds.map((id) => rows.get(id)!.keyVersion))],
         };
       },
-      async maskSubjectImmediate() {
+      async maskSubjectImmediate({ keyedDigests }) {
+        for (const { keyVersion, digest } of rows.values()) {
+          if (keyedDigests.some((kd) => kd.keyVersion === keyVersion && kd.lookupCandidates?.includes(digest))) {
+            maskedVersions.push(keyVersion);
+          }
+        }
         return { ecMemberSummaryDeleted: 0, edgeCacheKeysPurged: 0 };
       },
       async purgeTable({ table, resolvedKeys }) {
@@ -908,28 +915,53 @@ describe('lib/link/store/reconciliation (Independent Closures ①–④)', () =>
     };
 
     const engine = new DeletionExecutionEngine(adapter, reg);
+    const noKeys = new DeletionExecutionEngine(adapter, new TenantKeyVersionRegistry());
+    expect(() => noKeys.scheduleRequest({
+      requestId: 'unresolved-flat', tenantId: 'ten-v', siteId: 'site-v',
+      subjectKind: 'visitor_id', subjectHmacCandidates: [digestV1],
+    })).toThrow(/searchable tenant key version/);
     engine.scheduleRequest({
       requestId: 'req-r3-9-versioned',
       tenantId: 'ten-v',
       siteId: 'site-v',
       subjectKind: 'visitor_id',
-      subjectHmac: digestV2,
-      subjectHmacVersionedCandidates: [
+      ...(format !== 'standalone legacy 1' && {
+        subjectHmac: digestV2,
+        subjectHmacCandidates: [digestV1, digestV2],
+      }),
+      subjectHmacVersionedCandidates: format === 'standalone legacy 1' ? [
+        { key_version: '1', format: 'canonical_v1', hmac_hex: digestV2 },
+      ] : format === 'flat' ? [] : format === 'mixed' ? [
         { key_version: 'key_v2', format: 'canonical_v1', hmac_hex: digestV2 },
-        { key_version: 'key_v1', format: 'canonical_v1', hmac_hex: digestV1 },
+      ] : [
+        { key_version: format === 'versioned' ? 'key_v2' : '1', format: 'canonical_v1', hmac_hex: digestV2 },
+        { key_version: format === 'versioned' ? 'key_v1' : 'rotated_1', format: 'canonical_v1', hmac_hex: digestV1 },
       ],
       requestedAtMs: t0,
     });
     await engine.executeMaskPhase('req-r3-9-versioned', t0 + 1000);
+    expect(maskedVersions).toEqual(format === 'standalone legacy 1' ? [2] : [1, 2]);
     await engine.executePhysicalPurgePhase('req-r3-9-versioned', t0 + 2000);
     const cert = engine.issueCertificate('req-r3-9-versioned', t0 + 3000);
 
-    expect(rows.size).toBe(0);
+    expect([...rows.keys()]).toEqual(format === 'standalone legacy 1' ? ['pv-old'] : []);
     expect(cert.keyVersionsSearched).toEqual([1, 2]);
     // Verify v1 entry ONLY carries v1 digest and v2 entry ONLY carries v2 digest
     const v1Entry = seenKeyedDigests.find((d) => d.keyVersion === 1)!;
     const v2Entry = seenKeyedDigests.find((d) => d.keyVersion === 2)!;
-    expect(v1Entry.lookupCandidates).toEqual([digestV1]);
-    expect(v2Entry.lookupCandidates).toEqual([digestV2]);
+    if (format === 'versioned') {
+      expect(v1Entry.lookupCandidates).toEqual([digestV1]);
+      expect(v2Entry.lookupCandidates).toEqual([digestV2]);
+    } else if (format === 'standalone legacy 1') {
+      expect(v1Entry.lookupCandidates).toEqual([digestV2]);
+      expect(v2Entry.lookupCandidates).toEqual([digestV2]);
+    } else if (format === 'mixed') {
+      expect(v1Entry.lookupCandidates).toEqual([digestV1]);
+      expect(new Set(v2Entry.lookupCandidates)).toEqual(new Set([digestV1, digestV2]));
+    } else {
+      for (const entry of [v1Entry, v2Entry]) {
+        expect(new Set(entry.lookupCandidates)).toEqual(new Set([digestV1, digestV2]));
+      }
+    }
   });
 });

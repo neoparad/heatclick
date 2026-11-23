@@ -1394,6 +1394,7 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
     expect(sidClearIdx).toBeGreaterThanOrEqual(0);
     expect(delRetryIdx).toBeGreaterThanOrEqual(0);
     expect(vidClearIdx).toBeGreaterThan(delRetryIdx); // ugk_del_retry issued BEFORE clearing ugk_vid!
+    expect(setCookies503[delRetryIdx]).toContain('; Path=/v1/optout;');
     expect(setCookies503[delRetryIdx]).toContain('HttpOnly');
     expect(setCookies503[delRetryIdx]).toContain('Secure');
 
@@ -1424,6 +1425,10 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
       ? res200.headers.getSetCookie()
       : (res200.headers.get('set-cookie') ?? '').split(/,(?=\s*ugk_)/);
     expect(setCookies200.some((c) => c.startsWith('ugk_del_retry=;') && c.includes('Max-Age=0'))).toBe(true);
+    for (const path of ['/', '/v1/optout']) {
+      expect(setCookies200.some(c => c.startsWith('ugk_del_retry=;') &&
+        c.includes(`; Path=${path}; Max-Age=0;`))).toBe(true);
+    }
   });
 
   test('Wave 11 Codex R3 #8: ugk_del_retry cookie verifies across rotated continuityTokenSecret via rotatedContinuityTokenSecrets', async () => {
@@ -1551,7 +1556,7 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
     expect(queuedDeletions[0]!.subject_hmac_candidates).toContain(expectedVisitorHmac);
   });
 
-  test('Wave 11 Codex R3 #9: key-versioned subject HMAC candidates match historical (key_v1, digest_v1) row after rotation to key_v2 with ZERO plaintext', async () => {
+  test.each(['explicit', 'legacy'] as const)('member erasure after rotation uses only the queued record: %s key configuration', async (config) => {
     const q = makeMemoryQueue<PersistedCollectorRecord>();
     const customQ = makeMemoryQueue<CustomEventPersistedRecord>();
     const spill = makeMemoryR2();
@@ -1602,8 +1607,9 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
       tenantId: 'ten_r3_9',
       siteId: 'site_r3_9',
       tenantMemberHashKey: 'secret_key_v2',
-      tenantMemberHashKeyVersion: 'key_v2',
-      rotatedMemberHashKeyVersions: [{ keyVersion: 'key_v1', secretKey: 'secret_key_v1' }],
+      ...(config === 'explicit'
+        ? { tenantMemberHashKeyVersion: 'key_v2', rotatedMemberHashKeyVersions: [{ keyVersion: 1, secretKey: 'secret_key_v1' }] }
+        : { rotatedMemberHashKeys: ['secret_key_v1'] }),
     });
     const queuedDeletions: SubjectDeletionRequest[] = [];
     const workerV2 = createCollectorWorker({
@@ -1638,11 +1644,13 @@ describe('workers/link-collector — Bundles 3-A, 3-B, 3-C (Collector, Surge Bre
     // Verify ZERO plaintext and explicit per-key-version pairing
     expect(JSON.stringify(queuedReq)).not.toContain(rawMemberHash);
     expect(queuedReq.subject_hmac_versioned_candidates).toBeDefined();
+    expect(queuedReq.subject_hmac_candidates).toContain(digestV1);
+    if (config === 'legacy') expect(queuedReq.subject_hmac_versioned_candidates).toEqual([]);
     expect(
       queuedReq.subject_hmac_versioned_candidates!.some(
         (c) => c.key_version === 'key_v1' && c.format === 'canonical_v1' && c.hmac_hex === digestV1
       )
-    ).toBe(true);
+    ).toBe(config === 'explicit');
 
     // 3. Pass ONLY the queued record (zero plaintext!) to DeletionExecutionEngine
     // Adapter enforces strict (keyVersion, hmac) matching so mis-versioned digests fail to match!

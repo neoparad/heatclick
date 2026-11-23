@@ -46,6 +46,7 @@ import {
 } from './actor-experiment'
 import { evaluateHeatmapConsentEligibility } from './consent-matrix'
 import {
+  assertLabOnlyScreenshot,
   assertValidPngDimensions,
   decideHeatmapRenderKind,
   renderDeterministicHeatmapImage,
@@ -134,7 +135,7 @@ function boxesOverlap(
  * Bare strings, pre-mask OCR, or masked-region snippets are omitted completely (never emitted).
  */
 function extractSafePostMaskOcrTexts(screenshot: LabScreenshotInput | null): UntrustedValue[] {
-  if (!screenshot || !screenshot.embedded_text_samples || screenshot.embedded_text_samples.length === 0) {
+  if (screenshot?.provenance !== 'lab_render' || !screenshot.embedded_text_samples?.length) {
     return []
   }
   const redactionBoxes = screenshot.redaction_boxes ?? []
@@ -977,7 +978,7 @@ export class HeatmapRenderService {
   private readonly deletionEpochs = new Map<string, number>() // tenant|site|url -> epoch
   private readonly buildSeqs = new Map<string, number>() // tenant|site|url -> seq
   private readonly maskPolicyEpochs = new Map<string, number>() // tenant|site|url -> mask policy epoch
-  private readonly activeMaskPolicyHashes = new Map<string, string>() // tenant|site|url -> active mask policy hash
+  private readonly activeMaskPolicyHashes = new Map<string, string>() // page + render unit
   private readonly artifactsById = new Map<string, StoredArtifactEntry>()
   private readonly artifactsByReproHash = new Map<string, StoredArtifactEntry>()
   private readonly invalidatedArtifactTombstones = new Map<string, InvalidatedArtifactTombstone>()
@@ -1445,6 +1446,7 @@ export class HeatmapRenderService {
     // 3. Validate PNG dimensions BEFORE pixel budget arithmetic & cost reservation (§11.12)
     for (const d of req.unit_datasets) {
       if (d.screenshot) {
+        assertLabOnlyScreenshot(d.screenshot)
         assertValidPngDimensions(d.screenshot.width, d.screenshot.height)
       }
     }
@@ -1488,24 +1490,28 @@ export class HeatmapRenderService {
     this.principalActiveJobs.set(principal.principal_id, activeCount + 1)
     try {
       const pk = this.pageScopeKey(req.tenant_id, req.site_id, urlKey)
-      if (req.unit_datasets.some((d) => d.screenshot !== undefined)) {
+      let maskChanged = false
+      for (const dataset of req.unit_datasets) {
+        const policyKey = JSON.stringify([pk, serializeHeatmapUnitKey(dataset.unit)])
         const pageMaskPolicyHash = createHash('sha256')
           .update(
             JSON.stringify({
               ocr_policy_version: HEATMAP_OCR_POLICY_VERSION,
-              redaction_boxes: canonicalizeRedactionBoxes(
-                req.unit_datasets.flatMap((d) => d.screenshot?.redaction_boxes ?? []),
-              ),
+              private_scope: dataset.dom_state === 'private_scope',
+              provenance: dataset.screenshot?.provenance ?? null,
+              redaction_boxes: canonicalizeRedactionBoxes(dataset.screenshot?.redaction_boxes),
+              released_texts: extractSafePostMaskOcrTexts(dataset.screenshot),
             }),
             'utf8',
           )
           .digest('hex')
-        const prevMaskPolicyHash = this.activeMaskPolicyHashes.get(pk)
+        const prevMaskPolicyHash = this.activeMaskPolicyHashes.get(policyKey)
         if (prevMaskPolicyHash !== undefined && prevMaskPolicyHash !== pageMaskPolicyHash) {
-          this.invalidateOnMaskCorrection(req.tenant_id, req.site_id, urlKey)
+          maskChanged = true
         }
-        this.activeMaskPolicyHashes.set(pk, pageMaskPolicyHash)
+        this.activeMaskPolicyHashes.set(policyKey, pageMaskPolicyHash)
       }
+      if (maskChanged) this.invalidateOnMaskCorrection(req.tenant_id, req.site_id, urlKey)
       const curDelEpoch = this.deletionEpochs.get(pk) ?? 0
       const curBuildSeq = this.buildSeqs.get(pk) ?? 1
       const curMaskEpoch = this.maskPolicyEpochs.get(pk) ?? 0
@@ -1619,7 +1625,6 @@ export class HeatmapRenderService {
             pendingJobId: null,
             displayLabel,
             modelDisclosure: actorPolicy.model_inferred_disclosure,
-            untrustedEmbeddedTexts,
             deletionEpoch: curDelEpoch,
             buildSeq: curBuildSeq,
             reason: disclosure.reason,
@@ -1641,7 +1646,6 @@ export class HeatmapRenderService {
             pendingJobId: null,
             displayLabel,
             modelDisclosure: actorPolicy.model_inferred_disclosure,
-            untrustedEmbeddedTexts,
             deletionEpoch: curDelEpoch,
             buildSeq: curBuildSeq,
             reason: consentEval.reason,
@@ -1681,7 +1685,6 @@ export class HeatmapRenderService {
             pendingJobId: kindDecision.pending_job_id,
             displayLabel,
             modelDisclosure: actorPolicy.model_inferred_disclosure,
-            untrustedEmbeddedTexts,
             deletionEpoch: curDelEpoch,
             buildSeq: curBuildSeq,
             reason: kindDecision.reasons.join(';'),
@@ -1809,7 +1812,6 @@ export class HeatmapRenderService {
     readonly pendingJobId: string | null
     readonly displayLabel: string
     readonly modelDisclosure: ModelInferredDisclosureHeader | null
-    readonly untrustedEmbeddedTexts: readonly UntrustedValue[]
     readonly deletionEpoch: number
     readonly buildSeq: number
     readonly reason: string
@@ -1849,9 +1851,7 @@ export class HeatmapRenderService {
       model_inferred_disclosure: params.modelDisclosure,
       sections: Object.freeze([]),
       clicks: Object.freeze([]),
-      untrusted_embedded_texts: Object.freeze(
-        params.status === 'suppressed' ? [] : params.untrustedEmbeddedTexts,
-      ),
+      untrusted_embedded_texts: Object.freeze([]),
       cache_hit: false,
       deletion_epoch: params.deletionEpoch,
       build_seq: params.buildSeq,

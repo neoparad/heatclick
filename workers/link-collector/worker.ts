@@ -41,6 +41,11 @@ export interface CollectorWorkerDeps extends CollectorDeps {
 
 export type CollectorWorkerDependencies = CollectorWorkerDeps;
 
+function explicitKeyVersionLabel(version: string | number): string {
+  // Reserve bare '1' on the queue for ambiguous records written by older collectors.
+  return String(version) === '1' ? 'key_v1' : String(version);
+}
+
 function parseLabMarkerHeader(headerVal: string | null): LabMarkerToken | null {
   if (!headerVal) return null;
   try {
@@ -290,38 +295,23 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
         // Codex R2 #9 & R3 #9: Precompute canonical + legacy HMAC lookup candidates across
         // current + rotated tenant keys at intake time, preserving exact per-key-version
         // pairing so downstream deletion matches (key_version, hmac_hex) with ZERO plaintext!
-        const versionedKeysForCandidates: Array<{
-          readonly keyVersion: string;
-          readonly secretKey: string;
-        }> = [
-          {
-            keyVersion: String(site.tenantMemberHashKeyVersion ?? 1),
+        const explicitKeys = [
+          ...(site.tenantMemberHashKeyVersion === undefined ? [] : [{
+            keyVersion: explicitKeyVersionLabel(site.tenantMemberHashKeyVersion),
             secretKey: site.tenantMemberHashKey,
-          },
+          }]),
+          ...(site.rotatedMemberHashKeyVersions ?? []).map((entry) => ({
+            keyVersion: explicitKeyVersionLabel(entry.keyVersion),
+            secretKey: entry.secretKey,
+          })),
         ];
-        const seenSecretKeys = new Set<string>([site.tenantMemberHashKey]);
-        for (const entry of site.rotatedMemberHashKeyVersions ?? []) {
-          if (entry.secretKey && !seenSecretKeys.has(entry.secretKey)) {
-            seenSecretKeys.add(entry.secretKey);
-            versionedKeysForCandidates.push({
-              keyVersion: String(entry.keyVersion),
-              secretKey: entry.secretKey,
-            });
-          }
-        }
-        let fallbackRotatedIdx = 0;
-        for (const rotatedKey of site.rotatedMemberHashKeys ?? []) {
-          if (rotatedKey && !seenSecretKeys.has(rotatedKey)) {
-            seenSecretKeys.add(rotatedKey);
-            fallbackRotatedIdx += 1;
-            versionedKeysForCandidates.push({
-              keyVersion: `rotated_${fallbackRotatedIdx}`,
-              secretKey: rotatedKey,
-            });
-          }
-        }
-
-        const secretKeysForCandidates = versionedKeysForCandidates.map((k) => k.secretKey);
+        // Legacy configuration contains secrets, not version numbers. Keep those
+        // candidates in the flat list; the eraser resolves their scope from its registry.
+        const secretKeysForCandidates = [...new Set([
+          site.tenantMemberHashKey,
+          ...explicitKeys.map((entry) => entry.secretKey),
+          ...(site.rotatedMemberHashKeys ?? []),
+        ])];
         const subjectHmacCandidates =
           rawSubject && subjectKind !== 'optout_cookie'
             ? computeSubjectHmacLookupCandidates({
@@ -333,7 +323,7 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
             : [];
         const subjectHmacVersionedCandidates: SubjectHmacVersionedCandidate[] = [];
         if (rawSubject && subjectKind !== 'optout_cookie') {
-          for (const { keyVersion, secretKey } of versionedKeysForCandidates) {
+          for (const { keyVersion, secretKey } of explicitKeys) {
             subjectHmacVersionedCandidates.push(
               {
                 key_version: keyVersion,
@@ -423,7 +413,7 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
             });
             headers.append(
               'set-cookie',
-              `${DELETION_RETRY_COOKIE_NAME}=${retryHandle}; Path=/; Max-Age=${DELETION_RETRY_COOKIE_TTL_SEC}; HttpOnly; Secure; SameSite=Lax`
+              `${DELETION_RETRY_COOKIE_NAME}=${retryHandle}; Path=/v1/optout; Max-Age=${DELETION_RETRY_COOKIE_TTL_SEC}; HttpOnly; Secure; SameSite=Lax`
             );
           }
           headers.append('set-cookie', 'ugk_vid=; Path=/; Max-Age=0; Secure; SameSite=Lax');
@@ -445,6 +435,9 @@ export function createCollectorWorker(deps: CollectorWorkerDeps) {
         headers.append(
           'set-cookie',
           `${DELETION_RETRY_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`
+        );
+        headers.append('set-cookie',
+          `${DELETION_RETRY_COOKIE_NAME}=; Path=/v1/optout; Max-Age=0; HttpOnly; Secure; SameSite=Lax`
         );
 
         return new Response(

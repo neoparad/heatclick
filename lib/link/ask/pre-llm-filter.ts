@@ -4,7 +4,7 @@
  * Differencing Guard & Numeric Grounding Verifier (§11.11.11)
  */
 
-import { inspectSqlAst } from '@/lib/link/isolation';
+import { inspectSqlAst, tokenizeSql } from '@/lib/link/isolation';
 import type { ConsentMode } from '@/packages/contract/schema';
 import {
   PUBLIC_AGGREGATE_VIEWS,
@@ -794,6 +794,15 @@ export function verifyPublicViewSqlAndMetrics(params: {
   return { valid: true };
 }
 
+function hasSqlGroupBy(sql: string): boolean {
+  const { tokens } = tokenizeSql(sql);
+  return tokens.some((token, i) => {
+    const next = tokens[i + 1];
+    return token.kind === 'IDENT' && !token.quoted && token.lower === 'group' &&
+      next?.kind === 'IDENT' && !next.quoted && next.lower === 'by';
+  });
+}
+
 export function extractPredicateScopeKey(filterSignature: string): string {
   // Preserve explicit cohort predicates (e.g. `cohort:diff_pair_0_all`), while grouping
   // paraphrased natural-language questions (`q:<hash>`) into canonical 'ALL' so reworded
@@ -1130,7 +1139,8 @@ export function filterQueryAndRowsBeforeLlm(params: {
   //    Complementary secondary suppression on GROUP BY results.
   //    (Compute the exact set of disclosed rows FIRST so we feed pre-query + every disclosed row +
   //     total into atomic batch RREF differencing without ever committing suppressed rows.)
-  const isGroupedQuery = params.groupByColumns.length > 0 || params.rows.length > 1;
+  const sqlGrouped = hasSqlGroupBy(params.sql);
+  const isGroupedQuery = sqlGrouped || params.groupByColumns.length > 0 || params.rows.length > 1;
   const requireMembershipForGroupedRows = params.requireMembershipForGroupedRows !== false;
   const hasCohortHistory = params.differencingGuard.hasCohortHistory(params.sessionKey);
   const hasPredeclaredCohort =
@@ -1145,6 +1155,7 @@ export function filterQueryAndRowsBeforeLlm(params: {
     hasPredeclaredCohort ||
     anyRowHasCohortIds;
   const mustEnforceGroupedMembership =
+    sqlGrouped ||
     (isGroupedQuery && requireMembershipForGroupedRows) ||
     (rrefActive && params.groupByColumns.length > 0);
 

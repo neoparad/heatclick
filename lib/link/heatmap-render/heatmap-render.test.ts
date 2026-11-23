@@ -1157,6 +1157,40 @@ describe('Wave 9 Codex Remediation Regressions: [#15], [#16], [#19]', () => {
     expect(JSON.stringify(res2)).not.toContain('LATE_REDACTED_OCR_SECRET')
   })
 
+  test('variant-specific mask corrections revoke the old artifact even when the page-wide box set is unchanged', () => {
+    const svc = new HeatmapRenderService()
+    const render = (swapped: boolean) => {
+      const base = makeUnitDataset()
+      return svc.renderHeatmap(OWNER_PRINCIPAL, makeBaseRequest({
+        unit_datasets: ['control', 'treatment'].map((variant, i) => makeUnitDataset({
+          unit: { ...base.unit, variant_set_hash: variant },
+          screenshot: makeLabScreenshot({ redaction_boxes: (i === 0) === swapped
+            ? [{ x: 1, y: 1, width: 5, height: 5, reason: 'pii_region' }] : [] }),
+        })),
+      }))
+    }
+    const original = render(false).artifacts[0].artifact_id
+    const invalid = makeUnitDataset({ screenshot: makeLabScreenshot({ provenance: 'replay_recording' }) })
+    expect(() => svc.renderHeatmap(OWNER_PRINCIPAL, makeBaseRequest({ unit_datasets: [
+      { ...invalid, unit: { ...invalid.unit, variant_set_hash: 'control' } },
+    ] }))).toThrow(/lab_render screenshots only/)
+    expect(svc.fetchArtifactById({ principal: OWNER_PRINCIPAL, artifact_id: original,
+      now_iso: '2026-11-20T12:01:00Z' }).http_status).toBe(200)
+    expect(render(true).http_status).toBe(200)
+    expect(svc.fetchArtifactById({ principal: OWNER_PRINCIPAL, artifact_id: original,
+      now_iso: '2026-11-20T12:01:00Z' }).http_status).toBe(410)
+  })
+
+  test('private-scope non-image artifacts do not disclose OCR', () => {
+    const svc = new HeatmapRenderService()
+    const res = svc.renderHeatmap(OWNER_PRINCIPAL, makeBaseRequest({ unit_datasets: [
+      makeUnitDataset({ dom_state: 'private_scope', screenshot: makeLabScreenshot({
+        embedded_text_samples: [{ text: 'PRIVATE_SAMPLE', from_masked_image: true }],
+      }) }),
+    ] }))
+    expect(res.artifacts[0].untrusted_embedded_texts).toEqual([])
+  })
+
   test('[#19 Round 3] invalidates and zero-fills old stored artifact_id on mask policy correction (returns 410 artifact_invalidated_by_mask_correction with png_bytes=null)', () => {
     const svc = new HeatmapRenderService()
     const ocrSamples = [

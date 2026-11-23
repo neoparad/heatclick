@@ -990,6 +990,8 @@ export async function replayAllFromWal(options: {
   readonly region: DataRegion;
   readonly shardId: number;
   readonly walBucket: R2BucketLike;
+  /** Source for durable deletion state; replay manifests themselves remain isolated. */
+  readonly manifestBucket: R2BucketLike;
   readonly nowMs?: number;
   readonly chunkSize?: number;
   readonly deletionTombstones?: readonly DeletionTombstoneSpec[];
@@ -1001,7 +1003,7 @@ export async function replayAllFromWal(options: {
     bucket: options.walBucket,
     manifestBucket: replayManifestBucket,
   });
-  await loader.loadPersistedTombstonesFromBucket(options.walBucket);
+  await loader.loadPersistedTombstonesFromBucket(options.manifestBucket);
   for (const ts of options.deletionTombstones ?? []) {
     await loader.registerDeletionTombstones(ts);
   }

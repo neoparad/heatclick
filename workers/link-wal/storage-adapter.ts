@@ -408,10 +408,12 @@ export class LinkPlusExportStorageAdapter implements StorageTierAdapter {
     // (`primaryRes.written === false`), and check BOTH the sink-scoped receipt key AND the legacy
     // receipt key (`export-receipts/{region}/{tenantId}/{siteId}/{sha256Hex(walKey)}.json`) so
     // WALs already exported under the legacy receipt format are never re-exported!
-    const existingReceipt =
-      (await this.receiptBucket.get(receiptKey)) ??
-      (await this.receiptBucket.get(legacyReceiptKey));
-    if (existingReceipt !== null) {
+    const existingReceipt = await this.receiptBucket.get(receiptKey);
+    const legacyObject = existingReceipt ? null : await this.receiptBucket.get(legacyReceiptKey);
+    const legacy: unknown = legacyObject ? JSON.parse(await legacyObject.text()) : null;
+    if (existingReceipt || (legacy && typeof legacy === 'object' &&
+      'sinkId' in legacy && legacy.sinkId === this.exportSink.sinkId &&
+      'walKey' in legacy && legacy.walKey === args.key)) {
       return {
         ...primaryRes,
         tier: this.descriptor.tier,

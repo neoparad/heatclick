@@ -30,6 +30,8 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+require_once __DIR__ . '/command-session.php';
+
 final class UgokiLink_Companion_Plugin
 {
     public const PLUGIN_VERSION = '2.0.0';
@@ -191,6 +193,19 @@ final class UgokiLink_Companion_Plugin
         }
 
         $digest = self::computeLocalApprovalDigest($siteId, $postId, $beforeSha, $afterSha, $commandSeq);
+        $result = UgokiLink_Command_Session::run(static fn () => self::storeLocalApproval(
+            $digest, $siteId, $postId, $beforeSha, $afterSha, $commandSeq, $boundedTtl
+        ));
+        if (is_wp_error($result)) {
+            wp_die($result->get_error_message(), '', ['response' => $result->get_error_data()['status']]);
+        }
+        wp_safe_redirect(admin_url('options-general.php?page=ugokilink-companion&approved=1'));
+        exit;
+    }
+
+    private static function storeLocalApproval(
+        string $digest, string $siteId, int $postId, string $beforeSha, string $afterSha, int $commandSeq, int $boundedTtl
+    ): bool|\WP_Error {
         $stored = get_option(self::OPTION_LOCAL_APPROVALS, []);
         if (!is_array($stored)) {
             $stored = [];
@@ -217,9 +232,11 @@ final class UgokiLink_Companion_Plugin
             'claim_token' => null,
             'consumed' => false,
         ];
-        update_option(self::OPTION_LOCAL_APPROVALS, $stored, false);
-        wp_safe_redirect(admin_url('options-general.php?page=ugokilink-companion&approved=1'));
-        exit;
+        if (update_option(self::OPTION_LOCAL_APPROVALS, $stored, false)
+            || get_option(self::OPTION_LOCAL_APPROVALS, []) === $stored) {
+            return true;
+        }
+        return new \WP_Error('approval_write_failed', 'Could not store local approval.', ['status' => 503]);
     }
 
     /**
@@ -461,6 +478,18 @@ final class UgokiLink_Companion_Plugin
      */
     public static function reconcilePendingCommands(?int $nowMs = null): array
     {
+        $result = UgokiLink_Command_Session::run(static fn () => self::reconcileUnderLock($nowMs));
+        if (is_wp_error($result)) {
+            if ($result->get_error_code() === 'command_in_flight') {
+                return ['blockedByInFlight' => true, 'reconciledCount' => 0];
+            }
+            throw new \RuntimeException($result->get_error_message());
+        }
+        return $result;
+    }
+
+    private static function reconcileUnderLock(?int $nowMs = null): array
+    {
         $nowMs = $nowMs ?? (int) round(microtime(true) * 1000);
         $journal = get_option(self::OPTION_PENDING_JOURNAL, []);
         if (!is_array($journal) || count($journal) === 0) {
@@ -547,8 +576,17 @@ final class UgokiLink_Companion_Plugin
 
     public static function handleSignedCommand(\WP_REST_Request $request): \WP_REST_Response
     {
+        $result = UgokiLink_Command_Session::run(static fn () => self::handleUnderLock($request));
+        if (is_wp_error($result)) {
+            return new \WP_REST_Response(['error' => $result->get_error_code()], $result->get_error_data()['status']);
+        }
+        return $result;
+    }
+
+    private static function handleUnderLock(\WP_REST_Request $request): \WP_REST_Response
+    {
         // [#7] Reconcile expired pending-command journal records; reject concurrent requests while an active lease is in flight
-        $reconcile = self::reconcilePendingCommands();
+        $reconcile = self::reconcileUnderLock();
         if ($reconcile['blockedByInFlight']) {
             return new \WP_REST_Response(['error' => 'command_in_flight'], 409);
         }

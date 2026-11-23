@@ -1231,15 +1231,14 @@ describe('packages/wp-plugin — WordPress Companion Plugin Protocol & del.D20 C
       'k1'
     );
 
-    // During a stalled seq=10 post update, after seq=10's lease expires a newer seq=20 command arrives
-    // and advances lastSeq to 20; when stalled seq=10 then fails, CAS rollback MUST NOT overwrite lastSeq=20 back to 1!
+    // An expired deadline is not proof the session doing the update has ended.
+    let overlappingStatus: number | undefined;
     engine.setPostUpdateHook(async () => {
       const capRes = await engine.handleSignedCommand(
         concurrentNewerCmd,
         nowMs + 250 + DEFAULT_WP_PENDING_COMMAND_LEASE_MS + 100
       );
-      expect(capRes.status).toBe(200);
-      expect(engine.getLastSeq()).toBe(20);
+      overlappingStatus = capRes.status;
       throw new Error('simulated_db_failure_after_newer_seq');
     });
 
@@ -1267,7 +1266,10 @@ describe('packages/wp-plugin — WordPress Companion Plugin Protocol & del.D20 C
     const failRes = await engine.handleSignedCommand(failingSeq10Env, nowMs + 250);
     expect(failRes.status).toBe(500);
     expect(failRes.error).toBe('wp_update_post_failed');
-    // lastSeq MUST remain 20 (never clobbered to 1)!
+    expect(overlappingStatus).toBe(409);
+    expect(engine.getLastSeq()).toBe(1);
+    const retry = await engine.handleSignedCommand(concurrentNewerCmd, nowMs + 35_000);
+    expect(retry.status).toBe(200);
     expect(engine.getLastSeq()).toBe(20);
   });
 
@@ -1425,7 +1427,12 @@ describe('packages/wp-plugin — WordPress Companion Plugin Protocol & del.D20 C
     let approvalStateAfterConcurrentReq: string | null = null;
 
     engine.setPostUpdateHook(async () => {
-      const concurrentRes = await engine.handleSignedCommand(concurrentNextCmd, nowMs + 1_000);
+      const afterDeadline = nowMs + 501 + DEFAULT_WP_PENDING_COMMAND_LEASE_MS;
+      expect(await engine.reconcilePendingCommands(afterDeadline)).toEqual({
+        blockedByInFlight: true,
+        reconciledCount: 0,
+      });
+      const concurrentRes = await engine.handleSignedCommand(concurrentNextCmd, afterDeadline);
       concurrentResStatus = concurrentRes.status;
       concurrentResError = concurrentRes.error;
       approvalStateAfterConcurrentReq = engine.getLocalApprovalState(digest);
